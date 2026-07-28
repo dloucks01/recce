@@ -92,6 +92,68 @@ def _ports_for_host(xml_path: str, ip: str) -> list[int]:
     return []
 
 
+def _swept_ports_for_host(xml_path: str, ip: str) -> list:
+    """The Port objects the sweep found for this host (open ports only - the parser
+    already drops closed/filtered). Unlike _ports_for_host (portids for the `-p`
+    arg), this keeps the whole Port so the sweep's authoritative open-port result can
+    be folded into the host: the enum re-scan enriches those ports with service/script
+    data, but must never be able to DROP one it happened to miss (a heavier -sV/-sC
+    pass with no congestion-adaptive retry can under-report on a lossy net or under
+    host-timeout, which silently turned a host with real services into '0 open ports')."""
+    for h in np.parse_nmap_xml(xml_path):
+        if h.ip == ip:
+            return list(h.ports)
+    return []
+
+
+def _fold_swept_ports(host, swept) -> None:
+    """Union the sweep's open ports into `host`, keyed by (protocol, portid). The enum
+    re-scan already populated host.ports with rich data, so an existing port wins; a
+    swept port the enum missed is added back as a bare open port (svcdetect/reprobe
+    fill in its service later). Guarantees the enum phase can only ADD to or enrich the
+    authoritative sweep result, never erase it."""
+    if not swept:
+        return
+    have = {(p.protocol, p.portid) for p in host.ports}
+    for sp in swept:
+        if (sp.protocol, sp.portid) not in have:
+            host.ports.append(sp)
+
+
+def _disproved_ports_in_xml(xml_path: str, ip: str) -> set:
+    """Ports the enum re-scan ACTIVELY disproved for this host: nmap got a reply that
+    proves the port is shut (a RST => 'closed'). Returns {(protocol, portid)}.
+
+    parse_nmap_xml drops closed ports, so this reads the raw enum XML to recover
+    nmap's negative verdicts. Used to prune masscan's stateless false positives: a
+    masscan SYN-ACK that nmap then saw closed is dropped, but a port nmap merely
+    couldn't reach ('filtered'/no-response = packet loss, NOT counted here) is kept -
+    masscan's positive evidence stands over nmap loss. Never raises."""
+    import xml.etree.ElementTree as ET
+    try:
+        tree = ET.parse(xml_path)
+    except (OSError, ET.ParseError):
+        return set()
+    disproved: set = set()
+    for hnode in tree.getroot().findall("host"):
+        if ip not in [a.get("addr") for a in hnode.findall("address")]:
+            continue
+        ports_node = hnode.find("ports")
+        if ports_node is None:
+            continue
+        for pnode in ports_node.findall("port"):
+            st = pnode.find("state")
+            # Only "closed" (a definitive RST) disproves. "filtered"/no-response is
+            # ambiguous (firewall or loss) and must NOT prune a masscan-observed port.
+            if st is not None and st.get("state", "") == "closed":
+                try:
+                    disproved.add((pnode.get("protocol", "tcp"),
+                                   int(pnode.get("portid", "0"))))
+                except (TypeError, ValueError):
+                    continue
+    return disproved
+
+
 def _open_store(db_path: str):
     """Open the datastore, turning a corrupt/unreadable DB (StoreError) into a
     clean actionable message + None instead of a traceback. Used by the commands
@@ -567,8 +629,17 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     # one for a silent -Pn host. Empty stays empty -> the host build falls back to
     # "user-set" under -Pn, which is-NOT proof (keeps it off the confirmed-up list).
     up_reason = disc_reason
+    # The nmap sweep (-sS/-sT --open) is authoritative: its open ports are folded into
+    # the host after enum so the enum re-scan can enrich them but never drop one it
+    # missed. The masscan `--fast` port_map is a stateless sweep that can false-positive,
+    # so its ports are handled differently below: kept UNLESS the enum re-scan actively
+    # disproved them (nmap saw the port closed), so real ports survive enum packet loss
+    # while masscan's spurious opens are still pruned.
+    swept_ports: list = []
+    masscan_candidates: list = []
     if port_map is not None:
         open_ports = port_map.get(ip, [])
+        masscan_candidates = list(open_ports)
     else:
         fp_xml = os.path.join(paths["raw"], f"{ip}_ports.xml")
         _, iss = scanner.full_port_scan(ip, fp_xml, profile)
@@ -576,6 +647,7 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
             issues.append(_mkissue(iss, "port-sweep"))
             truncated = iss.kind == "host-timeout"
         open_ports = _ports_for_host(fp_xml, ip)
+        swept_ports = _swept_ports_for_host(fp_xml, ip)
         # Completeness safeguard: a host that came back with ZERO ports may be
         # genuinely empty - or the fast pass dropped every probe. Confirm it with
         # an independent congestion-adaptive re-scan before we trust "no ports"
@@ -591,6 +663,7 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
                 truncated = True
             if vports:
                 open_ports = vports
+                swept_ports = _swept_ports_for_host(vx, ip)
                 issues.append(_mkissue(scanner.ScanIssue(
                     "warning", f"port-sweep: fast pass found 0 ports but a "
                     f"verification re-scan found {len(vports)} - the first sweep "
@@ -620,6 +693,26 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     if iss:
         issues.append(_mkissue(iss, "enum"))
     host = _fold_host(ip, np.parse_nmap_xml(enum_xml), subnet_map)
+    # The enum re-scan populated host.ports; fold the sweep's authoritative open ports
+    # back in so a port the sweep definitively found is never lost when the heavier enum
+    # pass under-reports (lossy network / host-timeout) - the root cause of a host with
+    # real services being reported as "0 open ports".
+    _fold_swept_ports(host, swept_ports)
+    # masscan (--fast) path: masscan is stateless and can't be blindly trusted, so a
+    # masscan-observed port is kept only if the enum re-scan didn't actively disprove it
+    # (nmap saw it closed). This recovers ports enum lost to packet loss - the same "0
+    # open ports" failure as the nmap path - while still pruning masscan's false opens.
+    if masscan_candidates:
+        from .models import Port
+        disproved = _disproved_ports_in_xml(enum_xml, ip)
+        have = {(p.protocol, p.portid) for p in host.ports}
+        for pid in masscan_candidates:
+            key = ("tcp", pid)
+            if key in have or key in disproved:
+                continue
+            host.ports.append(Port(
+                portid=pid, protocol="tcp", state="open", detect_source="masscan",
+                reason="masscan-syn-ack (enum re-scan got no reply - kept, not confirmed)"))
     host.enumerated = True
     host.incomplete_scan = truncated
     # Record how we know this host is up: a real reply (discovery or UDP fallback)

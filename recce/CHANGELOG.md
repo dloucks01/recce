@@ -4,6 +4,26 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+### Fixed
+- **A host with real open ports could be reported as "0 open ports".** The port sweep
+  is completeness-first (retries, congestion-adaptive verify re-scan, truncation flag),
+  but its result was only used as the `-p` list handed to the enum phase — the final
+  host was then rebuilt *entirely* from the enum re-scan's XML. That enum pass is a much
+  heavier `-sV`/`-sC` scan with **none** of the sweep's congestion-adaptive retry, so on
+  a lossy/rate-limited network (or under a host-timeout) it under-reported, and any port
+  it missed was **silently dropped** — discarding what the sweep had definitively found.
+  This was maddening because the verify re-scan would log *"found N ports"* and the host
+  would still show 0. Now the sweep's open ports are **folded into the host after enum**,
+  so the enum phase can only enrich them, never erase them — it is structurally no longer
+  the stage that decides the final port list.
+- **`--fast` (masscan) hardened against the same loss without trusting masscan blindly.**
+  masscan is stateless and can false-positive, so its ports are kept only if the enum
+  re-scan didn't **actively disprove** them (nmap saw the port `closed` via a RST). A
+  masscan port nmap simply couldn't reach (`filtered`/no-response = packet loss) is kept
+  and tagged `detect_source=masscan` (marked *not confirmed*); a masscan port nmap proved
+  closed is pruned. Recovers real ports lost to enum packet loss while still dropping
+  masscan's spurious opens. New regression tests in `tests/test_enum_seed.py`.
+
 ### Changed
 - **The Sköll-Fieldkit integration is now the fieldkit integration.** The companion kit
   was renamed to [**fieldkit**](https://github.com/dloucks01/fieldkit), so the commands
