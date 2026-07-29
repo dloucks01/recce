@@ -350,6 +350,15 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     from . import qod
     for h in hosts:                    # ensure every finding is QoD-scored before report/gates
         qod.annotate(h)
+    # Optional noise floor: hide findings below the operator's QoD threshold from the
+    # deliverables (set via `report --min-qod N`, persisted in meta; 0 = show all).
+    try:
+        min_qod = int(store.get_meta("min_qod") or 0)
+    except (TypeError, ValueError):
+        min_qod = 0
+    if min_qod > 0:
+        for h in hosts:
+            h.vulns = [v for v in h.vulns if qod.qod_of(v) >= min_qod]
     tracking = store.get_tracking()
     domains = _resolve_domains(store, hosts)
     meta = {"subtitle": title}
@@ -4382,6 +4391,14 @@ def cmd_report(args: argparse.Namespace) -> int:
     if store is None:
         return 1
     _import_excel_tracking(store, paths)  # honor Excel edits before regenerating
+    # Persist the QoD noise floor so every later regeneration honors it too. 0 shows all;
+    # 70 (MIN_QOD_VISIBLE) hides banner/version leads; higher shows only verified findings.
+    min_qod = getattr(args, "min_qod", None)
+    if min_qod is not None:
+        store.set_meta("min_qod", str(max(0, min_qod)))
+        if min_qod > 0:
+            print(f"[*] Filtering the report to findings with QoD >= {min_qod} "
+                  "(--min-qod 0 to show all).")
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
@@ -5906,6 +5923,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
     r.add_argument("--title", default="Recce Engagement")
+    r.add_argument("--min-qod", type=int, default=None, metavar="N",
+                   help="hide findings below this Quality-of-Detection score (0-100; "
+                        "70 hides banner/version leads, 95 shows only verified). "
+                        "Persists; --min-qod 0 shows all again.")
     r.set_defaults(func=cmd_report)
 
     st = sub.add_parser("status", help="print live review coverage")

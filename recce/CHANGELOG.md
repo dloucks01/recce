@@ -5,6 +5,12 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **QoD is now visible and dialable in the report (Stage 1b).** The Vulnerabilities sheet
+  shows a **QoD** column (`80 remote_banner`, `99 active_vuln ✓`) in place of the coarse
+  `Conf.` column, so you can see at a glance whether a finding is verified or a lead. New
+  **`recce report --min-qod N`** hides findings below a chosen Quality-of-Detection score
+  (70 hides banner/version leads, 95 shows only verified) across every report format; the
+  setting persists, and `--min-qod 0` shows everything again.
 - **Quality of Detection (QoD) — a single confidence authority (accuracy re-architecture,
   Stage 1).** Every finding now gets a 0–100 `qod` score derived once from *how* it was
   detected (`recce/qod.py`), modelled on OpenVAS's QoD and kept orthogonal to severity: an

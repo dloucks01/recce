@@ -214,9 +214,10 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
         dc = by_ip["10.0.10.10"]
         ms17 = next(r for r in dc if "ms17-010" in r["Finding"])
         self.assertIn("eternalblue", ms17["Exploit"].lower())
-        # A potential/advisory finding never claims an exploit.
+        # A potential/advisory finding (now shown by its low QoD tier) never claims
+        # an exploit.
         for r in dc:
-            if r["Conf."] == "potential":
+            if "banner_unreliable" in r["QoD"]:
                 self.assertEqual(r["Exploit"], "")
         # A config/hardening finding (weak TLS cipher/protocol, missing header)
         # never gets a PROVEN exploit, even if a CVE leaked into its output.
