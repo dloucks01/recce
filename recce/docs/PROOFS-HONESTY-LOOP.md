@@ -28,6 +28,32 @@ both by *ranking and grouping*, not gating:
 - A **hard gate fires only for a definitive disproof** (NSE says NOT VULNERABLE; a live
   re-probe refuses auth). Everything else is evaluated and shown.
 
+## How it's built: proven SOTA mechanisms, NOT a bespoke evaluation engine
+
+The honesty loop is a set of *goals*. It is realized through the four mechanisms every
+state-of-the-art scanner uses — not a new custom framework (that would be complexity SOTA
+tools deliberately don't carry):
+
+| Honesty-loop goal | Realized by (proven mechanism) |
+|---|---|
+| "Hundreds → the handful of real issues" | **Dedup / correlation** — merge the same issue across sources/ports/hosts |
+| "Evaluate realness, don't guess" | **Active verification** — re-run the cheap confirm-check and PROVE it, rather than infer from a banner |
+| "Surface everything, ranked honestly" | **QoD tiering** + **EPSS/KEV prioritization** (severity × realness × exploitability) |
+| "Reasoning shown, nothing hidden" | The **honesty column** (rationale + caveats + to-confirm) + tiered/collapsed presentation |
+
+**The centerpiece is active verification.** The reason banner/version scanners are inherently
+high-FP is that they *infer*. The reason the best tools aren't is that they *confirm* —
+authenticated local checks (Nessus), active matchers + OOB callbacks (Nuclei), `remote_active`
+(OpenVAS). recce already actively probes several services; the design makes that the **default
+posture**: a version-based *lead* triggers the cheap confirm-check the recipe already names
+(`finish`/`to_confirm`), which **promotes it to CONFIRMED with real evidence or refutes it** —
+attacking false positives and false negatives at the same time, and playing to recce's offline
+edge (it can't phone home, so verify-by-probe is how it earns trust). A finding recce actually
+re-checked beats any passively-computed rationale string.
+
+The `Evaluation` shape below is the *record* each finding carries, populated primarily by the
+verification result + dedup + QoD — it is data, not a DSL.
+
 ## Data model
 
 ```python
