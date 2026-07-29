@@ -85,5 +85,21 @@ class QodScoreTest(unittest.TestCase):
         self.assertEqual(h2.vulns[0].qod, 99)
 
 
+class QodReportColumnTest(unittest.TestCase):
+    def test_vulns_sheet_shows_qod_tier(self):
+        from recce.report_excel import _spec_vulns
+        h = Host(ip="10.0.0.5", ports=[Port(portid=22, protocol="tcp", service="ssh")])
+        h.vulns = [_v(ip="10.0.0.5", port=22, source="version-db", confidence="likely",
+                      title="OpenSSH < 7.7 user enum"),
+                   _v(ip="10.0.0.5", port=22, source="nse", state="VULNERABLE",
+                      title="ms17-010")]
+        spec = _spec_vulns([h])
+        self.assertIn("QoD", [c[0] for c in spec.cols])
+        self.assertNotIn("Conf.", [c[0] for c in spec.cols])
+        qcells = {r["data"]["Finding"]: r["data"]["QoD"] for r in spec.rows}
+        self.assertEqual(qcells["OpenSSH < 7.7 user enum"], "80 remote_banner")
+        self.assertEqual(qcells["ms17-010"], "99 active_vuln ✓")   # verified marker
+
+
 if __name__ == "__main__":
     unittest.main()

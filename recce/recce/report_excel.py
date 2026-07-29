@@ -380,7 +380,7 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
     cols = [
         ("Triaged", "checkbox", 9), ("Severity", "data", 10), ("IP", "data", 16),
         ("Port", "data", 6), ("Finding", "data", 44),
-        ("Source", "data", 11), ("Conf.", "data", 10), ("CVE / refs", "data", 22),
+        ("Source", "data", 11), ("QoD", "data", 18), ("CVE / refs", "data", 22),
         ("CWE", "data", 16), ("Exploit", "data", 52),
         ("Remediation", "data", 44), ("Details", "data", 50),
         ("Notes", "notes", 26), ("Key", "key", 4),
@@ -402,7 +402,7 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
                      "data": {
             "Severity": (v.severity or "info").upper(), "IP": h.ip,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,
-            "Source": v.source, "Conf.": v.confidence, "CVE / refs": ", ".join(v.ids),
+            "Source": v.source, "QoD": _qod_cell(v), "CVE / refs": ", ".join(v.ids),
             "CWE": ", ".join(v.cwes), "Exploit": _exploit_cell(h, v),
             "Remediation": v.remediation, "Details": out,
             "Hostname": h.hostname, "_worstsev": v.severity}})
@@ -440,6 +440,17 @@ def _is_hardening_finding(v) -> bool:
     if any(k in t for k in _HARDENING_KW):
         return True
     return bool({c.upper() for c in (v.cwes or [])} & {"CWE-326", "CWE-327", "CWE-1104"})
+
+
+def _qod_cell(v) -> str:
+    """The finding's Quality of Detection as 'NN tier' (e.g. '99 active_vuln',
+    '80 remote_banner'). Falls back to computing it if the finding wasn't annotated
+    (a direct spec call in a test), so the column is always meaningful."""
+    from . import qod as _qod
+    score = v.qod or _qod.qod_of(v)
+    kind = v.qod_type or _qod.score(v)[1]
+    verified = " ✓" if score >= _qod.MIN_QOD_VERIFIED else ""
+    return f"{score} {kind}{verified}".strip()
 
 
 def _curated_exploit(v) -> str:
