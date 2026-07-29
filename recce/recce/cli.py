@@ -347,6 +347,9 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     if _DEFER_REPORTS:
         return
     hosts = store.all_hosts()
+    from . import qod
+    for h in hosts:                    # ensure every finding is QoD-scored before report/gates
+        qod.annotate(h)
     tracking = store.get_tracking()
     domains = _resolve_domains(store, hosts)
     meta = {"subtitle": title}
@@ -756,6 +759,8 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     ad.parse_signing_and_ntlm(host)
     from . import vulndb
     vulndb.assess_host_inplace(host)   # offline version->CVE findings, immediately
+    from . import qod
+    qod.annotate(host)                 # stamp Quality-of-Detection once, from the method
     return host, issues
 
 

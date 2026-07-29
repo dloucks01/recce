@@ -97,8 +97,9 @@ def worst_severity(host: Host) -> str:
     """Highest severity among the host's *confirmed* vulns (excludes unverified
     'potential' version guesses), or '' if none. Grounds the map's risk overlay."""
     best = ""
+    from . import qod
     for v in getattr(host, "vulns", []) or []:
-        if getattr(v, "confidence", "") == "potential":
+        if not qod.is_visible(v):      # single QoD authority (was: confidence == potential)
             continue
         sev = (getattr(v, "severity", "") or "").lower()
         if sev in _SEV_ORDER and (best == "" or
