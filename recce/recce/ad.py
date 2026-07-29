@@ -70,7 +70,14 @@ def identify_roles(host: Host) -> None:
         # Fall back to NSE hints (ldap rootdse / smb-os-discovery 'Domain controller').
         for p in host.ports:
             for s in p.scripts:
-                if s.id.startswith("ldap") and "namingcontext" in s.output.lower():
+                # `namingContexts` is a standard RootDSE attribute on EVERY LDAP
+                # server (OpenLDAP, AD LDS/ADAM), so it tagged any 389/636 host as a
+                # Domain Controller. Require an AD-DC-specific RootDSE marker instead.
+                low = s.output.lower()
+                if s.id.startswith("ldap") and (
+                        "domaincontrollerfunctionality" in low
+                        or "dsservicename" in low
+                        or "1.2.840.113556.1.4.800" in low):   # LDAP_CAP_ACTIVE_DIRECTORY_OID
                     is_dc = True
     if is_dc:
         roles.add("Domain Controller")
@@ -245,9 +252,12 @@ def privileged_accounts(hosts: list[Host]) -> list[Account]:
             if a.attrs.get("admincount") == "1":
                 out.append(a)
                 continue
-            memberof = (a.attrs.get("memberof") or "").lower()
-            if any(g in memberof for g in ("domain admins", "enterprise admins",
-                                           "administrators")):
+            # Exact per-group membership: `memberof` is a "; "-joined list of group
+            # CNs. A loose substring test flagged members of "Helpdesk Administrators"
+            # / "SQL Administrators" / "DHCP Administrators" as tier-0 privileged
+            # because those contain "administrators".
+            groups = {g.strip().lower() for g in (a.attrs.get("memberof") or "").split(";")}
+            if groups & {"domain admins", "enterprise admins", "administrators"}:
                 out.append(a)
     return out
 

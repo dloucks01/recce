@@ -13,6 +13,11 @@ import xml.etree.ElementTree as ET
 from .models import Account, Host, Port, Script, Vuln
 
 _CVE_RE = re.compile(r"\b(CVE-\d{4}-\d{4,7})\b", re.IGNORECASE)
+# Phrasings that mean the host is NOT affected, so a CVE mentioned in the same output
+# (reference/advice text) must not be turned into a finding.
+_NOT_AFFECTED_RE = re.compile(
+    r"not\s+vulnerable|not\s+affected|not\s+susceptible|not\s+exploitable|"
+    r"\bpatched\b|no\s+longer\s+vulnerable|appears\s+(?:to\s+be\s+)?safe", re.I)
 # A CVSS *base score* in the phrasings NSE/community scripts emit -
 # "CVSS Base Score: 7.5", "CVSSv3: 9.8", "CVSS: 9.8", "... (7.5)" - but NOT the
 # version inside a vector string ("CVSS:3.1/AV:N/..."), where 3.1 is the CVSS
@@ -86,8 +91,11 @@ def _classify_vuln(host_ip: str, port: Port | None, script: Script) -> Vuln | No
     if not is_vuln_family:
         return None
     # Explicitly not-vulnerable (patched) → drop it; never report a NOT-VULNERABLE
-    # script as a finding.
-    if "NOT VULNERABLE" in up and not positive:
+    # script as a finding. Beyond the exact "NOT VULNERABLE" state string, catch the
+    # other ways a script says the host is fine while still mentioning a CVE in its
+    # reference/advice text ("host is not affected. See CVE-2021-44228") - which
+    # otherwise slipped past the CVE gate below and became a spurious info finding.
+    if not positive and _NOT_AFFECTED_RE.search(out):
         return None
     # Skip scripts that report nothing actionable (no positive state, no CVE).
     if not positive and "CVE-" not in up and sid != "vulners":

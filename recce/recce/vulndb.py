@@ -63,6 +63,38 @@ def _cmp(a: str, b: str) -> int:
     return (ta > tb) - (ta < tb)
 
 
+def _same_base_no_p(v: str, bound: str) -> bool:
+    """True when `v` is a bare X.Y release and `bound` is X.YpN of the SAME base -
+    e.g. v='9.8', bound='9.8p1'. OpenSSH's portable pN is the same release as the
+    OpenBSD base for vuln purposes, so a bare 9.8 must not read as < 9.8p1 (which
+    flagged the patched 9.8 as vulnerable to regreSSHion)."""
+    if "p" not in bound.lower():
+        return False
+    if re.search(r"\d+p\d+", v.lower()):        # v has its own pN -> normal compare
+        return False
+    base = re.sub(r"(?i)(\d+)p\d+", r"\1", bound)   # 9.8p1 -> 9.8
+    return _ver_tuple(v) == _ver_tuple(base)
+
+
+def _product_in(token: str, blob: str) -> bool:
+    """Whole-token product match so 'bind' does not match 'rpcbind' and 'php' does
+    not match 'phpmyadmin'. Boundaries are non-alphanumeric, so 'php-cgi', 'isc
+    bind', 'ms-sql' still match; the token may contain spaces/dots itself."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", blob) is not None
+
+
+# Service version/extrainfo markers that mean the build is DISTRO-PACKAGED, so a
+# fix is often backported with the upstream version string left unchanged - a bare
+# version match then can't be trusted as "vulnerable" without checking the package.
+_DISTRO_RE = re.compile(
+    r"ubuntu|debian|\+deb|raspbian|\bel[5-9]\b|rhel|centos|red\s?hat|amzn|"
+    r"\.fc\d|fedora|suse|\+dfsg|mageia|\bcp\d", re.I)
+
+
+def _distro_packaged(port: "Port") -> bool:
+    return bool(_DISTRO_RE.search(f"{port.version} {port.extrainfo}"))
+
+
 def _in_range(version: str, lo: str | None, hi: str | None,
               lo_incl: bool, hi_incl: bool) -> bool:
     if lo is not None:
@@ -71,6 +103,10 @@ def _in_range(version: str, lo: str | None, hi: str | None,
             return False
     if hi is not None:
         c = _cmp(version, hi)
+        # A bare X.Y is the same release as the X.YpN upper bound (see above): don't
+        # let the missing pN component read as "below" the bound.
+        if c < 0 and _same_base_no_p(version, hi):
+            c = 0
         if c > 0 or (c == 0 and not hi_incl):
             return False
     return True
@@ -810,7 +846,7 @@ def _is_dc(host: Host) -> bool:
 
 def _matches(sig: dict, port: Port, host: Host) -> bool:
     blob = f"{port.product} {port.service}".lower()
-    if not any(p in blob for p in sig["product"]):
+    if not any(_product_in(p, blob) for p in sig["product"]):
         return False
     # OS gate (e.g. BlueKeep only on old Windows).
     if sig.get("os") and sig["os"] not in (host.os_family or host.os_name).lower():
@@ -862,15 +898,27 @@ def assess_host(host: Host) -> list[Vuln]:
                 continue
             seen.add((sig["title"], port.portid))
             banner = f"{port.product} {port.version}".strip() or port.service
+            conf = _confidence(sig)
+            remediation = sig.get("remediation", "")
+            note = ""
+            # A concrete version match on a distro-packaged build is unreliable: the
+            # distro often backports the fix without bumping the upstream version, so
+            # the number alone can't confirm the flaw (a patched Debian vsftpd 2.3.4
+            # is not the backdoored upstream tarball). Downgrade to a lead + say so.
+            if conf == "likely" and _distro_packaged(port):
+                conf = "potential"
+                note = ("  NOTE: distro-packaged build - the fix may be backported with "
+                        "the version unchanged; verify the package before relying on "
+                        "this version match.")
             findings.append(Vuln(
                 ip=host.ip, port=port.portid, protocol=port.protocol,
                 script_id="version-db", state="version match",
                 title=sig["title"],
-                output=f"{banner} on {port.portid}/{port.protocol} - {sig['desc']}",
+                output=f"{banner} on {port.portid}/{port.protocol} - {sig['desc']}{note}",
                 severity=sig["severity"], ids=list(sig.get("cves", [])),
                 cwes=list(sig.get("cwe", [])),
-                source="version-db", remediation=sig.get("remediation", ""),
-                confidence=_confidence(sig),
+                source="version-db", remediation=remediation,
+                confidence=conf,
             ))
     return findings
 

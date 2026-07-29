@@ -479,8 +479,17 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             pl = (probes.get(tgt) or {}).get("prelogin") or {}
 
             # sa / login with a blank or trivial password -> instant sysadmin.
-            blank = any("empty password" in (v.title or "").lower() and v.port == t.portid
-                        for v in h.vulns) or "ms-sql-empty-password" in scripts
+            # Gate on POSITIVE evidence, not mere script presence: nmap's
+            # ms-sql-empty-password script runs on every 1433 during enum and lands
+            # in `scripts` even when it authenticated nothing (empty/negative
+            # output), so keying off `"...-empty-password" in scripts` fired a
+            # critical "blank password" finding on every instance. Require the
+            # script's own "Login Success" marker (an account really logged in with
+            # an empty password) or a parsed empty-password vuln the parser vetted.
+            esp = scripts.get("ms-sql-empty-password", "")
+            blank = (any("empty password" in (v.title or "").lower() and v.port == t.portid
+                         for v in h.vulns)
+                     or "login success" in esp.lower())
             if blank:
                 out.append(_finding(
                     "critical", "MSSQL login with a blank password (sysadmin -> RCE)",
@@ -708,8 +717,8 @@ def parse_nxc_mssql(output: str) -> dict:
             continue
         if "[+]" in line:
             access = True
-            if "pwn3d" in low or "(admin)" in low:
-                admin = True
+            if "pwn3d" in low:            # the only real netexec admin marker; a
+                admin = True              # loose "(admin)" substring false-flagged
         if "(name:" in low or "(domain:" in low:
             banner = line
     return {"access": access, "admin": admin, "banner": banner}

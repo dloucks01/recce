@@ -32,6 +32,15 @@ LIKELY = "LIKELY"
 FALSE_POSITIVE = "FALSE POSITIVE"
 INCONCLUSIVE = "INCONCLUSIVE"
 
+# Evidence phrasing that claims recce actively ACCESSED a service (authenticated /
+# read with no credential / got an unauth reply) - true only for a live probe, so it
+# must not stand on a version-db banner match. Deliberately excludes EOL/version-fact
+# wording ("directly-observed build", "read the running version"), which is legit.
+_LIVE_ACCESS_RE = re.compile(
+    r"with no credential|no authentication and the server returned|"
+    r"authenticated with|logged in with|read this kubernetes surface|"
+    r"read the docker engine api", re.I)
+
 
 # --- evidence helpers -----------------------------------------------------------
 
@@ -1210,6 +1219,22 @@ def verify_host(host: Host) -> list[dict]:
         seen.add(key)
         port = _port_of(host, vuln)
         verdict, evidence = r["fn"](host, port, vuln)
+        # Safety net for over-claiming verdicts. Some recipes return CONFIRMED with
+        # ACCESS language ("recce read the API with no credential", "authenticated
+        # with a default credential", "sent INFO ... no authentication and the server
+        # returned") - true only when recce actually probed. When the finding is just
+        # a version-db BANNER match (source "version-db", never a live probe), recce
+        # ran no such request, so cap it at LIKELY. EOL/version-fact verdicts speak of
+        # a "directly-observed build" (the banner IS the proof) and don't use this
+        # access phrasing, so they stay CONFIRMED; genuine live-probe findings aren't
+        # source "version-db", so they're untouched too.
+        if verdict == CONFIRMED and vuln.source == "version-db" \
+                and _LIVE_ACCESS_RE.search(" ".join(evidence)):
+            verdict = LIKELY
+            action = list(evidence[1:]) if len(evidence) > 1 else []
+            evidence = ["Version/advisory match only - recce did NOT authenticate or "
+                        "read this service live; treat it as a lead to verify, not a "
+                        "confirmed observation.", *action]
         out.append({
             "ip": host.ip, "port": vuln.port, "vuln": r["name"],
             "finding": vuln.title or vuln.script_id or r["name"],
