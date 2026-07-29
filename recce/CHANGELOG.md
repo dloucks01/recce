@@ -4,6 +4,19 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+### Added
+- **Quality of Detection (QoD) — a single confidence authority (accuracy re-architecture,
+  Stage 1).** Every finding now gets a 0–100 `qod` score derived once from *how* it was
+  detected (`recce/qod.py`), modelled on OpenVAS's QoD and kept orthogonal to severity: an
+  actively-verified check (NSE `VULNERABLE`, live probe, credentialed/on-target fact) scores
+  95–100; a version/banner inference scores 70–80 (a *lead*); an advisory / distro-backport /
+  explicitly-`potential` finding scores 30 and drops below the default `MIN_QOD_VISIBLE = 70`
+  filter. This replaces the root cause of recce's recurring false positives — "is this real /
+  how sure" being re-derived from raw strings in ~20 places. The four divergent
+  `confidence != "potential"` gates (`exploitplan`, `poc`, `playbook`, `netmap`) now read this
+  one authority. See **docs/ARCHITECTURE.md** for the full staged plan. Tests in
+  `tests/test_qod.py`.
+
 ### Fixed
 - **False-positive sweep across the finding/verdict pipeline.** A codebase audit found
   several detections that asserted a finding from *presence* or a *loose substring*

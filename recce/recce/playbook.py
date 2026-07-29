@@ -283,9 +283,11 @@ def host_entries(host: Host) -> list[dict]:
             "prereq": entry["prereq"], "validate": entry["validate"],
             "key": f"exploit:{host.ip}:{entry['id']}"})
 
-    # Confirmed vulns (skip advisories / potential version matches).
+    # Findings above the QoD visibility floor (skip advisories / low-confidence version
+    # matches). Single QoD authority; was a bespoke `confidence == "potential"` skip.
+    from . import qod
     for v in host.vulns:
-        if v.confidence == "potential":
+        if not qod.is_visible(v):
             continue
         add(f"{v.title} {v.output}", v.title or v.script_id or "finding")
     # On-target ingested findings (all confirmed local observations).

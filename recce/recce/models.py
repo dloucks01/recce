@@ -71,6 +71,12 @@ class Vuln:
     source: str = "nse"      # nse | version-db | probe | config
     remediation: str = ""    # how to fix (offline knowledge base)
     confidence: str = ""     # confirmed | likely | potential
+    # Quality of Detection (0-100): how RELIABLE the detection method is, orthogonal
+    # to severity (which is how bad it is if real). Set once, from the detection
+    # method, by recce.qod.annotate(). See docs/ARCHITECTURE.md §3.1. 0 = not yet
+    # scored (older store / not annotated).
+    qod: int = 0
+    qod_type: str = ""       # the named tier, e.g. remote_banner / active_vuln
 
     @property
     def key(self) -> str:
