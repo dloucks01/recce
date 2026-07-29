@@ -24,6 +24,7 @@ workbook tab. Airgapped-safe; degrades cleanly when the port doesn't speak LDAP.
 """
 from __future__ import annotations
 
+import re
 import socket
 import struct
 
@@ -492,6 +493,11 @@ _DOMAIN_ATTRS = ["ms-DS-MachineAccountQuota", "minPwdLength", "lockoutThreshold"
                  "maxPwdAge"]
 # Description/comment fields that look like they hold a secret.
 _PW_HINT = ("pass", "pwd", "pw=", "pw:", "secret", "cred", "kennwort", "mot de passe")
+# Word-boundary match so a description doesn't fire on bypass/compass/passport (pass),
+# accredited/incredible (cred), or passenger/passive - only on an actual credential hint.
+_PW_DESC_RE = re.compile(
+    r"\b(pass(word|wd)?|pwd|secret|cred(ential)?|kennwort|mot\s+de\s+passe)\b"
+    r"|pw\s*[:=]", re.I)
 
 
 def _open(ip: str, port: int, timeout: float):
@@ -736,8 +742,8 @@ def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict
     kerb = [a for a in accts if a.kind == "user" and a.attrs.get("spn")]
     asrep = [a for a in accts if a.attrs.get("asrep_roastable") == "yes"]
     uncon = [a for a in accts if a.attrs.get("delegation") == "unconstrained"]
-    pw_desc = [a for a in accts if a.kind == "user" and any(
-        h in (a.attrs.get("description", "").lower()) for h in _PW_HINT)]
+    pw_desc = [a for a in accts if a.kind == "user"
+               and _PW_DESC_RE.search(a.attrs.get("description", ""))]
 
     dom = en.get("domain") or {}
     try:

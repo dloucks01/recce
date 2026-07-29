@@ -32,6 +32,11 @@ from collections import deque
 # High-value = reaching it is effectively domain compromise. Matched by RID suffix
 # (domain-relative) and by absolute built-in SID.
 _HIGHVALUE_RID = {"512", "516", "518", "519", "521"}   # DA, DCs, Schema, EA, RODC-ish
+# Credential-hint match for account descriptions, word-boundary so it doesn't fire on
+# bypass/compass/passport (pass) or accredited/incredible (cred).
+_PW_DESC_RE = re.compile(
+    r"\b(pass(word|wd)?|pwd|secret|cred(ential)?|kennwort|mot\s+de\s+passe)\b"
+    r"|pw\s*[:=]", re.I)
 _HIGHVALUE_SID = {
     "S-1-5-32-544": "Administrators",
     "S-1-5-32-548": "Account Operators",
@@ -640,7 +645,9 @@ def findings(graph: dict) -> list[dict]:
     for sid, node in nodes.items():
         props = node.get("props") or {}
         desc = str(props.get("description") or "")
-        if any(k in desc.lower() for k in ("pass", "pwd", "pw:", "cred")):
+        # Word-boundary match: a loose substring fired on bypass/compass/passport
+        # ("pass") and accredited/incredible ("cred"), flagging benign descriptions.
+        if _PW_DESC_RE.search(desc):
             out.append(_finding(
                 "creds", "high", "Possible password in account description",
                 node.get("name") or short(node), "",

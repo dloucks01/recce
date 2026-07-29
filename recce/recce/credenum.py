@@ -108,10 +108,15 @@ def parse_nxc_smb(output: str) -> dict:
             section = "sessions"; continue
         if "logged" in low and msg.startswith(("[*]", "[+]")):
             section = "loggedon"; continue
-        # Auth / admin marker: "[+] domain\user:pass (Pwn3d!)"
+        # Auth / admin marker: netexec/cme print the successful auth as
+        # "[+] domain\user:pass" and flag LOCAL ADMIN on that same line as
+        # "(Pwn3d!)" - and nowhere else. Key off that token alone. A loose
+        # "(admin)" substring also matched share/session/host-info text (a DC's
+        # output is share/session-heavy), flipping plain domain users to admin and
+        # producing false "Local admin confirmed" findings on domain controllers.
         if msg.startswith("[+]"):
             result["auth"] = True
-            if "pwn3d" in low or "(admin)" in low:
+            if "pwn3d" in low:
                 result["admin"] = True
             continue
         if msg.startswith("[*]") and ("windows" in low or "unix" in low
@@ -419,8 +424,13 @@ def run_ssh_local(ip: str, ssh: dict) -> tuple[dict | None, str | None]:
     out, err = _run(cmd, timeout=60)
     if err:
         return None, err
-    if not out.strip():
-        return None, "ssh: no output (auth failed or connection refused)"
+    # _run folds stderr into `out`, and parse_ssh_enum always returns a (truthy)
+    # fixed-key dict, so a failed auth ("Permission denied") or unreachable host
+    # ("Connection refused") would otherwise be recorded as an SSH foothold
+    # (access_gained + auth:True). The remote script emits `===ID===` as its first
+    # marker, so its presence is proof the login actually succeeded and the enum ran.
+    if "===ID===" not in out:
+        return None, "ssh: auth failed / no shell (enum did not run)"
     return parse_ssh_enum(out), None
 
 

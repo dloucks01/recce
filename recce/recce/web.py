@@ -180,6 +180,15 @@ _SECRET_RE = re.compile(
     r'["\']?\s*[:=]\s*(?:\{?\s*["\']?value["\']?\s*:\s*)?["\']?([^\s"\',}{]{4,})', re.I)
 
 
+def _looks_like_html(body: str) -> bool:
+    """True when the body is an HTML document (a SPA/soft-404 index page), as opposed
+    to a dotenv/config/source file. Used to reject a backup 'leak' that is really the
+    app's index page. Deliberately does NOT treat raw '<?php' source as HTML."""
+    head = body[:512].lstrip().lower()
+    return (head.startswith("<!doctype html") or head.startswith("<html")
+            or "<head" in head or "<body" in head)
+
+
 def _leaked_secrets(body: str, limit: int = 8) -> list[str]:
     """Redacted 'key=ab…yz' pairs pulled from an exposed config/env body, so the
     finding shows WHAT leaked without dumping the raw secret."""
@@ -252,6 +261,12 @@ def _confirm_backup(kind: str, body: str) -> bool:
         return body[:2] == "\x1f\x8b"
     if kind == "sql":
         return bool(re.search(r"INSERT INTO|CREATE TABLE|MySQL dump|PostgreSQL database dump", body, re.I))
+    # A 200-everything SPA serves index.html for /.env.bak etc.; if that HTML/JS
+    # embeds a front-end config secret (apiKey:"..."), _leaked_secrets matched and we
+    # reported the app's index page as an exposed backup. Reject bodies that are
+    # clearly an HTML document before trusting a leaked-secret match.
+    if _looks_like_html(body):
+        return False
     if kind == "php":
         return "<?php" in body or bool(_leaked_secrets(body))
     if kind == "xml":
@@ -318,7 +333,13 @@ _APP_LOGINS = [
      "creds": [("admin", "admin")]},
     {"id": "MinIO", "tech": "MinIO", "path": "/api/v1/login", "ctype": "json",
      "body": '{{"accessKey":"{u}","secretKey":"{p}"}}',
-     "ok": lambda s, b, h: s in (200, 204) and ("set-cookie" in h or "token" in b.lower()),
+     # Require a real auth artifact, not any Set-Cookie (a CSRF/anon cookie set on a
+     # FAILED login) or the mere word "token" (e.g. an error like "invalid token").
+     # A successful MinIO console login sets a `token=` session cookie / returns a
+     # token value in the JSON body.
+     "ok": lambda s, b, h: s in (200, 204) and (
+         "token=" in h.get("set-cookie", "").lower()
+         or bool(re.search(r'"(sessiontoken|token|sts)"\s*:\s*"[^"]+', b, re.I))),
      "creds": [("minioadmin", "minioadmin")]},
 ]
 
@@ -368,7 +389,7 @@ _PATHS = [
      lambda s, b: s == 200 and re.search(r"APP_KEY|DB_(PASSWORD|HOST|USER)|SECRET|API_?KEY", b, re.I)),
     (".svn/entries", "medium", "web-svn", "Exposed SVN metadata (.svn)",
      ["CWE-538"], "Remove .svn from the web root.",
-     lambda s, b: s == 200 and ("dir" in b[:50] or b[:10].strip().isdigit())),
+     lambda s, b: s == 200 and b.split("\n", 1)[0].strip().isdigit()),
     ("server-status", "medium", "web-serverstatus", "Apache mod_status exposed (/server-status)",
      ["CWE-200"], "Restrict <Location /server-status> to localhost/admins.",
      lambda s, b: s == 200 and "Apache Server Status" in b),
@@ -386,7 +407,11 @@ _PATHS = [
      lambda s, b: s == 200 and ('"swagger"' in b or '"openapi"' in b)),
     ("manager/html", "medium", "web-tomcat-manager", "Apache Tomcat Manager reachable",
      ["CWE-1188"], "Restrict/authenticate the Tomcat Manager app.",
-     lambda s, b: s in (200, 401, 403)),
+     # A bare 200/401/403 matched EVERY auth-gated or default-deny server (nginx 403,
+     # site-wide basic auth) as "Tomcat Manager". Require a Tomcat signature: its own
+     # manager app (200) and its default 401/403 error pages are branded "Apache
+     # Tomcat", so a generic 401/403 from something else no longer qualifies.
+     lambda s, b: s in (200, 401, 403) and "tomcat" in b.lower()),
     ("wp-login.php", "info", "web-wordpress", "WordPress login page (WordPress in use)",
      ["CWE-200"], "Ensure WordPress + plugins are current; restrict wp-login/xmlrpc.",
      lambda s, b: s == 200 and ("user_login" in b or "wordpress" in b.lower())),
@@ -446,13 +471,12 @@ _PATHS = [
      ["CWE-306", "CWE-284"],
      "Enable the security realm (authentication) and bind to a trusted interface.",
      lambda s, b: s == 200 and b.lstrip()[:1] == "["
-     and ('"health"' in b or '"index"' in b or b.strip() == "[]")),
+     and ('"health"' in b or '"index"' in b)),
     ("api/status", "info", "web-kibana",
      "Kibana status endpoint exposed (version disclosure)",
      ["CWE-200"],
      "Restrict Kibana; keep it patched (the version maps to known CVEs).",
-     lambda s, b: s == 200 and '"version"' in b
-     and ("kibana" in b.lower() or '"number"' in b)),
+     lambda s, b: s == 200 and '"version"' in b and "kibana" in b.lower()),
 ]
 
 _DANGEROUS_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT", "PATCH"}
