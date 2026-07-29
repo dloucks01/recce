@@ -5,6 +5,17 @@
 > in a terminal on a client engagement — not by code cleanliness for its own sake. Bloat
 > cuts and efficiency work must never cost field capability; they remove friction and
 > latency only.
+>
+> **TOP PRINCIPLE — a false NEGATIVE is worse than a false positive.** Never hide or
+> block a real finding. Confidence work (QoD) must **label and sort**, never **hide by
+> default**: the report shows everything, and filtering (`--min-qod`) is strictly opt-in.
+> When in doubt, surface the finding as a low-confidence lead rather than drop it. This is
+> why the aggressive `proofs` rewrite was **dropped** (2026-07-29): deleting the per-type
+> precondition gates (ZeroLogon→DC-only, BlueKeep→OS-gated, patched-version→FP, SMB-signing
+> -required→FP) would have turned real findings into missed ones. Those gates are accuracy,
+> not bloat. The `proofs`/evidence design is to be **re-planned from scratch** under this
+> principle before any rewrite — the FP over-claiming it was meant to fix is already handled
+> by the QoD gate (PR #31/#32).
 
 This document is the durable plan for the accuracy-first re-architecture. It captures the
 root-cause problem, the proven external models we're adopting, the target design, and a
@@ -155,10 +166,10 @@ Each stage is independently shippable (green tests, tool usable). Ordered by tes
 | Stage | Tester win | Scope |
 |---|---|---|
 | **0** ✅ | Stop the FP bleeding | Tactical FP sweep (PR #29/#31, merged) |
-| **1 — QoD spine** | **Trust the default view**; leads labeled, dialable | `qod`/`qod_type` on the model; central `qod.py` scoring from detection method; `MIN_QOD` visibility + verified thresholds; unify the 5 divergent `!= "potential"` gates onto one predicate; QoD column + `--min-qod` in reports |
-| **1b** | Honest "confirmed" | proofs → evidence-driven promote/refute; add `evidence[]`; retire the string re-adjudication |
-| **2 — dedup/rank** | One ranked finding per real issue | fingerprint `(ip,port,cve)`, merge-on-collision keeping top QoD; EPSS/KEV offline snapshots; rank = severity×qod×EPSS/KEV |
-| **3 — scan efficiency** | **~½ the scan time** | Collapse the 4–5 redundant `-sV` passes; merge enum+vuln NSE sets; fold db+privesc into one pass; incremental (not full) report regen |
+| **1 — QoD spine** ✅ | **Trust the default view**; leads labeled (not hidden), dialable | `qod`/`qod_type` on the model; central `qod.py` scoring from detection method; QoD column + opt-in `--min-qod`; gates unified onto one predicate (PR #32/#33, merged) |
+| **1b** ⚠︎ RE-PLAN | Honest "confirmed" | The aggressive proofs rewrite was **DROPPED** — it deleted precondition gates and would miss real findings (see top principle). The over-claiming it targeted is already fixed by the QoD gate (#31/#32). `evidence[]` foundation is PR #34 (open, optional). Re-plan the proofs/evidence design from scratch, never-hide-first, before any rewrite. |
+| **2 — dedup/rank** | One ranked finding per real issue | fingerprint `(ip,port,cve)`, merge-on-collision keeping top QoD; EPSS/KEV offline snapshots; rank = severity×qod×EPSS/KEV. **Merge must never drop a distinct finding.** |
+| **3 — scan efficiency** ◀︎ NEXT | **~½ the scan time, zero coverage loss** | Collapse the 4–5 redundant `-sV` passes + merge enum/vuln/db/privesc NSE sets + incremental report regen — but **only where coverage is provably preserved** (a standalone `recce vulns` must still run the deep-enum scripts if enum didn't). Verify-then-cut. |
 | **4 — data-driven detection** | Tune checks & runbooks without code | `SIGNATURES`/runbooks/narratives → YAML matcher rules + templates; `--validate-rules` lint |
 | **5 — structural de-bloat** | Faster/safer iteration; clean library core | `cli.py` 6,018→~2,000 via `phases/` + declarative argspec + service registry; collapse report trio onto one model→renderers; shared `util.run` |
 
@@ -189,12 +200,33 @@ two-CONFIRMED contradiction.
 of the coarse string. Behavior-preserving (potential ⇔ qod < 70) so the suite stays green,
 but there is now a single predicate to change — and it already respects `--min-qod`.
 
-**1b — follow-up PR (the semantic tightening):** add `evidence[]`; rewrite `proofs` to
-promote/refute on evidence (retiring `_LIVE_ACCESS_RE` and the ~670 lines of string
-re-adjudication); make the exploitation sheet label a non-`is_verified` finding a
-**candidate — verify** (matching the proofs verdict) instead of a confirmed exploit — the
-real fix for the two-definitions-of-CONFIRMED contradiction; add the QoD column +
-`--min-qod` flag to the reports.
+**1b — RE-PLAN (superseded): a review & evaluation "honesty loop", not hard gates.**
+The first attempt (delete the per-type `_v_*` verdict code, drive everything from
+evidence/QoD) was dropped: those functions also encode **precondition gates** that stop
+false positives (ZeroLogon→DC-only, BlueKeep→OS, patched-version→FP), and deleting them
+would MISS real findings. The replacement direction (user, 2026-07-29):
+
+> Instead of throwing hard gates, have an **end review + evaluation + honesty loop** that
+> verifies findings are real. Some gates may be OK.
+
+Design intent for the re-plan (to be specced in full before any code):
+- **Surface everything; hide nothing.** No finding is silently dropped. A finding that
+  can't be confirmed is shown as a lead with an honest rationale, not deleted.
+- **A final evaluation pass per finding** produces `{realness confidence, rationale,
+  what-would-confirm-it, what-argues-against-it}` from the structured **evidence** +
+  preconditions — a transparent assessment the tester reviews, not a binary verdict.
+  Preconditions (DC status, OS, version-in-range) become *inputs that lower/raise the
+  realness score and are explained*, not silent drops. (This is where `evidence[]` from
+  PR #34 pays off, and it composes with the adversarial-verify / completeness-critic
+  patterns — an "is this real, and what did we NOT check?" loop.)
+- **Hard gates only for a definitive disproof** — e.g. an NSE check that explicitly reports
+  NOT VULNERABLE, or a live re-probe that refuses auth. Everything else is evaluated and
+  surfaced, never suppressed.
+- **Honesty column in the report**: the verdict carries its confidence AND its reasoning,
+  so "confirmed" means recce can show *why*, and a lead says plainly what's unverified.
+
+The two-definitions-of-CONFIRMED fix (label a non-verified exploitation action
+**candidate — verify**) still applies and lands with this re-plan.
 
 **Regression contract:** `tests/test_fp_sweep.py` and `tests/test_false_positives.py` encode
 the exact version-db-vs-live/EOL/regreSSHion/distro distinctions QoD formalizes — they must
