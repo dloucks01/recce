@@ -159,22 +159,30 @@ reviewable/versionable and tunable **without touching Python**.
 
 ---
 
-## 4. Staged roadmap
+## 4. Staged roadmap (SOTA-driven)
 
-Each stage is independently shippable (green tests, tool usable). Ordered by tester payoff.
+Re-sequenced (2026-07-29) around the four mechanisms every state-of-the-art scanner uses to
+be low-FP *and* high-signal — **confidence tiering · verify-don't-infer · dedup/correlation ·
+exploit-aware prioritization** — plus data-driven detection. The honesty loop's goals are
+realized *through* these proven mechanisms, not a bespoke evaluation engine. Accuracy
+capabilities come first (the tester's trust); efficiency and bloat follow. Each stage ships
+independently (green tests, tool usable).
 
 | Stage | Tester win | Scope |
 |---|---|---|
 | **0** ✅ | Stop the FP bleeding | Tactical FP sweep (PR #29/#31, merged) |
-| **1 — QoD spine** ✅ | **Trust the default view**; leads labeled (not hidden), dialable | `qod`/`qod_type` on the model; central `qod.py` scoring from detection method; QoD column + opt-in `--min-qod`; gates unified onto one predicate (PR #32/#33, merged) |
-| **1b** ⚠︎ RE-PLANNED | Honest, never-hidden findings | The aggressive proofs rewrite was **DROPPED** (it deleted precondition gates and would miss real findings). Replaced by an **evaluation & honesty loop** — surface everything, rank by honest realness, merge duplicates, hard-gate only on definitive disproof. **Full spec: [`docs/PROOFS-HONESTY-LOOP.md`](PROOFS-HONESTY-LOOP.md).** Builds on the `evidence[]` foundation (PR #34). |
-| **2 — dedup/rank** | One ranked finding per real issue | fingerprint `(ip,port,cve)`, merge-on-collision keeping top QoD; EPSS/KEV offline snapshots; rank = severity×qod×EPSS/KEV. **Merge must never drop a distinct finding.** |
-| **3 — scan efficiency** ◀︎ NEXT | **~½ the scan time, zero coverage loss** | Collapse the 4–5 redundant `-sV` passes + merge enum/vuln/db/privesc NSE sets + incremental report regen — but **only where coverage is provably preserved** (a standalone `recce vulns` must still run the deep-enum scripts if enum didn't). Verify-then-cut. |
-| **4 — data-driven detection** | Tune checks & runbooks without code | `SIGNATURES`/runbooks/narratives → YAML matcher rules + templates; `--validate-rules` lint |
-| **5 — structural de-bloat** | Faster/safer iteration; clean library core | `cli.py` 6,018→~2,000 via `phases/` + declarative argspec + service registry; collapse report trio onto one model→renderers; shared `util.run` |
+| **1 — QoD confidence spine** ✅ | Trust the default view; leads labeled (not hidden), dialable | `qod`/`qod_type` + `qod.py` scoring; QoD column + opt-in `--min-qod`; gates unified (PR #32/#33). `evidence[]` foundation = PR #34 (open) |
+| **2 — Dedup / correlation** ◀︎ NEXT | **The FP-count killer**: hundreds → the handful of real issues | Merge the same issue across sources/ports/hosts into one finding (identity = primary CVE else normalized rule id), keep top QoD + union of evidence; host roll-up for shared-root-cause. **Never fold two *distinct* findings.** Lowest-risk big win (presentation, not verdicts). |
+| **3 — Active verification (verify-don't-infer)** | **The core low-FP capability**; recce's offline edge | Make active confirmation the default posture: for a version/banner *lead*, auto-run the cheap confirm-check the recipe already names (`finish`/`to_confirm`) → promote to CONFIRMED with real evidence, or refute — instead of inferring from a banner. Extends recce's existing live probes (redis/ftp/smb/http…). Bounded, safe-by-default, ROE-aware. |
+| **4 — Honest tiered presentation** | Signal never buried; nothing hidden | Tier the report (confirmed/likely up top, **leads collapsed**, refuted hidden-but-available); the honesty column (rationale + caveats + to-confirm); Exploitation labels a non-verified action **candidate — verify**. Keeps `_v_*` precondition knowledge as verification triggers + caveats. Realizes the [honesty loop](PROOFS-HONESTY-LOOP.md) via presentation. |
+| **5 — Offline EPSS/KEV prioritization** | A priority order, not a flat wall | Bundle offline EPSS + CISA KEV snapshots; rank = severity × QoD × EPSS/KEV; "fix these first" view. |
+| **6 — Data-driven detection** | Tune checks/runbooks without code; enables API-enum | `SIGNATURES`/runbooks → Nuclei-style YAML matcher rules with **negative** matchers; `--validate-rules` lint. Foundation for API enumeration ([[recce-backlog]]). |
+| **7 — Scan efficiency** | ~½ the scan time, **zero coverage loss** | Collapse the 4–5 redundant `-sV` passes + merge NSE sets + incremental report regen — **only where coverage is provably preserved** (verify-then-cut). |
+| **8 — Structural de-bloat** | Faster/safer iteration; clean library core | `cli.py` 6,018→~2,000 via `phases/` + declarative argspec + service registry; collapse report trio onto one model→renderers; shared `util.run`. ~7,000 LOC out, zero capability loss. |
 
-Estimated reducible bloat across stages 4–5: **~7,000 LOC** (~20% of the codebase) with
-**zero capability loss**.
+**One-line thesis:** the capability that makes or breaks a scanner's reputation is **active
+verification** — shifting recce from *inferring* findings from banners to *confirming* them —
+and **dedup** is what makes the result readable. Those two are the priority.
 
 ---
 
