@@ -378,10 +378,10 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
     # every row), so a host's findings collapse to one line and the hosts with the
     # worst findings sort to the top.
     cols = [
-        ("Triaged", "checkbox", 9), ("Severity", "data", 10), ("IP", "data", 16),
-        ("Port", "data", 6), ("Finding", "data", 44),
+        ("Triaged", "checkbox", 9), ("Severity", "data", 10), ("Tier", "data", 10),
+        ("IP", "data", 16), ("Port", "data", 6), ("Finding", "data", 44),
         ("Source", "data", 11), ("QoD", "data", 18), ("CVE / refs", "data", 22),
-        ("CWE", "data", 16), ("Exploit", "data", 52),
+        ("CWE", "data", 16), ("Exploit", "data", 52), ("To confirm", "data", 40),
         ("Remediation", "data", 44), ("Details", "data", 50),
         ("Notes", "notes", 26), ("Key", "key", 4),
     ]
@@ -390,9 +390,11 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
     rows = []
     ordered = [(h, v) for h in hosts for v in h.vulns]
     # host worst-severity, then IP (keeps a host's findings contiguous for the band),
-    # then this finding's severity.
+    # then this finding's severity, then confidence tier (confirmed edges above a lead of
+    # the same severity - honest signal without disturbing the severity-first ordering).
     ordered.sort(key=lambda hv: (worst[hv[0].ip], _ip_sort_key(hv[0].ip),
-                                 _SEV_RANK.get((hv[1].severity or "").lower(), 9)))
+                                 _SEV_RANK.get((hv[1].severity or "").lower(), 9),
+                                 _TIER_RANK.get(_tier(hv[1]), 3)))
     for h, v in ordered:
         # Full output, shown in a wrapped column so it reads down inside its cell
         # (never truncated). Rows fold under the per-host band, so verbose findings
@@ -400,10 +402,11 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
         out = v.output
         rows.append({"key": tr.vuln_row_key(v), "group": h.ip,
                      "data": {
-            "Severity": (v.severity or "info").upper(), "IP": h.ip,
+            "Severity": (v.severity or "info").upper(), "Tier": _tier(v), "IP": h.ip,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,
             "Source": v.source, "QoD": _qod_cell(v), "CVE / refs": ", ".join(v.ids),
             "CWE": ", ".join(v.cwes), "Exploit": _exploit_cell(h, v),
+            "To confirm": _to_confirm_cell(h, v),
             "Remediation": v.remediation, "Details": out,
             "Hostname": h.hostname, "_worstsev": v.severity}})
     return SheetSpec("Vulnerabilities", cols, rows, _styler_vulns,
@@ -451,6 +454,38 @@ def _qod_cell(v) -> str:
     kind = v.qod_type or _qod.score(v)[1]
     verified = " ✓" if score >= _qod.MIN_QOD_VERIFIED else ""
     return f"{score} {kind}{verified}".strip()
+
+
+def _tier(v) -> str:
+    """The honest confidence bucket from QoD: confirmed (actively verified),
+    likely (a version/inference lead worth checking), or lead (low-confidence)."""
+    from . import qod as _qod
+    score = v.qod or _qod.qod_of(v)
+    if score >= _qod.MIN_QOD_VERIFIED:
+        return "confirmed"
+    if score >= _qod.MIN_QOD_VISIBLE:
+        return "likely"
+    return "lead"
+
+
+_TIER_RANK = {"confirmed": 0, "likely": 1, "lead": 2}
+
+
+def _to_confirm_cell(h, v) -> str:
+    """For a not-yet-confirmed lead, the exact SAFE command that would settle it (the
+    honesty loop's `to_confirm`); blank for an actively-verified finding."""
+    from . import qod as _qod
+    from .verify_rules import rule_for_cve
+    if (v.qod or _qod.qod_of(v)) >= _qod.MIN_QOD_VERIFIED:
+        return ""
+    for cve in (i.upper() for i in (v.ids or [])):
+        rule = rule_for_cve(cve)
+        if rule:
+            cmd = (rule.get("confirm", "") or "").replace("<ip>", h.ip)
+            if v.port:
+                cmd = cmd.replace("<port>", str(v.port))
+            return f"recce verify --run   ·   {cmd}"
+    return ""
 
 
 def _curated_exploit(v) -> str:
