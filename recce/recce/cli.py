@@ -5405,14 +5405,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Phased enumeration & reporting for pentest engagements. "
                     "Scans fill an Excel workbook you check off as you go.",
         epilog=(
-            "typical engagement:\n"
-            "  1. recce doctor                     # verify this box\n"
-            "  2. recce enum 10.0.0.0/24 -o eng    # discover + services\n"
-            "  3. recce vulns -o eng               # vuln-scan open ports\n"
-            "  4. recce sweep -o eng               # ALL credential-free deep modules\n"
-            "  5. recce credsweep -u U -p P -d DOM -o eng   # once you have creds\n"
-            "  6. recce status -o eng              # what's left; open eng/enumeration.xlsx\n\n"
+            "quick start - one command does the whole engagement:\n"
+            "  recce run 10.0.0.0/24 -o eng             # discover->enum->vulns->deep->report\n"
+            "  recce run 10.0.0.0/24 -u U -p P -o eng   # + authenticated SMB/AD/mssql modules\n\n"
+            "core loop, any time:\n"
+            "  recce next   -o eng     # the best next step, from what's been found\n"
+            "  recce verify --run -o eng   # confirm/refute version leads (safe re-check)\n"
+            "  recce status -o eng     # coverage + what's left\n"
+            "  recce report -o eng     # regenerate the workbook / write-ups\n\n"
+            "everything else is a surgical subcommand (per-service enum, ingest, deploy, ...).\n"
             "targets: single IP, several IPs, range (10.0.0.10-40), CIDR, or @file.\n"
+            "interrupted? re-run (add --resume) or 'recce next' - nothing dead-ends.\n"
             "run 'recce <command> -h' for a command's options."
         ),
     )
@@ -6160,28 +6163,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 _QUICKSTART = r"""
-recce - phased enumeration & reporting. New to this? Open QUICKSTART.md for a
-plain-English, step-by-step walkthrough. The core loop is short:
+recce - phased enumeration & reporting. New to this? Open QUICKSTART.md for the
+plain-English walkthrough. In ONE command:
 
-  1.  recce doctor                       check this box can run everything
-  2.  recce enum  <targets> -o eng        find hosts, ports, services -> workbook
-  3.  recce vulns -o eng                   vuln-scan what enum found
-  4.  recce sweep -o eng                   ALL credential-free deep modules at once
-                                          (web/smb/ftp/ldap/snmp/mongodb/redis/
-                                          elasticsearch/rsync/nfs/kerberos/docker/k8s/mssql)
-  5.  recce credsweep -u USER -p PASS -d DOMAIN -o eng
-                                          ALL authenticated modules once you have creds
-                                          (credenum + authenticated ldap/smb/mssql/ftp)
+  recce run <targets> -o eng     discover -> enum -> vulns -> every applicable deep
+                                 module -> report. Add -u USER -p PASS -d DOMAIN to
+                                 also run the authenticated SMB/AD/mssql modules.
 
-Then open eng/enumeration.xlsx (the "Runbook" tab lists every command + options),
-or check progress and the suggested next step:  recce status -o eng
+Then, any time (the core loop):
 
-Want to focus one service instead of the whole sweep?  Each still has its own
-command - recce web|smb|ftp|ldap|snmp|mongodb|redis|elasticsearch|rsync|nfs|
-kerberos|docker|k8s|mssql -o eng  (or add -u/-p/-d to smb/ldap/mssql/ftp for their
-authenticated depth). See the Runbook tab.
+  recce next   -o eng            the single best next step, from what's been found
+  recce verify --run -o eng      confirm/refute version leads with a safe re-check
+  recce status -o eng            coverage + what's left   (open eng/enumeration.xlsx)
+  recce report -o eng            regenerate the workbook / write-ups
+
+Interrupted? Re-run the command (add --resume to skip finished hosts) or `recce next`
+- nothing dead-ends.
+
+Surgical (focus one thing): recce web|smb|ftp|ldap|snmp|mongodb|redis|elasticsearch|
+rsync|nfs|kerberos|docker|k8s|mssql -o eng  (add -u/-p/-d for authenticated depth),
+plus enum|vulns|sweep|credsweep|ingest|deploy|import. Run `recce <command> -h`.
 
 Already have an nmap scan?   recce import scan.xml -o eng   (no scanning)
+First time on this box?      recce doctor
 SharpHound / Certipy data?   recce ad loot.zip certipy.json -u USER -p PASS -d DOMAIN
                              (AD vulns + ESC findings + paths to Domain Admin)
 Have a complete IP/hostname list?  recce enum @scope.txt --targets-up

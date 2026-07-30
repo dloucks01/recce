@@ -134,6 +134,7 @@ All notable changes to recce are documented here. Dates are UTC.
   masscan's spurious opens. New regression tests in `tests/test_enum_seed.py`.
 
 ### Changed
+- **`recce -h` and bare `recce` now lead with the core path (workflow W4).** The quickstart and help open with **`recce run`** (the one-command engagement) and the core loop (`next` / `verify` / `status` / `report`), with the ~40 per-service commands grouped below as surgical tools — so a new tester sees the 5 commands that matter first, not a wall.
 - **The Sköll-Fieldkit integration is now the fieldkit integration.** The companion kit
   was renamed to [**fieldkit**](https://github.com/dloucks01/fieldkit), so the commands
   follow: **`recce fieldkit-export`** / **`recce fieldkit-import`**, writing `eng/fieldkit/`
