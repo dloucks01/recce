@@ -19,25 +19,13 @@ from __future__ import annotations
 import re
 
 from .models import Evidence, Host
+from .verify_rules import rule_for_cve, script_cves
 
 _CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
-# Single-vuln NSE detectors whose CVE set isn't always embedded in the output text, so a
-# "NOT VULNERABLE" from them refutes these specific CVEs. (Most vuln scripts DO print their
-# IDs, which are picked up directly; this is the belt-and-suspenders map for the rest.)
-_SCRIPT_CVES: dict[str, list[str]] = {
-    "smb-vuln-ms17-010": ["CVE-2017-0143", "CVE-2017-0144", "CVE-2017-0145",
-                          "CVE-2017-0146", "CVE-2017-0147", "CVE-2017-0148"],
-    "smb-vuln-ms08-067": ["CVE-2008-4250"],
-    "rdp-vuln-ms12-020": ["CVE-2012-0002"],
-    "ssl-heartbleed": ["CVE-2014-0160"],
-    "ssl-poodle": ["CVE-2014-3566"],
-    "ssl-ccs-injection": ["CVE-2014-0224"],
-    "smb-double-pulsar-backdoor": ["CVE-2017-0143"],
-    "http-shellshock": ["CVE-2014-6271", "CVE-2014-6278"],
-    "http-vuln-cve2017-5638": ["CVE-2017-5638"],
-    "ftp-vsftpd-backdoor": ["CVE-2011-2523"],
-}
+# {nse_script_id: [cves]} from the verification registry (verify_rules.py) - the curated
+# belt-and-suspenders map for scripts whose NOT-VULNERABLE output doesn't embed the CVE.
+_SCRIPT_CVES: dict[str, list[str]] = script_cves()
 
 
 def _refuted_cves(host: Host) -> set[str]:
@@ -102,3 +90,37 @@ def apply_refutations(host: Host) -> int:
 
 def is_refuted(v) -> bool:
     return getattr(v, "qod_type", "") == "refuted"
+
+
+def _ran_scripts(host: Host) -> set[str]:
+    ids = {s.id for p in host.ports for s in (p.scripts or [])}
+    ids |= {s.id for s in (getattr(host, "host_scripts", []) or [])}
+    return ids
+
+
+def confirm_plan(host: Host) -> list[dict]:
+    """For each still-unconfirmed version-inference LEAD that has a registry rule, the exact
+    safe check that would settle it — the honesty loop's `to_confirm`, as data. Reports
+    whether that check already ran, and the one-line command. No traffic; pure planning.
+
+    Returns [{ip, port, cve, finding, check, tier, command, ran}]. Drives the report's
+    'To confirm' guidance now and the opt-in `recce verify --run` (slice 3c) next.
+    """
+    ran = _ran_scripts(host)
+    out: list[dict] = []
+    for v in host.vulns:
+        if v.source != "version-db" or is_refuted(v):
+            continue
+        for cve in (i.upper() for i in (v.ids or [])):
+            rule = rule_for_cve(cve)
+            if not rule:
+                continue
+            cmd = (rule.get("confirm", "") or "").replace("<ip>", host.ip)
+            if v.port:
+                cmd = cmd.replace("<port>", str(v.port))
+            out.append({"ip": host.ip, "port": v.port, "cve": cve,
+                        "finding": v.title or v.script_id, "check": rule.get("nse", ""),
+                        "tier": rule.get("tier", "B"), "command": cmd,
+                        "ran": rule.get("nse", "") in ran})
+            break   # one confirm plan per finding
+    return out
