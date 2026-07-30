@@ -137,6 +137,7 @@ All notable changes to recce are documented here. Dates are UTC.
   masscan's spurious opens. New regression tests in `tests/test_enum_seed.py`.
 
 ### Changed
+- **~Half the vuln-pass NSE work, zero coverage loss (Stage 7).** The ~90 deep service-enum scripts used to run twice — once in the `enum` phase, again in the `vulns` phase. The vuln pass now skips them **only when they already ran on that host** (their output is present) — the same scripts would just re-match the same ports and find nothing new. When enum didn't run them (a shallow enum, or a standalone `recce vulns` / imported scan), they still run, so no finding is ever lost. Roughly halves the vuln pass's per-host NSE work.
 - **`recce -h` and bare `recce` now lead with the core path (workflow W4).** The quickstart and help open with **`recce run`** (the one-command engagement) and the core loop (`next` / `verify` / `status` / `report`), with the ~40 per-service commands grouped below as surgical tools — so a new tester sees the 5 commands that matter first, not a wall.
 - **The Sköll-Fieldkit integration is now the fieldkit integration.** The companion kit
   was renamed to [**fieldkit**](https://github.com/dloucks01/fieldkit), so the commands
