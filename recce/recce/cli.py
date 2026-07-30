@@ -1720,7 +1720,7 @@ def _sweep_defaults(args: argparse.Namespace) -> None:
 # web + protocol posture first, then the heavier service dives. Each no-ops cleanly
 # when the datastore has no matching host.
 _UNAUTH_SWEEP = [
-    ("web", "cmd_web"), ("smb", "cmd_smb"), ("ftp", "cmd_ftp"), ("ldap", "cmd_ldap"),
+    ("web", "cmd_web"), ("api", "cmd_api"), ("smb", "cmd_smb"), ("ftp", "cmd_ftp"), ("ldap", "cmd_ldap"),
     ("snmp", "cmd_snmp"), ("mongodb", "cmd_mongodb"), ("redis", "cmd_redis"),
     ("elasticsearch", "cmd_elasticsearch"), ("rsync", "cmd_rsync"),
     ("nfs", "cmd_nfs"), ("kerberos", "cmd_kerberos"), ("docker", "cmd_docker"),
@@ -4181,6 +4181,41 @@ def _ldap_shot(args, ip, command, output):
     return path
 
 
+def cmd_api(args: argparse.Namespace) -> int:
+    """API enumeration over the web services enum found: OpenAPI/Swagger specs,
+    interactive API docs (Swagger UI / ReDoc / GraphiQL), and GraphQL introspection.
+    Read-only GETs plus one GraphQL introspection POST."""
+    from . import api
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    active = not getattr(args, "no_probe", False)
+    analysis = api.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No web services to enumerate for APIs. Run `enum`/`vulns` first, or "
+              "target hosts with HTTP/S ports.")
+        store.close()
+        return 0
+    print(f"[+] Probed {len(tgts)} web endpoint(s) for API surface; "
+          f"{len(analysis['findings'])} finding(s).")
+    for f in analysis["findings"]:
+        print(f"      {f['target']}  {f['title']}  ({f['severity']})")
+    _fold_service_findings(store, hosts, analysis, "api", api.findings_to_vulns, "API")
+    _mark_capability_scanned(store, tgts)
+    _final_report(store, paths, store.get_meta("engagement")
+                  or getattr(args, "title", "Recce Engagement"))
+    store.close()
+    _print_next(paths, args.output_dir, n=2)
+    return 0
+
+
 def cmd_snmp(args: argparse.Namespace) -> int:
     """Deep SNMP enumeration: brute common community strings over UDP 161, then read
     the system group + walk Windows users / processes / software. Read-only - recce
@@ -5970,6 +6005,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     lp.set_defaults(func=cmd_ldap)
 
     # SNMP enumeration (UDP 161).
+    ap = sub.add_parser("api",
+                        help="API enum: OpenAPI/Swagger specs, interactive docs, and "
+                             "GraphQL introspection on the web services enum found")
+    ap.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "web hosts in the datastore)")
+    ap.add_argument("-o", "--output-dir", default="engagement")
+    ap.add_argument("--title", default="Recce Engagement")
+    ap.add_argument("--no-probe", action="store_true",
+                    help="don't send API probes (list web targets only)")
+    ap.set_defaults(func=cmd_api)
+
     sp = sub.add_parser("snmp",
                         help="SNMP: brute common community strings (UDP 161) and walk "
                              "the system group + Windows users / processes / software")
