@@ -96,6 +96,9 @@ class Vuln:
     # Structured observations backing (or refuting) this finding - the verifier reads
     # these instead of re-parsing `output`. See models.Evidence.
     evidence: list[Evidence] = field(default_factory=list)
+    # Exploitation-in-the-wild prioritization (orthogonal to severity + qod):
+    kev: bool = False        # a CVE in CISA's Known Exploited Vulnerabilities catalogue
+    epss: float = 0.0        # EPSS 30-day exploitation probability (0-1), when known
 
     @property
     def key(self) -> str:

@@ -5,6 +5,7 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Fix-first prioritization: CISA KEV (Stage 5).** Every finding whose CVE is in CISA's Known Exploited Vulnerabilities catalogue is now flagged **🔥 KEV** on the Vulnerabilities sheet and sorts to the **top** — above raw severity — because confirmed exploited-in-the-wild is the strongest 'fix this first' signal (orthogonal to CVSS severity and to QoD confidence). The catalogue ships as an offline snapshot, refreshed at package build. New `recce/kev.py`; `Vuln` gains `kev`/`epss` fields (EPSS scoring lands next).
 - **Recovery-first interruptions (workflow W3).** When a scan is interrupted (Ctrl-C) or a phase is cut short, recce now ends with the exact way to pick up — re-run the command (`--resume` skips finished hosts) or `recce next` to see what's left. Recovery never dead-ends; you always know the one command to continue.
 - **Exploitation actions are labeled confirmed vs. candidate (Stage 4b).** The Exploitation
   sheet gains a **Confidence** column: an action off an actively-verified finding reads
