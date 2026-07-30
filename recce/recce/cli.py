@@ -1447,6 +1447,50 @@ def _setup_scan(args, need_targets=True):
     return profile, paths, store
 
 
+def _print_next(paths: dict, output_dir: str, n: int = 1) -> None:
+    """Echo the top next-best-action(s) for this engagement (ambient guidance). Opens a
+    short-lived read of the datastore, so it works after the main scan store is closed.
+    Silent on any error - guidance must never break a command."""
+    from . import workflow
+    try:
+        s = Store(paths["db"])
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        acts = workflow.next_actions(s.all_hosts(), s.all_credentials(), output_dir)
+        for line in workflow.format_next(acts, top=n):
+            print(f"    {line}")
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        s.close()
+
+
+def cmd_next(args: argparse.Namespace) -> int:
+    """Print the ranked next-best-actions for an engagement — the ambient 'you are here,
+    do this next' so the tester never has to remember which of the subcommands comes next."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No engagement at {args.output_dir}. Start one:  recce run <targets> "
+              f"-o {args.output_dir}")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    from . import workflow
+    acts = workflow.next_actions(store.all_hosts(), store.all_credentials(), args.output_dir)
+    store.close()
+    if not acts:
+        print("Nothing outstanding — review the report / write-ups.")
+        return 0
+    print("\nNext best actions:\n")
+    for a in acts[:5]:
+        print(f"  {a.command}")
+        print(f"      · {a.label} — {a.why}")
+    print()
+    return 0
+
+
 def cmd_enum(args: argparse.Namespace) -> int:
     print(BANNER)
     profile, paths, store = _setup_scan(args)
@@ -1473,10 +1517,7 @@ def cmd_enum(args: argparse.Namespace) -> int:
         _final_report(store, paths, args.title)
         store.close()
     print(f"\n[+] Enumeration done -> {paths['xlsx']}")
-    print(f"    Next:  recce vulns -o {args.output_dir}     "
-          "# vuln-scan the open ports it found")
-    print(f"    or:    recce services -o {args.output_dir}  "
-          "# the exact per-service enum command for each open port")
+    _print_next(paths, args.output_dir, n=2)
     return 0
 
 
@@ -1499,8 +1540,7 @@ def cmd_vulns(args: argparse.Namespace) -> int:
         _final_report(store, paths, title)
         store.close()
     print("\n[+] Vuln scan done -> open the Vulnerabilities / Exploitation tabs.")
-    print(f"    Next:  recce status -o {args.output_dir}      # what's left, and the "
-          "suggested next step")
+    _print_next(paths, args.output_dir, n=2)
     return 0
 
 
@@ -1538,7 +1578,28 @@ def cmd_scan(args: argparse.Namespace) -> int:
               "discovered hosts ...")
         return _run_sweep(args, authenticated=False)
     print("\n[+] Done.")
+    _print_next(paths, args.output_dir, n=2)
     return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """THE front door: discover -> enum -> vulns -> every applicable deep module
+    (credential-free, each self-skipping where nothing matches) -> + the authenticated
+    modules when creds are supplied -> report. One adaptive, resumable command instead of
+    sequencing ~9 by hand. The surgical subcommands still exist for precision work.
+
+    Built by coordinating the existing phases (`scan --deep` + `credsweep`), so there is no
+    new scan logic here - just the streamlined path and ambient next-step guidance."""
+    args.deep = True                       # enum -> vulns -> credential-free deep sweep
+    rc = cmd_scan(args)                     # (prints the banner; reports deferred inside)
+    if getattr(args, "username", None):
+        print("\n[*] Credentials supplied - running the authenticated modules "
+              "(SMB/AD/mssql matrix) ...")
+        _run_sweep(args, authenticated=True)
+    paths = _open_paths(args.output_dir)
+    print("\n[+] run complete.")
+    _print_next(paths, args.output_dir, n=3)
+    return rc
 
 
 def _sweep_defaults(args: argparse.Namespace) -> None:
@@ -5504,6 +5565,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cd.set_defaults(func=cmd_creds)
 
     # Convenience: enum + vulns in one shot.
+    # THE front door: one adaptive, resumable command (scan --deep + authenticated modules
+    # when creds are given). Mirrors scan's options; the surgical subcommands remain.
+    rn = sub.add_parser("run", help="THE one command: discover -> enum -> vulns -> every "
+                                    "applicable deep module -> report (adaptive, resumable; "
+                                    "pass -u/-p to also run the authenticated modules)")
+    _add_discovery(rn)
+    _add_common(rn)
+    _add_vuln_opts(rn)
+    _add_creds(rn)
+    rn.add_argument("--skip", nargs="*", metavar="MOD",
+                    help="deep modules to skip (e.g. --skip mssql docker)")
+    rn.add_argument("--only-modules", nargs="*", metavar="MOD",
+                    help="run only these deep modules")
+    rn.set_defaults(func=cmd_run)
+
     s = sub.add_parser("scan", help="run enum then vulns in one shot "
                                      "(add --deep for the full credential-free sweep)")
     _add_discovery(s)
@@ -5932,6 +6008,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="print live review coverage")
     st.add_argument("-o", "--output-dir", default="engagement")
     st.set_defaults(func=cmd_status)
+
+    nx = sub.add_parser("next", help="the ranked next-best-actions for an engagement")
+    nx.add_argument("-o", "--output-dir", default="engagement")
+    nx.set_defaults(func=cmd_next)
 
     ax = sub.add_parser("access",
                         help="record / review initial access (footholds) per host - "
