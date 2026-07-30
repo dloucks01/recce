@@ -77,5 +77,36 @@ class RefutationTest(unittest.TestCase):
         self.assertEqual(verify.apply_refutations(h), 1)
 
 
+class ConfirmPlanTest(unittest.TestCase):
+    def test_registry_lookup(self):
+        from recce import verify_rules
+        r = verify_rules.rule_for_cve("CVE-2017-0143")
+        self.assertEqual(r["nse"], "smb-vuln-ms17-010")
+        self.assertIn("B", r["tier"])
+        self.assertIsNone(verify_rules.rule_for_cve("CVE-2099-0000"))
+
+    def test_plan_for_unconfirmed_lead(self):
+        h = Host(ip="10.0.0.7", ports=[Port(portid=445, protocol="tcp", state="open")],
+                 vulns=[_lead("CVE-2017-0143")])
+        plan = verify.confirm_plan(h)
+        self.assertEqual(len(plan), 1)
+        p = plan[0]
+        self.assertEqual(p["check"], "smb-vuln-ms17-010")
+        self.assertFalse(p["ran"])                 # detector hasn't run here
+        self.assertIn("10.0.0.7", p["command"])    # <ip> filled in
+        self.assertIn("smb-vuln-ms17-010", p["command"])
+
+    def test_plan_marks_check_that_already_ran(self):
+        h = _host_with_script("smb-vuln-ms17-010", "State: NOT VULNERABLE",
+                              _lead("CVE-2017-0143"))
+        # refute it first, then the plan should skip a refuted lead
+        verify.apply_refutations(h)
+        self.assertEqual(verify.confirm_plan(h), [])
+
+    def test_plan_skips_leads_without_a_rule(self):
+        h = Host(ip="10.0.0.7", vulns=[_lead("CVE-2099-9999")])
+        self.assertEqual(verify.confirm_plan(h), [])
+
+
 if __name__ == "__main__":
     unittest.main()
