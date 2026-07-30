@@ -5,6 +5,17 @@
 > in a terminal on a client engagement — not by code cleanliness for its own sake. Bloat
 > cuts and efficiency work must never cost field capability; they remove friction and
 > latency only.
+>
+> **TOP PRINCIPLE — a false NEGATIVE is worse than a false positive.** Never hide or
+> block a real finding. Confidence work (QoD) must **label and sort**, never **hide by
+> default**: the report shows everything, and filtering (`--min-qod`) is strictly opt-in.
+> When in doubt, surface the finding as a low-confidence lead rather than drop it. This is
+> why the aggressive `proofs` rewrite was **dropped** (2026-07-29): deleting the per-type
+> precondition gates (ZeroLogon→DC-only, BlueKeep→OS-gated, patched-version→FP, SMB-signing
+> -required→FP) would have turned real findings into missed ones. Those gates are accuracy,
+> not bloat. The `proofs`/evidence design is to be **re-planned from scratch** under this
+> principle before any rewrite — the FP over-claiming it was meant to fix is already handled
+> by the QoD gate (PR #31/#32).
 
 This document is the durable plan for the accuracy-first re-architecture. It captures the
 root-cause problem, the proven external models we're adopting, the target design, and a
@@ -148,22 +159,30 @@ reviewable/versionable and tunable **without touching Python**.
 
 ---
 
-## 4. Staged roadmap
+## 4. Staged roadmap (SOTA-driven)
 
-Each stage is independently shippable (green tests, tool usable). Ordered by tester payoff.
+Re-sequenced (2026-07-29) around the four mechanisms every state-of-the-art scanner uses to
+be low-FP *and* high-signal — **confidence tiering · verify-don't-infer · dedup/correlation ·
+exploit-aware prioritization** — plus data-driven detection. The honesty loop's goals are
+realized *through* these proven mechanisms, not a bespoke evaluation engine. Accuracy
+capabilities come first (the tester's trust); efficiency and bloat follow. Each stage ships
+independently (green tests, tool usable).
 
 | Stage | Tester win | Scope |
 |---|---|---|
 | **0** ✅ | Stop the FP bleeding | Tactical FP sweep (PR #29/#31, merged) |
-| **1 — QoD spine** | **Trust the default view**; leads labeled, dialable | `qod`/`qod_type` on the model; central `qod.py` scoring from detection method; `MIN_QOD` visibility + verified thresholds; unify the 5 divergent `!= "potential"` gates onto one predicate; QoD column + `--min-qod` in reports |
-| **1b** | Honest "confirmed" | proofs → evidence-driven promote/refute; add `evidence[]`; retire the string re-adjudication |
-| **2 — dedup/rank** | One ranked finding per real issue | fingerprint `(ip,port,cve)`, merge-on-collision keeping top QoD; EPSS/KEV offline snapshots; rank = severity×qod×EPSS/KEV |
-| **3 — scan efficiency** | **~½ the scan time** | Collapse the 4–5 redundant `-sV` passes; merge enum+vuln NSE sets; fold db+privesc into one pass; incremental (not full) report regen |
-| **4 — data-driven detection** | Tune checks & runbooks without code | `SIGNATURES`/runbooks/narratives → YAML matcher rules + templates; `--validate-rules` lint |
-| **5 — structural de-bloat** | Faster/safer iteration; clean library core | `cli.py` 6,018→~2,000 via `phases/` + declarative argspec + service registry; collapse report trio onto one model→renderers; shared `util.run` |
+| **1 — QoD confidence spine** ✅ | Trust the default view; leads labeled (not hidden), dialable | `qod`/`qod_type` + `qod.py` scoring; QoD column + opt-in `--min-qod`; gates unified (PR #32/#33). `evidence[]` foundation = PR #34 (open) |
+| **2 — Dedup / correlation** ◀︎ NEXT | **The FP-count killer**: hundreds → the handful of real issues | Merge the same issue across sources/ports/hosts into one finding (identity = primary CVE else normalized rule id), keep top QoD + union of evidence; host roll-up for shared-root-cause. **Never fold two *distinct* findings.** Lowest-risk big win (presentation, not verdicts). |
+| **3 — Active verification (verify-don't-infer)** | **The core low-FP capability**; recce's offline edge | Make active confirmation the default posture: for a version/banner *lead*, auto-run the cheap confirm-check the recipe already names (`finish`/`to_confirm`) → promote to CONFIRMED with real evidence, or refute — instead of inferring from a banner. Extends recce's existing live probes (redis/ftp/smb/http…). Bounded, safe-by-default, ROE-aware. |
+| **4 — Honest tiered presentation** | Signal never buried; nothing hidden | Tier the report (confirmed/likely up top, **leads collapsed**, refuted hidden-but-available); the honesty column (rationale + caveats + to-confirm); Exploitation labels a non-verified action **candidate — verify**. Keeps `_v_*` precondition knowledge as verification triggers + caveats. Realizes the [honesty loop](PROOFS-HONESTY-LOOP.md) via presentation. |
+| **5 — Offline EPSS/KEV prioritization** | A priority order, not a flat wall | Bundle offline EPSS + CISA KEV snapshots; rank = severity × QoD × EPSS/KEV; "fix these first" view. |
+| **6 — Data-driven detection** | Tune checks/runbooks without code; enables API-enum | `SIGNATURES`/runbooks → Nuclei-style YAML matcher rules with **negative** matchers; `--validate-rules` lint. Foundation for API enumeration ([[recce-backlog]]). |
+| **7 — Scan efficiency** | ~½ the scan time, **zero coverage loss** | Collapse the 4–5 redundant `-sV` passes + merge NSE sets + incremental report regen — **only where coverage is provably preserved** (verify-then-cut). |
+| **8 — Structural de-bloat** | Faster/safer iteration; clean library core | `cli.py` 6,018→~2,000 via `phases/` + declarative argspec + service registry; collapse report trio onto one model→renderers; shared `util.run`. ~7,000 LOC out, zero capability loss. |
 
-Estimated reducible bloat across stages 4–5: **~7,000 LOC** (~20% of the codebase) with
-**zero capability loss**.
+**One-line thesis:** the capability that makes or breaks a scanner's reputation is **active
+verification** — shifting recce from *inferring* findings from banners to *confirming* them —
+and **dedup** is what makes the result readable. Those two are the priority.
 
 ---
 
@@ -189,12 +208,33 @@ two-CONFIRMED contradiction.
 of the coarse string. Behavior-preserving (potential ⇔ qod < 70) so the suite stays green,
 but there is now a single predicate to change — and it already respects `--min-qod`.
 
-**1b — follow-up PR (the semantic tightening):** add `evidence[]`; rewrite `proofs` to
-promote/refute on evidence (retiring `_LIVE_ACCESS_RE` and the ~670 lines of string
-re-adjudication); make the exploitation sheet label a non-`is_verified` finding a
-**candidate — verify** (matching the proofs verdict) instead of a confirmed exploit — the
-real fix for the two-definitions-of-CONFIRMED contradiction; add the QoD column +
-`--min-qod` flag to the reports.
+**1b — RE-PLAN (superseded): a review & evaluation "honesty loop", not hard gates.**
+The first attempt (delete the per-type `_v_*` verdict code, drive everything from
+evidence/QoD) was dropped: those functions also encode **precondition gates** that stop
+false positives (ZeroLogon→DC-only, BlueKeep→OS, patched-version→FP), and deleting them
+would MISS real findings. The replacement direction (user, 2026-07-29):
+
+> Instead of throwing hard gates, have an **end review + evaluation + honesty loop** that
+> verifies findings are real. Some gates may be OK.
+
+Design intent for the re-plan (to be specced in full before any code):
+- **Surface everything; hide nothing.** No finding is silently dropped. A finding that
+  can't be confirmed is shown as a lead with an honest rationale, not deleted.
+- **A final evaluation pass per finding** produces `{realness confidence, rationale,
+  what-would-confirm-it, what-argues-against-it}` from the structured **evidence** +
+  preconditions — a transparent assessment the tester reviews, not a binary verdict.
+  Preconditions (DC status, OS, version-in-range) become *inputs that lower/raise the
+  realness score and are explained*, not silent drops. (This is where `evidence[]` from
+  PR #34 pays off, and it composes with the adversarial-verify / completeness-critic
+  patterns — an "is this real, and what did we NOT check?" loop.)
+- **Hard gates only for a definitive disproof** — e.g. an NSE check that explicitly reports
+  NOT VULNERABLE, or a live re-probe that refuses auth. Everything else is evaluated and
+  surfaced, never suppressed.
+- **Honesty column in the report**: the verdict carries its confidence AND its reasoning,
+  so "confirmed" means recce can show *why*, and a lead says plainly what's unverified.
+
+The two-definitions-of-CONFIRMED fix (label a non-verified exploitation action
+**candidate — verify**) still applies and lands with this re-plan.
 
 **Regression contract:** `tests/test_fp_sweep.py` and `tests/test_false_positives.py` encode
 the exact version-db-vs-live/EOL/regreSSHion/distro distinctions QoD formalizes — they must
