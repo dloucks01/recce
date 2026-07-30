@@ -387,16 +387,19 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
     ]
     worst = {h.ip: min((_SEV_RANK.get((v.severity or "").lower(), 9) for v in h.vulns),
                        default=9) for h in hosts}
-    # A host with a KEV (confirmed exploited-in-the-wild) finding sorts to the top - that's
-    # the strongest fix-first signal, above raw severity.
+    # Fix-first: a host with a KEV (exploited-in-the-wild) finding, then higher EPSS, sorts
+    # to the top - above raw severity.
     host_kev = {h.ip: any(getattr(v, "kev", False) for v in h.vulns) for h in hosts}
+    host_epss = {h.ip: max((getattr(v, "epss", 0.0) or 0.0 for v in h.vulns), default=0.0)
+                 for h in hosts}
     rows = []
     ordered = [(h, v) for h in hosts for v in h.vulns]
-    # KEV host first, then host worst-severity, then IP (keeps a host contiguous), then this
-    # finding's KEV flag, its severity, then confidence tier.
-    ordered.sort(key=lambda hv: (not host_kev[hv[0].ip], worst[hv[0].ip],
-                                 _ip_sort_key(hv[0].ip),
+    # KEV host, then highest-EPSS host, then host worst-severity, then IP (keeps a host
+    # contiguous); within a host: KEV, then EPSS, then severity, then confidence tier.
+    ordered.sort(key=lambda hv: (not host_kev[hv[0].ip], -host_epss[hv[0].ip],
+                                 worst[hv[0].ip], _ip_sort_key(hv[0].ip),
                                  not getattr(hv[1], "kev", False),
+                                 -(getattr(hv[1], "epss", 0.0) or 0.0),
                                  _SEV_RANK.get((hv[1].severity or "").lower(), 9),
                                  _TIER_RANK.get(_tier(hv[1]), 3)))
     for h, v in ordered:
@@ -406,7 +409,7 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
         out = v.output
         rows.append({"key": tr.vuln_row_key(v), "group": h.ip,
                      "data": {
-            "Fix first": "🔥 KEV" if getattr(v, "kev", False) else "",
+            "Fix first": _priority_cell(v),
             "Severity": (v.severity or "info").upper(), "Tier": _tier(v), "IP": h.ip,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,
             "Source": v.source, "QoD": _qod_cell(v), "CVE / refs": ", ".join(v.ids),
@@ -474,6 +477,17 @@ def _tier(v) -> str:
 
 
 _TIER_RANK = {"confirmed": 0, "likely": 1, "lead": 2}
+
+
+def _priority_cell(v) -> str:
+    """The fix-first indicator: KEV (confirmed exploited in the wild) wins, else a notable
+    EPSS 30-day exploitation probability, else blank."""
+    if getattr(v, "kev", False):
+        return "🔥 KEV"
+    e = getattr(v, "epss", 0.0) or 0.0
+    if e >= 0.5:
+        return f"EPSS {round(e * 100)}%"
+    return ""
 
 
 def _to_confirm_cell(h, v) -> str:
