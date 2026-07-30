@@ -1051,8 +1051,11 @@ def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss,
     issues: list[dict] = []
     if portids:
         vx = os.path.join(paths["raw"], f"{ip}_vuln.xml")
+        # Skip the ~90 deep service-enum scripts here when the enum phase already ran them
+        # on this host (their output is present) - coverage-safe, ~half the vuln NSE work.
         _, iss = scanner.vuln_scan(ip, portids, vx, profile, creds=creds,
-                                   aggressive=aggressive, fast=fast)
+                                   aggressive=aggressive, fast=fast,
+                                   skip_enum_scripts=scanner.enum_scripts_present(host))
         if iss:
             issues.append(_mkissue(iss, "vuln-scan"))
         _merge_vuln_results(host, np.parse_nmap_xml(vx))

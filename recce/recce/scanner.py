@@ -599,9 +599,24 @@ def enum_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
 
 # --- phase 3b: vulnerability scan (targeted, safe-by-default) --------------------
 
+_ENUM_SCRIPTS_SET = frozenset(_ENUM_SCRIPTS)
+
+
+def enum_scripts_present(host) -> bool:
+    """True if the deep service-enum NSE scripts already ran on this host (their output is
+    stored on its ports) - so the vuln pass can skip re-running the ~90-script set with NO
+    coverage loss (the same scripts would re-match the same ports and find nothing new).
+    Fail-safe: if none are present, they run, so coverage can never be lost."""
+    for p in getattr(host, "ports", []) or []:
+        for s in (p.scripts or []):
+            if s.id in _ENUM_SCRIPTS_SET:
+                return True
+    return False
+
+
 def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
               creds: dict | None = None, aggressive: bool = False,
-              fast: bool = False) -> tuple[str, ScanIssue | None]:
+              fast: bool = False, skip_enum_scripts: bool = False) -> tuple[str, ScanIssue | None]:
     """Per-open-port vulnerability pass.
 
     Safe by default, but deeper than the raw `vuln and safe` category: many
@@ -623,15 +638,20 @@ def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
 
     # nmap --script grammar: a comma-separated list where each item is a boolean
     # category expression OR a script name (each name portrule-filtered by nmap).
+    # The deep service-enum scripts run in the ENUM phase; when they already ran on this
+    # host (skip_enum_scripts), the vuln pass drops the ~90-script set - it would only
+    # re-match the same ports and find nothing new - keeping just the vuln DETECTORS. This
+    # roughly halves the vuln pass's NSE work with zero coverage loss.
+    _enum = [] if skip_enum_scripts else _ENUM_SCRIPTS
     if aggressive:
         selection = "(vuln or vulners)" if not profile.offline else "(vuln)"
-        named = _ENUM_SCRIPTS + _VULN_DETECT
+        named = _enum + _VULN_DETECT
     elif fast:
         selection = None                 # skip the broad category net entirely
         named = _VULN_DETECT             # top-signal detection scripts only
     else:
         selection = "(vuln and safe)"    # broad safe net...
-        named = _ENUM_SCRIPTS + _VULN_DETECT   # ...always plus the misses it leaves
+        named = _enum + _VULN_DETECT     # ...always plus the misses it leaves
     parts = ([selection] if selection else []) + list(dict.fromkeys(named))
     script_expr = ",".join(parts)
 

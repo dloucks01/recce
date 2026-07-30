@@ -1126,7 +1126,7 @@ class PhaseWorkerTest(unittest.TestCase):
         import recce.scanner as s
         orig = s.vuln_scan
         s.vuln_scan = lambda ip, ports, out, profile, creds=None, aggressive=False, \
-            fast=False: \
+            fast=False, skip_enum_scripts=False: \
             _fake_scan(out, ip, [{"port": 80, "service": "http", "scripts": [
                 ("http-vuln-x", "VULNERABLE: demo issue State: VULNERABLE")]}])
         try:
@@ -1254,7 +1254,7 @@ class TargetingFormE2ETest(unittest.TestCase):
         seed.close()
 
         def fake_vuln(ip, portids, out, profile, creds=None, aggressive=False,
-                      fast=False):
+                      fast=False, skip_enum_scripts=False):
             # Echo the requested ports back as an open-port XML the worker parses.
             return _fake_scan(out, ip, [{"port": p, "service": "tcp"}
                                         for p in portids])
@@ -1420,7 +1420,7 @@ class PhaseIdempotencyTest(unittest.TestCase):
         seed.close()
 
         def fake_vuln(ip, portids, out, profile, creds=None, aggressive=False,
-                      fast=False):
+                      fast=False, skip_enum_scripts=False):
             # Emit a real NSE finding + an issue every run, so a broken dedup WOULD
             # grow the counts.
             return _fake_scan(out, ip, [{"port": 80, "service": "http", "scripts": [
