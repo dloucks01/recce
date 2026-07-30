@@ -14,6 +14,15 @@ All notable changes to recce are documented here. Dates are UTC.
   but **never deleted** (`report --show-refuted` surfaces them; the raw row stays in the
   datastore). Conservative: only version-inference leads, never a live-confirmed finding, and
   never when the same CVE is confirmed positive elsewhere on the host. New `recce/verify.py`.
+- **Duplicate findings are collapsed in the report (Stage 2 — dedup/correlation).** The same
+  real issue often surfaced several times on one host — a version-db CVE match *and* an NSE
+  script *and* a live probe for the same CVE on the same port — inflating the count and
+  burying the signal. Those true duplicates now fold into **one** finding, keeping the
+  highest-confidence detection, unioning the CVE/CWE refs and evidence, never downgrading
+  severity, and noting the corroboration ("Corroborated by 2 detections …"). It is
+  conservative — only findings sharing a CVE on the same port, or exact duplicates, merge;
+  two distinct findings are **never** collapsed — and presentation-only, so the datastore
+  keeps every raw row. New `recce/dedup.py`, tests in `tests/test_dedup.py`.
 - **QoD is now visible and dialable in the report (Stage 1b).** The Vulnerabilities sheet
   shows a **QoD** column (`80 remote_banner`, `99 active_vuln ✓`) in place of the coarse
   `Conf.` column, so you can see at a glance whether a finding is verified or a lead. New

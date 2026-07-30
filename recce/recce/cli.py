@@ -347,7 +347,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     if _DEFER_REPORTS:
         return
     hosts = store.all_hosts()
-    from . import qod, verify
+    from . import qod, verify, dedup
     for h in hosts:                    # ensure every finding is QoD-scored before report/gates
         qod.annotate(h)
         verify.apply_refutations(h)    # refute leads an NSE check already disproved (patched)
@@ -357,6 +357,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     if (store.get_meta("show_refuted") or "0") != "1":
         for h in hosts:
             h.vulns = [v for v in h.vulns if not verify.is_refuted(v)]
+    for h in hosts:                    # collapse duplicate findings into one row (after
+        dedup.dedupe_host(h)           # refutation) - presentation-only; raw rows kept
     # Optional noise floor: hide findings below the operator's QoD threshold from the
     # deliverables (set via `report --min-qod N`, persisted in meta; 0 = show all).
     try:
