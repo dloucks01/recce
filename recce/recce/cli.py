@@ -1500,6 +1500,72 @@ def cmd_next(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Active verification (verify-don't-infer): confirm or refute version-inference LEADS by
+    running the SAFE (Tier-A/B) NSE check each one names, then re-correlating.
+
+    Dry-run by default (prints the plan, sends nothing). `--run` executes the safe re-checks;
+    the results fold into the store and the normal pipeline promotes a confirmed lead
+    (NSE VULNERABLE -> CONFIRMED) or refutes a disproved one (NOT VULNERABLE, hidden by
+    default). Only Tier-A/B (read-only / non-intrusive detection) - never a weaponizing PoC.
+    See docs/ACTIVE-VERIFICATION.md."""
+    from . import verify, qod
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No engagement at {args.output_dir}. Run `recce run <targets> -o "
+              f"{args.output_dir}` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    hosts = store.all_hosts()
+    for h in hosts:
+        qod.annotate(h)
+    pending = [p for h in hosts for p in verify.confirm_plan(h) if not p["ran"]]
+    if not pending:
+        store.close()
+        print("[*] Nothing to verify: no unconfirmed lead maps to a safe re-check "
+              "(already checked, or no registry rule). See `recce next`.")
+        return 0
+
+    if not getattr(args, "run", False):
+        print(f"[*] {len(pending)} lead(s) can be settled with a safe re-check "
+              "(dry run - nothing sent):\n")
+        for p in pending:
+            tgt = f"{p['ip']}:{p['port']}" if p['port'] else p['ip']
+            print(f"  {tgt}  {p['finding']}  [{p['cve']}]  (tier {p['tier']})")
+            print(f"      {p['command']}")
+        print(f"\n  Run them:  recce verify --run -o {args.output_dir}")
+        store.close()
+        return 0
+
+    print(BANNER)
+    print(f"[*] Verifying {len(pending)} lead(s) with safe (Tier-A/B) re-checks ...")
+    profile = scanner.ScanProfile()
+    by_host: dict[str, tuple] = {}
+    for p in pending:
+        ports, scripts = by_host.setdefault(p["ip"], (set(), set()))
+        if p["port"]:
+            ports.add(int(p["port"]))
+        scripts.add(p["check"])
+    n = 0
+    for ip, (ports, scripts) in by_host.items():
+        store.clear_issues(ip, "verify")
+        xml = os.path.join(paths["raw"], f"{ip}_verify.xml")
+        _, iss = scanner.nse_scan(ip, sorted(ports), xml, profile, sorted(scripts))
+        if iss:
+            _record_issues(store, paths, ip, [_mkissue(iss, "verify")])
+        for ph in np.parse_nmap_xml(xml):
+            if ph.ip == ip:
+                store.upsert_host(ph, merge=True)   # folds the NSE result into the host
+                n += 1
+    print(f"[+] Re-checked {n} host(s); folding results and regenerating the report ...")
+    _final_report(store, paths, store.get_meta("engagement") or args.title)
+    store.close()
+    _print_next(paths, args.output_dir, n=2)
+    return 0
+
+
 def cmd_enum(args: argparse.Namespace) -> int:
     print(BANNER)
     profile, paths, store = _setup_scan(args)
@@ -6032,6 +6098,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     nx = sub.add_parser("next", help="the ranked next-best-actions for an engagement")
     nx.add_argument("-o", "--output-dir", default="engagement")
     nx.set_defaults(func=cmd_next)
+
+    vf = sub.add_parser("verify", help="confirm/refute version leads by re-running their "
+                                       "safe NSE check (dry-run; --run to execute)")
+    vf.add_argument("-o", "--output-dir", default="engagement")
+    vf.add_argument("--run", action="store_true",
+                    help="actually run the safe (Tier-A/B) re-checks (sends traffic); "
+                         "default is a dry-run plan that sends nothing")
+    vf.add_argument("--title", default="Recce Engagement")
+    vf.set_defaults(func=cmd_verify)
 
     ax = sub.add_parser("access",
                         help="record / review initial access (footholds) per host - "

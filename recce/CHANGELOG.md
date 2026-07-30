@@ -5,6 +5,13 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **`recce verify` — active verification, opt-in (Stage 3c).** Confirms or refutes
+  version-inference *leads* by running the safe (Tier-A/B, non-intrusive) NSE check each one
+  names, then re-correlating: an NSE **VULNERABLE** promotes the lead to a confirmed finding,
+  a **NOT VULNERABLE** refutes it (hidden by default). **Dry-run by default** — it prints the
+  plan and the exact command and sends nothing; **`--run`** is required to send any traffic,
+  and only Tier-A/B detection ever runs (never a weaponizing PoC). This is verify-don't-infer:
+  a lead recce actually re-checked, not a banner guess. New `recce/verify.py` command path.
 - **Active verification — leads an NSE check already disproved are now refuted (Stage 3a).**
   recce's vulns phase already runs non-intrusive vuln detectors (`smb-vuln-ms17-010`,
   `ssl-heartbleed`, …); when one reports **NOT VULNERABLE**, that "it's patched" answer used
