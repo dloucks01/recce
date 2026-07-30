@@ -378,8 +378,8 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
     # every row), so a host's findings collapse to one line and the hosts with the
     # worst findings sort to the top.
     cols = [
-        ("Triaged", "checkbox", 9), ("Severity", "data", 10), ("Tier", "data", 10),
-        ("IP", "data", 16), ("Port", "data", 6), ("Finding", "data", 44),
+        ("Triaged", "checkbox", 9), ("Fix first", "data", 9), ("Severity", "data", 10),
+        ("Tier", "data", 10), ("IP", "data", 16), ("Port", "data", 6), ("Finding", "data", 44),
         ("Source", "data", 11), ("QoD", "data", 18), ("CVE / refs", "data", 22),
         ("CWE", "data", 16), ("Exploit", "data", 52), ("To confirm", "data", 40),
         ("Remediation", "data", 44), ("Details", "data", 50),
@@ -387,12 +387,16 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
     ]
     worst = {h.ip: min((_SEV_RANK.get((v.severity or "").lower(), 9) for v in h.vulns),
                        default=9) for h in hosts}
+    # A host with a KEV (confirmed exploited-in-the-wild) finding sorts to the top - that's
+    # the strongest fix-first signal, above raw severity.
+    host_kev = {h.ip: any(getattr(v, "kev", False) for v in h.vulns) for h in hosts}
     rows = []
     ordered = [(h, v) for h in hosts for v in h.vulns]
-    # host worst-severity, then IP (keeps a host's findings contiguous for the band),
-    # then this finding's severity, then confidence tier (confirmed edges above a lead of
-    # the same severity - honest signal without disturbing the severity-first ordering).
-    ordered.sort(key=lambda hv: (worst[hv[0].ip], _ip_sort_key(hv[0].ip),
+    # KEV host first, then host worst-severity, then IP (keeps a host contiguous), then this
+    # finding's KEV flag, its severity, then confidence tier.
+    ordered.sort(key=lambda hv: (not host_kev[hv[0].ip], worst[hv[0].ip],
+                                 _ip_sort_key(hv[0].ip),
+                                 not getattr(hv[1], "kev", False),
                                  _SEV_RANK.get((hv[1].severity or "").lower(), 9),
                                  _TIER_RANK.get(_tier(hv[1]), 3)))
     for h, v in ordered:
@@ -402,6 +406,7 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
         out = v.output
         rows.append({"key": tr.vuln_row_key(v), "group": h.ip,
                      "data": {
+            "Fix first": "🔥 KEV" if getattr(v, "kev", False) else "",
             "Severity": (v.severity or "info").upper(), "Tier": _tier(v), "IP": h.ip,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,
             "Source": v.source, "QoD": _qod_cell(v), "CVE / refs": ", ".join(v.ids),

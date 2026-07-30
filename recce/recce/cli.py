@@ -347,9 +347,10 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     if _DEFER_REPORTS:
         return
     hosts = store.all_hosts()
-    from . import qod, verify, dedup
+    from . import qod, verify, dedup, kev
     for h in hosts:                    # ensure every finding is QoD-scored before report/gates
         qod.annotate(h)
+        kev.annotate(h)                # flag CVEs confirmed exploited-in-the-wild (fix-first)
         verify.apply_refutations(h)    # refute leads an NSE check already disproved (patched)
     # A refuted finding was actively disproven (an NSE check said NOT VULNERABLE), so it is
     # hidden from the deliverables by default - but NEVER deleted: the raw row stays in the
