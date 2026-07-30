@@ -5,6 +5,13 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Honest tiered presentation on the Vulnerabilities sheet (Stage 4a).** Every finding now
+  shows a **Tier** — `confirmed` (actively verified), `likely` (a version/inference lead), or
+  `lead` (low-confidence) — derived from QoD, and a **To confirm** column giving the exact
+  safe re-check for any unconfirmed lead (`recce verify --run` + the nmap one-liner — the
+  honesty loop's *to_confirm* made visible). Findings sort confirmed-above-lead within a
+  severity, so what recce actually verified reads first. You can see at a glance what's real
+  vs. worth checking, and exactly how to settle each lead.
 - **`recce verify` — active verification, opt-in (Stage 3c).** Confirms or refutes
   version-inference *leads* by running the safe (Tier-A/B, non-intrusive) NSE check each one
   names, then re-correlating: an NSE **VULNERABLE** promotes the lead to a confirmed finding,
