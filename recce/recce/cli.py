@@ -347,9 +347,11 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     if _DEFER_REPORTS:
         return
     hosts = store.all_hosts()
-    from . import qod
+    from . import qod, dedup
     for h in hosts:                    # ensure every finding is QoD-scored before report/gates
         qod.annotate(h)
+        dedup.dedupe_host(h)           # collapse duplicate findings (one issue, one row);
+                                       # presentation-only - the datastore keeps the raw rows
     # Optional noise floor: hide findings below the operator's QoD threshold from the
     # deliverables (set via `report --min-qod N`, persisted in meta; 0 = show all).
     try:
