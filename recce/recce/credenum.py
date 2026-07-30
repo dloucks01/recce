@@ -67,14 +67,8 @@ def available_tools() -> dict[str, str | None]:
 
 def _run(cmd: list[str], timeout: int = _TIMEOUT) -> tuple[str, str | None]:
     """Run a tool; return (combined output, error-or-None). Never raises."""
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True,
-                           errors="replace", timeout=timeout)
-        return (p.stdout or "") + (p.stderr or ""), None
-    except subprocess.TimeoutExpired:
-        return "", f"timed out after {timeout}s"
-    except (OSError, ValueError) as e:
-        return "", str(e)
+    from .util import run_tool
+    return run_tool(cmd, timeout)
 
 
 # --- netexec / crackmapexec SMB output ------------------------------------------

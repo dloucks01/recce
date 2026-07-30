@@ -386,15 +386,8 @@ def smbclient_tool():
 
 
 def _run(cmd, timeout: int = 120) -> tuple[str, str | None]:
-    import subprocess
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
-                           timeout=timeout)
-        return (p.stdout or "") + (p.stderr or ""), None
-    except subprocess.TimeoutExpired:
-        return "", f"timed out after {timeout}s"
-    except (OSError, ValueError) as e:
-        return "", str(e)
+    from .util import run_tool
+    return run_tool(cmd, timeout)
 
 
 def enum_session(ip: str, user: str = "", password: str = "",
