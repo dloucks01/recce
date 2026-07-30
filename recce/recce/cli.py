@@ -1475,6 +1475,14 @@ def _print_next(paths: dict, output_dir: str, n: int = 1) -> None:
         s.close()
 
 
+def _recovery_hint(output_dir: str) -> None:
+    """After an interruption or failure, tell the tester exactly how to pick up. recce
+    phases are idempotent (finished hosts are skipped), so recovery is always one command -
+    and `recce next` computes what's actually left. Recovery must never dead-end."""
+    print(f"    ↻ Pick up:  re-run the command (add --resume to skip finished hosts), "
+          f"or `recce next -o {output_dir}` to see what's left.")
+
+
 def cmd_next(args: argparse.Namespace) -> int:
     """Print the ranked next-best-actions for an engagement — the ambient 'you are here,
     do this next' so the tester never has to remember which of the subcommands comes next."""
@@ -1587,7 +1595,8 @@ def cmd_enum(args: argparse.Namespace) -> int:
         if args.ldap_enum or args.ldap_anon:
             _run_ldap_enum(store, args)
     except KeyboardInterrupt:
-        print("\n[!] Interrupted - saving results collected so far ...")
+        print("\n[!] Interrupted - results collected so far are saved.")
+        _recovery_hint(args.output_dir)
     finally:
         _final_report(store, paths, args.title)
         store.close()
@@ -1610,7 +1619,8 @@ def cmd_vulns(args: argparse.Namespace) -> int:
         if args.ldap_enum or args.ldap_anon:
             _run_ldap_enum(store, args)
     except KeyboardInterrupt:
-        print("\n[!] Interrupted - saving results collected so far ...")
+        print("\n[!] Interrupted - results collected so far are saved.")
+        _recovery_hint(args.output_dir)
     finally:
         _final_report(store, paths, title)
         store.close()
@@ -1642,7 +1652,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if args.ldap_enum or args.ldap_anon:
             _run_ldap_enum(store, args)
     except KeyboardInterrupt:
-        print("\n[!] Interrupted - saving results collected so far ...")
+        print("\n[!] Interrupted - results collected so far are saved.")
+        _recovery_hint(args.output_dir)
     finally:
         _final_report(store, paths, args.title)
         store.close()
@@ -1831,7 +1842,8 @@ def cmd_db(args: argparse.Namespace) -> int:
     try:
         _phase_db(store, paths, args, profile)
     except KeyboardInterrupt:
-        print("\n[!] Interrupted - saving results collected so far ...")
+        print("\n[!] Interrupted - results collected so far are saved.")
+        _recovery_hint(args.output_dir)
     finally:
         _final_report(store, paths, title)
         store.close()
@@ -1863,7 +1875,8 @@ def cmd_privesc(args: argparse.Namespace) -> int:
                     store.upsert_host(h)
                 store.delete_tracking(tr.step_key("privesc", h.ip))
     except KeyboardInterrupt:
-        print("\n[!] Interrupted - saving results collected so far ...")
+        print("\n[!] Interrupted - results collected so far are saved.")
+        _recovery_hint(args.output_dir)
     finally:
         _final_report(store, paths, title)
         store.close()
@@ -1885,7 +1898,8 @@ def cmd_credenum(args: argparse.Namespace) -> int:
         # Note: the manual 'Creds' checklist box is the operator's own sign-off,
         # so credenum records findings but never ticks it automatically.
     except KeyboardInterrupt:
-        print("\n[!] Interrupted - saving results collected so far ...")
+        print("\n[!] Interrupted - results collected so far are saved.")
+        _recovery_hint(args.output_dir)
     finally:
         _final_report(store, paths, title)
         store.close()
