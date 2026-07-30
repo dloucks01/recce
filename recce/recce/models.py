@@ -21,6 +21,22 @@ class Script:
 
 
 @dataclass
+class Evidence:
+    """A single structured observation backing (or disproving) a finding.
+
+    This is what lets the verifier reason about a finding WITHOUT re-parsing free-text
+    output: `kind` says how it was observed and `positive` says whether it supports or
+    refutes the finding. A negative observation (a patched banner, an NSE 'NOT
+    VULNERABLE', an auth-required response) is a first-class refutation, not a special
+    string-grep case. See docs/ARCHITECTURE.md §3.2.
+    """
+
+    kind: str            # nse | live-probe | version-range | on-target | config-observed
+    detail: str = ""     # what was observed (short, human-readable)
+    positive: bool = True  # True supports the finding; False disproves it
+
+
+@dataclass
 class Port:
     portid: int
     protocol: str = "tcp"
@@ -77,6 +93,9 @@ class Vuln:
     # scored (older store / not annotated).
     qod: int = 0
     qod_type: str = ""       # the named tier, e.g. remote_banner / active_vuln
+    # Structured observations backing (or refuting) this finding - the verifier reads
+    # these instead of re-parsing `output`. See models.Evidence.
+    evidence: list[Evidence] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -299,7 +318,11 @@ class Host:
                     "scripts": [Script(**_keep(Script, s)) for s in p.get("scripts", [])]})
             for p in data.get("ports", [])
         ]
-        vulns = [Vuln(**_keep(Vuln, v)) for v in data.get("vulns", [])]
+        vulns = [
+            Vuln(**{**_keep(Vuln, v),
+                    "evidence": [Evidence(**_keep(Evidence, e)) for e in v.get("evidence", [])]})
+            for v in data.get("vulns", [])
+        ]
         accounts = [Account(**_keep(Account, a)) for a in data.get("accounts", [])]
         exploits = [Exploit(**_keep(Exploit, e)) for e in data.get("exploits", [])]
         host_scripts = [Script(**_keep(Script, s)) for s in data.get("host_scripts", [])]

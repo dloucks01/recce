@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from .models import Host, Port, Vuln
+from .models import Evidence, Host, Port, Vuln
 
 
 def _ver_tuple(v: str) -> tuple[int, ...]:
@@ -919,6 +919,11 @@ def assess_host(host: Host) -> list[Vuln]:
                 cwes=list(sig.get("cwe", [])),
                 source="version-db", remediation=remediation,
                 confidence=conf,
+                # A version/banner inference, never a live corroboration - the verifier
+                # must not promote this to CONFIRMED on its own. `positive=True` (the
+                # version really is in range) but `kind` marks it inference-only.
+                evidence=[Evidence(kind="version-range", positive=True,
+                                   detail=f"{banner}{note}"[:120])],
             ))
     return findings
 

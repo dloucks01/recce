@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 
-from .models import Account, Host, Port, Script, Vuln
+from .models import Account, Evidence, Host, Port, Script, Vuln
 
 _CVE_RE = re.compile(r"\b(CVE-\d{4}-\d{4,7})\b", re.IGNORECASE)
 # Phrasings that mean the host is NOT affected, so a CVE mentioned in the same output
@@ -137,6 +137,11 @@ def _classify_vuln(host_ip: str, port: Port | None, script: Script) -> Vuln | No
         output=out,
         severity=severity,
         ids=[i.upper() for i in ids],
+        # An NSE check that fired with a positive VULNERABLE state is a live corroboration
+        # the verifier can promote on; a CVE-referencing script that did NOT confirm is
+        # only a lead. `positive` carries that distinction structurally.
+        evidence=[Evidence(kind="nse", positive=bool(positive),
+                           detail=(state or sid)[:120])],
     )
 
 
@@ -211,6 +216,10 @@ def _weak_config(host_ip: str, port: Port | None, script: Script) -> Vuln | None
         severity=sev,
         cwes=cwe,
         source="config",
+        # A weak-config NSE script matched its specific positive marker (the
+        # `_weak_config` arms all require the affirmative phrasing) - an observed
+        # misconfiguration, not a version guess.
+        evidence=[Evidence(kind="config-observed", positive=True, detail=title[:120])],
     )
 
 
