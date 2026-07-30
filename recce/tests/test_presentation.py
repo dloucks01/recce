@@ -44,5 +44,41 @@ class TieredPresentationTest(unittest.TestCase):
         self.assertIn("smb-vuln-ms17-010", row["To confirm"])  # the safe re-check
 
 
+class ExploitCandidateLabelTest(unittest.TestCase):
+    """Stage 4b: an exploitation action off a version lead reads 'candidate — verify',
+    not confirmed (the two-definitions-of-CONFIRMED fix)."""
+
+    def _host(self):
+        h = Host(ip="10.0.0.2", up_reason="syn-ack", os_family="Windows",
+                 ports=[Port(portid=445, protocol="tcp", state="open", service="microsoft-ds"),
+                        Port(portid=21, protocol="tcp", state="open", service="ftp")])
+        h.vulns = [
+            Vuln(ip="10.0.0.2", port=445, protocol="tcp", script_id="smb-vuln-ms17-010",
+                 title="ms17-010", source="nse", state="VULNERABLE", severity="critical",
+                 ids=["CVE-2017-0143"]),                                   # verified
+            Vuln(ip="10.0.0.2", port=21, protocol="tcp", script_id="version-db",
+                 title="vsftpd 2.3.4 backdoor (smiley-face) - remote root",
+                 source="version-db", severity="critical", ids=["CVE-2011-2523"]),  # lead
+        ]
+        qod.annotate(h)
+        return h
+
+    def test_actions_carry_verified_flag(self):
+        from recce import exploitplan
+        acts = exploitplan.actions_for_host(self._host())
+        vmap = {a["finding"]: a.get("verified") for a in acts}
+        self.assertTrue(vmap.get("ms17-010"))                              # confirmed
+        self.assertIn(False, [v for k, v in vmap.items() if "vsftpd" in k])  # candidate
+
+    def test_exploitation_sheet_confidence_column(self):
+        from recce.report_excel import _spec_exploitation
+        spec = _spec_exploitation([self._host()])
+        self.assertIn("Confidence", [c[0] for c in spec.cols])
+        confs = {r["data"]["Finding"]: r["data"]["Confidence"] for r in spec.rows}
+        self.assertEqual(confs.get("ms17-010"), "confirmed")
+        vsftpd = next(c for f, c in confs.items() if "vsftpd" in f)
+        self.assertEqual(vsftpd, "candidate — verify")
+
+
 if __name__ == "__main__":
     unittest.main()
