@@ -108,5 +108,20 @@ class RunOrchestrationTest(unittest.TestCase):
         self.assertIn(("sweep", True), self.calls)             # authenticated modules run
 
 
+class RecoveryHintTest(unittest.TestCase):
+    """W3: recovery-first — every interruption/failure ends with an actionable pick-up."""
+
+    def test_recovery_hint_is_actionable(self):
+        import contextlib
+        import io
+        from recce import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._recovery_hint("eng")
+        out = buf.getvalue()
+        self.assertIn("--resume", out)             # skip finished hosts
+        self.assertIn("recce next -o eng", out)    # or see exactly what's left
+
+
 if __name__ == "__main__":
     unittest.main()

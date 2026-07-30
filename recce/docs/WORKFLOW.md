@@ -152,7 +152,7 @@ Consumed by: the **end of every major command** (echo the top action as "→ Nex
 |---|---|---|---|---|---|---|
 | **W1 — Next-best-action engine** | ✅ **shipped (PR #41)** | `next_actions()` + `Action`; echo top action at end of `enum`/`vulns`/`run`; new `recce next` | `recce/workflow.py`, `cli.py` | `tests/test_next_actions.py` (rules over synthetic state) | low (read-only) | come-in-partway, section |
 | **W2 — `recce run`** | ✅ **shipped (PR #41)** | one front door coordinating the existing phases (`scan --deep` + `credsweep`): discover→enum→vulns→deep modules (+ auth when creds) → report; adaptive/resumable; report deferred to the sweep's single pass | `recce/workflow.py`, `cli.py` (new `run` cmd) | orchestration test (deep forced, auth-sweep only with creds) | med (coordination only, no scan logic changed) | end-to-end |
-| **W3 — Recovery-first failures** | ◀︎ next | shared `fail()` helper; surface `--resume`; `run` end-of-run retry summary | `cli.py`, phase callers | failure paths end with recovery cmd | low–med | failure-at-start |
+| **W3 — Recovery-first failures** | ✅ shipped | shared `fail()` helper; surface `--resume`; `run` end-of-run retry summary | `cli.py`, phase callers | failure paths end with recovery cmd | low–med | failure-at-start |
 | **W4 — Progressive disclosure** | planned | help grouping (core vs surgical); quickstart on bare invocation | `cli.py` argparse / argspec | help lists core path first | low | discoverability |
 | **W5 — Report smoothness** | partial | `run` already defers to the sweep's single pass; full incremental regen = Stage 7 (scan efficiency) | — | — | — | section speed |
 

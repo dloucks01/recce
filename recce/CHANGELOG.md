@@ -5,6 +5,7 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Recovery-first interruptions (workflow W3).** When a scan is interrupted (Ctrl-C) or a phase is cut short, recce now ends with the exact way to pick up — re-run the command (`--resume` skips finished hosts) or `recce next` to see what's left. Recovery never dead-ends; you always know the one command to continue.
 - **Exploitation actions are labeled confirmed vs. candidate (Stage 4b).** The Exploitation
   sheet gains a **Confidence** column: an action off an actively-verified finding reads
   **confirmed**, while one off a version/inference lead reads **candidate — verify** (run the
