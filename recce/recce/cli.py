@@ -347,9 +347,16 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     if _DEFER_REPORTS:
         return
     hosts = store.all_hosts()
-    from . import qod
+    from . import qod, verify
     for h in hosts:                    # ensure every finding is QoD-scored before report/gates
         qod.annotate(h)
+        verify.apply_refutations(h)    # refute leads an NSE check already disproved (patched)
+    # A refuted finding was actively disproven (an NSE check said NOT VULNERABLE), so it is
+    # hidden from the deliverables by default - but NEVER deleted: the raw row stays in the
+    # datastore, and `report --show-refuted` surfaces it (north star: no false negatives).
+    if (store.get_meta("show_refuted") or "0") != "1":
+        for h in hosts:
+            h.vulns = [v for v in h.vulns if not verify.is_refuted(v)]
     # Optional noise floor: hide findings below the operator's QoD threshold from the
     # deliverables (set via `report --min-qod N`, persisted in meta; 0 = show all).
     try:
@@ -4399,6 +4406,12 @@ def cmd_report(args: argparse.Namespace) -> int:
         if min_qod > 0:
             print(f"[*] Filtering the report to findings with QoD >= {min_qod} "
                   "(--min-qod 0 to show all).")
+    show_refuted = getattr(args, "show_refuted", None)
+    if show_refuted is not None:
+        store.set_meta("show_refuted", "1" if show_refuted else "0")
+        if show_refuted:
+            print("[*] Including refuted findings (an NSE check reported NOT VULNERABLE) "
+                  "in the report.")
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
@@ -5927,6 +5940,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="hide findings below this Quality-of-Detection score (0-100; "
                         "70 hides banner/version leads, 95 shows only verified). "
                         "Persists; --min-qod 0 shows all again.")
+    r.add_argument("--show-refuted", dest="show_refuted", action="store_true", default=None,
+                   help="include findings an NSE check reported NOT VULNERABLE (patched); "
+                        "hidden by default. Persists until --no-show-refuted.")
+    r.add_argument("--no-show-refuted", dest="show_refuted", action="store_false",
+                   help="hide refuted findings again (the default).")
     r.set_defaults(func=cmd_report)
 
     st = sub.add_parser("status", help="print live review coverage")
