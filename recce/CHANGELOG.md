@@ -5,6 +5,15 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Active verification — leads an NSE check already disproved are now refuted (Stage 3a).**
+  recce's vulns phase already runs non-intrusive vuln detectors (`smb-vuln-ms17-010`,
+  `ssl-heartbleed`, …); when one reports **NOT VULNERABLE**, that "it's patched" answer used
+  to be discarded, so a version-inference *lead* for the same CVE survived even though nmap
+  had disproved it. recce now harvests those already-collected negative results (**zero new
+  traffic**) and refutes the matching version-db leads — hidden from the report by default
+  but **never deleted** (`report --show-refuted` surfaces them; the raw row stays in the
+  datastore). Conservative: only version-inference leads, never a live-confirmed finding, and
+  never when the same CVE is confirmed positive elsewhere on the host. New `recce/verify.py`.
 - **QoD is now visible and dialable in the report (Stage 1b).** The Vulnerabilities sheet
   shows a **QoD** column (`80 remote_banner`, `99 active_vuln ✓`) in place of the coarse
   `Conf.` column, so you can see at a glance whether a finding is verified or a lead. New
