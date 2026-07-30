@@ -848,6 +848,14 @@ def _matches(sig: dict, port: Port, host: Host) -> bool:
     blob = f"{port.product} {port.service}".lower()
     if not any(_product_in(p, blob) for p in sig["product"]):
         return False
+    # Negative matcher (Nuclei-style): a rule can assert what the banner must NOT contain,
+    # so it fires only on a genuine target and skips decoys / already-excluded builds (e.g.
+    # a distro tag). Checked against the full banner text. The main data-driven FP reducer.
+    absent = sig.get("absent")
+    if absent:
+        text = f"{blob} {port.version} {port.extrainfo}".lower()
+        if any(a.lower() in text for a in absent):
+            return False
     # OS gate (e.g. BlueKeep only on old Windows).
     if sig.get("os") and sig["os"] not in (host.os_family or host.os_name).lower():
         return False
@@ -936,3 +944,28 @@ def assess_host_inplace(host: Host) -> int:
 
 def signature_count() -> int:
     return len(SIGNATURES)
+
+
+def load_rules(path: str) -> int:
+    """Load extra detection rules from a JSON file and merge them into SIGNATURES, so the
+    knowledge base is extensible as DATA (no code) - the SOTA data-driven-detection model,
+    stdlib-only (JSON, since recce ships without a YAML dep). Each rule is a signature dict
+    with the same fields (product / eq|lt|le|ge|gt / severity / title / cves / cwe /
+    remediation / desc / advisory / os / os_lt / dc_only / **absent**). Returns the count
+    added. Malformed entries are skipped (a bad rule file must never break a scan)."""
+    import json
+    try:
+        with open(path, "r", errors="replace") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return 0
+    rules = data.get("rules", data) if isinstance(data, dict) else data
+    added = 0
+    for r in rules if isinstance(rules, list) else []:
+        # Minimum viable rule: a product list + a title. Everything else is optional.
+        if isinstance(r, dict) and r.get("product") and r.get("title"):
+            r.setdefault("severity", "medium")
+            r.setdefault("desc", r["title"])   # assess_host reads desc directly
+            SIGNATURES.append(r)
+            added += 1
+    return added

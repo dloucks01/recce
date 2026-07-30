@@ -1438,6 +1438,12 @@ def _setup_scan(args, need_targets=True):
     # in the same process (tests, library reuse).
     profile = copy.deepcopy(scanner.PROFILES[args.profile])
     _apply_profile_overrides(profile, args)
+    rules = getattr(args, "rules", None)
+    if rules:
+        from . import vulndb
+        n = vulndb.load_rules(rules)
+        print(f"[+] Loaded {n} extra detection rule(s) from {rules}."
+              if n else f"[!] No usable detection rules found in {rules}.")
     try:
         for w in scanner.check_environment(profile):
             print(f"[!] {w}")
@@ -5382,6 +5388,10 @@ def _add_discovery(pp) -> None:
 
 def _add_vuln_opts(pp) -> None:
     g = pp.add_argument_group("vuln-scan tuning (optional)")
+    g.add_argument("--rules", metavar="FILE",
+                   help="load extra detection rules from a JSON file (data-driven "
+                        "detection: add/override version->CVE signatures without code; "
+                        "see docs/DETECTION-RULES.md)")
     g.add_argument("--aggressive", action="store_true",
                    help="run the full intrusive NSE 'vuln' category (can crash "
                         "fragile services); default is deep safe detection")
