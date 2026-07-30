@@ -23,6 +23,18 @@ All notable changes to recce are documented here. Dates are UTC.
   conservative — only findings sharing a CVE on the same port, or exact duplicates, merge;
   two distinct findings are **never** collapsed — and presentation-only, so the datastore
   keeps every raw row. New `recce/dedup.py`, tests in `tests/test_dedup.py`.
+- **`recce run` — one command for the whole engagement (workflow W2).** Discover → enum →
+  vulns → every applicable deep module (web/smb/db/snmp/…, each self-skipping where nothing
+  matches) → report — and the authenticated SMB/AD/mssql modules too when you pass `-u/-p`.
+  One adaptive, resumable front door instead of sequencing ~9 subcommands by hand; the
+  surgical subcommands still exist for precision work. Built by coordinating the existing
+  phases (`scan --deep` + `credsweep`), so there's no new scan behavior — just the
+  streamlined path.
+- **Ambient next-step guidance (workflow W1).** New **`recce next`** prints the ranked
+  next-best-actions for an engagement ("6 web host(s) → `recce web`", "2 foothold(s) not
+  priv-esc checked → `recce privesc`"), computed from the datastore's existing progress
+  state — so you always know the single best next move instead of remembering which
+  subcommand comes next. The top action is now echoed at the end of `enum`/`vulns`/`run`.
 - **QoD is now visible and dialable in the report (Stage 1b).** The Vulnerabilities sheet
   shows a **QoD** column (`80 remote_banner`, `99 active_vuln ✓`) in place of the coarse
   `Conf.` column, so you can see at a glance whether a finding is verified or a lead. New
