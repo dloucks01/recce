@@ -728,14 +728,19 @@ def _spec_exploitation(hosts: list[Host]) -> SheetSpec:
     defenses = {h.ip: "; ".join(h.defenses) for h in hosts if h.defenses}
     cols = [
         ("Done", "checkbox", 9), ("IP", "data", 15), ("Hostname", "data", 15),
-        ("Type", "data", 13), ("Finding", "data", 28), ("Existing tool", "data", 28),
-        ("Command (fill in your values)", "data", 58),
+        ("Type", "data", 13), ("Confidence", "data", 18), ("Finding", "data", 28),
+        ("Existing tool", "data", 28), ("Command (fill in your values)", "data", 58),
         ("Prerequisite", "data", 28), ("Validate", "data", 22),
         ("Defenses (host)", "data", 26), ("Notes", "notes", 20), ("Key", "key", 4),
     ]
+    # An action off an actively-verified finding is "confirmed"; one off a version/
+    # inference lead is a "candidate - verify" (run the check before firing). This is the
+    # honest fix for a version match ever reading as a confirmed exploit.
     rows = [{"key": a["key"], "data": {
         "IP": a["ip"], "Hostname": a["hostname"],
-        "Type": _KIND.get(a["kind"], a["kind"]), "Finding": a["finding"],
+        "Type": _KIND.get(a["kind"], a["kind"]),
+        "Confidence": "confirmed" if a.get("verified", True) else "candidate — verify",
+        "Finding": a["finding"],
         "Existing tool": a["tool"], "Command (fill in your values)": a["cmd"],
         "Prerequisite": a["prereq"], "Validate": a["validate"],
         "Defenses (host)": defenses.get(a["ip"], "")}}

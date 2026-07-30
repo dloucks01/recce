@@ -5,6 +5,12 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Exploitation actions are labeled confirmed vs. candidate (Stage 4b).** The Exploitation
+  sheet gains a **Confidence** column: an action off an actively-verified finding reads
+  **confirmed**, while one off a version/inference lead reads **candidate — verify** (run the
+  check before firing). This closes the last "two definitions of CONFIRMED" gap — a
+  version-only match can no longer read as a confirmed exploit; it's an honest candidate with
+  the verification step called out.
 - **Honest tiered presentation on the Vulnerabilities sheet (Stage 4a).** Every finding now
   shows a **Tier** — `confirmed` (actively verified), `likely` (a version/inference lead), or
   `lead` (low-confidence) — derived from QoD, and a **To confirm** column giving the exact
