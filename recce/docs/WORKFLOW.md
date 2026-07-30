@@ -148,17 +148,24 @@ Consumed by: the **end of every major command** (echo the top action as "→ Nex
 
 ## Implementation plan (slices, safe/high-value first)
 
-| Slice | Scope | Files | Tests | Risk | Fixes scenario |
-|---|---|---|---|---|---|
-| **W1 — Next-best-action engine** | `next_actions()` + `Action`; echo top action at end of major commands; new `recce next` | `recce/workflow.py`, `cli.py` (call sites), `status` | rules over synthetic state | **low** (read-only) | come-in-partway, section |
-| **W2 — `recce run` orchestrator** | `Phase`/`PLAN` + coordinator reusing existing phase/cmd fns; trigger/done/skip; defer-report-to-end; per-phase failure isolation; `--safe` gate | `recce/workflow.py`, `cli.py` (new `run` cmd) | mock phases; assert which run given a store state; resume skips done | **med** (coordination only, no scan logic changes) | end-to-end |
-| **W3 — Recovery-first failures** | shared `fail()` helper; surface `--resume`; `run` end-of-run retry summary | `cli.py`, `scanner`/phase callers | failure paths end with recovery cmd | low–med | failure-at-start |
-| **W4 — Progressive disclosure** | help grouping (core vs surgical); quickstart on bare invocation | `cli.py` argparse / argspec | help lists core path first | low | discoverability |
-| **W5 — Report smoothness** | defer-in-run (done in W2); note full incremental = Stage 7 | — | — | — | section speed |
+| Slice | Status | Scope | Files | Tests | Risk | Fixes scenario |
+|---|---|---|---|---|---|---|
+| **W1 — Next-best-action engine** | ✅ **shipped (PR #41)** | `next_actions()` + `Action`; echo top action at end of `enum`/`vulns`/`run`; new `recce next` | `recce/workflow.py`, `cli.py` | `tests/test_next_actions.py` (rules over synthetic state) | low (read-only) | come-in-partway, section |
+| **W2 — `recce run`** | ✅ **shipped (PR #41)** | one front door coordinating the existing phases (`scan --deep` + `credsweep`): discover→enum→vulns→deep modules (+ auth when creds) → report; adaptive/resumable; report deferred to the sweep's single pass | `recce/workflow.py`, `cli.py` (new `run` cmd) | orchestration test (deep forced, auth-sweep only with creds) | med (coordination only, no scan logic changed) | end-to-end |
+| **W3 — Recovery-first failures** | ◀︎ next | shared `fail()` helper; surface `--resume`; `run` end-of-run retry summary | `cli.py`, phase callers | failure paths end with recovery cmd | low–med | failure-at-start |
+| **W4 — Progressive disclosure** | planned | help grouping (core vs surgical); quickstart on bare invocation | `cli.py` argparse / argspec | help lists core path first | low | discoverability |
+| **W5 — Report smoothness** | partial | `run` already defers to the sweep's single pass; full incremental regen = Stage 7 (scan efficiency) | — | — | — | section speed |
 
 Each slice ships independently, green, tool usable throughout — same discipline as the
-accuracy stages. **W1 alone** (ambient next-best-action) is a large perceived-smoothness win
-for near-zero risk; **W2 (`recce run`)** is the headline.
+accuracy stages. **W1** (ambient next-best-action) was a large perceived-smoothness win for
+near-zero risk; **W2 (`recce run`)** is the headline — recce now feels like one tool.
+
+> **Implementation note (as-built):** W2 was built as a thin front door over the *existing*
+> `scan --deep` + `_run_sweep`/`credsweep` machinery (which already does adaptive,
+> self-skipping deep modules with a deferred single-pass report and per-module failure
+> isolation) rather than a new `Phase`/`PLAN` engine. Same behavior, far less new code and
+> risk. A declarative phase plan can still replace the coordinator later if it earns its
+> keep, but the front-door + guidance is what the tester feels, and that's shipped.
 
 ## Roadmap placement
 
