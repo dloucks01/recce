@@ -373,50 +373,13 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     tracking = store.get_tracking()
     domains = _resolve_domains(store, hosts)
     meta = {"subtitle": title}
-    bh_blob = store.get_meta("ad_bloodhound")
-    if bh_blob:
-        try:
-            meta["ad_bloodhound"] = json.loads(bh_blob)
-        except ValueError:
-            pass
-    mssql_blob = store.get_meta("mssql")
-    if mssql_blob:
-        try:
-            meta["mssql"] = json.loads(mssql_blob)
-        except ValueError:
-            pass
-    smb_blob = store.get_meta("smb")
-    if smb_blob:
-        try:
-            meta["smb"] = json.loads(smb_blob)
-        except ValueError:
-            pass
-    ftp_blob = store.get_meta("ftp")
-    if ftp_blob:
-        try:
-            meta["ftp"] = json.loads(ftp_blob)
-        except ValueError:
-            pass
-    docker_blob = store.get_meta("docker")
-    if docker_blob:
-        try:
-            meta["docker"] = json.loads(docker_blob)
-        except ValueError:
-            pass
-    k8s_blob = store.get_meta("kubernetes")
-    if k8s_blob:
-        try:
-            meta["kubernetes"] = json.loads(k8s_blob)
-        except ValueError:
-            pass
-    ldap_blob = store.get_meta("ldap")
-    if ldap_blob:
-        try:
-            meta["ldap"] = json.loads(ldap_blob)
-        except ValueError:
-            pass
-    for _mk in ("snmp", "mongodb", "redis", "elasticsearch", "rsync", "nfs",
-                "kerberos"):
+    # Fold each deep-module's saved analysis blob into the report meta. They all
+    # follow the identical shape (the report-meta key == the stored-meta name), so
+    # one loop replaces what used to be a dozen copy-pasted get_meta/json.loads
+    # guards - the same drift risk the service-command collapse removed.
+    for _mk in ("ad_bloodhound", "mssql", "smb", "ftp", "docker", "kubernetes",
+                "ldap", "snmp", "mongodb", "redis", "elasticsearch", "rsync",
+                "nfs", "kerberos"):
         _blob = store.get_meta(_mk)
         if _blob:
             try:
@@ -3350,24 +3313,36 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     return 0
 
 
-def _ad_shot(args, name, command, output):
-    """Render a terminal-output proof screenshot of a live Kerberos capture into
-    engagement/screenshots/. Returns the saved path or None."""
+def _proof_shot(args, module: str, filename: str, command: str, output: str,
+                *, ip: str | None = None, **proof_kwargs):
+    """Shared 'capture a terminal-output proof screenshot' helper behind the live
+    service actions (mssql/smb/ftp/docker/ldap/AD). Guarded by --screenshots, needs
+    the screenshot tool available, writes engagement/screenshots/<filename>.png, and
+    returns the path (or None). `ip`, when given, prefixes the console line;
+    proof_kwargs (banner= / prompt=) pass through to the module's proof_html(). Six
+    byte-identical copies used to drift on exactly these small differences."""
     if not getattr(args, "screenshots", False):
         return None
-    from . import mssql, screenshot
+    from importlib import import_module
+    from . import screenshot
     if not screenshot.available():
         return None
-    png = screenshot.capture_html(mssql.proof_html(command, output, prompt="# "))
+    mod = import_module(f".{module}", __package__)
+    png = screenshot.capture_html(mod.proof_html(command, output, **proof_kwargs))
     if not png:
         return None
     shot_dir = os.path.join(args.output_dir, "screenshots")
     os.makedirs(shot_dir, exist_ok=True)
-    path = os.path.join(shot_dir, f"ad_{name}.png")
+    path = os.path.join(shot_dir, f"{filename}.png")
     with open(path, "wb") as fh:
         fh.write(png)
-    print(f"      [+] proof screenshot -> {path}")
+    print(f"      [+] {f'{ip}: ' if ip else ''}proof screenshot -> {path}")
     return path
+
+
+def _ad_shot(args, name, command, output):
+    """Terminal-output proof screenshot of a live Kerberos capture."""
+    return _proof_shot(args, "mssql", f"ad_{name}", command, output, prompt="# ")
 
 
 def _ad_live_kerberos(args, bh, creds, sh_paths, analysis):
@@ -3428,23 +3403,9 @@ def _ad_live_kerberos(args, bh, creds, sh_paths, analysis):
 
 
 def _mssql_shot(args, ip, name, banner, command, output):
-    """Render a faithful terminal screenshot of an executed MSSQL action into
-    engagement/screenshots/. Returns the saved path or None."""
-    if not getattr(args, "screenshots", False):
-        return None
-    from . import mssql, screenshot
-    if not screenshot.available():
-        return None
-    png = screenshot.capture_html(mssql.proof_html(command, output, banner=banner))
-    if not png:
-        return None
-    shot_dir = os.path.join(args.output_dir, "screenshots")
-    os.makedirs(shot_dir, exist_ok=True)
-    path = os.path.join(shot_dir, f"mssql_{ip.replace(':', '_')}_{name}.png")
-    with open(path, "wb") as fh:
-        fh.write(png)
-    print(f"      [+] {ip}: proof screenshot -> {path}")
-    return path
+    """Faithful terminal screenshot of an executed MSSQL action."""
+    return _proof_shot(args, "mssql", f"mssql_{ip.replace(':', '_')}_{name}",
+                       command, output, ip=ip, banner=banner)
 
 
 def cmd_mssql(args: argparse.Namespace) -> int:
@@ -3728,23 +3689,9 @@ def cmd_mssql(args: argparse.Namespace) -> int:
 
 
 def _smb_shot(args, ip, name, command, output):
-    """Render a terminal-output proof screenshot of a live SMB action into
-    engagement/screenshots/. Returns the saved path or None."""
-    if not getattr(args, "screenshots", False):
-        return None
-    from . import smb, screenshot
-    if not screenshot.available():
-        return None
-    png = screenshot.capture_html(smb.proof_html(command, output))
-    if not png:
-        return None
-    shot_dir = os.path.join(args.output_dir, "screenshots")
-    os.makedirs(shot_dir, exist_ok=True)
-    path = os.path.join(shot_dir, f"smb_{ip.replace(':', '_')}_{name}.png")
-    with open(path, "wb") as fh:
-        fh.write(png)
-    print(f"      [+] {ip}: proof screenshot -> {path}")
-    return path
+    """Terminal-output proof screenshot of a live SMB action."""
+    return _proof_shot(args, "smb", f"smb_{ip.replace(':', '_')}_{name}",
+                       command, output, ip=ip)
 
 
 def cmd_smb(args: argparse.Namespace) -> int:
@@ -3869,21 +3816,9 @@ def cmd_smb(args: argparse.Namespace) -> int:
 
 
 def _ftp_shot(args, ip, name, command, output):
-    if not getattr(args, "screenshots", False):
-        return None
-    from . import ftp, screenshot
-    if not screenshot.available():
-        return None
-    png = screenshot.capture_html(ftp.proof_html(command, output))
-    if not png:
-        return None
-    shot_dir = os.path.join(args.output_dir, "screenshots")
-    os.makedirs(shot_dir, exist_ok=True)
-    path = os.path.join(shot_dir, f"ftp_{ip.replace(':', '_')}_{name}.png")
-    with open(path, "wb") as fh:
-        fh.write(png)
-    print(f"      [+] {ip}: proof screenshot -> {path}")
-    return path
+    """Terminal-output proof screenshot of a live FTP action."""
+    return _proof_shot(args, "ftp", f"ftp_{ip.replace(':', '_')}_{name}",
+                       command, output, ip=ip)
 
 
 def cmd_ftp(args: argparse.Namespace) -> int:
@@ -4026,19 +3961,9 @@ def cmd_docker(args: argparse.Namespace) -> int:
 
 
 def _docker_shot(args, ip, command, output):
-    from . import docker, screenshot
-    if not screenshot.available():
-        return None
-    png = screenshot.capture_html(docker.proof_html(command, output))
-    if not png:
-        return None
-    shot_dir = os.path.join(args.output_dir, "screenshots")
-    os.makedirs(shot_dir, exist_ok=True)
-    path = os.path.join(shot_dir, f"docker_{ip.replace(':', '_')}.png")
-    with open(path, "wb") as fh:
-        fh.write(png)
-    print(f"      [+] {ip}: proof screenshot -> {path}")
-    return path
+    """Terminal-output proof screenshot of an exposed Docker API."""
+    return _proof_shot(args, "docker", f"docker_{ip.replace(':', '_')}",
+                       command, output, ip=ip)
 
 
 def cmd_kubernetes(args: argparse.Namespace) -> int:
@@ -4166,19 +4091,9 @@ def cmd_ldap(args: argparse.Namespace) -> int:
 
 
 def _ldap_shot(args, ip, command, output):
-    from . import ldap as _ldap, screenshot
-    if not screenshot.available():
-        return None
-    png = screenshot.capture_html(_ldap.proof_html(command, output))
-    if not png:
-        return None
-    shot_dir = os.path.join(args.output_dir, "screenshots")
-    os.makedirs(shot_dir, exist_ok=True)
-    path = os.path.join(shot_dir, f"ldap_{ip.replace(':', '_')}.png")
-    with open(path, "wb") as fh:
-        fh.write(png)
-    print(f"      [+] {ip}: proof screenshot -> {path}")
-    return path
+    """Terminal-output proof screenshot of an anonymous LDAP RootDSE read."""
+    return _proof_shot(args, "ldap", f"ldap_{ip.replace(':', '_')}",
+                       command, output, ip=ip)
 
 
 def cmd_api(args: argparse.Namespace) -> int:
