@@ -7094,6 +7094,62 @@ class SvcDetectTest(unittest.TestCase):
             srv.close()
             t.join(timeout=2)
 
+    def test_silent_https_on_nonstandard_port_is_identified(self):
+        """The TLS twin of the plaintext fix: a silent HTTPS app on an odd port
+        answers a plaintext HEAD with a TLS alert (not HTTP/), so grab_banner can't
+        name it. enrich_port must then try a TLS handshake + HEAD and label it
+        'https' - which makes both _is_tls and _is_web fire. Uses a monkeypatched
+        probe so the test needs no cert; the live handshake path is covered by the
+        real-socket negative test below."""
+        from recce import svcdetect as sd, web, probes
+
+        orig = sd.tls_http_probe
+        sd.tls_http_probe = lambda ip, port, timeout=4.0: (
+            "HTTP/1.1 200 OK\r\nServer: nginx/1.25.3\r\n\r\n")
+        try:
+            port = Port(portid=9999, protocol="tcp", state="open", service="unknown")
+            host = Host(ip="127.0.0.1", ports=[port])
+            sd.enrich_host(host, active=True)
+        finally:
+            sd.tls_http_probe = orig
+        self.assertEqual(port.service, "https")
+        self.assertEqual(port.detect_source, "banner")
+        self.assertEqual((port.product, port.version), ("nginx", "1.25.3"))
+        self.assertTrue(web.is_web(port))
+        self.assertTrue(probes._is_tls(port))          # scheme -> https
+        self.assertEqual(web.scheme_for(port), "https")
+
+    def test_tls_probe_does_not_misfire_on_plaintext(self):
+        """tls_http_probe against a plaintext (non-TLS) service must return "" - the
+        handshake fails, so we never mislabel a cleartext port as https."""
+        import socket as _socket
+        import threading
+        from recce import svcdetect as sd
+
+        srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        port_no = srv.getsockname()[1]
+        srv.listen(1)
+
+        def serve_once():
+            try:
+                conn, _ = srv.accept()
+                conn.recv(256)
+                conn.sendall(b"HTTP/1.0 200 OK\r\n\r\n")   # cleartext, not TLS
+                conn.close()
+            except OSError:
+                pass
+
+        t = threading.Thread(target=serve_once, daemon=True)
+        t.start()
+        try:
+            port = Port(portid=port_no, protocol="tcp", state="open", service="unknown")
+            self.assertEqual(sd.tls_http_probe("127.0.0.1", port), "")
+        finally:
+            srv.close()
+            t.join(timeout=2)
+
     def test_suggest_command_only_for_still_unknown(self):
         from recce import svcdetect as sd
         unknown = Port(portid=1234, service="unknown")

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 import socket
+import ssl
 
 from .models import Host, Port
 
@@ -201,6 +202,34 @@ def grab_banner(ip: str, port: Port, timeout: float = _BANNER_TIMEOUT) -> str:
         return ""
 
 
+def tls_http_probe(ip: str, port: Port, timeout: float = _BANNER_TIMEOUT) -> str:
+    """Complete a TLS handshake then send one HTTP request over it. Returns the
+    HTTP response banner if the port speaks HTTPS, else "".
+
+    The plaintext grab_banner can't see a TLS service - an HTTPS server on a non-
+    standard port answers a plaintext HEAD with a TLS alert (or nothing), so it
+    stayed "unknown" and got no web/api enum, exactly the false negative the
+    plaintext fallback fixed for cleartext HTTP. This is the TLS twin: handshake
+    first, then HEAD. Certs are not verified (we're fingerprinting, not trusting).
+    Never raises - any handshake/socket failure just means "not HTTPS here"."""
+    ctx = ssl._create_unverified_context()
+    ctx.check_hostname = False
+    try:
+        with socket.create_connection((ip, port.portid), timeout=timeout) as raw:
+            raw.settimeout(timeout)
+            try:
+                # server_hostname must be set for SNI; an IP literal is fine with
+                # verification off (no hostname matching happens).
+                with ctx.wrap_socket(raw, server_hostname=ip) as tls:
+                    tls.sendall(_HTTP_NUDGE)
+                    data = tls.recv(_READ)
+            except (ssl.SSLError, socket.timeout, OSError, ValueError):
+                return ""
+    except OSError:
+        return ""
+    return data.decode("latin-1", "replace") if data else ""
+
+
 # --- orchestration --------------------------------------------------------------
 
 def _needs_id(port: Port) -> bool:
@@ -248,6 +277,22 @@ def enrich_port(ip: str, port: Port, active: bool = True) -> bool:
             changed = True
         if _fill_product(port, banner):        # concrete product+version -> CVEs
             changed = True
+    # Silent-HTTPS recovery: if a plaintext probe couldn't name it, the service may
+    # be TLS-wrapped (a custom HTTPS app on an odd port). One handshake + HEAD tells
+    # us. Label it "https" explicitly so _is_tls AND _is_http both fire (scheme https
+    # + web/api enum). Only runs when still unidentified, so it costs nothing on the
+    # ports the cheaper layers already resolved.
+    if _needs_id(port):
+        tls_banner = tls_http_probe(ip, port)
+        if tls_banner:
+            sig = _match_signature(tls_banner)
+            if sig and sig[0] == "http":
+                port.service = "https"
+                port.extrainfo = port.extrainfo or "HTTP over TLS"
+                port.banner = tls_banner[:200]
+                port.detect_source = "banner"
+                _fill_product(port, tls_banner)
+                changed = True
     return changed
 
 
