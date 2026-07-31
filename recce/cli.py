@@ -5152,6 +5152,18 @@ def _add_common(pp) -> None:
                         "host after this and moves on (0 = no limit)")
 
 
+def _add_io(pp, title: bool = True) -> None:
+    """The output-dir (+ optional engagement title) flags the lighter commands share.
+    The scan-style commands use _add_common (these two PLUS the perf group); the
+    report/status/next/verify/... commands just want these, so this is the one place
+    their default/help lives instead of ~35 hand-copied add_argument lines."""
+    pp.add_argument("-o", "--output-dir", default="engagement",
+                    help="output directory (default: ./engagement)")
+    if title:
+        pp.add_argument("--title", default="Recce Engagement",
+                        help="engagement title shown in reports")
+
+
 def _add_creds(pp) -> None:
     # The three you reach for (user / pass / domain) are grouped together; the
     # privileged-account and LDAP-tuning flags fold into a second group so the
@@ -5390,7 +5402,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="generate one Word (.docx) write-up per finding")
     wu.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
-    wu.add_argument("-o", "--output-dir", default="engagement")
+    _add_io(wu, title=False)
     wu.add_argument("--title", default="Recce Engagement",
                     help="engagement title shown on the combined report")
     wu.add_argument("--min-severity", default="low",
@@ -5416,7 +5428,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     w1.add_argument("selector", nargs="?",
                     help="which finding: an F-id (F-007 / 7), a CVE, an IP or IP:port, "
                          "or a word from its title. Omit to list all findings.")
-    w1.add_argument("-o", "--output-dir", default="engagement")
+    _add_io(w1, title=False)
     w1.add_argument("--no-screenshots", action="store_true",
                     help="don't auto-capture web screenshots (add them in Word)")
     w1.add_argument("--overwrite", action="store_true",
@@ -5429,7 +5441,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "open port recce found (bridges to recce/scripts/)")
     sv.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
-    sv.add_argument("-o", "--output-dir", default="engagement")
+    _add_io(sv, title=False)
     sv.add_argument("-a", "--aggressive", action="store_true",
                     help="append -a to each command (enable the intrusive checks)")
     sv.set_defaults(func=cmd_services)
@@ -5440,8 +5452,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "exposed .git/.env, actuator, methods, headers/TLS)")
     wb.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
-    wb.add_argument("-o", "--output-dir", default="engagement")
-    wb.add_argument("--title", default="Recce Engagement")
+    _add_io(wb)
     wb.add_argument("--workers", type=int, default=6,
                     help="concurrent hosts to scan at once (default: 6)")
     wb.add_argument("--no-active", action="store_true",
@@ -5480,7 +5491,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "tool commands) for confirmed findings, params pre-filled")
     ep.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
-    ep.add_argument("-o", "--output-dir", default="engagement")
+    _add_io(ep, title=False)
     ep.add_argument("--lhost", default="<LHOST>",
                     help="your callback IP for reverse payloads (fills LHOST in the "
                          ".rc files)")
@@ -5496,8 +5507,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "needs-PoC) + the exact safe check, per finding")
     pv.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
-    pv.add_argument("-o", "--output-dir", default="engagement")
-    pv.add_argument("--title", default="Recce Engagement")
+    _add_io(pv)
     pv.add_argument("--profile", choices=list(scanner.PROFILES), default="standard")
     pv.add_argument("--run", action="store_true",
                     help="also re-run the NON-INTRUSIVE detection NSE (SMB "
@@ -5511,7 +5521,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(foothold -> priv-esc -> creds -> lateral -> domain)")
     ap.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
-    ap.add_argument("-o", "--output-dir", default="engagement")
+    _add_io(ap, title=False)
     ap.set_defaults(func=cmd_attackpath)
 
     # Credential stacking + spray planning.
@@ -5520,7 +5530,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "spray plan across the discovered surface")
     cd.add_argument("targets", nargs="*",
                     help="restrict spray targets to these IPs / ranges / CIDRs / @file")
-    cd.add_argument("-o", "--output-dir", default="engagement")
+    _add_io(cd, title=False)
     cd.add_argument("--add", action="append", metavar="USER:SECRET",
                     help="add a captured credential: 'user:secret', "
                          "'DOMAIN\\user:secret' (a 32-hex secret => NT hash). Repeatable.")
@@ -5614,8 +5624,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ing.add_argument("--host", help="attach findings to this IP (default: auto-resolve "
                                     "from the enum's own NET-IFACE interface IPs, then "
                                     "its hostname, else a 'local:<host>' entry)")
-    ing.add_argument("-o", "--output-dir", default="engagement")
-    ing.add_argument("--title", default="Recce Engagement")
+    _add_io(ing)
     ing.set_defaults(func=cmd_ingest)
 
     # Import an existing nmap scan (XML / grepable) -> workbook, no scanning.
@@ -5623,7 +5632,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="import an existing nmap scan (-oX / -oG / -oN) -> sheet")
     imp.add_argument("files", nargs="+",
                      help="nmap .xml / .gnmap / .nmap file(s), a directory, or a glob")
-    imp.add_argument("-o", "--output-dir", default="engagement")
+    _add_io(imp, title=False)
     imp.add_argument("--title", default="Recce Engagement",
                      help="engagement title (only used when starting a fresh datastore)")
     imp.add_argument("--enum-only", action="store_true",
@@ -5669,8 +5678,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     bhp.add_argument("--screenshots", action="store_true",
                      help="save terminal-output proof screenshots of the live "
                           "captures into engagement/screenshots/")
-    bhp.add_argument("-o", "--output-dir", default="engagement")
-    bhp.add_argument("--title", default="Recce Engagement")
+    _add_io(bhp)
     bhp.set_defaults(func=cmd_bloodhound)
 
     # MSSQL offensive enumeration + attack chain.
@@ -5718,8 +5726,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="don't recursively walk the linked-server graph")
     ms.add_argument("--link-depth", type=int, default=4, metavar="N",
                     help="max linked-server chain depth to walk (default 4)")
-    ms.add_argument("-o", "--output-dir", default="engagement")
-    ms.add_argument("--title", default="Recce Engagement")
+    _add_io(ms)
     _add_budget(ms)
     ms.set_defaults(func=cmd_mssql)
 
@@ -5746,8 +5753,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="don't execute nxc/smbclient; just write the commands (airgapped-safe)")
     sm.add_argument("--no-probe", action="store_true",
                     help="skip the live SMB2/SMBv1 negotiate probes")
-    sm.add_argument("-o", "--output-dir", default="engagement")
-    sm.add_argument("--title", default="Recce Engagement")
+    _add_io(sm)
     _add_budget(sm)
     sm.set_defaults(func=cmd_smb)
 
@@ -5769,8 +5775,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="don't run the write proof; just write the commands")
     fp.add_argument("--no-probe", action="store_true",
                     help="skip the live banner/anonymous/FEAT probe")
-    fp.add_argument("-o", "--output-dir", default="engagement")
-    fp.add_argument("--title", default="Recce Engagement")
+    _add_io(fp)
     _add_budget(fp)
     fp.set_defaults(func=cmd_ftp)
 
@@ -5786,8 +5791,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "each exposed daemon")
     dk.add_argument("--no-probe", action="store_true",
                     help="skip the live API read; just write the commands")
-    dk.add_argument("-o", "--output-dir", default="engagement")
-    dk.add_argument("--title", default="Recce Engagement")
+    _add_io(dk)
     dk.set_defaults(func=cmd_docker)
 
     # Kubernetes attack-surface enumeration.
@@ -5799,8 +5803,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "Kubernetes hosts in the datastore)")
     kp.add_argument("--no-probe", action="store_true",
                     help="skip the live unauthenticated reads; just write the commands")
-    kp.add_argument("-o", "--output-dir", default="engagement")
-    kp.add_argument("--title", default="Recce Engagement")
+    _add_io(kp)
     kp.set_defaults(func=cmd_kubernetes)
 
     # LDAP / AD directory enumeration.
@@ -5820,8 +5823,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "authenticates the enumeration without the plaintext password; "
                          "on plaintext 389 it is sign+sealed so a signing-required DC "
                          "accepts it (LDAPS 636 needs no sealing)")
-    lp.add_argument("-o", "--output-dir", default="engagement")
-    lp.add_argument("--title", default="Recce Engagement")
+    _add_io(lp)
     _add_budget(lp)
     lp.set_defaults(func=cmd_ldap)
 
@@ -5832,8 +5834,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
                          "web hosts in the datastore)")
-    ap.add_argument("-o", "--output-dir", default="engagement")
-    ap.add_argument("--title", default="Recce Engagement")
+    _add_io(ap)
     ap.add_argument("--no-probe", action="store_true",
                     help="don't send API probes (list web targets only)")
     ap.set_defaults(func=cmd_api)
@@ -5846,8 +5847,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "hosts in the datastore - recce probes UDP 161 directly)")
     sp.add_argument("--no-probe", action="store_true",
                     help="skip the live community brute/walk; just write the commands")
-    sp.add_argument("-o", "--output-dir", default="engagement")
-    sp.add_argument("--title", default="Recce Engagement")
+    _add_io(sp)
     _add_budget(sp)
     sp.set_defaults(func=cmd_snmp)
 
@@ -5860,8 +5860,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "MongoDB hosts in the datastore)")
     mp.add_argument("--no-probe", action="store_true",
                     help="skip the live probe; just write the commands")
-    mp.add_argument("-o", "--output-dir", default="engagement")
-    mp.add_argument("--title", default="Recce Engagement")
+    _add_io(mp)
     _add_budget(mp)
     mp.set_defaults(func=cmd_mongodb)
 
@@ -5874,8 +5873,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "Redis hosts in the datastore)")
     rp.add_argument("--no-probe", action="store_true",
                     help="skip the live probe; just write the commands")
-    rp.add_argument("-o", "--output-dir", default="engagement")
-    rp.add_argument("--title", default="Recce Engagement")
+    _add_io(rp)
     _add_budget(rp)
     rp.set_defaults(func=cmd_redis)
 
@@ -5888,8 +5886,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "Elasticsearch hosts in the datastore)")
     ep.add_argument("--no-probe", action="store_true",
                     help="skip the live probe; just write the commands")
-    ep.add_argument("-o", "--output-dir", default="engagement")
-    ep.add_argument("--title", default="Recce Engagement")
+    _add_io(ep)
     _add_budget(ep)
     ep.set_defaults(func=cmd_elasticsearch)
 
@@ -5902,8 +5899,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "all rsync hosts in the datastore)")
     syp.add_argument("--no-probe", action="store_true",
                      help="skip the live probe; just write the commands")
-    syp.add_argument("-o", "--output-dir", default="engagement")
-    syp.add_argument("--title", default="Recce Engagement")
+    _add_io(syp)
     _add_budget(syp)
     syp.set_defaults(func=cmd_rsync)
 
@@ -5916,8 +5912,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "all NFS hosts in the datastore)")
     nfp.add_argument("--no-probe", action="store_true",
                      help="skip the live probe; just write the commands")
-    nfp.add_argument("-o", "--output-dir", default="engagement")
-    nfp.add_argument("--title", default="Recce Engagement")
+    _add_io(nfp)
     _add_budget(nfp)
     nfp.set_defaults(func=cmd_nfs)
 
@@ -5938,8 +5933,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="test a single username (repeatable)")
     kp.add_argument("--no-probe", action="store_true",
                     help="skip the live probe; just write the commands")
-    kp.add_argument("-o", "--output-dir", default="engagement")
-    kp.add_argument("--title", default="Recce Engagement")
+    _add_io(kp)
     _add_budget(kp)
     kp.set_defaults(func=cmd_kerberos)
 
@@ -5948,16 +5942,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "exploitation kit (gnmap + bridge JSON + attack plan)")
     sk.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
-    sk.add_argument("-o", "--output-dir", default="engagement")
-    sk.add_argument("--title", default="Recce Engagement")
+    _add_io(sk)
     sk.set_defaults(func=cmd_fieldkit_export)
 
     ski = sub.add_parser("fieldkit-import",
                          help="fold a fieldkit findings.json (proven exploitation) back "
                               "into the workbook + report")
     ski.add_argument("findings", help="path to a fieldkit findings.json or recce_findings.json")
-    ski.add_argument("-o", "--output-dir", default="engagement")
-    ski.add_argument("--title", default="Recce Engagement")
+    _add_io(ski)
     ski.set_defaults(func=cmd_fieldkit_import)
 
     # Pre-rename spellings (the kit was called Sköll) - hidden from --help, still functional.
@@ -5965,21 +5957,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     #  and it prints `help=SUPPRESS` literally rather than honouring it.)
     sk_old = sub.add_parser("skoll-export")
     sk_old.add_argument("targets", nargs="*")
-    sk_old.add_argument("-o", "--output-dir", default="engagement")
-    sk_old.add_argument("--title", default="Recce Engagement")
+    _add_io(sk_old)
     sk_old.set_defaults(func=_deprecated_alias(cmd_fieldkit_export,
                                                "skoll-export", "fieldkit-export"))
 
     ski_old = sub.add_parser("skoll-import")
     ski_old.add_argument("findings")
-    ski_old.add_argument("-o", "--output-dir", default="engagement")
-    ski_old.add_argument("--title", default="Recce Engagement")
+    _add_io(ski_old)
     ski_old.set_defaults(func=_deprecated_alias(cmd_fieldkit_import,
                                                 "skoll-import", "fieldkit-import"))
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
-    r.add_argument("-o", "--output-dir", default="engagement")
-    r.add_argument("--title", default="Recce Engagement")
+    _add_io(r)
     r.add_argument("--min-qod", type=int, default=None, metavar="N",
                    help="hide findings below this Quality-of-Detection score (0-100; "
                         "70 hides banner/version leads, 95 shows only verified). "
@@ -5992,16 +5981,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     r.set_defaults(func=cmd_report)
 
     st = sub.add_parser("status", help="print live review coverage")
-    st.add_argument("-o", "--output-dir", default="engagement")
+    _add_io(st, title=False)
     st.set_defaults(func=cmd_status)
 
     nx = sub.add_parser("next", help="the ranked next-best-actions for an engagement")
-    nx.add_argument("-o", "--output-dir", default="engagement")
+    _add_io(nx, title=False)
     nx.set_defaults(func=cmd_next)
 
     vf = sub.add_parser("verify", help="confirm/refute version leads by re-running their "
                                        "safe NSE check (dry-run; --run to execute)")
-    vf.add_argument("-o", "--output-dir", default="engagement")
+    _add_io(vf, title=False)
     vf.add_argument("--run", action="store_true",
                     help="actually run the safe (Tier-A/B) re-checks (sends traffic); "
                          "default is a dry-run plan that sends nothing")
@@ -6013,8 +6002,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "auto-derived from credentialed enum, or record your own")
     ax.add_argument("targets", nargs="*",
                     help="restrict the listing to these IPs / ranges / CIDRs / @file")
-    ax.add_argument("-o", "--output-dir", default="engagement")
-    ax.add_argument("--title", default="Recce Engagement")
+    _add_io(ax)
     ax.add_argument("--host", nargs="*",
                     help="record a foothold on this IP (or --undo to clear it)")
     ax.add_argument("--note", help="how access was gained (shown in the report)")
@@ -6023,8 +6011,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ax.set_defaults(func=cmd_access)
 
     rv = sub.add_parser("review", help="mark items reviewed / not reviewed")
-    rv.add_argument("-o", "--output-dir", default="engagement")
-    rv.add_argument("--title", default="Recce Engagement")
+    _add_io(rv)
     rv.add_argument("--host", nargs="*", help="host IP(s) to mark")
     rv.add_argument("--service", nargs="*", metavar="IP:PORT", help="service(s) to mark")
     rv.add_argument("--key", nargs="*", help="raw tracking key(s) to mark")
