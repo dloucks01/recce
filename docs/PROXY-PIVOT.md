@@ -1,248 +1,230 @@
 # Proxy & Pivot Support — design + implementation plan
 
-> **North star:** recce is for the *tester in the field*. Proxy/pivot support exists so an
-> operator can reach an internal segment **through a compromised host** and still get the
-> same trustworthy enumeration. It must honor the top principle: **a false negative is worse
-> than a false positive.** Some traffic *cannot* traverse a SOCKS proxy (UDP, raw-packet
-> SYN/masscan scans, ICMP host-discovery). When that happens recce must **say so loudly** —
-> never silently skip a probe (a missed finding) and never silently fall back to a direct
-> connection (which both misses the internal target *and* leaks the operator's real source
-> IP past the pivot). Read `docs/ARCHITECTURE.md` first.
+> **North star:** recce is for the *tester in the field*. When they pivot through a
+> compromised host into an internal segment, recce's job is **not** to be a networking
+> library — the operator's proxychains/tunnel already moves the packets. recce's job is to
+> make itself **proxy-safe** and **proxy-honest**: never scan from the operator's real IP by
+> accident (an OPSEC failure), and never report a misleading clean result for traffic that
+> silently couldn't traverse the proxy (a false negative — the top principle). Read
+> `docs/ARCHITECTURE.md` first.
 
 ---
 
-## 1. Goal & scope
+## 1. The real question: what does recce actually add?
 
-**Use case.** The operator has a foothold on host `A` inside the target network and stands up
-a SOCKS proxy that exits through `A` — via Metasploit (`socks_proxy` + `route`), `chisel`,
-`ligolo-ng`, `sshuttle`, or a plain `ssh -D`. They then point recce at that SOCKS port so
-every scan and probe reaches the internal `10.x` segment as if recce were running on `A`.
+Before writing any networking code, be honest about what's *already handled*:
 
-**recce is SOCKS-*aware*, it does not build tunnels.** Establishing the pivot (msf route,
-chisel server/client, ligolo) is the operator's job and is tool-specific; recce's
-responsibility is simply to send all its outbound traffic through a SOCKS endpoint the
-operator supplies. This keeps the feature small, stdlib-only, and airgap-friendly — no new
-dependency, no tunnel-management surface.
+- **proxychains already proxies recce's own probes, transparently.** proxychains `LD_PRELOAD`-
+  hooks libc `connect()`, and every one of recce's stdlib probes (`socket.create_connection`,
+  `http.client`) bottoms out in that call. So `proxychains4 recce scan 10.x` routes all of
+  recce's TCP/HTTP enumeration through a SOCKS/CONNECT pivot **today, with zero code changes.**
+- **Transparent tunnels need recce to do nothing at all.** ligolo-ng (TUN), `sshuttle`, msf
+  `autoroute` + a local redirect — these make the internal subnet OS-routable, so
+  `recce scan 10.x` just works. This covers a large and growing share of real pivoting.
 
-**In scope (v1, decisions confirmed 2026-07-30):** SOCKS5 (+ SOCKS4a) **and HTTP CONNECT**
-proxies for every stdlib socket/HTTP probe; `proxychains4` prefixing for the external tools
-recce shells out to; honest handling + surfacing of the traffic that can't be proxied.
+So the transport problem — "get recce's packets to the internal segment" — is **already solved
+for the operator.** Building a from-scratch SOCKS stack would mostly re-implement proxychains.
 
-**Out of scope (v1):** building the tunnel; per-target proxy chains (one proxy for the whole
-run to start).
+**What is NOT solved, and only recce can fix, are two failures that bare `proxychains4 recce`
+walks straight into:**
 
----
+1. **OPSEC failure — scanning from the real IP.** recce doesn't know it's proxied, so it runs
+   a SYN scan / masscan. Those use raw packets, **bypass proxychains entirely**, and hit the
+   target from the operator's actual source IP — the exact thing the pivot exists to avoid.
+2. **False negative — silent UDP misses.** SNMP / SQL-Browser / UDP host-discovery go over
+   UDP, which can't traverse a TCP proxy. Under bare proxychains they just fail silently → a
+   clean, misleading "0 findings."
 
-## 2. The network surface recce has to cover
-
-Grounded inventory of every place recce currently touches the network (this is what a proxy
-layer must intercept — nothing more, nothing less):
-
-| Path | Primitive | Sites | Modules |
-|------|-----------|-------|---------|
-| **TCP probes** | `socket.create_connection` | 19 | ftp, nfs, ldap, mongodb, kerberos, redis, rsync, smb, mssql, svcdetect, probes |
-| **HTTP/S probes** | `http.client.HTTP(S)Connection` | 12 | web, probes, docker, elasticsearch, kubernetes |
-| **UDP probes** | `socket.socket(SOCK_DGRAM)` | 3 | snmp (161), mssql (SQL Browser 1434), stager |
-| **Tool shell-outs** | `subprocess.run` | ~6 | scanner (nmap), util.run_tool (netexec/impacket/bloodhound), ad, deploy, mssql, exploits |
-| **Local render (EXCLUDE)** | `subprocess.run` | 3 | screenshot (wkhtmltoimage/chromium — never proxy this) |
-
-Two happy facts fall out of the earlier de-bloat work:
-
-- The TCP probes almost all go through **one primitive** (`socket.create_connection`), so a
-  single wrapper covers 19 sites.
-- The tool shell-outs already funnel through **two chokepoints** (`scanner._run` for nmap and
-  `util.run_tool` for everything else) — the exact seams the de-bloat consolidated. Proxy
-  prefixing hooks there once, not in six commands.
+**recce's value is closing those two gaps — proxy *awareness*, *safety*, and *honesty* — not
+transport.** That reframes the whole feature from "a networking library" to "a thin safety
+layer over the transport the operator already has."
 
 ---
 
-## 3. Design
+## 2. Scope
 
-### 3.1 A single `net` module (the one home for outbound connections)
+**In scope (v1) — the awareness/safety/honesty layer:**
 
-Create `recce/net.py`. Every module stops calling `socket.create_connection` /
-`http.client.*` directly and calls `net` instead. `net` decides direct-vs-proxied from a
-process-global config.
+- A `--proxy` flag that makes recce **guarantee** it's proxied (§4.1), flip nmap into a
+  **proxy-safe profile** (§4.2), and turn on the **honesty layer** for traffic that can't
+  tunnel (§4.3), plus a persistent PROXY banner.
+- Transport is delegated to **proxychains4** (which speaks SOCKS4/5 *and* HTTP CONNECT), so no
+  new networking code and both proxy kinds are covered for free.
 
-```python
-# recce/net.py  (stdlib only)
-_PROXY = None   # set once at startup; None => everything behaves exactly as today
+**Optional / later (only if the proxychains dependency proves annoying):**
 
-def configure(proxy: str | None) -> None:
-    """Parse & store the proxy for the whole run, e.g. 'socks5://127.0.0.1:1080'.
-    socks5h:// = remote DNS (default & recommended); socks4a:// supported."""
+- A native stdlib `recce/net.py` (SOCKS5/4a + HTTP CONNECT) so `recce --proxy` self-contains
+  transport with no proxychains and gives per-probe UDP honesty (§5). Deliberately *not* the
+  headline.
 
-def create_connection(address, timeout=None, source_address=None):
-    """Drop-in for socket.create_connection. Direct when no proxy; else opens a TCP
-    socket to the SOCKS server and performs the CONNECT handshake to `address`."""
+**Out of scope (v1):** building the tunnel itself; per-target / multi-hop proxy chains.
 
-def http_connection(host, port, *, tls=False, timeout=None, context=None):
-    """Return an http.client.HTTP(S)Connection whose .connect() tunnels via the proxy
-    (set conn.sock to the SOCKS-tunneled socket; wrap in ssl for tls=True)."""
+---
 
-def udp_socket():
-    """Raise ProxyUnsupported when a proxy is configured (SOCKS TCP can't carry UDP),
-    so callers surface it honestly instead of leaking a direct packet."""
-```
+## 3. The network surface — what proxychains covers vs. what needs recce's help
 
-**Config propagation.** Deep probes (`probes`, `svcdetect`, the service modules) are called
-without `args`, so the proxy is a **module-global set once at startup** — the same idiom
-`cli._DEFER_REPORTS` already uses. `cmd_*` entry points (or `main`) call `net.configure(args.proxy)`
-before any probing. No threading a `proxy=` kwarg through dozens of call signatures.
+Grounded inventory of every place recce touches the network, split by whether the operator's
+proxychains wrapper already handles it or recce must intervene:
 
-### 3.2 Hand-rolled SOCKS (stdlib, ~80 lines)
+| Path | Primitive | Sites | proxychains handles it? | recce's job |
+|------|-----------|-------|------------------------|-------------|
+| **TCP probes** | `socket.create_connection` | 19 | ✅ transparent (`connect()` hook) | nothing (v1) |
+| **HTTP/S probes** | `http.client.HTTP(S)Connection` | 12 | ✅ transparent | nothing (v1) |
+| **UDP probes** | `socket.socket(SOCK_DGRAM)` | 3 | ❌ can't tunnel UDP | **flag honestly** |
+| **nmap** | `subprocess` (scanner._run) | 1 | ⚠️ connect-scan only; SYN/masscan/ICMP/UDP **bypass** | **force `-sT -Pn`, no masscan/`-sU`** |
+| **Other tools** | `subprocess` (util.run_tool) | ~5 | ✅ children inherit the hook | nothing (v1) |
+| **Local render** | `subprocess` (screenshot) | 3 | n/a — local | **never proxy** |
 
-No third-party `PySocks` (airgap + stdlib-only constraint). Implement the minimal client:
+The two subprocess chokepoints (`scanner._run`, `util.run_tool`) that the earlier de-bloat
+consolidated are also where any re-exec / prefixing logic hooks — one place each.
 
-- **SOCKS5**: version/method greeting (`0x05` + no-auth `0x00`, plus username/password `0x02`
-  when the URL carries creds) → `CONNECT` (0x01) with either an IPv4 (0x01) or a **domain
-  name** (0x03) address → parse the bind reply / error code.
-- **SOCKS4a**: `CONNECT` with `0.0.0.1` sentinel + trailing hostname for remote DNS.
-- **Remote DNS by default** (`socks5h`): pass the *hostname* to the proxy, never pre-resolve
-  locally. This avoids DNS leaks and — more importantly — resolves internal names
-  (`dc.corp.local`, Kerberos realms, `ldap://…`) that only the pivot can see. recce mostly
-  targets IPs, but AD/LDAP/Kerberos paths use names, so this matters.
+---
 
-Map SOCKS reply codes to clear errors (`host unreachable`, `connection refused`, `TTL
-expired`) so a failed internal probe reads as a real result, not a mystery.
+## 4. Design — the awareness / safety / honesty layer (v1)
 
-**HTTP CONNECT** (also in v1). For an `http://[user:pass@]host:port` proxy, `net.create_connection`
-opens TCP to the proxy and sends `CONNECT target:port HTTP/1.1` (+ `Proxy-Authorization:
-Basic …` when creds are present), then reads the status line: `200` → the socket is now a
-tunnel to `target` and is returned like any other; any other code maps to the same clear
-error surface as the SOCKS codes. The tunneled socket then feeds `http_connection` / ssl
-exactly as the SOCKS one does, so §3.1's factories are proxy-kind-agnostic — the scheme in
-`--proxy` (`socks5h://` vs `http://`) is the only thing that differs.
+### 4.1 `--proxy` guarantees recce is proxied (via proxychains)
 
-### 3.3 Tool shell-outs → proxychains
+`recce scan 10.x --proxy socks5h://127.0.0.1:1080` must guarantee that **every** byte recce
+sends — its Python probes *and* its tool children — goes through the proxy. The clean way to
+do that without any transport code:
 
-nmap, netexec, impacket, bloodhound-python, etc. have no native SOCKS; the standard field
-answer is `proxychains4`. Prefix at the two chokepoints only:
+- On startup, if `--proxy` is set and recce is **not already running under proxychains**
+  (detected via `LD_PRELOAD` / an env sentinel), recce **re-executes itself under
+  proxychains4**: it writes a throwaway proxychains conf from the `--proxy` URL into the
+  engagement dir and `os.execvp("proxychains4", ["proxychains4", "-f", conf, "recce", …same
+  argv…])`, with a sentinel env var to prevent a re-exec loop.
+- After the re-exec, the whole process tree (recce's `connect()` probes + every nmap/netexec/
+  impacket child) is transparently tunneled. recce then runs in proxy-safe + honest mode.
+- If recce is *already* wrapped (`proxychains4 recce --proxy …`), it skips the re-exec and just
+  enables safe/honest mode — no double-wrapping.
+- **Nice-to-have:** auto-detect the proxychains `LD_PRELOAD` even without `--proxy` and enable
+  safe mode with a "recce noticed it's under proxychains" notice, so a wrapped run can't
+  accidentally SYN-scan from the real IP.
 
-- `scanner._run(cmd)` and `util.run_tool(cmd)` prepend `proxychains4 -f <generated.conf>`
-  (or `-q` for quiet) when a proxy is set. recce writes a throwaway proxychains conf from
-  `--proxy` into the engagement dir.
-- **`screenshot.py` is explicitly excluded** — it renders proof images locally; proxying it
-  would break rendering and pointlessly route local traffic.
+This gives full SOCKS + HTTP CONNECT transport (proxychains does both) for **zero** networking
+code in recce. proxychains is gated by `doctor` / `--proxy-check` with a clear message if
+missing.
 
-### 3.4 nmap over a proxy — the profile MUST change (correctness, not preference)
+### 4.2 Proxy-safe nmap profile (the core safety win)
 
-proxychains only intercepts libc `connect()` calls. Anything using raw packets or non-TCP
-silently bypasses it — which, unhandled, means scanning from the operator's real IP. So when
-a proxy is active, `scanner` must force a proxy-safe nmap profile and **refuse the unsafe
-bits**:
+proxychains only intercepts `connect()`. Anything raw-packet or non-TCP silently bypasses it
+and goes out the real interface. So when proxied, `scanner` **forces** a safe profile and
+**refuses** the unsafe engines — this is correctness, not preference:
 
-- **Force `-sT`** (TCP connect). A SYN scan (`-sS`) uses raw packets → bypasses proxychains.
+- **Force `-sT`** (TCP connect). SYN (`-sS`) uses raw packets → bypasses the proxy.
 - **Force `-Pn`** (already used for port scans) and **skip ICMP/UDP host-discovery**
-  (`-sn -PE -PP` / `-PU`) — ICMP and UDP don't traverse SOCKS. Discovery becomes TCP-connect
-  based, through the proxy.
-- **Disable masscan** — raw-packet engine, cannot be proxied at all; fall back to nmap `-sT`
-  (recce already has a masscan→nmap fallback path to reuse).
-- **Drop `-sU`** UDP scans while proxied (see §4).
-- Keep `-n` (proxy does remote DNS).
+  (`-sn -PE -PP` / `-PU`) — neither traverses the proxy; discovery becomes TCP-connect based.
+- **Disable masscan** — raw-packet engine, cannot be proxied at all → fall back to nmap `-sT`
+  (recce already has that fallback path).
+- **Drop `-sU`** UDP scans (see §4.3). Keep `-n` (proxy does remote DNS).
 
-This is a documented, operator-visible shift ("proxy mode → connect scan, no masscan, no UDP"),
-not a silent downgrade.
+Operator-visible ("proxy mode → connect scan, no masscan, no UDP"), never a silent downgrade.
 
----
+### 4.3 Honesty layer — surface what can't tunnel
 
-## 4. Honesty & limitations (the north-star part)
-
-Everything that **cannot** go through the proxy is surfaced, never hidden:
-
-- **UDP probes** (SNMP 161, SQL Browser 1434, UDP host-discovery, `-sU`): SOCKS TCP can't
-  carry them. `net.udp_socket()` raises `ProxyUnsupported`; each caller logs a **scan issue**
-  ("SNMP skipped — UDP can't traverse the SOCKS proxy; run it from the pivot host directly")
-  rather than returning "no finding". A clean "0 SNMP" while proxied would be a false
-  negative; the warning prevents that misread.
-- **Raw-packet scans** (SYN, masscan): auto-swapped to `-sT` with a one-line notice.
-- **ICMP discovery**: replaced by `-Pn` + TCP discovery, noted.
-- **No silent direct fallback, ever.** If the proxy is set and a connection can't be
-  tunneled, it **fails loudly** — recce must never quietly connect direct (that leaks the
-  operator's real source IP past the pivot and is an OPSEC failure, not just a bug).
-- **A persistent "PROXY: socks5://… (connect-scan mode, UDP disabled)" banner** on every
+- **UDP probes** (SNMP 161, SQL-Browser 1434, UDP discovery, `-sU`): each is skipped with a
+  logged **scan issue** — e.g. *"SNMP skipped: UDP can't traverse the proxy; run it from the
+  pivot host directly."* A clean "0 SNMP" while proxied would be a false negative; the warning
+  prevents the misread.
+- **Raw-packet scans** auto-swapped to `-sT` with a one-line notice; **ICMP discovery** →
+  `-Pn` + TCP, noted.
+- **A persistent "PROXY: socks5h://… (connect-scan mode, UDP disabled)" banner** on every
   command and in the report header, so results are always read in the right context.
-- **Timeouts scale** — proxied + multi-hop connections are slower; apply a proxy latency
-  multiplier to probe timeouts so slow-but-alive internal hosts aren't misread as down.
+- **Timeouts scale** — proxied/multi-hop is slower; apply a latency multiplier so slow-but-
+  alive internal hosts aren't misread as down.
+
+### 4.4 Config propagation
+
+The proxy state is a **process-global set once at startup** (the same idiom `cli._DEFER_REPORTS`
+already uses) — `scanner` reads it to pick the safe profile, the UDP call sites read it to
+decide skip-and-warn, the report header reads it for the banner. No threading a `proxy=` kwarg
+through dozens of probe signatures.
 
 ---
 
-## 5. CLI surface
+## 5. Optional (later): native `recce/net.py` — transport without proxychains
 
-A single global option (added to the shared arg groups, like `_add_common`):
+Only worth building if the proxychains-wrap UX proves annoying, or to run on a box without
+proxychains. It would let `recce --proxy` self-contain transport and give **per-probe** UDP
+honesty instead of relying on nmap-level handling.
+
+- Stdlib `recce/net.py`: SOCKS5 (+ SOCKS4a, remote DNS via `socks5h`) **and HTTP CONNECT**,
+  scheme-driven and proxy-agnostic downstream; a proxy-aware `create_connection` +
+  `http_connection` factory; `udp_socket()` that raises `ProxyUnsupported` when proxied.
+- Migrate the 19 `create_connection` and 12 `HTTP(S)Connection` sites onto it.
+- With `--proxy` unset it is a byte-for-byte no-op over today's direct path (the whole existing
+  suite is the guard).
+
+This is the part of the *original* design that mostly duplicated proxychains — hence demoted
+to optional. Ship §4 first and see whether it's even wanted.
+
+---
+
+## 6. CLI surface
 
 ```
---proxy socks5h://[user:pass@]HOST:PORT   route all probes + tools through this SOCKS proxy
---proxy socks4a://HOST:PORT               (SOCKS4a also supported)
---proxy http://[user:pass@]HOST:PORT      HTTP CONNECT proxy (Burp / corporate web proxy)
+--proxy socks5h://[user:pass@]HOST:PORT   pivot through this proxy (re-execs under proxychains)
+--proxy socks4a://HOST:PORT               SOCKS4a
+--proxy http://[user:pass@]HOST:PORT      HTTP CONNECT (Burp / corporate web proxy)
 ```
 
-- Accepts `socks5` / `socks5h` (remote DNS) / `socks4a` / `http` (CONNECT). `socks5h` is the
-  recommended default resolution behavior. The scheme is the only switch between proxy kinds;
-  everything downstream is proxy-agnostic.
-- **proxychains note:** proxychains4 itself understands SOCKS4/5 and HTTP CONNECT, so the
-  generated conf mirrors whichever `--proxy` scheme is set — the tool half and the probe half
-  stay consistent.
-- On startup: parse → `net.configure()` → write proxychains conf → print the proxy banner →
-  probe the SOCKS port once and **fail fast with a clear message if it's unreachable** (don't
-  start a whole engagement against a dead tunnel).
-- Optional `--proxy-check` doctor sub-check: verify the SOCKS endpoint answers and that
-  `proxychains4` is installed (gate the tool half of the feature honestly).
+- Scheme selects the proxy kind; proxychains4 handles all three, so the generated conf mirrors
+  whatever `--proxy` is set — probe half and tool half stay consistent.
+- On startup: parse → write proxychains conf → (re-exec if not already wrapped) → **probe the
+  proxy once and fail fast with a clear message if it's unreachable** (don't launch a whole
+  engagement against a dead tunnel) → print the PROXY banner.
+- `doctor` / `--proxy-check`: verify `proxychains4` is installed and the proxy endpoint
+  answers — gate the feature honestly.
 
 ---
 
-## 6. Staged rollout (each stage ships independently, tool usable throughout)
+## 7. Staged rollout (each stage ships independently)
 
-- **P1 — `net` module + TCP probes.** Build `recce/net.py` (config + SOCKS5/4a + proxy-aware
-  `create_connection`), migrate the 19 `create_connection` sites, add `--proxy`, banner,
-  startup reachability check. Ships: every raw-socket service probe (ftp/smb/ldap/mongodb/
-  redis/rsync/nfs/mssql/kerberos + svcdetect/probes banner grabs) works through a pivot.
-  Test with a stdlib SOCKS server.
-- **P2 — HTTP/S probes.** `net.http_connection`; migrate the 12 `HTTP(S)Connection` sites
-  (web/api/docker/elasticsearch/kubernetes/probes). Ships: web + API enum through the pivot.
-- **P3 — tool shell-outs + nmap profile.** proxychains prefixing at `scanner._run` /
-  `util.run_tool`; the forced `-sT -Pn`, no-masscan, no-`-sU` proxy profile; exclude
-  screenshot. Ships: the full scan + credentialed tooling through the pivot.
-- **P4 — UDP honesty + polish.** `ProxyUnsupported` + scan-issue surfacing for SNMP/SQL-
-  Browser/UDP-discovery, report-header banner, timeout scaling, `--proxy-check` doctor.
+- **P1 — awareness + safety + honesty (the whole valuable core).** `--proxy` re-exec-under-
+  proxychains + proxychains conf generation + reachability check; the forced proxy-safe nmap
+  profile (§4.2); the UDP skip-and-warn + report banner + timeout scaling (§4.3); doctor check.
+  Ships the complete field capability leaning on proxychains for transport. **Small — mostly
+  scanner-profile + CLI + honesty wiring, little-to-no new network code.**
+- **P2 — (optional) native `recce/net.py`.** Only if P1's proxychains dependency/UX warrants
+  it: the stdlib SOCKS/CONNECT client + the 19+12 site migration, so `recce --proxy` works with
+  no proxychains and gains per-probe UDP honesty.
 
-Order rationale: P1 covers the largest, cleanest chunk (one primitive, 19 sites) and proves
-the SOCKS core end-to-end; P4 (the honesty layer) lands last because it depends on the earlier
-paths knowing they're proxied.
+Order rationale: P1 is the part only recce can do and carries the real field value (no real-IP
+leak, no silent UDP miss). P2 is a transport nicety that competes with a tool the operator
+already has — build it on demand, not on spec.
 
 ---
 
-## 7. Testing (offline, deterministic)
+## 8. Testing (offline, deterministic)
 
-- **SOCKS handshake unit tests** — encode/parse SOCKS5 greeting/CONNECT/reply and SOCKS4a,
-  including error codes, against hand-built byte vectors (mirrors the existing
-  `wire_vectors.py` style).
-- **A tiny stdlib SOCKS5 server in-test** (thread + loopback, like the HTTPS-probe test) to
-  prove `net.create_connection` and `net.http_connection` actually tunnel: point recce probes
-  at a loopback service *via* the test proxy and assert the same result as direct.
-- **UDP-while-proxied** asserts `ProxyUnsupported` is raised and the caller logs a scan issue
-  (not a clean zero).
-- **No-proxy regression**: with `--proxy` unset, `net.create_connection` must be a
-  byte-for-byte behavioral no-op over today's direct path (the whole existing suite is the
-  guard).
+- **Safe-profile unit tests** — with the proxy global set, assert `scanner` emits `-sT -Pn`,
+  no `-sS`, no masscan, no `-sU`, and that host-discovery drops ICMP.
+- **Honesty tests** — a UDP probe (SNMP) while proxied logs a scan issue rather than returning
+  a clean zero; the report header carries the PROXY banner.
+- **Re-exec logic** — the LD_PRELOAD/sentinel detection picks "already wrapped" vs "need
+  re-exec" correctly, with the loop guard (test the decision function, not an actual exec).
+- **No-proxy regression** — with `--proxy` unset, every path is byte-for-byte today's behavior
+  (the whole existing suite guards this).
+- **(P2 only)** stdlib SOCKS5 test server + handshake byte-vector tests (mirrors
+  `wire_vectors.py`), proving `net.create_connection` tunnels to a loopback service.
 
 ---
 
-## 8. Decisions & remaining notes
+## 9. Decisions & notes
 
 **Decided (2026-07-30):**
 
-1. ✅ **Proxy types — SOCKS + HTTP CONNECT in v1.** SOCKS5/4a for pivots plus HTTP CONNECT
-   for Burp/corporate web proxies. Scheme-driven, proxy-agnostic downstream (§3.2).
-2. ✅ **Tool proxying — proxychains4.** Assume `proxychains4` on the Kali box, doctor-gated
-   with a clear message if missing (`--proxy-check`). Uniform across every shelled-out tool;
-   no per-tool native-flag matrix. proxychains4 covers SOCKS + HTTP CONNECT, so it mirrors
-   whatever `--proxy` scheme is set.
+1. ✅ **Value is safety + honesty, not transport.** Transport is already handled by proxychains
+   (transparent `connect()` hook) and by transparent tunnels (ligolo/sshuttle need nothing). v1
+   is the thin safety/honesty layer; native SOCKS is demoted to optional P2.
+2. ✅ **Proxy types — SOCKS + HTTP CONNECT**, both delivered via proxychains4 (which speaks
+   all three schemes), so v1 supports them with no per-kind code.
+3. ✅ **Tool proxying — proxychains4**, doctor-gated. The re-exec model extends the same
+   proxychains transport to recce's own probes, so one mechanism covers everything.
 
 **Still open (don't block P1):**
 
-3. **Per-target vs whole-run proxy** — v1 is one proxy for the run. Worth a `--proxy-scope`
-   later for multi-segment engagements?
-4. **ligolo-ng note** — ligolo uses a TUN, not SOCKS, so recce needs no special support there
-   (traffic is transparently routed by the OS). Document as "no proxy flag needed with
-   ligolo" so operators don't double-configure.
+4. **Per-target / multi-hop proxy** — v1 is one proxy for the run; a `--proxy-scope` for multi-
+   segment engagements could come later.
+5. **ligolo-ng** — TUN, not SOCKS; the OS routes transparently, so recce needs no flag. Document
+   as "no `--proxy` needed with ligolo" so operators don't double-configure.
