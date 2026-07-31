@@ -4216,11 +4216,18 @@ def cmd_api(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_snmp(args: argparse.Namespace) -> int:
-    """Deep SNMP enumeration: brute common community strings over UDP 161, then read
-    the system group + walk Windows users / processes / software. Read-only - recce
-    never sends a SET (a read-write community is flagged by name, not exercised)."""
-    from . import snmp
+def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
+                      no_targets: str, fmt, extra=None) -> int:
+    """Shared driver for the single-service deep-enum commands (snmp/mongodb/redis/
+    elasticsearch/rsync/nfs). They differ only in the module they call, the hint shown
+    when no endpoints are present, and how each target line is formatted - everything
+    else (open the store, select hosts, analyze, print targets, fold findings, mark
+    scanned, regenerate the report) was byte-for-byte identical across six copies.
+    One implementation kills the drift that let the same step quietly diverge between
+    them. `fmt(t, active)` returns the display text for one target; optional
+    `extra(store, hosts, tgts, by_ip)` runs a per-service post-fold step."""
+    from importlib import import_module
+    mod = import_module(f".{module}", __package__)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
@@ -4230,263 +4237,162 @@ def cmd_snmp(args: argparse.Namespace) -> int:
         return 1
     _import_excel_tracking(store, paths)
     hosts = _selected_hosts(store.all_hosts(), args)
-
     active = not args.no_probe
-    analysis = snmp.analyze(hosts, active=active, **_probe_kwargs(args, "snmp"))
+    analysis = mod.analyze(hosts, active=active, **_probe_kwargs(args, source))
     tgts = analysis["targets"]
     if not tgts:
-        print("[!] No SNMP-responsive hosts. (SNMP is UDP 161; recce probes it directly, "
-              "so target the hosts you expect to run it.)")
+        print(no_targets)
         store.close()
         return 0
-    print(f"[+] {len(tgts)} SNMP endpoint(s):")
+    print(f"[+] {len(tgts)} {noun}:")
     for t in tgts:
-        c = t.get("community")
-        state = (f"community '{c}'" + ("  [RW-likely]" if t.get("rw_likely") else "")
-                 if c else "no readable community")
-        name = f"  {t.get('sys_name')}" if t.get("sys_name") else ""
-        users = f"  {t.get('users')} users" if t.get("users") else ""
-        print(f"      {t['ip']}:{t['port']}  {state}{name}{users}")
+        print(f"      {fmt(t, active)}")
+    by_ip = _fold_service_findings(store, hosts, analysis, source,
+                                   mod.findings_to_vulns, label)
+    if extra:
+        extra(store, hosts, tgts, by_ip)
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print(f"    -> {label} sheet written; findings folded into the main totals.")
+    return 0
 
-    by_ip = _fold_service_findings(store, hosts, analysis, "snmp",
-                                   snmp.findings_to_vulns, "SNMP")
+
+def _fmt_snmp(t, active) -> str:
+    c = t.get("community")
+    state = (f"community '{c}'" + ("  [RW-likely]" if t.get("rw_likely") else "")
+             if c else "no readable community")
+    name = f"  {t.get('sys_name')}" if t.get("sys_name") else ""
+    users = f"  {t.get('users')} users" if t.get("users") else ""
+    return f"{t['ip']}:{t['port']}  {state}{name}{users}"
+
+
+def _snmp_persist_accounts(store, hosts, tgts, by_ip) -> None:
     # analyze() attached SNMP Account rows in place; persist hosts that gained them
     # but produced no SNMP vuln (rare) so the accounts still land.
     host_by_ip = {h.ip: h for h in hosts}
     for t in tgts:
         if t.get("users") and t["ip"] not in by_ip and t["ip"] in host_by_ip:
             store.upsert_host(host_by_ip[t["ip"]], merge=False)
-    if active:
-        _mark_capability_scanned(store, tgts)
-    title = store.get_meta("engagement") or args.title
-    _generate_reports(store, paths, title)
-    store.close()
-    print("    -> SNMP sheet written; findings folded into the main totals.")
-    return 0
+
+
+def _fmt_mongodb(t, active) -> str:
+    if t.get("unauth"):
+        state = f"EXPOSED (unauth, {t.get('databases', 0)} db)"
+    else:
+        state = "auth required" if t.get("version") else "probed"
+    ver = f"  {t.get('version', '')}" if t.get("version") else ""
+    return f"{t['ip']}:{t['port']}  {state}{ver}"
+
+
+def _fmt_redis(t, active) -> str:
+    if t.get("unauth"):
+        state = f"EXPOSED (unauth, {t.get('keys', 0)} keys)"
+    elif t.get("auth_required"):
+        state = "auth required"
+    else:
+        state = "probed" if t.get("version") else "reachable"
+    ver = f"  {t.get('version', '')}" if t.get("version") else ""
+    return f"{t['ip']}:{t['port']}  {state}{ver}"
+
+
+def _fmt_elasticsearch(t, active) -> str:
+    if t.get("unauth"):
+        state = f"EXPOSED (unauth, {t.get('indices', 0)} indices)"
+    elif t.get("secured"):
+        state = "security enforced"
+    else:
+        state = "probed" if t.get("version") else "reachable"
+    ver = f"  {t.get('version', '')}" if t.get("version") else ""
+    return f"{t['ip']}:{t['port']}  {state}{ver}"
+
+
+def _fmt_rsync(t, active) -> str:
+    mods = t.get("modules", 0)
+    state = (f"{t.get('open', 0)}/{mods} module(s) open" if mods
+             else "probed" if active else "reachable")
+    return f"{t['ip']}:{t['port']}  {state}"
+
+
+def _fmt_nfs(t, active) -> str:
+    exp = t.get("exports", 0)
+    if t.get("world"):
+        state = f"{t['world']}/{exp} export(s) WORLD-mountable"
+    elif exp:
+        state = f"{exp} export(s) listed"
+    else:
+        state = "probed" if active else "reachable"
+    return f"{t['ip']}  {state}"
+
+
+def cmd_snmp(args: argparse.Namespace) -> int:
+    """Deep SNMP enumeration: brute common community strings over UDP 161, then read
+    the system group + walk Windows users / processes / software. Read-only - recce
+    never sends a SET (a read-write community is flagged by name, not exercised)."""
+    return _run_service_scan(
+        args, module="snmp", source="snmp", label="SNMP", noun="SNMP endpoint(s)",
+        no_targets="[!] No SNMP-responsive hosts. (SNMP is UDP 161; recce probes it "
+                   "directly, so target the hosts you expect to run it.)",
+        fmt=_fmt_snmp, extra=_snmp_persist_accounts)
 
 
 def cmd_mongodb(args: argparse.Namespace) -> int:
     """Deep MongoDB enumeration: speak the wire protocol (stdlib OP_MSG/BSON), read the
     version, and test whether listDatabases works WITHOUT authentication - an exposed
     instance is a CONFIRMED critical data exposure. Read-only."""
-    from . import mongodb
-    paths = _open_paths(args.output_dir)
-    if not os.path.exists(paths["db"]):
-        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
-              "knows which hosts expose MongoDB.")
-        return 1
-    store = _open_store(paths["db"])
-    if store is None:
-        return 1
-    _import_excel_tracking(store, paths)
-    hosts = _selected_hosts(store.all_hosts(), args)
-
-    active = not args.no_probe
-    analysis = mongodb.analyze(hosts, active=active, **_probe_kwargs(args, "mongodb"))
-    tgts = analysis["targets"]
-    if not tgts:
-        print("[!] No MongoDB endpoints in the datastore (no port 27017-27019). Run "
-              "`enum` against the database hosts first.")
-        store.close()
-        return 0
-    print(f"[+] {len(tgts)} MongoDB endpoint(s):")
-    for t in tgts:
-        if t.get("unauth"):
-            state = f"EXPOSED (unauth, {t.get('databases', 0)} db)"
-        else:
-            state = "auth required" if t.get("version") else "probed"
-        ver = f"  {t.get('version', '')}" if t.get("version") else ""
-        print(f"      {t['ip']}:{t['port']}  {state}{ver}")
-
-    _fold_service_findings(store, hosts, analysis, "mongodb",
-                           mongodb.findings_to_vulns, "MongoDB")
-    if active:
-        _mark_capability_scanned(store, tgts)
-    title = store.get_meta("engagement") or args.title
-    _generate_reports(store, paths, title)
-    store.close()
-    print("    -> MongoDB sheet written; findings folded into the main totals.")
-    return 0
+    return _run_service_scan(
+        args, module="mongodb", source="mongodb", label="MongoDB",
+        noun="MongoDB endpoint(s)",
+        no_targets="[!] No MongoDB endpoints in the datastore (no port 27017-27019). "
+                   "Run `enum` against the database hosts first.",
+        fmt=_fmt_mongodb)
 
 
 def cmd_redis(args: argparse.Namespace) -> int:
     """Deep Redis enumeration: speak RESP (stdlib), read the version, and test whether
     INFO works WITHOUT authentication - an exposed instance is a CONFIRMED critical
     exposure (full read/write + a file-write -> RCE primitive). Read-only."""
-    from . import redis as _redis
-    paths = _open_paths(args.output_dir)
-    if not os.path.exists(paths["db"]):
-        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
-              "knows which hosts expose Redis.")
-        return 1
-    store = _open_store(paths["db"])
-    if store is None:
-        return 1
-    _import_excel_tracking(store, paths)
-    hosts = _selected_hosts(store.all_hosts(), args)
-
-    active = not args.no_probe
-    analysis = _redis.analyze(hosts, active=active, **_probe_kwargs(args, "redis"))
-    tgts = analysis["targets"]
-    if not tgts:
-        print("[!] No Redis endpoints in the datastore (no port 6379/6380). Run `enum` "
-              "against the cache/database hosts first.")
-        store.close()
-        return 0
-    print(f"[+] {len(tgts)} Redis endpoint(s):")
-    for t in tgts:
-        if t.get("unauth"):
-            state = f"EXPOSED (unauth, {t.get('keys', 0)} keys)"
-        elif t.get("auth_required"):
-            state = "auth required"
-        else:
-            state = "probed" if t.get("version") else "reachable"
-        ver = f"  {t.get('version', '')}" if t.get("version") else ""
-        print(f"      {t['ip']}:{t['port']}  {state}{ver}")
-
-    _fold_service_findings(store, hosts, analysis, "redis",
-                           _redis.findings_to_vulns, "Redis")
-    if active:
-        _mark_capability_scanned(store, tgts)
-    title = store.get_meta("engagement") or args.title
-    _generate_reports(store, paths, title)
-    store.close()
-    print("    -> Redis sheet written; findings folded into the main totals.")
-    return 0
+    return _run_service_scan(
+        args, module="redis", source="redis", label="Redis", noun="Redis endpoint(s)",
+        no_targets="[!] No Redis endpoints in the datastore (no port 6379/6380). Run "
+                   "`enum` against the cache/database hosts first.",
+        fmt=_fmt_redis)
 
 
 def cmd_elasticsearch(args: argparse.Namespace) -> int:
     """Deep Elasticsearch enumeration: GET the HTTP API (stdlib), read the version, and
     test whether /_cat/indices works WITHOUT authentication - an exposed cluster is a
     CONFIRMED critical data exposure. Read-only (GETs only)."""
-    from . import elasticsearch as _es
-    paths = _open_paths(args.output_dir)
-    if not os.path.exists(paths["db"]):
-        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
-              "knows which hosts expose Elasticsearch.")
-        return 1
-    store = _open_store(paths["db"])
-    if store is None:
-        return 1
-    _import_excel_tracking(store, paths)
-    hosts = _selected_hosts(store.all_hosts(), args)
-
-    active = not args.no_probe
-    analysis = _es.analyze(hosts, active=active, **_probe_kwargs(args, "elasticsearch"))
-    tgts = analysis["targets"]
-    if not tgts:
-        print("[!] No Elasticsearch endpoints in the datastore (no port 9200/9201). "
-              "Run `enum` against the search/log hosts first.")
-        store.close()
-        return 0
-    print(f"[+] {len(tgts)} Elasticsearch endpoint(s):")
-    for t in tgts:
-        if t.get("unauth"):
-            state = f"EXPOSED (unauth, {t.get('indices', 0)} indices)"
-        elif t.get("secured"):
-            state = "security enforced"
-        else:
-            state = "probed" if t.get("version") else "reachable"
-        ver = f"  {t.get('version', '')}" if t.get("version") else ""
-        print(f"      {t['ip']}:{t['port']}  {state}{ver}")
-
-    _fold_service_findings(store, hosts, analysis, "elasticsearch",
-                           _es.findings_to_vulns, "Elasticsearch")
-    if active:
-        _mark_capability_scanned(store, tgts)
-    title = store.get_meta("engagement") or args.title
-    _generate_reports(store, paths, title)
-    store.close()
-    print("    -> Elasticsearch sheet written; findings folded into the main totals.")
-    return 0
+    return _run_service_scan(
+        args, module="elasticsearch", source="elasticsearch", label="Elasticsearch",
+        noun="Elasticsearch endpoint(s)",
+        no_targets="[!] No Elasticsearch endpoints in the datastore (no port "
+                   "9200/9201). Run `enum` against the search/log hosts first.",
+        fmt=_fmt_elasticsearch)
 
 
 def cmd_rsync(args: argparse.Namespace) -> int:
     """Deep rsync-daemon enumeration: speak the rsync daemon protocol (stdlib), list
     the modules, and test each for anonymous access - an @RSYNCD: OK module is a
     CONFIRMED unauthenticated file exposure. Read-only (never transfers a file)."""
-    from . import rsync as _rsync
-    paths = _open_paths(args.output_dir)
-    if not os.path.exists(paths["db"]):
-        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
-              "knows which hosts expose rsync.")
-        return 1
-    store = _open_store(paths["db"])
-    if store is None:
-        return 1
-    _import_excel_tracking(store, paths)
-    hosts = _selected_hosts(store.all_hosts(), args)
-
-    active = not args.no_probe
-    analysis = _rsync.analyze(hosts, active=active, **_probe_kwargs(args, "rsync"))
-    tgts = analysis["targets"]
-    if not tgts:
-        print("[!] No rsync endpoints in the datastore (no port 873). Run `enum` "
-              "against the file hosts first.")
-        store.close()
-        return 0
-    print(f"[+] {len(tgts)} rsync endpoint(s):")
-    for t in tgts:
-        mods = t.get("modules", 0)
-        state = (f"{t.get('open', 0)}/{mods} module(s) open" if mods
-                 else "probed" if active else "reachable")
-        print(f"      {t['ip']}:{t['port']}  {state}")
-
-    _fold_service_findings(store, hosts, analysis, "rsync",
-                           _rsync.findings_to_vulns, "rsync")
-    if active:
-        _mark_capability_scanned(store, tgts)
-    title = store.get_meta("engagement") or args.title
-    _generate_reports(store, paths, title)
-    store.close()
-    print("    -> rsync sheet written; findings folded into the main totals.")
-    return 0
+    return _run_service_scan(
+        args, module="rsync", source="rsync", label="rsync", noun="rsync endpoint(s)",
+        no_targets="[!] No rsync endpoints in the datastore (no port 873). Run `enum` "
+                   "against the file hosts first.",
+        fmt=_fmt_rsync)
 
 
 def cmd_nfs(args: argparse.Namespace) -> int:
     """Deep NFS enumeration: speak ONC RPC (stdlib) to the portmapper + mountd, list
     the exports (showmount -e), and flag any shared to every host - a world-mountable
     export is a CONFIRMED exposure. Read-only (never mounts)."""
-    from . import nfs as _nfs
-    paths = _open_paths(args.output_dir)
-    if not os.path.exists(paths["db"]):
-        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
-              "knows which hosts expose NFS.")
-        return 1
-    store = _open_store(paths["db"])
-    if store is None:
-        return 1
-    _import_excel_tracking(store, paths)
-    hosts = _selected_hosts(store.all_hosts(), args)
-
-    active = not args.no_probe
-    analysis = _nfs.analyze(hosts, active=active, **_probe_kwargs(args, "nfs"))
-    tgts = analysis["targets"]
-    if not tgts:
-        print("[!] No NFS endpoints in the datastore (no port 2049/111). Run `enum` "
-              "against the file hosts first.")
-        store.close()
-        return 0
-    print(f"[+] {len(tgts)} NFS host(s):")
-    for t in tgts:
-        exp = t.get("exports", 0)
-        if t.get("world"):
-            state = f"{t['world']}/{exp} export(s) WORLD-mountable"
-        elif exp:
-            state = f"{exp} export(s) listed"
-        else:
-            state = "probed" if active else "reachable"
-        print(f"      {t['ip']}  {state}")
-
-    _fold_service_findings(store, hosts, analysis, "nfs",
-                           _nfs.findings_to_vulns, "NFS")
-    if active:
-        _mark_capability_scanned(store, tgts)
-    title = store.get_meta("engagement") or args.title
-    _generate_reports(store, paths, title)
-    store.close()
-    print("    -> NFS sheet written; findings folded into the main totals.")
-    return 0
+    return _run_service_scan(
+        args, module="nfs", source="nfs", label="NFS", noun="NFS host(s)",
+        no_targets="[!] No NFS endpoints in the datastore (no port 2049/111). Run "
+                   "`enum` against the file hosts first.",
+        fmt=_fmt_nfs)
 
 
 def cmd_kerberos(args: argparse.Namespace) -> int:
