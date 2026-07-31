@@ -7058,6 +7058,42 @@ class SvcDetectTest(unittest.TestCase):
         self.assertEqual(sd._match_signature("\x03\x00\x00\x13")[0], "ms-wbt-server")
         self.assertIsNone(sd._match_signature("random noise"))
 
+    def test_silent_http_on_nonstandard_port_is_identified(self):
+        """A web server on an odd port stays mute on connect and has no nudge of
+        its own; the generic HTTP fallback must still coax an HTTP/ banner so the
+        port gets a real service label (and thus web/api enum). Regression for the
+        lab shakeout where 8099 came back 'unknown' and all API surface was missed."""
+        import socket as _socket
+        import threading
+        from recce import svcdetect as sd
+
+        srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))                 # silent HTTP-ish server on an odd port
+        port_no = srv.getsockname()[1]
+        srv.listen(1)
+
+        def serve_once():
+            try:
+                conn, _ = srv.accept()
+                conn.recv(256)                     # wait to be spoken to, THEN answer
+                conn.sendall(b"HTTP/1.0 200 OK\r\nServer: LabAPI/1.0\r\n\r\n")
+                conn.close()
+            except OSError:
+                pass
+
+        t = threading.Thread(target=serve_once, daemon=True)
+        t.start()
+        try:
+            port = Port(portid=port_no, protocol="tcp", state="open", service="unknown")
+            host = Host(ip="127.0.0.1", ports=[port])
+            sd.enrich_host(host, active=True)
+            self.assertEqual(port.service, "http")
+            self.assertEqual(port.detect_source, "banner")
+        finally:
+            srv.close()
+            t.join(timeout=2)
+
     def test_suggest_command_only_for_still_unknown(self):
         from recce import svcdetect as sd
         unknown = Port(portid=1234, service="unknown")

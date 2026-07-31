@@ -153,10 +153,10 @@ _READ = 512
 # Ports where the service stays silent until spoken to - send a tiny, protocol-
 # appropriate nudge so we actually get bytes back. Everything else we just read
 # (FTP/SMTP/SSH/POP/IMAP/VNC announce themselves on connect).
+_HTTP_NUDGE = b"HEAD / HTTP/1.0\r\n\r\n"
 _NUDGE = {
-    80: b"HEAD / HTTP/1.0\r\n\r\n", 8080: b"HEAD / HTTP/1.0\r\n\r\n",
-    8000: b"HEAD / HTTP/1.0\r\n\r\n", 8888: b"HEAD / HTTP/1.0\r\n\r\n",
-    5000: b"HEAD / HTTP/1.0\r\n\r\n", 3000: b"HEAD / HTTP/1.0\r\n\r\n",
+    80: _HTTP_NUDGE, 8080: _HTTP_NUDGE, 8000: _HTTP_NUDGE, 8888: _HTTP_NUDGE,
+    5000: _HTTP_NUDGE, 3000: _HTTP_NUDGE,
     6379: b"PING\r\n", 11211: b"version\r\n",
 }
 # RDP: an X.224 Connection Request. Cheap, and the response starts 0x03 0x00.
@@ -180,6 +180,19 @@ def grab_banner(ip: str, port: Port, timeout: float = _BANNER_TIMEOUT) -> str:
             if not data and nudge:
                 try:
                     s.sendall(nudge)
+                    data = s.recv(_READ)
+                except OSError:
+                    data = b""
+            # Last-resort HTTP probe: a web app on a non-standard port (custom API,
+            # qdrant, an internal tool) stays mute until spoken to and has no nudge
+            # of its own, so it used to come back "unknown" and get ZERO web/api
+            # enum - a real finding silently dropped. HTTP is by far the commonest
+            # thing to find on an arbitrary high port; one HEAD confirms it. A non-
+            # HTTP service just won't answer with "HTTP/", so _match_signature stays
+            # silent and no wrong label is set.
+            if not data and nudge is None:
+                try:
+                    s.sendall(_HTTP_NUDGE)
                     data = s.recv(_READ)
                 except OSError:
                     data = b""
