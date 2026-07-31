@@ -24,12 +24,12 @@ responsibility is simply to send all its outbound traffic through a SOCKS endpoi
 operator supplies. This keeps the feature small, stdlib-only, and airgap-friendly — no new
 dependency, no tunnel-management surface.
 
-**In scope:** SOCKS5 (+ SOCKS4a) for every stdlib socket/HTTP probe; `proxychains`-style
-prefixing for the external tools recce shells out to; honest handling + surfacing of the
-traffic that can't be proxied.
+**In scope (v1, decisions confirmed 2026-07-30):** SOCKS5 (+ SOCKS4a) **and HTTP CONNECT**
+proxies for every stdlib socket/HTTP probe; `proxychains4` prefixing for the external tools
+recce shells out to; honest handling + surfacing of the traffic that can't be proxied.
 
-**Out of scope (v1):** building the tunnel; HTTP CONNECT proxies (add later if needed);
-per-target proxy chains (one proxy for the whole run to start).
+**Out of scope (v1):** building the tunnel; per-target proxy chains (one proxy for the whole
+run to start).
 
 ---
 
@@ -106,6 +106,14 @@ No third-party `PySocks` (airgap + stdlib-only constraint). Implement the minima
 Map SOCKS reply codes to clear errors (`host unreachable`, `connection refused`, `TTL
 expired`) so a failed internal probe reads as a real result, not a mystery.
 
+**HTTP CONNECT** (also in v1). For an `http://[user:pass@]host:port` proxy, `net.create_connection`
+opens TCP to the proxy and sends `CONNECT target:port HTTP/1.1` (+ `Proxy-Authorization:
+Basic …` when creds are present), then reads the status line: `200` → the socket is now a
+tunnel to `target` and is returned like any other; any other code maps to the same clear
+error surface as the SOCKS codes. The tunneled socket then feeds `http_connection` / ssl
+exactly as the SOCKS one does, so §3.1's factories are proxy-kind-agnostic — the scheme in
+`--proxy` (`socks5h://` vs `http://`) is the only thing that differs.
+
 ### 3.3 Tool shell-outs → proxychains
 
 nmap, netexec, impacket, bloodhound-python, etc. have no native SOCKS; the standard field
@@ -166,10 +174,15 @@ A single global option (added to the shared arg groups, like `_add_common`):
 ```
 --proxy socks5h://[user:pass@]HOST:PORT   route all probes + tools through this SOCKS proxy
 --proxy socks4a://HOST:PORT               (SOCKS4a also supported)
+--proxy http://[user:pass@]HOST:PORT      HTTP CONNECT proxy (Burp / corporate web proxy)
 ```
 
-- Accepts `socks5` / `socks5h` (remote DNS) / `socks4a`. `socks5h` is the recommended/default
-  resolution behavior.
+- Accepts `socks5` / `socks5h` (remote DNS) / `socks4a` / `http` (CONNECT). `socks5h` is the
+  recommended default resolution behavior. The scheme is the only switch between proxy kinds;
+  everything downstream is proxy-agnostic.
+- **proxychains note:** proxychains4 itself understands SOCKS4/5 and HTTP CONNECT, so the
+  generated conf mirrors whichever `--proxy` scheme is set — the tool half and the probe half
+  stay consistent.
 - On startup: parse → `net.configure()` → write proxychains conf → print the proxy banner →
   probe the SOCKS port once and **fail fast with a clear message if it's unreachable** (don't
   start a whole engagement against a dead tunnel).
@@ -215,13 +228,19 @@ paths knowing they're proxied.
 
 ---
 
-## 8. Open questions / decisions to confirm
+## 8. Decisions & remaining notes
 
-1. **HTTP CONNECT proxies** (corporate/Burp-style) in addition to SOCKS — needed, or SOCKS-
-   only for v1? (Pivots are almost always SOCKS; leaning SOCKS-only first.)
-2. **proxychains dependency** — assume `proxychains4` present on the Kali box (doctor-gated),
-   or also offer nmap-native `--proxies socks4://…` where nmap supports it (nmap's SOCKS
-   support is partial/`-sT`-only)?
+**Decided (2026-07-30):**
+
+1. ✅ **Proxy types — SOCKS + HTTP CONNECT in v1.** SOCKS5/4a for pivots plus HTTP CONNECT
+   for Burp/corporate web proxies. Scheme-driven, proxy-agnostic downstream (§3.2).
+2. ✅ **Tool proxying — proxychains4.** Assume `proxychains4` on the Kali box, doctor-gated
+   with a clear message if missing (`--proxy-check`). Uniform across every shelled-out tool;
+   no per-tool native-flag matrix. proxychains4 covers SOCKS + HTTP CONNECT, so it mirrors
+   whatever `--proxy` scheme is set.
+
+**Still open (don't block P1):**
+
 3. **Per-target vs whole-run proxy** — v1 is one proxy for the run. Worth a `--proxy-scope`
    later for multi-segment engagements?
 4. **ligolo-ng note** — ligolo uses a TUN, not SOCKS, so recce needs no special support there
