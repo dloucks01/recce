@@ -22,7 +22,7 @@ import time
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
 from .models import Host, Port, Vuln
-from . import probes
+from . import probes, proxy
 
 _TIMEOUT = 6.0
 _UA = "recce-web/1.0"
@@ -61,9 +61,9 @@ def _fetch(ip: str, port: Port, path: str = "/", method: str = "GET", read: int 
     try:
         if use_tls:
             conn = http.client.HTTPSConnection(
-                ip, port.portid, timeout=_TIMEOUT, context=ssl._create_unverified_context())
+                ip, port.portid, timeout=proxy.scaled(_TIMEOUT), context=ssl._create_unverified_context())
         else:
-            conn = http.client.HTTPConnection(ip, port.portid, timeout=_TIMEOUT)
+            conn = http.client.HTTPConnection(ip, port.portid, timeout=proxy.scaled(_TIMEOUT))
         req_headers = {"User-Agent": _UA, "Connection": "close", "Accept": "*/*"}
         if auth:
             req_headers.update(auth)
