@@ -26,6 +26,7 @@ import ssl
 import time
 
 from .models import Host, Port, Vuln
+from . import proxy
 
 # Ports we treat as HTTP/HTTPS even if nmap's service name is fuzzy.
 _TLS_HINTS = ("https", "ssl", "tls")
@@ -98,9 +99,9 @@ def _fetch_headers(host_ip: str, port: Port, use_tls: bool):
         if use_tls:
             ctx = ssl._create_unverified_context()
             conn = http.client.HTTPSConnection(
-                host_ip, port.portid, timeout=_TIMEOUT, context=ctx)
+                host_ip, port.portid, timeout=proxy.scaled(_TIMEOUT), context=ctx)
         else:
-            conn = http.client.HTTPConnection(host_ip, port.portid, timeout=_TIMEOUT)
+            conn = http.client.HTTPConnection(host_ip, port.portid, timeout=proxy.scaled(_TIMEOUT))
         conn.request("HEAD", "/", headers={"User-Agent": "recce-probe/1.0",
                                            "Connection": "close"})
         resp = conn.getresponse()
@@ -109,10 +110,10 @@ def _fetch_headers(host_ip: str, port: Port, use_tls: bool):
         # Some servers reject HEAD; retry once with GET if that looks the case.
         if status in (400, 405, 501):
             conn.close()
-            conn = (http.client.HTTPSConnection(host_ip, port.portid, timeout=_TIMEOUT,
+            conn = (http.client.HTTPSConnection(host_ip, port.portid, timeout=proxy.scaled(_TIMEOUT),
                                                 context=ssl._create_unverified_context())
                     if use_tls else
-                    http.client.HTTPConnection(host_ip, port.portid, timeout=_TIMEOUT))
+                    http.client.HTTPConnection(host_ip, port.portid, timeout=proxy.scaled(_TIMEOUT)))
             conn.request("GET", "/", headers={"User-Agent": "recce-probe/1.0",
                                               "Connection": "close"})
             resp = conn.getresponse()
@@ -198,7 +199,7 @@ def _peer_cert(host_ip: str, port: Port):
     verify_error = ""
     try:
         vctx = ssl.create_default_context()
-        with socket.create_connection((host_ip, port.portid), timeout=_TIMEOUT) as raw:
+        with socket.create_connection((host_ip, port.portid), timeout=proxy.scaled(_TIMEOUT)) as raw:
             with vctx.wrap_socket(raw, server_hostname=host_ip) as tls:
                 return tls.getpeercert(), tls.version(), ""
     except ssl.SSLCertVerificationError as exc:
@@ -211,7 +212,7 @@ def _peer_cert(host_ip: str, port: Port):
     # path above; the verify_error already captures expired/self-signed here.
     try:
         uctx = ssl._create_unverified_context()
-        with socket.create_connection((host_ip, port.portid), timeout=_TIMEOUT) as raw:
+        with socket.create_connection((host_ip, port.portid), timeout=proxy.scaled(_TIMEOUT)) as raw:
             with uctx.wrap_socket(raw, server_hostname=host_ip) as tls:
                 return {}, tls.version(), verify_error or "unverified"
     except (OSError, ssl.SSLError, ValueError):
@@ -290,7 +291,7 @@ def _accepts_protocol(host_ip: str, portid: int, protocol_const) -> bool:
         ctx = ssl.SSLContext(protocol_const)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        with socket.create_connection((host_ip, portid), timeout=_TIMEOUT) as raw:
+        with socket.create_connection((host_ip, portid), timeout=proxy.scaled(_TIMEOUT)) as raw:
             with ctx.wrap_socket(raw, server_hostname=host_ip):
                 return True
     except (OSError, ssl.SSLError, ValueError, AttributeError):

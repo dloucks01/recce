@@ -151,6 +151,72 @@ class ScannerSafetyTest(ProxyBase):
         self.assertIn("UDP can't traverse the proxy", issue.message)
 
 
+class TimeoutScalingTest(ProxyBase):
+    def test_scaled_is_noop_when_direct(self):
+        self.assertEqual(proxy.scaled(6.0), 6.0)
+
+    def test_scaled_grows_when_proxied(self):
+        proxy.configure("socks5h://127.0.0.1:1080")
+        self.assertGreater(proxy.scaled(6.0), 6.0)
+
+    def test_probe_modules_use_scaled_timeout(self):
+        # svcdetect/web/probes resolve their connect timeout through proxy.scaled at call
+        # time, so a proxied run gets a longer ceiling than a direct one.
+        from recce import proxy as p
+        base_direct = p.scaled(4.0)
+        p.configure("socks5h://127.0.0.1:1080")
+        self.assertGreater(p.scaled(4.0), base_direct)
+
+    def test_harden_extends_host_timeout(self):
+        proxy.configure("socks5h://127.0.0.1:1080")
+        p = ScanProfile(name="standard", host_timeout=20)
+        scanner.harden_for_proxy(p)
+        self.assertEqual(p.host_timeout, 40)
+
+
+class ReportBannerTest(ProxyBase):
+    def test_html_report_carries_proxy_banner(self):
+        import tempfile
+        from recce.report_html import build_html
+        from recce.models import Host
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "r.html")
+            build_html([Host(ip="10.0.0.1")], out, title="T",
+                       proxy_note="socks5h://127.0.0.1:1080")
+            text = open(out).read()
+        self.assertIn("Scanned via", text)
+        self.assertIn("socks5h://127.0.0.1:1080", text)
+
+    def test_html_report_no_banner_when_direct(self):
+        import tempfile
+        from recce.report_html import build_html
+        from recce.models import Host
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "r.html")
+            build_html([Host(ip="10.0.0.1")], out, title="T")   # no proxy_note
+            self.assertNotIn("Scanned via", open(out).read())
+
+    def test_xlsx_guide_carries_proxy_banner(self):
+        from recce import report_excel
+        rows = []
+
+        class FakeSheet:
+            def write(self, data):
+                rows.append(data)
+
+            def __getattr__(self, _name):        # swallow set_col / freeze / etc.
+                return lambda *a, **k: None
+
+        class FakeWb:
+            def add_sheet(self, name):
+                return FakeSheet()
+
+        report_excel._build_guide(FakeWb(), {"subtitle": "S", "proxy": "socks5h://127.0.0.1:1080"})
+        flat = " ".join(str(r) for r in rows)
+        self.assertIn("Scanned via proxy", flat)
+        self.assertIn("socks5h://127.0.0.1:1080", flat)
+
+
 class HonestyTest(ProxyBase):
     def test_snmp_command_skips_with_honest_message(self):
         from recce import cli

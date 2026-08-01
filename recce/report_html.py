@@ -755,7 +755,7 @@ def _page(title, body):
 
 def build_html(hosts: list[Host], out_path: str, *, title: str = "",
                domains=None, credentials=None, generated: str = "",
-               tracking=None, assets_link: str = "") -> str:
+               tracking=None, assets_link: str = "", proxy_note: str = "") -> str:
     """Write the self-contained findings report. Architecture diagrams and the
     users / credentials / key-information inventory live in a companion page
     (see build_assets_html); `assets_link` is the relative filename to link to it.
@@ -765,11 +765,20 @@ def build_html(hosts: list[Host], out_path: str, *, title: str = "",
     nav = (f'<div class="sub"><a class="xlink" href="{escape(assets_link)}">'
            'Architecture &amp; assets (network map, AD diagram, users, '
            'credentials) →</a></div>' if assets_link else "")
+    # Pivoted run: connect-scan only, no UDP. Banner it so an unreachable UDP service
+    # (SNMP, etc.) is never read as absent. Inline-styled to stay self-contained.
+    proxy_banner = (
+        f'<div style="margin:.6em 0;padding:.5em .8em;border-left:4px solid #d08b00;'
+        f'background:rgba(208,139,0,.12);border-radius:3px">⚠ <strong>Scanned via '
+        f'proxy:</strong> <code>{escape(proxy_note)}</code> — connect-scan only; UDP '
+        f'services (SNMP, etc.) were not reachable through the tunnel.</div>'
+        if proxy_note else "")
     body = "".join([
         f'<header><div class="wrap"><h1>{escape(title)}</h1>'
         f'<div class="sub">recce engagement report'
         + (f' · {escape(generated)}' if generated else "") + '</div>'
         + nav + '</div></header>',
+        (f'<div class="wrap">{proxy_banner}</div>' if proxy_banner else ""),
         '<div class="wrap">',
         _exec_summary(hosts, domains, creds),
         _dashboard(hosts),
