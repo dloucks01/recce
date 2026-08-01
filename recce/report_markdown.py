@@ -17,8 +17,13 @@ def _ip_key(ip: str):
 
 
 def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration Report",
-                   domains: list[Domain] | None = None) -> str:
+                   domains: list[Domain] | None = None, proxy_note: str = "") -> str:
     lines: list[str] = [f"# {title}", ""]
+    if proxy_note:
+        # This run was pivoted through a proxy: TCP connect scan only, no SYN/masscan/UDP.
+        # Flag it so a reader knows UDP services weren't reachable (not "absent").
+        lines += [f"> **Scanned via proxy:** `{proxy_note}` - connect-scan only; UDP "
+                  "services (SNMP, etc.) were not reachable through the tunnel.", ""]
     total_open = sum(len(h.open_ports) for h in hosts)
     total_vulns = sum(len(h.vulns) for h in hosts)
     # Report only hosts we can prove are up; count the rest separately so a scanned-
