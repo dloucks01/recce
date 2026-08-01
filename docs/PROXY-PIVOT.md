@@ -180,11 +180,13 @@ to optional. Ship §4 first and see whether it's even wanted.
 
 ## 7. Staged rollout (each stage ships independently)
 
-- **P1 — awareness + safety + honesty (the whole valuable core).** `--proxy` re-exec-under-
-  proxychains + proxychains conf generation + reachability check; the forced proxy-safe nmap
-  profile (§4.2); the UDP skip-and-warn + report banner + timeout scaling (§4.3); doctor check.
-  Ships the complete field capability leaning on proxychains for transport. **Small — mostly
-  scanner-profile + CLI + honesty wiring, little-to-no new network code.**
+- **P1 — awareness + safety + honesty (the whole valuable core). ✅ LANDED.** `--proxy`
+  re-exec-under-proxychains + conf generation + reachability check; auto-detect an existing
+  proxychains wrap (LD_PRELOAD); the forced proxy-safe nmap profile (`_scan_type()` -> `-sT`,
+  `harden_for_proxy()` drops masscan/UDP/ICMP); UDP skip-and-warn (SNMP, mssql SQL-Browser,
+  udp-liveness) + a persisted "Scanned via proxy" markdown report banner; `doctor` gates
+  proxychains4. `recce/proxy.py` + `tests/test_proxy.py` (28 tests). Timeout scaling and the
+  xlsx/html report banners are the small remaining polish (fold into P1.1 if wanted).
 - **P2 — (optional) native `recce/net.py`.** Only if P1's proxychains dependency/UX warrants
   it: the stdlib SOCKS/CONNECT client + the 19+12 site migration, so `recce --proxy` works with
   no proxychains and gains per-probe UDP honesty.
