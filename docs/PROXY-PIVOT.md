@@ -185,8 +185,12 @@ to optional. Ship §4 first and see whether it's even wanted.
   proxychains wrap (LD_PRELOAD); the forced proxy-safe nmap profile (`_scan_type()` -> `-sT`,
   `harden_for_proxy()` drops masscan/UDP/ICMP); UDP skip-and-warn (SNMP, mssql SQL-Browser,
   udp-liveness) + a persisted "Scanned via proxy" markdown report banner; `doctor` gates
-  proxychains4. `recce/proxy.py` + `tests/test_proxy.py` (28 tests). Timeout scaling and the
-  xlsx/html report banners are the small remaining polish (fold into P1.1 if wanted).
+  proxychains4. `recce/proxy.py` + `tests/test_proxy.py`.
+- **P1.1 — polish. ✅ LANDED.** `proxy.scaled()` latency multiplier applied to the shared
+  probe timeouts (svcdetect banner/TLS grab, web + probes HTTP) and the nmap per-host timeout
+  (×2) so slow multi-hop hops aren't misread as down; the "Scanned via proxy" banner now also
+  renders in the **HTML** report header and the **xlsx** Start-Here sheet (markdown already
+  had it). `tests/test_proxy.py` now 35 tests.
 - **P2 — (optional) native `recce/net.py`.** Only if P1's proxychains dependency/UX warrants
   it: the stdlib SOCKS/CONNECT client + the 19+12 site migration, so `recce --proxy` works with
   no proxychains and gains per-probe UDP honesty.

@@ -1018,6 +1018,11 @@ def _build_guide(wb, meta: dict) -> None:
     sh = wb.add_sheet("Start Here")
     sh.write([("recce - engagement tracker", "title")])
     sh.write([(meta.get("subtitle", ""), "sub")])
+    if meta.get("proxy"):
+        # Data was collected through a pivot: connect-scan only, no UDP. Flag it so a
+        # reader never mistakes an unreachable UDP service (SNMP, etc.) for an absent one.
+        sh.write([(f"⚠ Scanned via proxy: {meta['proxy']} - connect-scan only; UDP "
+                   "services (SNMP, etc.) were not reachable through the tunnel.", "bold")])
     sh.write([""])
     sh.write([("Scans fill this workbook in; you check things off as you go. "
                "Your ticks and notes are saved and survive re-scans.", "bold")])

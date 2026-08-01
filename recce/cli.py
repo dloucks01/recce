@@ -406,7 +406,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     gen = _now()
     build_html(hosts, paths["html"], title=title, domains=domains,
                credentials=credentials, generated=gen, tracking=tracking,
-               assets_link=os.path.basename(paths["assets"]))
+               assets_link=os.path.basename(paths["assets"]), proxy_note=proxy_note)
     build_assets_html(hosts, paths["assets"], title=title, domains=domains,
                       credentials=credentials, generated=gen,
                       ad_bloodhound=meta.get("ad_bloodhound"),

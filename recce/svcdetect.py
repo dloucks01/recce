@@ -164,9 +164,12 @@ _NUDGE = {
 _RDP_CR = bytes.fromhex("0300000b06e00000000000")
 
 
-def grab_banner(ip: str, port: Port, timeout: float = _BANNER_TIMEOUT) -> str:
+def grab_banner(ip: str, port: Port, timeout: float | None = None) -> str:
     """Connect, (optionally nudge), read up to 512 bytes. Returns the raw bytes
     decoded latin-1 (lossless), or "" on any failure. Never raises."""
+    from . import proxy
+    if timeout is None:
+        timeout = proxy.scaled(_BANNER_TIMEOUT)     # slower through a pivot
     pid = port.portid
     nudge = _NUDGE.get(pid)
     if pid == 3389:
@@ -202,7 +205,7 @@ def grab_banner(ip: str, port: Port, timeout: float = _BANNER_TIMEOUT) -> str:
         return ""
 
 
-def tls_http_probe(ip: str, port: Port, timeout: float = _BANNER_TIMEOUT) -> str:
+def tls_http_probe(ip: str, port: Port, timeout: float | None = None) -> str:
     """Complete a TLS handshake then send one HTTP request over it. Returns the
     HTTP response banner if the port speaks HTTPS, else "".
 
@@ -212,6 +215,9 @@ def tls_http_probe(ip: str, port: Port, timeout: float = _BANNER_TIMEOUT) -> str
     plaintext fallback fixed for cleartext HTTP. This is the TLS twin: handshake
     first, then HEAD. Certs are not verified (we're fingerprinting, not trusting).
     Never raises - any handshake/socket failure just means "not HTTPS here"."""
+    from . import proxy
+    if timeout is None:
+        timeout = proxy.scaled(_BANNER_TIMEOUT)     # slower through a pivot
     ctx = ssl._create_unverified_context()
     ctx.check_hostname = False
     try:

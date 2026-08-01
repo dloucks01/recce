@@ -219,6 +219,8 @@ def harden_for_proxy(profile: ScanProfile) -> ScanProfile:
     profile.udp_fallback = False
     profile.ping_discovery = False    # ICMP/UDP pings bypass the proxy -> -Pn instead
     profile.assume_up = True          # under -Pn, treat targets as up (fail fast on dead)
+    if profile.host_timeout:          # a connect scan through a pivot is much slower -
+        profile.host_timeout *= 2     # give each host longer before nmap abandons it
     return profile
 
 

@@ -100,6 +100,16 @@ def describe() -> str:
     return f"{_PROXY['scheme']}://{_PROXY['host']}:{_PROXY['port']}"
 
 
+_TIMEOUT_MULT = 2.5
+
+def scaled(seconds: float) -> float:
+    """Scale a probe/connect timeout for proxy latency. A multi-hop SOCKS tunnel is far
+    slower than a direct connect, so a 4-6s direct timeout can give up before the tunnel
+    even answers - a live internal host then reads as down / no-service (a false negative).
+    Returns `seconds` unchanged when direct."""
+    return seconds * _TIMEOUT_MULT if _PROXY is not None else seconds
+
+
 def banner_line() -> str:
     """The one-line PROXY banner shown on commands and in the report header."""
     if not _PROXY:
