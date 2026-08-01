@@ -86,6 +86,11 @@ def _parse_browser(text: str) -> list[dict]:
 def sql_browser(ip: str, timeout: float = 3.0) -> list[dict]:
     """Enumerate SQL Server instances via the SQL Browser (UDP 1434) - instance
     names, versions and TCP ports, NO credentials. Returns [] on any failure."""
+    from . import proxy
+    if proxy.is_active():
+        # UDP can't traverse the proxy and a datagram would leak from the real IP.
+        # Skip the browser; the TCP 1433 enum below still works through the tunnel.
+        return []
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(timeout)

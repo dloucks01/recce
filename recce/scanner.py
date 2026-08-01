@@ -190,6 +190,38 @@ def _is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+def _proxied() -> bool:
+    from . import proxy
+    return proxy.is_active()
+
+
+def _scan_type() -> str:
+    """SYN scan when we can, EXCEPT through a proxy: a SYN scan uses raw packets that
+    bypass proxychains and would fire from the operator's real IP. A TCP connect scan
+    (-sT) goes through libc connect(), so the proxy tunnels it. This is the OPSEC
+    linchpin of proxy mode - force -sT whenever proxied, regardless of root."""
+    if _proxied():
+        return "-sT"
+    return "-sS" if _is_root() else "-sT"
+
+
+def harden_for_proxy(profile: ScanProfile) -> ScanProfile:
+    """Mutate a profile in place for proxy-safe scanning. proxychains only tunnels TCP
+    connect(); masscan's raw engine and every UDP/ICMP path bypass it (leaking the real
+    IP and/or missing findings). So through a proxy: force the nmap connect scanner, drop
+    all UDP, and skip ICMP host-discovery (-Pn is already used). The dropped UDP services
+    (SNMP etc.) are surfaced honestly by their own modules - never a silent zero."""
+    if not _proxied():
+        return profile
+    profile.scanner = "nmap"          # masscan is raw-packet -> can't be proxied at all
+    profile.udp_basic = False         # UDP can't traverse a TCP proxy...
+    profile.udp_top = 0
+    profile.udp_fallback = False
+    profile.ping_discovery = False    # ICMP/UDP pings bypass the proxy -> -Pn instead
+    profile.assume_up = True          # under -Pn, treat targets as up (fail fast on dead)
+    return profile
+
+
 def check_environment(profile: ScanProfile) -> list[str]:
     """Return a list of human-readable warnings about the runtime environment."""
     warnings: list[str] = []
@@ -327,7 +359,7 @@ def port_scope_label(profile: ScanProfile) -> tuple[str, bool]:
 
 def _portscan_cmd(ip: str, out_xml: str, profile: ScanProfile,
                   reliable: bool) -> tuple[list, int | None]:
-    scan_type = "-sS" if _is_root() else "-sT"
+    scan_type = _scan_type()
     port_spec = ["-p-"] if profile.all_ports else ["--top-ports", str(profile.top_ports)]
     if reliable:
         # Mirror what a manual nmap does on a rate-limiting / lossy network: let
@@ -364,7 +396,7 @@ def full_port_scan(ip: str, out_xml: str,
     host letting nmap adapt (no --min-rate, more retries), which is what actually
     finds the ports. `--reliable` forces that mode from the first pass.
     """
-    if profile.scanner == "masscan" and _have("masscan"):
+    if profile.scanner == "masscan" and _have("masscan") and not _proxied():
         return _masscan_ports(ip, out_xml, profile)
 
     reliable = profile.reliable
@@ -411,6 +443,10 @@ def udp_liveness_probe(ip: str, out_xml: str,
     Uses `-sn` (no -Pn) so nmap's up/down verdict is meaningful again: it reports the
     host up ONLY on an actual reply. Needs root (raw UDP); returns a skip issue if not.
     """
+    if _proxied():
+        return _empty_xml(out_xml), ScanIssue(
+            "warning", "udp-liveness: skipped - UDP can't traverse the proxy (a UDP ping "
+            "would leak from the real IP). Firewalled hosts may read as down under -Pn.")
     if not _is_root():
         return _empty_xml(out_xml), ScanIssue(
             "warning", "udp-liveness: skipped (needs root/CAP_NET_RAW for UDP ping)")
@@ -431,7 +467,7 @@ def reconfirm_hosts(targets_file: str, out_xml: str,
     catches the firewalled-but-alive box before it's written off as down - without
     full-scanning every dead IP (top 100 ports, --open, fail-fast, one bounded sweep
     over all the missed IPs). Callers cap the input size (profile.reconfirm_cap)."""
-    scan_type = "-sS" if _is_root() else "-sT"
+    scan_type = _scan_type()
     cmd = ["nmap", scan_type, "-Pn", "-n", "--open", "--top-ports", "100",
            f"-T{profile.timing}", "--max-retries", "2", "--host-timeout", "2m",
            "-iL", targets_file, "-oX", out_xml]
@@ -461,7 +497,7 @@ def _masscan_ports(ip: str, out_xml: str,
         pass
     if not ports:
         return _empty_xml(out_xml), None
-    scan_type = "-sS" if _is_root() else "-sT"
+    scan_type = _scan_type()
     to_args, kill = _timeout_args(profile)
     outcome = _run(["nmap", scan_type, "-Pn", "-n", "--open", *to_args,
                     "-p", ",".join(str(p) for p in ports), ip, "-oX", out_xml],
@@ -574,7 +610,7 @@ def enum_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
     """
     if not ports:
         return _empty_xml(out_xml), None
-    scan_type = "-sS" if _is_root() else "-sT"
+    scan_type = _scan_type()
     scripts = ["default"]                 # safe, gives http-title, ssl-cert, etc.
     if profile.ad_enrich:
         scripts += _AD_SCRIPTS            # smb-os-discovery, signing, ldap-rootdse
@@ -634,7 +670,7 @@ def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
     """
     if not ports:
         return _empty_xml(out_xml), None
-    scan_type = "-sS" if _is_root() else "-sT"
+    scan_type = _scan_type()
 
     # nmap --script grammar: a comma-separated list where each item is a boolean
     # category expression OR a script name (each name portrule-filtered by nmap).
@@ -678,7 +714,7 @@ def nse_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
     """Generic targeted NSE run on specific ports (used by db / privesc phases)."""
     if not ports or not scripts:
         return _empty_xml(out_xml), None
-    scan_type = "-sS" if _is_root() else "-sT"
+    scan_type = _scan_type()
     to_args, kill = _timeout_args(profile)
     cmd = [
         "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
@@ -702,7 +738,7 @@ def reprobe_services(ip: str, ports: list[int], out_xml: str,
     name. Returns the XML path + any scan issue."""
     if not ports:
         return _empty_xml(out_xml), None
-    scan_type = "-sS" if _is_root() else "-sT"
+    scan_type = _scan_type()
     to_args, kill = _timeout_args(profile)
     cmd = [
         "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",

@@ -373,6 +373,15 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     tracking = store.get_tracking()
     domains = _resolve_domains(store, hosts)
     meta = {"subtitle": title}
+    # If this (or the originating scan) ran through a proxy, stamp the datastore so the
+    # note survives a later plain `recce report`, and surface it in the deliverables -
+    # a reader must know the data came from a connect-scan-only, no-UDP proxied run.
+    from . import proxy as _proxy
+    if _proxy.is_active():
+        store.set_meta("proxy", _proxy.describe())
+    proxy_note = store.get_meta("proxy") or ""
+    if proxy_note:
+        meta["proxy"] = proxy_note
     # Fold each deep-module's saved analysis blob into the report meta. They all
     # follow the identical shape (the report-meta key == the stored-meta name), so
     # one loop replaces what used to be a dozen copy-pasted get_meta/json.loads
@@ -391,7 +400,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
                     statuses=store.get_statuses(), issues=store.get_issues(),
                     credentials=credentials)
-    build_markdown(hosts, paths["md"], title=title, domains=domains)
+    build_markdown(hosts, paths["md"], title=title, domains=domains, proxy_note=proxy_note)
     build_csv(hosts, paths["csv"])
     from .report_html import build_html, build_assets_html
     gen = _now()
@@ -516,6 +525,10 @@ def _apply_profile_overrides(profile, args) -> None:
     profile.assume_up = not profile.ping_discovery   # -Pn: fail-fast on dead IPs
     if g("no_reconfirm", False):
         profile.reconfirm = False
+    # Through a proxy, force the connect-scan / no-masscan / no-UDP / no-ICMP profile so
+    # nothing bypasses the tunnel and scans from the operator's real IP (runs last so it
+    # wins over the discovery flags above).
+    scanner.harden_for_proxy(profile)
 
 
 def _split_userdomain(username: str, domain: str | None) -> tuple[str, str]:
@@ -2472,6 +2485,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("netexec", False, "credentialed SMB/AD enum (credenum phase)"),
         ("ssh", False, "credentialed Linux local checks (credenum phase)"),
         ("browser", False, "auto web screenshots in write-ups (firefox/chromium)"),
+        ("proxychains4", False, "pivot support: route the run through a proxy (--proxy)"),
     ]
     nmap_ok = False
     presence: dict[str, bool] = {}   # reused for the summary, so it can't disagree
@@ -2495,6 +2509,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             found = screenshot.browser_tool()
             if found:
                 desc = f"auto web screenshots in write-ups (using {found})"
+        if name == "proxychains4":
+            from . import proxy
+            present = bool(proxy.proxychains_bin())       # proxychains4 OR proxychains
         if name == "nmap":
             nmap_ok = present
         presence[name] = present
@@ -4132,7 +4149,7 @@ def cmd_api(args: argparse.Namespace) -> int:
 
 
 def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
-                      no_targets: str, fmt, extra=None) -> int:
+                      no_targets: str, fmt, extra=None, udp: bool = False) -> int:
     """Shared driver for the single-service deep-enum commands (snmp/mongodb/redis/
     elasticsearch/rsync/nfs). They differ only in the module they call, the hint shown
     when no endpoints are present, and how each target line is formatted - everything
@@ -4142,6 +4159,14 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
     them. `fmt(t, active)` returns the display text for one target; optional
     `extra(store, hosts, tgts, by_ip)` runs a per-service post-fold step."""
     from importlib import import_module
+    from . import proxy
+    if udp and proxy.is_active():
+        # A UDP-only service can't be reached through a TCP proxy, and a datagram would
+        # leak from the operator's real IP. Say so loudly instead of returning a clean,
+        # misleading "0 findings" (north star: never a silent false negative).
+        print(f"[!] {label} is UDP-only and can't traverse the proxy ({proxy.describe()}) "
+              f"- skipped. Run it from the pivot host directly, or without --proxy.")
+        return 0
     mod = import_module(f".{module}", __package__)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -4250,7 +4275,7 @@ def cmd_snmp(args: argparse.Namespace) -> int:
         args, module="snmp", source="snmp", label="SNMP", noun="SNMP endpoint(s)",
         no_targets="[!] No SNMP-responsive hosts. (SNMP is UDP 161; recce probes it "
                    "directly, so target the hosts you expect to run it.)",
-        fmt=_fmt_snmp, extra=_snmp_persist_accounts)
+        fmt=_fmt_snmp, extra=_snmp_persist_accounts, udp=True)
 
 
 def cmd_mongodb(args: argparse.Namespace) -> int:
@@ -5150,6 +5175,11 @@ def _add_common(pp) -> None:
     g.add_argument("--host-timeout", type=int, metavar="MIN",
                    help="per-host time ceiling in minutes; nmap gives up on a "
                         "host after this and moves on (0 = no limit)")
+    g.add_argument("--proxy", metavar="URL",
+                   help="pivot: route the whole run through a proxy, e.g. "
+                        "socks5h://127.0.0.1:1080 (also socks4a:// or http://). recce "
+                        "re-execs under proxychains4 and switches to a proxy-safe "
+                        "connect scan (no SYN/masscan/UDP - they'd bypass the proxy)")
 
 
 def _add_io(pp, title: bool = True) -> None:
@@ -6074,11 +6104,59 @@ def _print_quickstart() -> int:
     return 0
 
 
+def _setup_proxy(args) -> int | None:
+    """Handle --proxy / auto-detect. Returns an exit code to stop, or None to continue.
+
+    Explicit --proxy: verify proxychains + the tunnel, then re-exec recce under
+    proxychains so its whole process tree is proxied (unless already wrapped). A run that
+    is already under proxychains (our re-exec, or the operator's own wrap) just switches
+    on safe/honest mode. See docs/PROXY-PIVOT.md."""
+    from . import proxy
+    url = getattr(args, "proxy", None)
+    if not url and not proxy.already_proxied():
+        return None                              # the common, direct path: nothing to do
+    if not url:                                  # wrapped in proxychains but no --proxy
+        proxy.configure_detected()               # auto-enable safe/honest mode
+        print(proxy.banner_line())
+        return None
+    try:
+        cfg = proxy.configure(url)
+    except proxy.ProxyError as e:
+        print(f"[x] --proxy: {e}")
+        return 2
+    if proxy.already_proxied():                  # we ARE the re-exec'd child (or wrapped)
+        print(proxy.banner_line())
+        return None
+    if not proxy.proxychains_bin():
+        print("[x] --proxy needs proxychains4 (not on PATH). Install it, or use a "
+              "transparent tunnel (ligolo/sshuttle) and run recce without --proxy.")
+        return 2
+    if not proxy.reachable(cfg):
+        print(f"[x] --proxy: can't reach {proxy.describe()} - is the pivot/tunnel up?")
+        return 2
+    out = getattr(args, "output_dir", None) or "."
+    try:
+        os.makedirs(out, exist_ok=True)
+        conf = proxy.write_proxychains_conf(cfg, os.path.join(out, ".proxychains.conf"))
+    except OSError as e:
+        print(f"[x] --proxy: could not write proxychains conf: {e}")
+        return 2
+    print(proxy.banner_line())
+    print(f"    re-executing under proxychains4 so all traffic tunnels via "
+          f"{proxy.describe()} ...")
+    proxy.reexec_under_proxychains(conf)         # replaces this process on success
+    print("[x] --proxy: failed to re-exec under proxychains4")
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     if getattr(args, "command", None) is None:
         # Bare `recce` (no subcommand): a friendly quickstart beats an argparse error.
         return _print_quickstart()
+    _rc = _setup_proxy(args)
+    if _rc is not None:
+        return _rc
     try:
         return args.func(args)
     except KeyboardInterrupt:
