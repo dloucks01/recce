@@ -16,5 +16,6 @@ raw/
 # Build artifacts
 build/
 dist/
+releases/
 dump.rdb
 *.rdb

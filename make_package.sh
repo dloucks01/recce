@@ -23,8 +23,14 @@ STAGE="$DIST/$NAME"
 if [ "${1:-}" = "--verify" ]; then
   echo "[*] Running test suite before packaging ..."
   python3 -m unittest discover -s tests -p "test_*.py" >/dev/null
-  python3 -m pyflakes recce >/dev/null 2>&1 || true
   echo "[+] tests passed"
+  if python3 -c "import pyflakes" 2>/dev/null; then
+    echo "[*] Running pyflakes lint ..."
+    # Surface issues (was silenced with >/dev/null || true, so the lint did nothing).
+    python3 -m pyflakes recce || echo "[!] pyflakes reported issues (non-fatal) - review above"
+  else
+    echo "[!] pyflakes not installed - skipping lint"
+  fi
 fi
 
 echo "[*] Staging $NAME ..."
