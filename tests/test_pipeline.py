@@ -6312,12 +6312,17 @@ class BloodHoundTest(unittest.TestCase):
         self.assertEqual(krb[0]["nt"], "1a2b3c4d5e6f70819293a4b5c6d7e8f9")
 
     def test_live_kerberos_toolmissing_is_clean(self):
-        # No impacket installed in CI -> each runner reports the missing tool, never
-        # raises, and produces no findings.
+        # When impacket is absent each runner reports the missing tool, never raises,
+        # and produces no findings. Force the tool lookup to "missing" so this holds
+        # deterministically even on a Kali box that has impacket installed (recce's
+        # own target platform), instead of assuming an impacket-free CI runner.
+        from unittest import mock
         from recce import bloodhound as bh
         creds = {"domain": "CORP.LOCAL", "user": "bob", "secret": "Pw",
                  "is_hash": False, "dc_ip": "10.0.0.1"}
-        res = bh.live_kerberos(creds, None, do_roast=True, do_asrep=True, do_dcsync=True)
+        with mock.patch.object(bh, "_kerb_tool", return_value=None):
+            res = bh.live_kerberos(creds, None, do_roast=True, do_asrep=True,
+                                   do_dcsync=True)
         self.assertEqual(res["findings"], [])
         self.assertEqual(len(res["errors"]), 3)
         self.assertTrue(all("not installed" in e for e in res["errors"]))
@@ -6867,7 +6872,9 @@ class ListenerBackfillTest(unittest.TestCase):
 
 
 class EngagementPermsTest(unittest.TestCase):
-    def test_relax_perms_makes_tree_777(self):
+    def test_relax_perms_owner_only_never_world_readable(self):
+        # The engagement tree holds captured creds/NTLM hashes, so relax must give
+        # the operator access (dirs 0700, files 0600) WITHOUT any group/world bits.
         from recce import cli
         with tempfile.TemporaryDirectory() as d:
             sub = os.path.join(d, "raw")
@@ -6877,24 +6884,28 @@ class EngagementPermsTest(unittest.TestCase):
             for f in (f1, f2):
                 with open(f, "w") as fh:
                     fh.write("x")
-                os.chmod(f, 0o600)          # simulate a root-created, locked file
-            os.chmod(sub, 0o700)
+                os.chmod(f, 0o644)          # simulate a world-readable created file
             cli._relax_perms(d)
+            for p in (d, sub):
+                self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o700, p)
+            for p in (f1, f2):
+                self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600, p)
+            # No group/world access anywhere in the tree.
             for p in (d, sub, f1, f2):
-                self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o777, p)
+                self.assertEqual(stat.S_IMODE(os.stat(p).st_mode) & 0o077, 0, p)
 
     def test_relax_perms_is_best_effort_on_missing_dir(self):
         from recce import cli
         cli._relax_perms("/nonexistent/path/xyz")      # must not raise
 
-    def test_open_paths_relaxes_output_dir(self):
+    def test_open_paths_owner_only_output_dir(self):
         from recce import cli
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "engagement")
             cli._open_paths(out)
-            self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o777)
+            self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(os.stat(os.path.join(out, "raw")).st_mode),
-                             0o777)
+                             0o700)
 
     def test_main_finally_relaxes_perms_even_on_early_return(self):
         from recce import cli
@@ -6904,7 +6915,8 @@ class EngagementPermsTest(unittest.TestCase):
             # relax the folder that _open_paths created.
             rc = cli.main(["attackpath", "-o", out])
             self.assertEqual(rc, 1)
-            self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o777)
+            self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(os.stat(out).st_mode) & 0o077, 0)
 
 
 class AVAwarenessTest(unittest.TestCase):
@@ -8823,8 +8835,11 @@ class DiscoveryReconfirmTest(unittest.TestCase):
         self.assertTrue(prof2.ping_discovery)
 
 
-class AuditRegressionTest(unittest.TestCase):
-    """Regressions for bugs found in the full code audit + end-to-end run."""
+class AuditRegressionE2ETest(unittest.TestCase):
+    """Regressions for bugs found in the full code audit + end-to-end run.
+
+    Distinct from AuditRegressionTest above: sharing the class name silently
+    shadowed one block so ~9 tests never ran."""
 
     def test_plain_http_product_not_flipped_to_tls(self):
         # BUG: _is_tls substring-matched the PRODUCT, so "SimpleHTTPServer" (contains
