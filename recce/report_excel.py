@@ -2652,6 +2652,17 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None,
     return pre, ad_specs, tail
 
 
+def _safe_sheet(build, *args, name: str = "") -> None:
+    """Run one deep-service sheet builder in isolation. A malformed/partial analysis
+    dict (a missing key -> KeyError) must skip just that sheet, not abort the whole
+    workbook and lose every other sheet's data."""
+    try:
+        build(*args)
+    except Exception as e:            # noqa: BLE001 - one bad sheet must not kill the report
+        import sys
+        print(f"[!] skipped the {name} sheet ({type(e).__name__}: {e})", file=sys.stderr)
+
+
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
                    domains: list[Domain] | None = None,
                    tracking: Tracking | None = None,
@@ -2751,26 +2762,27 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     # orient/track/find (ends on Databases).
     for spec in pre:
         _emit(spec)
-    # Per-service deep-dive band, right after Databases.
-    _build_mssql(wb, meta.get("mssql") or {})
-    _build_smb(wb, meta.get("smb") or {})
-    _build_ftp(wb, meta.get("ftp") or {})
-    _build_docker(wb, meta.get("docker") or {})
-    _build_kubernetes(wb, meta.get("kubernetes") or {})
-    _build_ldap(wb, meta.get("ldap") or {})
-    _build_snmp(wb, meta.get("snmp") or {})
-    _build_mongodb(wb, meta.get("mongodb") or {})
-    _build_redis(wb, meta.get("redis") or {})
-    _build_elasticsearch(wb, meta.get("elasticsearch") or {})
-    _build_rsync(wb, meta.get("rsync") or {})
-    _build_nfs(wb, meta.get("nfs") or {})
-    _build_kerberos(wb, meta.get("kerberos") or {})
+    # Per-service deep-dive band, right after Databases. Each is isolated so a
+    # malformed analysis dict skips only its own sheet (see _safe_sheet).
+    _safe_sheet(_build_mssql, wb, meta.get("mssql") or {}, name="MSSQL")
+    _safe_sheet(_build_smb, wb, meta.get("smb") or {}, name="SMB")
+    _safe_sheet(_build_ftp, wb, meta.get("ftp") or {}, name="FTP")
+    _safe_sheet(_build_docker, wb, meta.get("docker") or {}, name="Docker")
+    _safe_sheet(_build_kubernetes, wb, meta.get("kubernetes") or {}, name="Kubernetes")
+    _safe_sheet(_build_ldap, wb, meta.get("ldap") or {}, name="LDAP")
+    _safe_sheet(_build_snmp, wb, meta.get("snmp") or {}, name="SNMP")
+    _safe_sheet(_build_mongodb, wb, meta.get("mongodb") or {}, name="MongoDB")
+    _safe_sheet(_build_redis, wb, meta.get("redis") or {}, name="Redis")
+    _safe_sheet(_build_elasticsearch, wb, meta.get("elasticsearch") or {}, name="Elasticsearch")
+    _safe_sheet(_build_rsync, wb, meta.get("rsync") or {}, name="rsync")
+    _safe_sheet(_build_nfs, wb, meta.get("nfs") or {}, name="NFS")
+    _safe_sheet(_build_kerberos, wb, meta.get("kerberos") or {}, name="Kerberos")
     # AD cluster, kept contiguous: inventory -> quick wins -> import findings/paths
     # -> users & accounts.
     _build_active_directory(wb, hosts, domains)
     _emit(quick_wins_spec)
-    _build_ad_findings(wb, bh)
-    _build_ad_paths(wb, bh)
+    _safe_sheet(_build_ad_findings, wb, bh, name="AD Findings")
+    _safe_sheet(_build_ad_paths, wb, bh, name="Attack Paths")
     _emit(accounts_spec)
     # loot -> act (exploit/chain) -> post-ex -> raw evidence.
     for spec in tail:

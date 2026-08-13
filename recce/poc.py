@@ -200,7 +200,11 @@ _TLS_PORTS = {443, 8443, 9443, 4443, 10443, 5986}
 
 
 def _url_from_vuln(v) -> str:
-    m = re.search(r"https?://[^\s/]+", getattr(v, "output", "") or "")
+    # Restrict to URL-safe host/port characters (no shell metacharacters): this URL
+    # is interpolated into generated PoC shell scripts, and v.output is derived from
+    # network data. A hostile "http://evil$(id)" is truncated at the '$' to a safe
+    # "http://evil" rather than carried into the script.
+    m = re.search(r"https?://[A-Za-z0-9.\-:\[\]%_]+", getattr(v, "output", "") or "")
     if m:
         return m.group(0)
     port = getattr(v, "port", None)

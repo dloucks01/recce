@@ -693,6 +693,8 @@ def _walkthrough_steps(f: Finding) -> list[str]:
     These are the mechanical, repeatable steps (discovery command, confirmation
     check, candidate exploit). The tester still adds the exploitation result and
     screenshots - that part is a placeholder."""
+    if not f.affected:
+        return []                     # nothing to reproduce against; guard IndexError
     ip, port, _hn = f.affected[0]
     ports = sorted({p for _i, p, _h in f.affected if p})
     portspec = ",".join(str(p) for p in ports)
@@ -958,10 +960,11 @@ def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
     doc.heading("Findings", 1)
     rows = []
     for fid, f in findings_with_ids:
-        hosts_txt = ", ".join(sorted({a[0] for a in f.affected}))
+        hosts = sorted({a[0] for a in f.affected})
+        hosts_txt = ", ".join(hosts)
         rows.append([fid, f.severity.upper(), f.title,
                      ", ".join(f.cwes) or "-",
-                     hosts_txt if len(hosts_txt) < 60 else f"{len(f.affected)} systems"])
+                     hosts_txt if len(hosts_txt) < 60 else f"{len(hosts)} systems"])
     doc.table(["ID", "Severity", "Finding", "CWE", "Affected"], rows,
               widths=[900, 1100, 3860, 1500, 2000])
 

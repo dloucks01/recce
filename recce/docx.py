@@ -63,13 +63,42 @@ _EMU_PER_PX = 9525          # at 96 DPI
 _MAX_IMG_EMU = 6 * 914400   # 6 inches wide max
 
 
+def _img_format(data: bytes) -> str:
+    """'png' or 'jpg' from the magic bytes (default 'png')."""
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    return "png"
+
+
+def _jpeg_size(data: bytes) -> tuple[int, int] | None:
+    """(width, height) in px from a JPEG's first SOF marker, or None."""
+    i, n = 2, len(data)
+    while i + 9 < n and data[i] == 0xFF:
+        marker = data[i + 1]
+        # SOF0..SOF15 carry the frame size (skip DHT/DQT/etc. and the RSTn range).
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            h = int.from_bytes(data[i + 5:i + 7], "big")
+            w = int.from_bytes(data[i + 7:i + 9], "big")
+            if w and h:
+                return w, h
+        seg = int.from_bytes(data[i + 2:i + 4], "big")
+        if seg <= 0:
+            break
+        i += 2 + seg
+    return None
+
+
 def _png_size(data: bytes) -> tuple[int, int]:
-    """(width, height) in px from a PNG header, or a sane default."""
+    """(width, height) in px from a PNG/JPEG header, or a sane default."""
     if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n":
         w = int.from_bytes(data[16:20], "big")
         h = int.from_bytes(data[20:24], "big")
         if w and h:
             return w, h
+    if data[:3] == b"\xff\xd8\xff":
+        jpg = _jpeg_size(data)
+        if jpg:
+            return jpg
     return 800, 600
 
 # Styles: Normal, Title, Heading1, Heading2 (built-ins so headings show in the
@@ -181,7 +210,7 @@ class Document:
     def image(self, data: bytes, caption: str | None = None) -> None:
         """Embed a PNG/JPEG image inline (scaled to fit the page width)."""
         idx = len(self._media) + 1
-        ext = "png"
+        ext = _img_format(data)          # label by actual bytes, not always png
         fname = f"image{idx}.{ext}"
         self._media.append((fname, data))
         rid = f"rId{len(self._rels) + 1}"

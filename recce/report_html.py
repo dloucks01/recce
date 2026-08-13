@@ -700,8 +700,10 @@ def _mask_secret(secret, kind):
         # sensitive (full path / private key) leaks into the shareable HTML.
         base = escape(os.path.basename(secret.rstrip("/")) or secret[:8])
         return f'SSH key: …/{base}'
-    if len(secret) <= 3:
-        return "•" * len(secret)
+    if len(secret) <= 6:
+        # Short secret: first/last + exact length would disclose most of it in a
+        # file meant to be shareable. Mask fully - no boundary chars, no length.
+        return "•" * 6
     return (escape(secret[0]) + "•" * (len(secret) - 2) + escape(secret[-1])
             + f' <span class="muted">[{len(secret)} chars]</span>')
 

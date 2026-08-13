@@ -1982,6 +1982,33 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
         self.assertFalse(redis._old_version("6.2"))
         self.assertTrue(redis._old_version("5.9"))
 
+    def test_docx_labels_jpeg_by_magic_bytes(self):
+        from recce import docx
+        self.assertEqual(docx._img_format(b"\xff\xd8\xff\xe0" + b"\x00" * 20), "jpg")
+        self.assertEqual(docx._img_format(b"\x89PNG\r\n\x1a\n"), "png")
+        d = docx.Document()
+        # A JPEG (SOF0 says 40x30) is stored as image1.jpg, not mislabeled png.
+        jpeg = (b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"\x00" * 4
+                + b"\xff\xc0\x00\x11\x08\x00\x1e\x00\x28" + b"\x00" * 8 + b"\xff\xd9")
+        d.image(jpeg)
+        self.assertTrue(any(name.endswith(".jpg") for name, _ in d._media))
+
+    def test_mask_short_secret_hides_chars_and_length(self):
+        from recce import report_html as rh
+        masked = rh._mask_secret("P@ss", "password")     # 4 chars
+        self.assertNotIn("P", masked)                    # no boundary char
+        self.assertNotIn("chars", masked)                # no exact length
+        # a longer secret still shows the recognisability hint
+        self.assertIn("[9 chars]", rh._mask_secret("longsec99", "password"))
+
+    def test_poc_url_strips_shell_metacharacters(self):
+        from recce import poc
+
+        class V:
+            output = "reachable at http://evil$(reboot)/path"
+            ip, port = "10.0.0.7", 80
+        self.assertEqual(poc._url_from_vuln(V()), "http://evil")   # truncated at '$'
+
 
 class HostUpCertaintyTest(unittest.TestCase):
     """The Checklist shows only hosts we can PROVE are up - but is never allowed to
