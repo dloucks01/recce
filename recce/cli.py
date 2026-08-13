@@ -955,11 +955,25 @@ def _discover(args, profile, store, paths):
                     disc_reasons.update(recovered)
                     print(f"    [+] Reconfirm recovered {len(recovered)} host(s) that "
                           "blocked ping but answered a port scan.")
-                still = len(hosts) - len(live_ips)
-                if still:
-                    print(f"    ({still} still didn't answer. If you expect more live "
-                          "hosts, re-run with -Pn - some firewalls drop everything "
-                          "unsolicited.)")
+                # Anything still unanswered is NOT scanned (full -Pn scanning every
+                # non-responder would reintroduce the cost the reconfirm cap avoids) -
+                # but it must not silently vanish. Persist the exact list as a durable
+                # issue so a firewalled-but-alive target the operator named is visible
+                # in the report with explicit -Pn guidance, not just a console line.
+                still_ips = sorted((ip for ip in missed if ip not in set(live_ips)),
+                                   key=_ip_key)
+                if still_ips:
+                    shown = ", ".join(still_ips[:20]) + (" …" if len(still_ips) > 20 else "")
+                    _record_issues(store, paths, "(discovery)", [_mkissue(
+                        scanner.ScanIssue(
+                            "warning",
+                            f"discovery: {len(still_ips)} target(s) blocked host "
+                            f"discovery AND the reconfirm port-probe, so they were NOT "
+                            f"port-scanned and their open ports (if any) are unknown. "
+                            f"Re-run with -Pn to force-scan them: {shown}"),
+                        "discovery")])
+                    print(f"    ({len(still_ips)} still didn't answer - recorded as "
+                          "unscanned. Re-run with -Pn to force-scan them.)")
         else:
             live_ips = hosts
             print(f"[*] -Pn: skipping discovery, scanning all {len(hosts)} target(s) "

@@ -36,6 +36,15 @@ class Evidence:
     positive: bool = True  # True supports the finding; False disproves it
 
 
+# nmap states that mean "this port is reachable/serving" and must count as open.
+# "open|filtered" is nmap's verdict when it got no negative response (dominant for
+# UDP, and for -sF/-sN/-sX/-sA scans): the port is open OR filtered, never closed,
+# so recce keeps it as a real service rather than discarding it. The XML parser
+# already preserves these (parser.py), and everything that asks "is this port open?"
+# routes through Port.is_open / Host.open_ports so they stay visible end to end.
+OPEN_STATES = ("open", "open|filtered")
+
+
 @dataclass
 class Port:
     portid: int
@@ -55,6 +64,12 @@ class Port:
     detect_source: str = ""      # how the service label was set: nmap / inferred / banner / local
     banner: str = ""             # raw banner/response text captured by our own probe
     binary: str = ""             # backing executable path (from on-target enum: /proc/<pid>/exe, svc ImagePath)
+
+    @property
+    def is_open(self) -> bool:
+        """Single source of truth for 'is this port open?' - counts open|filtered so
+        UDP / non-connect-scan opens aren't silently dropped downstream."""
+        return self.state in OPEN_STATES
 
     @property
     def service_banner(self) -> str:
@@ -252,7 +267,7 @@ class Host:
 
     @property
     def open_ports(self) -> list[Port]:
-        return [p for p in self.ports if p.state == "open"]
+        return [p for p in self.ports if p.is_open]
 
     # nmap status reasons that mean the host genuinely REPLIED (proof of life).
     # "user-set" is the -Pn blanket assume-up and does NOT count. "" / "unknown" /

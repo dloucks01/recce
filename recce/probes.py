@@ -329,7 +329,7 @@ def _accepts_protocol(host_ip: str, portid: int, version) -> bool:
 # --- orchestration --------------------------------------------------------------
 
 def probe_port(host_ip: str, port: Port) -> list[Vuln]:
-    if port.state != "open":
+    if not port.is_open:
         return []
     findings: list[Vuln] = []
     if _is_http(port):

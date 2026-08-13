@@ -53,7 +53,7 @@ _FUNC_LEVEL = {"0": "2000", "1": "2003 interim", "2": "2003", "3": "2008",
 
 
 def is_ldap(port: Port) -> bool:
-    if port.state != "open":
+    if not port.is_open:
         return False
     if port.portid in (_DEFAULT_PORT, _LDAPS, _GC, _GCS):
         return True
