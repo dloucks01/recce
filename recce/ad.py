@@ -14,9 +14,11 @@ Nothing here scans on import; callers drive it explicitly.
 from __future__ import annotations
 
 import base64
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 
 from .models import Account, Domain, Host
 
@@ -579,9 +581,22 @@ def _run_ldapsearch(dc_ip, base, filt, attrs, scope, username, password, domain,
     proto = "ldaps" if ssl else "ldap"
     cmd = ["ldapsearch", "-x", "-o", "ldif-wrap=no", "-LLL",
            "-H", f"{proto}://{dc_ip}", "-s", scope, "-b", base]
+    pwfile = None
     if username:
         bind = f"{username}@{domain}" if domain else username
-        cmd += ["-D", bind, "-w", password or ""]
+        cmd += ["-D", bind]
+        if password:
+            # Pass the password via a 0600 file (-y) instead of -w <pw>, which would
+            # expose it on the world-readable process argv. mkstemp is owner-only;
+            # -y reads the whole file, so write the password with no trailing newline.
+            fd, pwfile = tempfile.mkstemp(prefix="recce-ldap-pw-")
+            try:
+                os.write(fd, password.encode())
+            finally:
+                os.close(fd)
+            cmd += ["-y", pwfile]
+        else:
+            cmd += ["-w", ""]
     cmd.append(filt)
     cmd += attrs
     try:
@@ -589,6 +604,12 @@ def _run_ldapsearch(dc_ip, base, filt, attrs, scope, username, password, domain,
                               errors="replace", timeout=180)
     except (subprocess.TimeoutExpired, OSError, ValueError) as e:
         raise RuntimeError(f"ldapsearch failed: {e}")
+    finally:
+        if pwfile:
+            try:
+                os.unlink(pwfile)
+            except OSError:
+                pass
     if proc.returncode not in (0, 4):  # 4 = size-limit exceeded (partial results)
         err = (proc.stderr or "").strip().splitlines()
         raise RuntimeError(err[-1] if err else f"ldapsearch exit {proc.returncode}")

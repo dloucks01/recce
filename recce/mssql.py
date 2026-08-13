@@ -737,6 +737,8 @@ def run_nxc_mssql(ip: str, creds: dict, port: int = _DEFAULT_PORT,
     tool = nxc_tool()
     if not tool:
         return None, "netexec/nxc not installed"
+    # NOTE: netexec/nxc only takes the password via -p on the argv (no env/file/stdin
+    # option), so this site can't keep the secret off the process argv.
     cmd = [tool, "mssql", ip, "-u", creds.get("user", ""),
            "-p", creds.get("secret", "")]
     if creds.get("domain") and not local_auth:
@@ -822,11 +824,22 @@ def build_enum_script() -> str:
     return "\n".join(lines) + "\n"
 
 
-def _run_stdin(cmd: list[str], data: str, timeout: int = 180) -> tuple[str, str | None]:
+def _run_stdin(cmd: list[str], data: str, timeout: int = 180,
+               password: str | None = None) -> tuple[str, str | None]:
     import subprocess
+    stdin_data = data
+    new_session = False
+    if password is not None:
+        # Answer impacket-mssqlclient's getpass("Password:") from stdin (first line),
+        # then feed the SQL script. start_new_session detaches the controlling tty so
+        # getpass falls back to stdin instead of blocking on /dev/tty - which is what
+        # lets us keep the password off the argv.
+        stdin_data = password + "\n" + data
+        new_session = True
     try:
-        p = subprocess.run(cmd, input=data, capture_output=True, text=True,
-                           errors="replace", timeout=timeout)
+        p = subprocess.run(cmd, input=stdin_data, capture_output=True, text=True,
+                           errors="replace", timeout=timeout,
+                           start_new_session=new_session)
         return (p.stdout or "") + (p.stderr or ""), None
     except subprocess.TimeoutExpired:
         return "", f"timed out after {timeout}s"
@@ -855,11 +868,13 @@ def _mssqlclient_cmd(ip: str, creds: dict, port: int, windows_auth: bool) -> lis
     tool = mssqlclient_tool()
     if not tool:
         return None
-    user, secret, dom = creds.get("user", ""), creds.get("secret", ""), creds.get("domain", "")
+    # Omit the password from the target: it would sit on the world-readable process
+    # argv. The runners answer impacket's getpass() prompt from stdin instead.
+    user, dom = creds.get("user", ""), creds.get("domain", "")
     if windows_auth and dom:
-        cmd = [tool, f"{dom}/{user}:{secret}@{ip}", "-windows-auth"]
+        cmd = [tool, f"{dom}/{user}@{ip}", "-windows-auth"]
     else:
-        cmd = [tool, f"{user}:{secret}@{ip}"]
+        cmd = [tool, f"{user}@{ip}"]
     if port and port != _DEFAULT_PORT:
         cmd += ["-port", str(port)]
     return cmd
@@ -872,7 +887,7 @@ def run_mssqlclient(ip: str, creds: dict, port: int = _DEFAULT_PORT,
     cmd = _mssqlclient_cmd(ip, creds, port, windows_auth)
     if cmd is None:
         return None, "impacket-mssqlclient not installed"
-    out, err = _run_stdin(cmd, build_enum_script())
+    out, err = _run_stdin(cmd, build_enum_script(), password=creds.get("secret", ""))
     if err:
         return None, err
     sections = parse_enum(out)
@@ -890,7 +905,7 @@ def link_runner(ip: str, creds: dict, port: int = _DEFAULT_PORT,
     def run(script: str) -> str:
         if cmd is None:
             return ""
-        out, err = _run_stdin(cmd, script)
+        out, err = _run_stdin(cmd, script, password=creds.get("secret", ""))
         return "" if err else out
     return run
 

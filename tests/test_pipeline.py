@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -2025,6 +2026,127 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
         sweep.assert_not_called()
         open_paths.assert_not_called()
         print_next.assert_not_called()
+
+
+class ArgvCredentialDisclosureTest(unittest.TestCase):
+    """Credentials must not sit on a tool's (world-readable) process argv - they go
+    via env (sshpass), a 0600 file (ldapsearch -y), or stdin (impacket getpass)."""
+
+    def test_run_tool_env_extra_delivered_and_off_argv(self):
+        from recce import util
+        script = ("import os,sys;"
+                  "print('ARGV='+repr(sys.argv[1:]));"
+                  "print('ENVPW='+repr(os.environ.get('SSHPASS','')))")
+        out, err = util.run_tool([sys.executable, "-c", script, "ssh", "user@host"],
+                                 env_extra={"SSHPASS": "s3cr3t!"})
+        self.assertIsNone(err)
+        self.assertIn("ENVPW='s3cr3t!'", out)            # tool got it from env
+        self.assertNotIn("s3cr3t!", out.split("ENVPW=")[0])   # not on argv
+
+    def test_run_tool_stdin_answers_getpass_off_argv(self):
+        # The mechanism impacket relies on: password answered to getpass() over stdin,
+        # new_session detaches the tty so getpass falls back to stdin.
+        from recce import util
+        script = ("import sys,getpass;"
+                  "print('ARGV='+repr(sys.argv[1:]));"
+                  "pw=getpass.getpass('Password:');"
+                  "print('PW='+repr(pw));"
+                  "print('REST='+repr(sys.stdin.read().strip()))")
+        out, err = util.run_tool([sys.executable, "-c", script, "dom/user@ip"],
+                                 stdin_data="p@ss\nSELECT 1\n", new_session=True)
+        self.assertIsNone(err)
+        self.assertIn("PW='p@ss'", out)                  # read from stdin
+        self.assertIn("REST='SELECT 1'", out)            # script followed the password
+        self.assertNotIn("p@ss", out.split("PW=")[0])    # never on argv
+
+    def test_impacket_targets_carry_no_password(self):
+        from recce import credenum
+        captured = {}
+
+        def fake_run(cmd, timeout=120, **kw):
+            captured["cmd"], captured["kw"] = cmd, kw
+            return "", None
+        creds = {"domain": "CORP.LOCAL", "username": "alice",
+                 "password": "S3cret!", "dc_ip": "10.0.0.1"}
+        with mock.patch.object(credenum, "impacket_tool", return_value="impacket-secretsdump"), \
+                mock.patch.object(credenum, "_run", side_effect=fake_run):
+            credenum.run_secretsdump("10.0.0.5", creds)
+        self.assertNotIn("S3cret!", " ".join(captured["cmd"]))          # not on argv
+        self.assertEqual(captured["kw"].get("stdin_data"), "S3cret!\n")  # via stdin
+        self.assertTrue(captured["kw"].get("new_session"))
+
+    def test_mssqlclient_target_has_no_password(self):
+        from recce import mssql
+        with mock.patch.object(mssql, "mssqlclient_tool", return_value="impacket-mssqlclient"):
+            cmd = mssql._mssqlclient_cmd("10.0.0.5",
+                                         {"user": "sa", "secret": "S3cret!", "domain": ""},
+                                         mssql._DEFAULT_PORT, windows_auth=False)
+        self.assertNotIn("S3cret!", " ".join(cmd))
+        self.assertIn("sa@10.0.0.5", " ".join(cmd))
+
+    def test_ldapsearch_password_via_file_not_argv(self):
+        from recce import ad
+        seen = {}
+
+        def fake_subrun(cmd, **kw):
+            seen["cmd"] = cmd
+            # the -y file must exist, be 0600, and contain the password (no newline)
+            i = cmd.index("-y")
+            path = cmd[i + 1]
+            seen["mode"] = oct(os.stat(path).st_mode & 0o777)
+            seen["filecontent"] = open(path).read()
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch("recce.ad.subprocess.run", side_effect=fake_subrun):
+            ad._run_ldapsearch("10.0.0.1", "dc=x", "(objectClass=*)", [], "sub",
+                               "alice", "S3cret!", "CORP.LOCAL", False)
+        self.assertNotIn("-w", seen["cmd"])                 # not -w <pw>
+        self.assertNotIn("S3cret!", " ".join(seen["cmd"]))  # not on argv
+        self.assertEqual(seen["mode"], "0o600")             # owner-only file
+        self.assertEqual(seen["filecontent"], "S3cret!")    # whole file, no newline
+
+    def test_deploy_sshpass_password_via_env_not_argv(self):
+        from recce import deploy
+        seen = {}
+
+        def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
+            seen["argv"], seen["env"] = argv, env
+            return 0, "recce-enum host=x\n", ""
+        with mock.patch("recce.deploy.shutil.which", return_value="/usr/bin/sshpass"), \
+                mock.patch.object(deploy, "_run", side_effect=fake_run):
+            deploy.run_ssh("1.2.3.4", {"username": "u", "password": "S3cret!"}, "SCRIPT", 60)
+        self.assertIn("sshpass", seen["argv"])
+        self.assertIn("-e", seen["argv"])                   # env mode, not -p
+        self.assertNotIn("S3cret!", " ".join(seen["argv"]))  # not on argv
+        self.assertEqual(seen["env"], {"SSHPASS": "S3cret!"})
+
+    def test_bloodhound_impacket_target_password_via_stdin(self):
+        from recce import bloodhound as bh
+        creds = {"domain": "CORP.LOCAL", "user": "alice", "secret": "S3cret!",
+                 "is_hash": False, "dc_ip": "10.0.0.1"}
+        base, flags, stdin_pw = bh._impacket_target(creds)
+        self.assertNotIn("S3cret!", base)                   # not in the target/argv
+        self.assertNotIn("S3cret!", " ".join(flags))
+        self.assertEqual(stdin_pw, "S3cret!\n")             # answered over stdin
+        # An NT hash has no off-argv option, so it stays in -hashes (stdin None).
+        h = {"domain": "CORP.LOCAL", "user": "alice", "secret": "aabbcc", "is_hash": True}
+        _b, hflags, hstdin = bh._impacket_target(h)
+        self.assertIn("-hashes", hflags)
+        self.assertIsNone(hstdin)
+
+    def test_deploy_wmiexec_password_via_stdin_not_argv(self):
+        from recce import deploy
+        seen = {}
+
+        def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
+            seen["argv"], seen["stdin"], seen["ns"] = argv, stdin, new_session
+            return 0, "", ""
+        with mock.patch.object(deploy, "_run", side_effect=fake_run):
+            deploy._wmiexec("impacket-wmiexec",
+                            {"username": "a", "password": "S3cret!", "domain": "d"},
+                            "1.2.3.4", "whoami", 60)
+        self.assertNotIn("S3cret!", " ".join(seen["argv"]))  # not on argv
+        self.assertEqual(seen["stdin"], "S3cret!\n")         # via stdin
+        self.assertTrue(seen["ns"])
 
 
 class HostUpCertaintyTest(unittest.TestCase):
@@ -7713,7 +7835,7 @@ class DeployTest(unittest.TestCase):
         from recce import deploy
         calls = {}
 
-        def fake_run(argv, timeout, stdin=None):
+        def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
             calls["argv"], calls["stdin"] = argv, stdin
             return 0, "recce-enum host=x\n[!] finding", ""
         orig = deploy._run
@@ -7732,7 +7854,7 @@ class DeployTest(unittest.TestCase):
         from recce import deploy
         seen = {}
 
-        def fake_run(argv, timeout, stdin=None):
+        def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
             seen.setdefault("argvs", []).append(argv)
             return 0, "recce-enum host=x\n[!] x", ""
         o_run, o_tool = deploy._run, deploy.smb_tool
@@ -7845,7 +7967,7 @@ class DeployTest(unittest.TestCase):
         from recce import deploy
         seen = []
 
-        def fake_run(argv, timeout, stdin=None):
+        def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
             seen.append(argv[0])
             return 0, "recce-enum host=x\n[!] finding", ""
 
@@ -7873,7 +7995,7 @@ class DeployTest(unittest.TestCase):
         win = {"username": "a", "password": "b"}
         seen = []
 
-        def fake_run(argv, timeout, stdin=None):
+        def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
             joined = " ".join(argv)
             if "EncodedCommand" in joined:            # the stager cradle
                 seen.append("stager")

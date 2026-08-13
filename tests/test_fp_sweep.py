@@ -146,12 +146,12 @@ class SshGateTest(unittest.TestCase):
         credenum._run = self._orig
 
     def test_failed_auth_is_not_a_foothold(self):
-        credenum._run = lambda cmd, timeout=0: ("Permission denied (publickey).", None)
+        credenum._run = lambda cmd, timeout=0, **kw: ("Permission denied (publickey).", None)
         facts, err = credenum.run_ssh_local("10.0.0.7", {"username": "root", "key": "/k"})
         self.assertIsNone(facts, "failed SSH auth was recorded as a foothold")
 
     def test_real_shell_is_a_foothold(self):
-        credenum._run = lambda cmd, timeout=0: (
+        credenum._run = lambda cmd, timeout=0, **kw: (
             "===ID===\nuid=0(root) gid=0(root)\n===UNAME===\nLinux box 6.1\n", None)
         facts, err = credenum.run_ssh_local("10.0.0.7", {"username": "root", "key": "/k"})
         self.assertIsNotNone(facts)

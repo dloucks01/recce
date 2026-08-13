@@ -65,10 +65,11 @@ def available_tools() -> dict[str, str | None]:
     }
 
 
-def _run(cmd: list[str], timeout: int = _TIMEOUT) -> tuple[str, str | None]:
-    """Run a tool; return (combined output, error-or-None). Never raises."""
+def _run(cmd: list[str], timeout: int = _TIMEOUT, **kw) -> tuple[str, str | None]:
+    """Run a tool; return (combined output, error-or-None). Never raises. kw forwards
+    env_extra / stdin_data / new_session so credentials stay off the process argv."""
     from .util import run_tool
-    return run_tool(cmd, timeout)
+    return run_tool(cmd, timeout, **kw)
 
 
 # --- netexec / crackmapexec SMB output ------------------------------------------
@@ -264,6 +265,9 @@ def _ssh_port(host: Host) -> bool:
 
 
 def _nxc_cmd(tool: str, ip: str, creds: dict) -> list[str]:
+    # NOTE: netexec/nxc only accepts the password via -p on the argv; it exposes no
+    # env/file/stdin alternative, so this one site can't move the secret off the
+    # process argv (unlike the ldapsearch/sshpass/impacket paths, which do).
     cmd = [tool, "smb", ip, "-u", creds["username"], "-p", creds.get("password", "")]
     if creds.get("domain"):
         cmd += ["-d", creds["domain"]]
@@ -329,8 +333,11 @@ def run_kerberoast(dc_ip: str, creds: dict) -> tuple[list[dict], str | None]:
     tool = impacket_tool("GetUserSPNs")
     if not tool or not creds.get("domain"):
         return [], None
-    target = f"{creds['domain']}/{creds['username']}:{creds.get('password', '')}"
-    out, err = _run([tool, target, "-dc-ip", dc_ip, "-request"])
+    # Keep the password off the argv: omit it from the target and answer impacket's
+    # getpass() prompt over stdin (new_session detaches the tty so it reads stdin).
+    target = f"{creds['domain']}/{creds['username']}"
+    out, err = _run([tool, target, "-dc-ip", dc_ip, "-request"],
+                    stdin_data=(creds.get("password", "") + "\n"), new_session=True)
     if err:
         return [], err
     return parse_getuserspns(out), None
@@ -340,7 +347,9 @@ def run_asrep(dc_ip: str, creds: dict) -> tuple[list[dict], str | None]:
     tool = impacket_tool("GetNPUsers")
     if not tool or not creds.get("domain"):
         return [], None
-    target = f"{creds['domain']}/{creds['username']}:{creds.get('password', '')}"
+    # AS-REP roasting is unauthenticated (-no-pass), so the password was never used
+    # here - drop it from the target entirely rather than leak it on the argv.
+    target = f"{creds['domain']}/{creds['username']}"
     out, err = _run([tool, target, "-dc-ip", dc_ip, "-request", "-no-pass"])
     if err:
         return [], err
@@ -367,8 +376,11 @@ def run_secretsdump(ip: str, creds: dict) -> tuple[list[dict], str | None]:
     if not tool:
         return [], None
     dom = creds.get("domain", "") or "."
-    target = f"{dom}/{creds['username']}:{creds.get('password', '')}@{ip}"
-    out, err = _run([tool, target])
+    # Password off the argv: omit it from the target, answer impacket's getpass()
+    # over stdin (new_session detaches the tty so getpass falls back to stdin).
+    target = f"{dom}/{creds['username']}@{ip}"
+    out, err = _run([tool, target],
+                    stdin_data=(creds.get("password", "") + "\n"), new_session=True)
     if err:
         return [], err
     return parse_secretsdump(out), None
@@ -401,7 +413,9 @@ def _ssh_cmd(ip: str, ssh: dict) -> list[str] | None:
         cmd = base + ["-i", ssh["key"], f"{user}@{ip}", _SSH_SCRIPT]
     elif ssh.get("password") and sshpass_tool():
         # BatchMode disables password prompts; drop it and let sshpass feed the pw.
-        cmd = ["sshpass", "-p", ssh["password"], "ssh", "-o",
+        # `-e` reads the password from the SSHPASS env var (set by run_ssh_local),
+        # keeping it off the world-readable process argv that `-p` would expose.
+        cmd = ["sshpass", "-e", "ssh", "-o",
                "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
                f"{user}@{ip}", _SSH_SCRIPT]
     else:
@@ -415,7 +429,9 @@ def run_ssh_local(ip: str, ssh: dict) -> tuple[dict | None, str | None]:
     cmd = _ssh_cmd(ip, ssh)
     if cmd is None:
         return None, None
-    out, err = _run(cmd, timeout=60)
+    env_extra = ({"SSHPASS": ssh["password"]}
+                 if ssh.get("password") and not ssh.get("key") else None)
+    out, err = _run(cmd, timeout=60, env_extra=env_extra)
     if err:
         return None, err
     # _run folds stderr into `out`, and parse_ssh_enum always returns a (truthy)
