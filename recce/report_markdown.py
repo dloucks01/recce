@@ -12,8 +12,8 @@ from .models import Domain, Host
 def _ip_key(ip: str):
     try:
         return tuple(int(o) for o in ip.split("."))
-    except ValueError:
-        return (999, ip)
+    except (ValueError, AttributeError):        # non-numeric/IPv6, or ip is None
+        return (999, ip or "")
 
 
 def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration Report",
