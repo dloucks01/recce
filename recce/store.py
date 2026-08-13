@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS issues (
 class Store:
     def __init__(self, path: str):
         self.path = path
+        self.conn = None
         try:
             self.conn = sqlite3.connect(path)
             # Ride out a transient lock (operator opened the DB, or a second recce)
@@ -91,7 +92,13 @@ class Store:
         except sqlite3.Error as e:
             # A corrupt / partially-transferred results.sqlite must fail with a
             # clear, actionable message - not a raw sqlite traceback on the very
-            # first command against a carried-over engagement dir.
+            # first command against a carried-over engagement dir. Close the
+            # half-open connection first so the handle doesn't leak on this path.
+            if self.conn is not None:
+                try:
+                    self.conn.close()
+                except sqlite3.Error:
+                    pass
             raise StoreError(
                 f"datastore at {path} is corrupt or unreadable ({e}). Delete it "
                 "or point -o at a fresh directory, then re-run.") from e
