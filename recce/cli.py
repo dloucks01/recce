@@ -165,37 +165,68 @@ def _open_store(db_path: str):
         return None
 
 
-def _relax_perms(path: str, mode: int = 0o777) -> None:
-    """Best-effort chmod of the engagement tree to `mode` (default 777).
+def _sudo_owner() -> tuple[int, int] | None:
+    """The uid/gid that invoked sudo, when recce is running as root under sudo.
+
+    Returns None when not applicable (not root, or not launched via sudo), in
+    which case the output is already owned by the operator and needs no chown."""
+    if not (hasattr(os, "geteuid") and os.geteuid() == 0):
+        return None
+    uid = os.environ.get("SUDO_UID")
+    if not (uid and uid.isdigit()):
+        return None
+    gid = os.environ.get("SUDO_GID")
+    return int(uid), int(gid) if gid and gid.isdigit() else int(uid)
+
+
+def _reown(target: str, owner: "tuple[int, int] | None", mode: int) -> None:
+    """Best-effort: give `target` back to the operator with owner-only `mode`.
+
+    chowns to the sudo-invoking user (when recce ran under sudo) and restricts
+    permissions to the owner. Anything we can't chown/chmod is skipped, never
+    fatal."""
+    try:
+        if owner is not None:
+            os.chown(target, owner[0], owner[1])
+        os.chmod(target, mode)
+    except OSError:
+        pass
+
+
+def _relax_perms(path: str) -> None:
+    """Best-effort: hand the engagement tree back to the operator after a sudo run,
+    WITHOUT exposing it to other local users.
 
     recce is frequently run under sudo (raw socket scans, reading protected files),
-    which leaves root-owned output a normal user can't reopen or edit afterward.
-    We relax the whole output folder - every subdir and file - so the operator
-    keeps full access regardless of how recce was invoked. Best-effort: a file
-    owned by another user (that we can't chmod) is skipped, never fatal."""
+    which leaves root-owned output a normal user can't reopen or edit afterward. We
+    restore ownership to the sudo-invoking user and set owner-only permissions
+    (dirs 0700, files 0600). The tree holds captured credentials and NTLM hashes,
+    so it must never be group- or world-readable. Best-effort: anything we can't
+    chown/chmod is skipped, never fatal."""
     if not path or not os.path.isdir(path):
         return
-    targets = [path]
+    owner = _sudo_owner()
+    dirs_seen = [path]
+    files_seen: list[str] = []
     for root, dirs, files in os.walk(path):
-        targets.extend(os.path.join(root, n) for n in dirs)
-        targets.extend(os.path.join(root, n) for n in files)
-    for t in targets:
-        try:
-            os.chmod(t, mode)
-        except OSError:
-            pass
+        dirs_seen.extend(os.path.join(root, n) for n in dirs)
+        files_seen.extend(os.path.join(root, n) for n in files)
+    for d in dirs_seen:
+        _reown(d, owner, 0o700)
+    for f in files_seen:
+        _reown(f, owner, 0o600)
 
 
 def _open_paths(out_dir: str) -> dict[str, str]:
     raw = os.path.join(out_dir, "raw")
     os.makedirs(raw, exist_ok=True)
-    # Keep the engagement folder world-accessible even when recce runs as root, so
-    # the operator can always reopen/edit the outputs (see _relax_perms).
-    try:
-        os.chmod(out_dir, 0o777)
-        os.chmod(raw, 0o777)
-    except OSError:
-        pass
+    # Keep the engagement folder accessible to the operator even when recce runs as
+    # root under sudo, without exposing captured creds/hashes to other local users:
+    # hand ownership back to the sudo-invoking user with owner-only perms (see
+    # _relax_perms).
+    owner = _sudo_owner()
+    _reown(out_dir, owner, 0o700)
+    _reown(raw, owner, 0o700)
     return {
         "raw": raw,
         "db": os.path.join(out_dir, "results.sqlite"),
