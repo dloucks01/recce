@@ -103,8 +103,13 @@ class Vuln:
     @property
     def key(self) -> str:
         # Include the title so multiple findings on one port (e.g. several
-        # version-db matches) don't collide and get deduped away.
-        return f"{self.ip}:{self.port}:{self.script_id}:{self.title[:60]}"
+        # version-db matches) don't collide and get deduped away. Append the
+        # protocol only when it isn't the default tcp, so a udp finding can't
+        # collapse onto a distinct tcp finding on the same port/script/title
+        # while existing tcp keys stay stable (same pattern as tracking.acct_key).
+        base = f"{self.ip}:{self.port}:{self.script_id}:{self.title[:60]}"
+        proto = (self.protocol or "tcp").lower()
+        return base if proto == "tcp" else f"{base}:{proto}"
 
 
 @dataclass
@@ -316,19 +321,22 @@ class Host:
         def _keep(kls, row):
             allowed = {f.name for f in fields(kls)}
             return {k: v for k, v in row.items() if k in allowed}
+        # `... or []` (not a get-default): a key present with an explicit JSON null
+        # yields None, which would break the comprehension - defeating the whole
+        # cross-version tolerance this method exists for on a hand-edited/corrupt DB.
         ports = [
             Port(**{**_keep(Port, p),
-                    "scripts": [Script(**_keep(Script, s)) for s in p.get("scripts", [])]})
-            for p in data.get("ports", [])
+                    "scripts": [Script(**_keep(Script, s)) for s in (p.get("scripts") or [])]})
+            for p in (data.get("ports") or [])
         ]
         vulns = [
             Vuln(**{**_keep(Vuln, v),
-                    "evidence": [Evidence(**_keep(Evidence, e)) for e in v.get("evidence", [])]})
-            for v in data.get("vulns", [])
+                    "evidence": [Evidence(**_keep(Evidence, e)) for e in (v.get("evidence") or [])]})
+            for v in (data.get("vulns") or [])
         ]
-        accounts = [Account(**_keep(Account, a)) for a in data.get("accounts", [])]
-        exploits = [Exploit(**_keep(Exploit, e)) for e in data.get("exploits", [])]
-        host_scripts = [Script(**_keep(Script, s)) for s in data.get("host_scripts", [])]
+        accounts = [Account(**_keep(Account, a)) for a in (data.get("accounts") or [])]
+        exploits = [Exploit(**_keep(Exploit, e)) for e in (data.get("exploits") or [])]
+        host_scripts = [Script(**_keep(Script, s)) for s in (data.get("host_scripts") or [])]
         core = _keep(cls, {
             k: v
             for k, v in data.items()

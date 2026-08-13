@@ -256,12 +256,29 @@ def _accounts_from_host_scripts(host_ip: str, script: Script) -> list[Account]:
     return accounts
 
 
+def _declares_entities(path: str) -> bool:
+    """True if the file declares XML entities in its prolog. Real nmap output never
+    does; a file that does could be an entity-expansion ('billion laughs') DoS,
+    which stdlib ElementTree would happily expand. Bounded head-scan: the DTD must
+    precede the root element, so a real declaration is always near the top."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(262144)
+    except OSError:
+        return False
+    return b"<!ENTITY" in head
+
+
 def parse_nmap_xml(path: str) -> list[Host]:
     """Parse one nmap XML file into a list of Host objects (up hosts only).
 
     Never raises: a missing/unreadable/empty/truncated XML (nmap failed to start,
     was killed by a timeout, or wrote a partial file) yields [] rather than
     crashing the phase - the caller treats it as "nothing found here"."""
+    if _declares_entities(path):
+        # An operator-supplied (recce import) file that declares entities is not
+        # nmap output; refuse it rather than risk an entity-expansion blowup.
+        return []
     try:
         tree = ET.parse(path)
     except (FileNotFoundError, OSError):
@@ -492,8 +509,13 @@ def parse_gnmap(path: str) -> list[Host]:
                 if any(p.portid == portid and p.protocol == proto for p in host.ports):
                     continue
                 service = fields[4] if len(fields) > 4 else ""
-                product, version = _split_product_version(
-                    fields[6] if len(fields) > 6 else "")
+                # The version-info field is the 7th (index 6), but nmap does not
+                # escape a literal '/' inside it (e.g. "mod_ssl/2.2.14 OpenSSL/..."
+                # or a "nginx/1.18.0" banner), which the split scatters into extra
+                # slots. Rejoin everything from index 6 on so the version isn't
+                # silently truncated (weakening the offline version->CVE match).
+                version_blob = "/".join(fields[6:]).rstrip("/") if len(fields) > 6 else ""
+                product, version = _split_product_version(version_blob)
                 host.ports.append(Port(portid=portid, protocol=proto, state="open",
                                        service=service, product=product, version=version))
         om = re.search(r"\bOS:\s*([^\t]+)", line)
@@ -508,9 +530,13 @@ def parse_gnmap(path: str) -> list[Host]:
     return result
 
 
+# Match both IPv4 and IPv6 targets: an IPv6-only -oN import must not silently
+# yield zero hosts (parse_grepable's "Host: <addr>" is already family-agnostic).
+_IP4 = r"\d{1,3}(?:\.\d{1,3}){3}"
+_IP6 = r"[0-9A-Fa-f:]*:[0-9A-Fa-f:]+"
+_ADDR = rf"(?:{_IP4}|{_IP6})"
 _NORMAL_HOST = re.compile(
-    r"Nmap scan report for (?:([^\s()]+)\s+\((\d{1,3}(?:\.\d{1,3}){3})\)"
-    r"|(\d{1,3}(?:\.\d{1,3}){3}))")
+    rf"Nmap scan report for (?:([^\s()]+)\s+\(({_ADDR})\)|({_ADDR}))")
 _NORMAL_PORT = re.compile(
     r"^(\d+)/(tcp|udp)\s+(open\S*)\s+(\S+)(?:\s+(.*\S))?\s*$")
 

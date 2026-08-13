@@ -592,13 +592,26 @@ def _empty_xml(out_xml: str) -> str:
     return out_xml
 
 
+def _script_arg_val(v: str) -> str:
+    """Quote+escape a value for nmap's --script-args grammar.
+
+    That grammar is comma/brace-delimited, so a raw credential containing ',',
+    '{', '}', '"' or '\\' would silently split into bogus key=value pairs and
+    corrupt the auth args nmap actually receives. nmap allows a double-quoted
+    value with backslash escaping, so quote it and escape backslash + quote."""
+    v = v.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{v}"'
+
+
 def _creds_args(creds: dict | None) -> list[str]:
     if not (creds and creds.get("username")):
         return []
-    args = [f"smbusername={creds['username']}", f"smbpassword={creds.get('password', '')}"]
+    user = _script_arg_val(creds["username"])
+    pw = _script_arg_val(creds.get("password", ""))
+    args = [f"smbusername={user}", f"smbpassword={pw}"]
     if creds.get("domain"):
-        args.append(f"smbdomain={creds['domain']}")
-    args += [f"ldap.username={creds['username']}", f"ldap.password={creds.get('password', '')}"]
+        args.append(f"smbdomain={_script_arg_val(creds['domain'])}")
+    args += [f"ldap.username={user}", f"ldap.password={pw}"]
     return ["--script-args", ",".join(args)]
 
 

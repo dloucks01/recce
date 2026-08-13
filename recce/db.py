@@ -87,12 +87,19 @@ def db_instances(hosts: list[Host]) -> list[dict]:
                              _script_text(p, "mongodb-databases"), re.M)
             users = re.findall(r"([\w$@.-]+)",
                                _script_text(p, "mysql-users"))
-            # Auth posture from findings on this port.
+            # Auth posture from findings on this port. Priority is fixed (empty
+            # password is the more specific signal), not last-writer-wins over an
+            # arbitrary vuln order, so the reported value is deterministic when both
+            # an "empty password" and an "unauthenticated" finding exist.
             auth = ""
             for v in h.vulns:
-                if v.port == p.portid and "empty password" in v.title.lower():
+                if v.port != p.portid:
+                    continue
+                t = v.title.lower()
+                if "empty password" in t:
                     auth = "EMPTY PASSWORD"
-                elif v.port == p.portid and "unauthenticated" in v.title.lower():
+                    break
+                if "unauthenticated" in t and not auth:
                     auth = "UNAUTHENTICATED"
             findings = "; ".join(sorted({v.title for v in h.vulns
                                          if v.port == p.portid}))

@@ -179,8 +179,12 @@ def vuln_row_key(v: Any) -> str:
 
     The title slice must match models.Vuln.key's (60 chars): the store dedups
     vulns on title[:60], so a coarser key here would collapse two store-distinct
-    findings into one Vulnerabilities row and undercount coverage."""
-    return vuln_key(v.ip, v.port, f"{v.script_id}:{(v.title or '')[:60]}")
+    findings into one Vulnerabilities row and undercount coverage. Mirror its
+    protocol handling too (appended only for non-tcp) so a udp finding kept
+    distinct by the store gets its own row rather than collapsing onto a tcp one."""
+    base = vuln_key(v.ip, v.port, f"{v.script_id}:{(v.title or '')[:60]}")
+    proto = (getattr(v, "protocol", "") or "tcp").lower()
+    return base if proto == "tcp" else f"{base}:{proto}"
 
 
 def exploit_key(ip: str, port: Any, edb_id: str) -> str:
