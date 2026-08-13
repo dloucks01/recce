@@ -508,13 +508,12 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
 
 def _apply_profile_overrides(profile, args) -> None:
     g = lambda name, default=None: getattr(args, name, default)  # noqa: E731
-    if g("all_ports"):
-        profile.all_ports = True
     if g("top_ports"):
         profile.all_ports = False
         profile.top_ports = args.top_ports
     # --all-ports is the explicit, profile-overriding "full 65535-port sweep" and is
-    # applied last so it wins over a quick profile or a lingering --top-ports.
+    # applied after --top-ports so it wins over a quick profile or a lingering
+    # --top-ports.
     if g("all_ports"):
         profile.all_ports = True
     if g("no_ad"):
@@ -808,11 +807,13 @@ def _reconfirm_missed(missed, profile, paths):
     rx = os.path.join(paths["raw"], "reconfirm.xml")
     print(f"[*] Reconfirming {len(missed)} non-responder(s) with a fast -Pn top-ports "
           "probe (catches firewalled-but-alive hosts) ...")
-    _, iss = scanner.reconfirm_hosts(tfile, rx, profile)
     try:
-        os.unlink(tfile)
-    except OSError:
-        pass
+        _, iss = scanner.reconfirm_hosts(tfile, rx, profile)
+    finally:
+        try:
+            os.unlink(tfile)          # always remove the temp target list, even on error
+        except OSError:
+            pass
     recovered = {h.ip: (h.up_reason or "reconfirm: open port")
                  for h in np.parse_nmap_xml(rx) if h.open_ports}
     return recovered, iss
@@ -904,16 +905,21 @@ def _discover(args, profile, store, paths):
                 targets_file = tf.name
             disc_xml = os.path.join(paths["raw"], "discovery.xml")
             print("[*] Discovery: host sweep ...")
-            _, iss = scanner.discover_hosts(targets_file, disc_xml)
-            if iss:
-                _record_issues(store, paths, "(discovery)", [_mkissue(iss, "discovery")])
-            disc_hosts = np.parse_nmap_xml(disc_xml)
-            live_ips = [h.ip for h in disc_hosts]
-            # Carry each responder's real status reason (echo-reply/syn-ack/arp-...)
-            # into the enum phase so the stored host records HOW we know it's up.
-            disc_reasons = {h.ip: (h.up_reason or "discovery")
-                            for h in disc_hosts if h.up_reason not in ("", "user-set")}
-            os.unlink(targets_file)
+            try:
+                _, iss = scanner.discover_hosts(targets_file, disc_xml)
+                if iss:
+                    _record_issues(store, paths, "(discovery)", [_mkissue(iss, "discovery")])
+                disc_hosts = np.parse_nmap_xml(disc_xml)
+                live_ips = [h.ip for h in disc_hosts]
+                # Carry each responder's real status reason (echo-reply/syn-ack/arp-...)
+                # into the enum phase so the stored host records HOW we know it's up.
+                disc_reasons = {h.ip: (h.up_reason or "discovery")
+                                for h in disc_hosts if h.up_reason not in ("", "user-set")}
+            finally:
+                try:
+                    os.unlink(targets_file)   # always remove the temp target list
+                except OSError:
+                    pass
             print(f"[+] {len(live_ips)} of {len(hosts)} target(s) responded to discovery.")
             if not live_ips:
                 # Zero responses almost always means the network blocks ping/probes,
@@ -1696,6 +1702,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     new scan logic here - just the streamlined path and ambient next-step guidance."""
     args.deep = True                       # enum -> vulns -> credential-free deep sweep
     rc = cmd_scan(args)                     # (prints the banner; reports deferred inside)
+    if rc != 0:
+        # cmd_scan bailed early (e.g. store setup failed); don't run the
+        # authenticated sweep / next-steps against a half-set-up engagement.
+        return rc
     if getattr(args, "username", None):
         print("\n[*] Credentials supplied - running the authenticated modules "
               "(SMB/AD/mssql matrix) ...")
@@ -2289,7 +2299,12 @@ def _prove_run_safe_checks(store, paths, hosts, args) -> None:
                    "smb-vuln-ms17-010", "smb-enum-shares"]
     smb_recipes = {"smb-signing-relay", "ms17-010", "smb-null-session"}
     for h in hosts:
-        rids = {proofs.recipe_for(v)["id"] for v in h.vulns if proofs.recipe_for(v)}
+        # One recipe_for() call per vuln (was two), guarding a recipe with no "id".
+        rids = set()
+        for v in h.vulns:
+            r = proofs.recipe_for(v)
+            if r and r.get("id"):
+                rids.add(r["id"])
         if not (rids & smb_recipes) or not any(p.portid in (139, 445) for p in h.open_ports):
             continue
         print(f"[*] {h.ip}: re-running safe SMB detection NSE to prove/disprove ...")
@@ -2986,7 +3001,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             store.close()
             return 1
         try:
-            files = {"recce-enum.ps1": open(deploy.WINDOWS_SCRIPT, "rb").read()}
+            with open(deploy.WINDOWS_SCRIPT, "rb") as _wf:
+                files = {"recce-enum.ps1": _wf.read()}
         except OSError as e:
             print(f"[x] Could not read the Windows script: {e}")
             store.close()
@@ -3723,9 +3739,12 @@ def cmd_mssql(args: argparse.Namespace) -> int:
     # Checklist DB / Vuln-scan boxes for those hosts.
     if active or (creds and not args.no_run):
         _mark_capability_scanned(store, tgts, db=True)
+    rb_by_ip = {r["ip"]: r for r in analysis["runbooks"]}
     for t in tgts:
-        for line in analysis["runbooks"][next(i for i, r in enumerate(analysis["runbooks"])
-                                              if r["ip"] == t["ip"])]["chain"]:
+        rb = rb_by_ip.get(t["ip"])          # was next() with no default -> StopIteration
+        if not rb:
+            continue
+        for line in rb.get("chain") or []:
             print(f"      {line}")
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
@@ -4397,9 +4416,10 @@ def cmd_kerberos(args: argparse.Namespace) -> int:
             store.close()
             return 1
     # Privileged names (for critical severity) from admin-flagged accounts.
-    privileged = {a.name.lower() for h in hosts for a in (h.accounts or [])
-                  if str((a.attrs or {}).get("admincount", "")).lower() in ("1", "true")
-                  or a.name.lower() in ("administrator", "admin")}
+    privileged = {(a.name or "").lower() for h in hosts for a in (h.accounts or [])
+                  if (a.name and (str((a.attrs or {}).get("admincount", "")).lower()
+                                  in ("1", "true")
+                                  or a.name.lower() in ("administrator", "admin")))}
 
     active = not args.no_probe
     realm = getattr(args, "domain", "") or store.get_meta("domain") or ""

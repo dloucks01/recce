@@ -2009,6 +2009,23 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
             ip, port = "10.0.0.7", 80
         self.assertEqual(poc._url_from_vuln(V()), "http://evil")   # truncated at '$'
 
+    def test_cmd_run_bails_when_scan_fails(self):
+        # A failed cmd_scan (e.g. store setup returned 1) must stop the run, not go
+        # on to the authenticated sweep / next-steps against a half-set-up engagement.
+        from unittest import mock
+        from types import SimpleNamespace
+        from recce import cli
+        args = SimpleNamespace(output_dir="/tmp/recce-nonexistent", username="u")
+        with mock.patch.object(cli, "cmd_scan", return_value=1), \
+                mock.patch.object(cli, "_run_sweep") as sweep, \
+                mock.patch.object(cli, "_open_paths") as open_paths, \
+                mock.patch.object(cli, "_print_next") as print_next:
+            rc = cli.cmd_run(args)
+        self.assertEqual(rc, 1)
+        sweep.assert_not_called()
+        open_paths.assert_not_called()
+        print_next.assert_not_called()
+
 
 class HostUpCertaintyTest(unittest.TestCase):
     """The Checklist shows only hosts we can PROVE are up - but is never allowed to
