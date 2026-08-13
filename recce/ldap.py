@@ -25,6 +25,7 @@ workbook tab. Airgapped-safe; degrades cleanly when the port doesn't speak LDAP.
 from __future__ import annotations
 
 import re
+import shlex
 import socket
 import struct
 
@@ -792,7 +793,9 @@ def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict
             f"{len(pw_desc)} account description(s) look like they contain a credential "
             f"(e.g. {names}). Descriptions are world-readable to any authenticated user - "
             "a classic source of valid passwords.", "ldapsearch",
-            f"ldapsearch -x -H ldap://{dc_ip} -D '<user>@{domain}' -w '<pass>' -b '<base>' "
+            # shlex.quote the server-supplied domain (attacker-controlled) so a
+            # hostile RootDSE value can't break out when this is pasted into a shell.
+            f"ldapsearch -x -H ldap://{dc_ip} -D {shlex.quote('<user>@' + domain)} -w '<pass>' -b '<base>' "
             "'(description=*)' sAMAccountName description",
             "Remove secrets from description/info attributes; rotate the exposed passwords.",
             ["CWE-522", "CWE-200"], kind="ldap_pw_desc"))
@@ -927,7 +930,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "unauthenticated client can read directory objects. "
                     + (f"Directory: {summary}." if summary else ""),
                     "ldapsearch / netexec",
-                    f"ldapsearch -x -H ldap://{h.ip}:{p.portid} -b '{pr.get('naming_context', '')}' "
+                    # shlex.quote the server-supplied naming context (attacker-controlled).
+                    f"ldapsearch -x -H ldap://{h.ip}:{p.portid} -b {shlex.quote(pr.get('naming_context', ''))} "
                     "'(objectClass=user)' sAMAccountName servicePrincipalName description",
                     "Deny anonymous read on the directory (dsHeuristics / anonymous ACLs); "
                     "require authentication for all reads.",

@@ -165,10 +165,14 @@ def http_findings(host_ip: str, port: Port) -> list[Vuln]:
 
 # --- TLS certificate & protocol -------------------------------------------------
 
+# Use TLSVersion (not the deprecated PROTOCOL_* constants): _accepts_protocol
+# pins min==max to the exact version, so a handshake succeeds only if the server
+# truly speaks it - a PROTOCOL_TLSv1 context can silently negotiate UP to TLS 1.2
+# and falsely report legacy support.
 _LEGACY_PROTOCOLS = [
-    ("SSLv3", getattr(ssl, "PROTOCOL_SSLv3", None), ["CWE-327"], "high"),
-    ("TLSv1.0", getattr(ssl, "PROTOCOL_TLSv1", None), ["CWE-326"], "medium"),
-    ("TLSv1.1", getattr(ssl, "PROTOCOL_TLSv1_1", None), ["CWE-326"], "medium"),
+    ("SSLv3", getattr(ssl.TLSVersion, "SSLv3", None), ["CWE-327"], "high"),
+    ("TLSv1.0", getattr(ssl.TLSVersion, "TLSv1", None), ["CWE-326"], "medium"),
+    ("TLSv1.1", getattr(ssl.TLSVersion, "TLSv1_1", None), ["CWE-326"], "medium"),
 ]
 
 _MONTHS = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
@@ -199,6 +203,12 @@ def _peer_cert(host_ip: str, port: Port):
     verify_error = ""
     try:
         vctx = ssl.create_default_context()
+        # We connect by IP, so hostname verification would fail for essentially
+        # every real cert (the IP is rarely in the SAN) - flooding a spurious
+        # "hostname mismatch" finding on every TLS service AND leaving getpeercert()
+        # empty so the expiry check below can never fire. Verify the chain (still
+        # catches expired/self-signed/untrusted) but not the hostname.
+        vctx.check_hostname = False
         with socket.create_connection((host_ip, port.portid), timeout=proxy.scaled(_TIMEOUT)) as raw:
             with vctx.wrap_socket(raw, server_hostname=host_ip) as tls:
                 return tls.getpeercert(), tls.version(), ""
@@ -286,11 +296,29 @@ def tls_findings(host_ip: str, port: Port) -> list[Vuln]:
     return findings
 
 
-def _accepts_protocol(host_ip: str, portid: int, protocol_const) -> bool:
+def _accepts_protocol(host_ip: str, portid: int, version) -> bool:
+    """True only if the server completes a handshake at EXACTLY `version`.
+
+    Pins min==max to that TLSVersion so OpenSSL cannot negotiate up to a modern
+    version and report a false legacy accept. If the local OpenSSL build refuses
+    to offer the old version at all (ValueError) that is a clean False, not a
+    legacy accept."""
+    if version is None:
+        return False
     try:
-        ctx = ssl.SSLContext(protocol_const)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+        ctx.minimum_version = version
+        ctx.maximum_version = version
+        # Modern OpenSSL disables legacy ciphers by default (SECLEVEL 2), which
+        # would fail the handshake even against a server that DOES speak the old
+        # version - a false negative. Lower the security level so those ciphers
+        # are offered; best-effort (some builds reject the directive).
+        try:
+            ctx.set_ciphers("ALL:@SECLEVEL=0")
+        except ssl.SSLError:
+            pass
         with socket.create_connection((host_ip, portid), timeout=proxy.scaled(_TIMEOUT)) as raw:
             with ctx.wrap_socket(raw, server_hostname=host_ip):
                 return True

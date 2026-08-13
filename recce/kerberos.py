@@ -20,6 +20,7 @@ the prove engine. Safety posture: SECURITY.md.
 """
 from __future__ import annotations
 
+import shlex
 import socket
 import struct
 
@@ -381,7 +382,8 @@ def findings(dc_ip: str, realm: str, results: list[dict],
             f"logon attempt (no lockouts): {names}. This user list feeds spraying, "
             "AS-REP / Kerberoasting and phishing.",
             "kerbrute / GetNPUsers",
-            f"impacket-GetNPUsers {realm}/ -no-pass -usersfile users.txt -dc-ip {dc_ip}",
+            # shlex.quote the server-supplied realm (attacker-controlled).
+            f"impacket-GetNPUsers {shlex.quote(realm)}/ -no-pass -usersfile users.txt -dc-ip {dc_ip}",
             "Username enumeration via Kerberos pre-auth is largely inherent; minimise "
             "predictable names, monitor AS-REQ volume, and alert on pre-auth-disabled "
             "accounts.",

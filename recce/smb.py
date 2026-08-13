@@ -22,6 +22,7 @@ posture: see SECURITY.md.
 """
 from __future__ import annotations
 
+import shlex
 import socket
 import struct
 
@@ -521,7 +522,9 @@ def write_proof_finding(ip: str, port: int, share: str, proof: dict,
         "dropping a marker file, listing it, then deleting it (fully reversible):\n\n"
         + (proof.get("evidence") or ""),
         "smbclient / Responder",
-        "smbclient //<ip>/" + share + " -N -c 'put poison.scf; ls'   # then capture "
+        # shlex.quote the server-supplied share name: it's attacker-controlled and
+        # this string is meant to be copy-pasted into the operator's shell.
+        "smbclient //<ip>/" + shlex.quote(share) + " -N -c 'put poison.scf; ls'   # then capture "
         "NetNTLM with Responder; or drop a web shell if the share backs a web root",
         "Remove write access for non-admin/anonymous principals; audit share + NTFS "
         "ACLs.", ["CWE-732", "CWE-276"], kind="writable_share")

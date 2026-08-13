@@ -18,6 +18,7 @@ write-ups, a dedicated **rsync** tab, and the prove engine. Safety posture: SECU
 """
 from __future__ import annotations
 
+import shlex
 import socket
 
 from .models import Host, Port
@@ -230,14 +231,17 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             open_mods = [m for m in mods if m.get("access") == "open"]
             if open_mods:
                 names = ", ".join(m["name"] for m in open_mods[:12])
+                # shlex.quote the server-supplied module name (attacker-controlled)
+                # since this command is meant to be copy-pasted into a shell.
+                mod0 = shlex.quote(open_mods[0]["name"])
                 out.append(_finding(
                     "high", "rsync module readable without authentication", tgt,
                     f"{len(open_mods)} module(s) grant access with no credential: "
                     f"{names}. Unauthenticated read (and, if not read-only, write) "
                     "access to every file they expose.",
                     "rsync",
-                    f"rsync --list-only rsync://{h.ip}:{p.portid}/{open_mods[0]['name']}/ ; "
-                    f"rsync -av rsync://{h.ip}:{p.portid}/{open_mods[0]['name']}/ loot/",
+                    f"rsync --list-only rsync://{h.ip}:{p.portid}/{mod0}/ ; "
+                    f"rsync -av rsync://{h.ip}:{p.portid}/{mod0}/ loot/",
                     "Require 'auth users' + a secrets file on every module, set 'read "
                     "only = true', and restrict with 'hosts allow' / a firewall.",
                     ["CWE-306", "CWE-284"], kind="rsync_open"))

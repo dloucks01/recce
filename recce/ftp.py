@@ -230,15 +230,17 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "ftp-anon -p21 <ip>",
                     "Disable anonymous access unless the content is deliberately public "
                     "and read-only.", ["CWE-306", "CWE-287"], kind="anon_ftp"))
-                if pr.get("auth_tls") is False:
-                    out.append(_finding(
-                        "medium", "FTP authentication is cleartext (no AUTH TLS)", tgt,
-                        "The server advertises no AUTH TLS/FTPS in FEAT, so credentials "
-                        "and file transfers cross the network unencrypted and are "
-                        "sniffable.", "wireshark / tcpdump",
-                        "tcpdump -i <iface> 'tcp port 21'   # USER/PASS appear in clear",
-                        "Require FTPS (explicit AUTH TLS) or replace FTP with SFTP/SCP.",
-                        ["CWE-319"], kind="cleartext_ftp"))
+            # Not gated on anonymous: an auth-REQUIRED server with no AUTH TLS is the
+            # common cleartext-credential case and must still raise this finding.
+            if pr.get("auth_tls") is False:
+                out.append(_finding(
+                    "medium", "FTP authentication is cleartext (no AUTH TLS)", tgt,
+                    "The server advertises no AUTH TLS/FTPS in FEAT, so credentials "
+                    "and file transfers cross the network unencrypted and are "
+                    "sniffable.", "wireshark / tcpdump",
+                    "tcpdump -i <iface> 'tcp port 21'   # USER/PASS appear in clear",
+                    "Require FTPS (explicit AUTH TLS) or replace FTP with SFTP/SCP.",
+                    ["CWE-319"], kind="cleartext_ftp"))
     return out
 
 
