@@ -43,7 +43,7 @@ def next_actions(hosts, credentials=None, output_dir: str = "engagement") -> lis
                        "discover, enumerate and vuln-scan the scope in one pass")]
 
     unscanned = [h for h in up
-                 if any(p.state == "open" and not p.vuln_scanned for p in h.open_ports)]
+                 if any(p.is_open and not p.vuln_scanned for p in h.open_ports)]
     if unscanned:
         acts.append(Action(10, f"{len(unscanned)} host(s) not vuln-scanned",
                            f"recce vulns -o {o}", "run the vuln + service NSE pass"))

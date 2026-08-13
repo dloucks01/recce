@@ -38,7 +38,7 @@ _K8S_PORTS = (_KUBELET, _KUBELET_RO, 6443, 8443, _ETCD)
 
 
 def is_k8s(port: Port) -> bool:
-    if port.state != "open":
+    if not port.is_open:
         return False
     if port.portid in _K8S_PORTS:
         return True

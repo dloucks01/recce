@@ -12,11 +12,56 @@ No scanning happens on import - callers drive the phases explicitly.
 
 from __future__ import annotations
 
+import functools
 import os
+import re
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+
+# nmap ships a frequency-ranked service list; masscan has no such ranking, so to
+# make masscan's top-N match nmap's --top-ports N we read the real most-common
+# ports from here and feed masscan that explicit set.
+_NMAP_SERVICES_PATHS = (
+    "/usr/share/nmap/nmap-services",
+    "/usr/local/share/nmap/nmap-services",
+    "/opt/homebrew/share/nmap/nmap-services",
+)
+_SERVICES_LINE = re.compile(r"^\S+\s+(\d+)/tcp\s+([\d.]+)")
+
+
+@functools.lru_cache(maxsize=8)
+def _top_tcp_ports(n: int) -> tuple[int, ...]:
+    """The N most common TCP ports by nmap-services frequency (matches nmap's
+    --top-ports N). Empty tuple if nmap-services isn't found - callers then fall
+    back to a full 0-65535 sweep so a high open port is never silently skipped."""
+    path = next((p for p in _NMAP_SERVICES_PATHS if os.path.isfile(p)), None)
+    if not path:
+        return ()
+    ranked: list[tuple[float, int]] = []
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                m = _SERVICES_LINE.match(line)
+                if m:
+                    ranked.append((float(m.group(2)), int(m.group(1))))
+    except OSError:
+        return ()
+    ranked.sort(key=lambda t: t[0], reverse=True)
+    return tuple(sorted(p for _f, p in ranked[:n]))
+
+
+def _masscan_port_spec(profile: "ScanProfile") -> str:
+    """The masscan -p value for this profile. all_ports -> the full range; a top-N
+    profile -> the SAME frequency-ranked top-N set nmap would scan (NOT a literal
+    0..N range, which scans only low ports and misses RDP 3389 / WinRM 5985 /
+    8080 / 8443 / Mongo 27017 / Elastic 9200). Falls back to the full range if the
+    nmap-services frequency table isn't available."""
+    if profile.all_ports:
+        return "0-65535"
+    top = _top_tcp_ports(profile.top_ports)
+    return ",".join(str(p) for p in top) if top else "0-65535"
 
 
 @dataclass
@@ -487,7 +532,7 @@ def reconfirm_hosts(targets_file: str, out_xml: str,
 
 def _masscan_ports(ip: str, out_xml: str,
                    profile: ScanProfile) -> tuple[str, ScanIssue | None]:
-    port_range = "0-65535" if profile.all_ports else f"0-{profile.top_ports}"
+    port_range = _masscan_port_spec(profile)
     tmp = out_xml + ".masscan.xml"
     _run(["masscan", ip, "-p", port_range, "--rate", str(profile.min_rate * 10),
           "-oX", tmp], timeout=(profile.host_timeout * 60 + 120) or None)
@@ -521,7 +566,7 @@ def masscan_sweep(ips: list[str], out_xml: str, profile: ScanProfile) -> dict[st
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
         tf.write("\n".join(ips))
         list_file = tf.name
-    port_range = "0-65535" if profile.all_ports else f"0-{profile.top_ports}"
+    port_range = _masscan_port_spec(profile)
     # masscan rate is packets/sec across the whole sweep; scale up from min_rate.
     rate = max(profile.min_rate * 10, 5000)
     # Hard backstop so a wedged masscan (bad rate, no raw-socket perms, odd iface)

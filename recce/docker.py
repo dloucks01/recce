@@ -22,7 +22,7 @@ _TIMEOUT = 6.0
 
 
 def is_docker(port: Port) -> bool:
-    if port.state != "open":
+    if not port.is_open:
         return False
     if port.portid in _PORTS:
         return True

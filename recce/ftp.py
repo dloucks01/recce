@@ -52,7 +52,7 @@ _KNOWN_BAD = [
 
 
 def is_ftp(port: Port) -> bool:
-    if port.state != "open":
+    if not port.is_open:
         return False
     if port.portid == _DEFAULT_PORT:
         return True

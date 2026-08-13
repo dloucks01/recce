@@ -29,7 +29,7 @@ _UA = "recce-web/1.0"
 
 
 def is_web(port: Port) -> bool:
-    return port.state == "open" and probes._is_http(port)
+    return port.is_open and probes._is_http(port)
 
 
 def scheme_for(port: Port) -> str:

@@ -32,6 +32,19 @@ def _best_up_reason(old: str, new: str) -> str:
         return _UP_REASON_RANK.get(r, 2)   # anything not listed is a real reply
     return new if rank(new) > rank(old) else old
 
+
+def _merge_port_state(old: str, new: str) -> str:
+    """Merge two nmap port states without ever downgrading a confirmed 'open'.
+
+    The parser keeps only open / open|filtered, and 'open' is the more certain
+    verdict. A later scan that re-sees the same port as 'open|filtered' (UDP flaps
+    between the two between runs) must not overwrite a prior 'open' - that, combined
+    with open_ports honoring open|filtered, would make a previously-reported port
+    disappear on the re-scan. Prefer 'open' whenever either scan saw it."""
+    if "open" in (old, new):
+        return "open"
+    return new or old
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS hosts (
     ip       TEXT PRIMARY KEY,
@@ -133,7 +146,7 @@ class Store:
             key = (np.protocol, np.portid)
             if key in port_index:
                 op = port_index[key]
-                op.state = np.state or op.state
+                op.state = _merge_port_state(op.state, np.state)
                 op.service = np.service or op.service
                 op.product = np.product or op.product
                 op.version = np.version or op.version

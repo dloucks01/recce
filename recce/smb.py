@@ -44,7 +44,7 @@ _SMB1_DIALECTS = [b"PC NETWORK PROGRAM 1.0", b"LANMAN1.0",
 
 
 def is_smb(port: Port) -> bool:
-    if port.state != "open":
+    if not port.is_open:
         return False
     if port.portid in _SMB_PORTS:
         return True
