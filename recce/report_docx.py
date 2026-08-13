@@ -606,7 +606,7 @@ def list_findings(hosts: list[Host], *, min_severity: str = "info") -> list[dict
             continue
         out.append({"id": fid, "severity": f.severity, "title": f.title,
                     "affected": sorted({a[0] for a in f.affected}),
-                    "cves": f.cves, "confidence": f.confidence or "confirmed",
+                    "cves": f.cves, "confidence": f.confidence,
                     "real": _is_real(f)})
     return out
 

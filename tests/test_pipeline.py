@@ -800,6 +800,29 @@ class WriteupTest(unittest.TestCase):
         # stable ids: high sorts before the medium
         self.assertEqual(by_title["smb-vuln-ms17-010"]["id"], "F-001")
 
+    def test_blank_confidence_reads_reported_everywhere(self):
+        # Regression: list_findings coerced a blank confidence to "confirmed", so the
+        # HTML summary table showed a green "Confirmed" badge for a finding the detail
+        # card and the exec "Confirmed" tile both treat as "Reported" - an honesty
+        # inconsistency. A blank confidence (the NSE-VULNERABLE ms17-010 here) must
+        # read the same in all three places.
+        from recce.report_docx import list_findings, group_findings
+        from recce import report_html as rh
+        hosts = self._hosts_potential_and_loot()
+        row = {r["title"]: r for r in list_findings(hosts)}["smb-vuln-ms17-010"]
+        self.assertEqual(row["confidence"], "")        # not coerced to "confirmed"
+        # Summary-table badge (from the dict) matches the detail-card badge (from the
+        # grouped Finding), and neither claims "Confirmed".
+        f = {g.title: g for g in group_findings(hosts)}["smb-vuln-ms17-010"]
+        self.assertEqual(rh._conf_badge(row["confidence"]), rh._conf_badge(f.confidence))
+        self.assertIn("Reported", rh._conf_badge(row["confidence"]))
+        self.assertNotIn("Confirmed", rh._conf_badge(row["confidence"]))
+        # The exec-summary "Confirmed" tile counts none of the blank-confidence rows,
+        # so its number can't exceed the "Confirmed" badges in the table.
+        confirmed = sum(1 for g in group_findings(hosts)
+                        if (g.confidence or "").lower() == "confirmed")
+        self.assertEqual(confirmed, 0)
+
     def test_single_writeup_prefills_looted(self):
         from recce.report_docx import build_one_writeup
         hosts = self._hosts_potential_and_loot()
