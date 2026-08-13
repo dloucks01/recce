@@ -743,27 +743,32 @@ def _kerb_tool(*names):
     return None
 
 
-def _run(cmd, timeout: int = 240) -> tuple[str, str | None]:
+def _run(cmd, timeout: int = 240, **kw) -> tuple[str, str | None]:
     from .util import run_tool
-    return run_tool(cmd, timeout)
+    return run_tool(cmd, timeout, **kw)
 
 
-def _impacket_target(creds: dict, at_dc: bool = False) -> tuple[str, list[str]]:
-    """(target, extra_flags) for an impacket command from a creds dict.
-    Password -> DOM/user:pass; NT hash -> DOM/user + `-hashes :<nt>`."""
+def _impacket_target(creds: dict, at_dc: bool = False) -> tuple[str, list[str], str | None]:
+    """(target, extra_flags, stdin_password) for an impacket command.
+
+    The plaintext password is NEVER placed in the target - it would sit on the
+    world-readable process argv. It is returned as stdin_password so the caller can
+    answer impacket's getpass() prompt over stdin instead. An NT hash has no
+    off-argv option, so it stays in `-hashes` on the argv (stdin_password is None)."""
     dom = creds.get("domain") or ""
     user = creds.get("user") or ""
     secret = creds.get("secret") or ""
     dc = creds.get("dc_ip") or ""
     base = f"{dom}/{user}" if dom else user
     flags: list[str] = []
+    stdin_pw: str | None = None
     if creds.get("is_hash") and secret:
         flags = ["-hashes", f":{secret}"]
     elif secret:
-        base = f"{base}:{secret}"
+        stdin_pw = secret + "\n"
     if at_dc and dc:
         base = f"{base}@{dc}"
-    return base, flags
+    return base, flags, stdin_pw
 
 
 def parse_tgs(output: str) -> list[dict]:
@@ -818,13 +823,13 @@ def live_kerberoast(creds: dict, privileged: set | None = None) -> dict:
     if not tool:
         return {"ran": False, "error": "impacket-GetUserSPNs not installed",
                 "hashes": [], "findings": []}
-    target, flags = _impacket_target(creds)
+    target, flags, stdin_pw = _impacket_target(creds)
     dc = creds.get("dc_ip") or ""
     cmd = [tool, "-request", "-outputfile", "-"] + flags
     if dc:
         cmd += ["-dc-ip", dc]
     cmd.append(target)
-    out, err = _run(cmd)
+    out, err = _run(cmd, stdin_data=stdin_pw, new_session=stdin_pw is not None)
     if err:
         return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
                 "hashes": [], "findings": [], "error": err}
@@ -856,13 +861,13 @@ def live_asrep(creds: dict) -> dict:
     if not tool:
         return {"ran": False, "error": "impacket-GetNPUsers not installed",
                 "hashes": [], "findings": []}
-    target, flags = _impacket_target(creds)
+    target, flags, stdin_pw = _impacket_target(creds)
     dc = creds.get("dc_ip") or ""
     cmd = [tool, "-request", "-format", "hashcat"] + flags
     if dc:
         cmd += ["-dc-ip", dc]
     cmd.append(target)
-    out, err = _run(cmd)
+    out, err = _run(cmd, stdin_data=stdin_pw, new_session=stdin_pw is not None)
     if err:
         return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
                 "hashes": [], "findings": [], "error": err}
@@ -891,13 +896,13 @@ def live_dcsync(creds: dict) -> dict:
     if not tool:
         return {"ran": False, "error": "impacket-secretsdump not installed",
                 "hashes": [], "findings": []}
-    target, flags = _impacket_target(creds, at_dc=True)
+    target, flags, stdin_pw = _impacket_target(creds, at_dc=True)
     dc = creds.get("dc_ip") or ""
     cmd = [tool, "-just-dc"] + flags
     if dc:
         cmd += ["-dc-ip", dc]
     cmd.append(target)
-    out, err = _run(cmd, timeout=600)
+    out, err = _run(cmd, timeout=600, stdin_data=stdin_pw, new_session=stdin_pw is not None)
     if err:
         return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
                 "hashes": [], "findings": [], "error": err}

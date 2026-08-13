@@ -119,6 +119,8 @@ def _ssh_nxc_auth(base: list, creds: dict) -> list:
     if creds.get("key"):
         argv += ["--key-file", creds["key"]]
     elif creds.get("password"):
+        # netexec/nxc only accepts -p on the argv (no env/file/stdin option), so this
+        # one path can't move the secret off the process argv.
         argv += ["-p", creds["password"]]
     return argv
 
@@ -149,10 +151,13 @@ def validate(targets: list, ssh_creds, win_creds, timeout: int = 240) -> dict:
     return authmap
 
 
-def _run(argv: list, timeout: int, stdin: str | None = None):
+def _run(argv: list, timeout: int, stdin: str | None = None, env: dict | None = None,
+         new_session: bool = False):
     try:
+        full_env = {**os.environ, **env} if env else None
         p = subprocess.run(argv, input=stdin, capture_output=True, text=True,
-                           errors="replace", timeout=timeout)
+                           errors="replace", timeout=timeout, env=full_env,
+                           start_new_session=new_session)
         return p.returncode, p.stdout or "", p.stderr or ""
     except subprocess.TimeoutExpired:
         return None, "", f"timed out after {timeout}s"
@@ -184,6 +189,7 @@ def run_ssh(ip: str, creds: dict, script_text: str, timeout: int):
     ssh = ["ssh", "-o", "StrictHostKeyChecking=no",
            "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10"]
     prefix: list = []
+    env: dict | None = None
     if creds.get("key"):
         ssh += ["-o", "BatchMode=yes", "-i", creds["key"]]
     elif creds.get("password"):
@@ -191,12 +197,15 @@ def run_ssh(ip: str, creds: dict, script_text: str, timeout: int):
             return None, "sshpass not installed (needed for SSH password auth)"
         ssh += ["-o", "PreferredAuthentications=password",
                 "-o", "PubkeyAuthentication=no"]
-        prefix = ["sshpass", "-p", creds["password"]]
+        # `-e` reads the password from the SSHPASS env var instead of `-p <pw>`,
+        # keeping it off the world-readable process argv (/proc/<pid>/cmdline).
+        prefix = ["sshpass", "-e"]
+        env = {"SSHPASS": creds["password"]}
     else:
         return None, "no ssh key or password"
     # `bash -s -- -q`: read the script from stdin, pass -q (findings only).
     argv = prefix + ssh + [f"{user}@{ip}", "bash -s -- -q"]
-    rc, out, err = _run(argv, timeout, stdin=script_text)
+    rc, out, err = _run(argv, timeout, stdin=script_text, env=env)
     if rc is None:
         return None, err
     if rc != 0 and not out.strip():
@@ -214,8 +223,9 @@ def _b64_ps(script_text: str) -> str:
 def _nxc_auth(base: list, creds: dict) -> list:
     argv = base + ["-u", creds.get("username", "")]
     if creds.get("hash"):
-        argv += ["-H", creds["hash"]]          # pass-the-hash
+        argv += ["-H", creds["hash"]]          # pass-the-hash (no off-argv option)
     else:
+        # netexec/nxc only accepts -p on the argv (no env/file/stdin option).
         argv += ["-p", creds.get("password", "")]
     if creds.get("domain"):
         argv += ["-d", creds["domain"]]
@@ -238,20 +248,24 @@ def win_engine() -> tuple[str | None, str | None]:
 
 
 def _impacket_target(creds: dict, ip: str) -> str:
+    # Never embed the plaintext password (it would sit on the world-readable argv):
+    # a hash goes via -hashes, a password is answered to getpass() over stdin.
     dom = creds.get("domain") or ""
     prefix = f"{dom}/" if dom else ""
     user = creds.get("username", "")
-    if creds.get("hash"):
-        return f"{prefix}{user}@{ip}"              # password supplied via -hashes
-    return f"{prefix}{user}:{creds.get('password', '')}@{ip}"
+    return f"{prefix}{user}@{ip}"
 
 
 def _wmiexec(tool: str, creds: dict, ip: str, command: str, timeout: int):
     argv = [tool]
+    stdin_pw = None
     if creds.get("hash"):
         argv += ["-hashes", f":{creds['hash']}"]
+    elif creds.get("password"):
+        # Answer impacket's getpass() over stdin; new_session detaches the tty.
+        stdin_pw = creds["password"] + "\n"
     argv += [_impacket_target(creds, ip), command]
-    return _run(argv, timeout)
+    return _run(argv, timeout, stdin=stdin_pw, new_session=stdin_pw is not None)
 
 
 def run_winrm(ip: str, creds: dict, script_text: str, timeout: int):
