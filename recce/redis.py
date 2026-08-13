@@ -282,6 +282,8 @@ def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
 def _old_version(ver: str) -> bool:
     try:
         parts = [int(x) for x in ver.split(".")[:2]]
+        while len(parts) < 2:
+            parts.append(0)              # "6" -> [6,0], else [6] < [6,0] is True
         return parts < [6, 0]                          # < 6.0 predates ACLs; EOL
     except (ValueError, IndexError):
         return False

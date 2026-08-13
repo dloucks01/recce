@@ -1889,6 +1889,100 @@ class AuditRegressionTest(unittest.TestCase):
             mk("Samba CVE-2017-7494 SambaCry remote code execution")))
 
 
+class AuditMediumLowRegressionTest(unittest.TestCase):
+    """Regressions for the medium/low findings fixed after the full-codebase audit."""
+
+    def test_vuln_key_distinguishes_udp_from_tcp(self):
+        # A udp finding must not collapse onto a distinct tcp finding on the same
+        # port/script/title; the tcp key stays byte-for-byte stable (backward compat).
+        from recce.models import Vuln
+        common = dict(ip="10.0.0.1", port=161, script_id="svc", title="Unencrypted service")
+        tcp = Vuln(protocol="tcp", **common)
+        udp = Vuln(protocol="udp", **common)
+        self.assertNotEqual(tcp.key, udp.key)
+        self.assertEqual(tcp.key, "10.0.0.1:161:svc:Unencrypted service")   # unchanged
+        self.assertTrue(udp.key.endswith(":udp"))
+
+    def test_from_json_tolerates_explicit_null_lists(self):
+        # A hand-edited/corrupt results.sqlite with explicit JSON null for the list
+        # fields must load (the whole point of from_json's tolerance), not TypeError.
+        from recce.models import Host
+        h = Host.from_json({"ip": "10.0.0.2", "ports": None, "vulns": None,
+                            "accounts": None, "exploits": None, "host_scripts": None})
+        self.assertEqual(h.ip, "10.0.0.2")
+        self.assertEqual(h.ports, [])
+        # a null nested list (scripts/evidence) is tolerated too
+        h2 = Host.from_json({"ip": "10.0.0.3",
+                             "ports": [{"portid": 80, "protocol": "tcp", "scripts": None}],
+                             "vulns": [{"ip": "10.0.0.3", "port": 80, "protocol": "tcp",
+                                        "script_id": "x", "title": "t", "evidence": None}]})
+        self.assertEqual(h2.ports[0].scripts, [])
+        self.assertEqual(h2.vulns[0].evidence, [])
+
+    def test_gnmap_preserves_version_containing_slash(self):
+        from recce import parser
+        line = ("Host: 10.0.0.4 ()\tPorts: 443/open/tcp//http//Apache httpd 2.2.14 "
+                "((Ubuntu) mod_ssl/2.2.14 OpenSSL/0.9.8k)/\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".gnmap", delete=False) as f:
+            f.write(line); path = f.name
+        try:
+            hosts = parser.parse_gnmap(path)
+        finally:
+            os.unlink(path)
+        p = hosts[0].ports[0]
+        self.assertEqual(p.product, "Apache httpd")
+        self.assertEqual(p.version, "2.2.14")           # was silently truncated/lost
+
+    def test_parse_normal_reads_ipv6_target(self):
+        from recce import parser
+        txt = "Nmap scan report for 2001:db8::1\n22/tcp open ssh OpenSSH 8.2p1\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".nmap", delete=False) as f:
+            f.write(txt); path = f.name
+        try:
+            hosts = parser.parse_normal(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(len(hosts), 1)                 # was zero (IPv4-only regex)
+        self.assertEqual(hosts[0].ip, "2001:db8::1")
+        self.assertEqual(len(hosts[0].ports), 1)
+
+    def test_xml_import_refuses_entity_declaration(self):
+        from recce import parser
+        bomb = ('<?xml version="1.0"?><!DOCTYPE r [<!ENTITY a "x">]>'
+                '<nmaprun><host><status state="up"/>'
+                '<address addr="10.0.0.5" addrtype="ipv4"/></host></nmaprun>')
+        with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
+            f.write(bomb); path = f.name
+        try:
+            self.assertEqual(parser.parse_nmap_xml(path), [])   # refused, not expanded
+        finally:
+            os.unlink(path)
+
+    def test_script_args_quote_credentials(self):
+        from recce import scanner
+        self.assertEqual(scanner._script_arg_val("a,b{c}"), '"a,b{c}"')
+        args = scanner._creds_args({"username": "u", "password": "p,w{d}"})
+        joined = args[1]                                 # the --script-args value
+        self.assertIn('smbpassword="p,w{d}"', joined)    # comma stays inside quotes
+        self.assertNotIn("smbpassword=p,w", joined)      # not split into bogus pairs
+
+    def test_ftp_cleartext_finding_reachable_without_anonymous(self):
+        # The "no AUTH TLS" cleartext finding must fire for an auth-REQUIRED server
+        # (the common case), not only when anonymous login is open.
+        from recce import ftp
+        h = Host(ip="10.0.0.6", ports=[Port(portid=21, service="ftp", state="open")])
+        pr = {("10.0.0.6", 21): {"anonymous": False, "auth_tls": False,
+                                 "banner": "vsftpd 3.0.3"}}
+        titles = [f["title"].lower() for f in ftp.findings([h], pr)]
+        self.assertTrue(any("cleartext" in t for t in titles))
+
+    def test_redis_single_component_version_not_flagged_eol(self):
+        from recce import redis
+        self.assertFalse(redis._old_version("6"))        # was True ([6] < [6,0])
+        self.assertFalse(redis._old_version("6.2"))
+        self.assertTrue(redis._old_version("5.9"))
+
+
 class HostUpCertaintyTest(unittest.TestCase):
     """The Checklist shows only hosts we can PROVE are up - but is never allowed to
     write a live host off as down. is_up is the single source of that judgement."""

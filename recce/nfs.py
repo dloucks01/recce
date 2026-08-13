@@ -18,6 +18,7 @@ sheet, the write-ups, a dedicated **NFS** tab, and the prove engine. Safety: SEC
 """
 from __future__ import annotations
 
+import shlex
 import socket
 import struct
 
@@ -382,8 +383,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"wildcard: {dirs}. Any machine on the network can mount and read "
                 "them (and write, if root-squash is off).",
                 "showmount / mount",
+                # shlex.quote the server-supplied export path (attacker-controlled).
                 f"showmount -e {h.ip} ; mkdir /mnt/x ; mount -o vers=3 {h.ip}:"
-                f"{world[0]['dir']} /mnt/x   # then read/plant files (within ROE)",
+                f"{shlex.quote(world[0]['dir'])} /mnt/x   # then read/plant files (within ROE)",
                 "Restrict every export to specific hosts/subnets, enable root_squash, "
                 "and export read-only where possible.",
                 ["CWE-284", "CWE-732"], kind="nfs_world"))
