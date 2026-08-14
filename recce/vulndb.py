@@ -91,8 +91,15 @@ _DISTRO_RE = re.compile(
     r"\.fc\d|fedora|suse|\+dfsg|mageia|\bcp\d", re.I)
 
 
-def _distro_packaged(port: "Port") -> bool:
-    return bool(_DISTRO_RE.search(f"{port.version} {port.extrainfo}"))
+def _distro_packaged(port: "Port", host=None) -> bool:
+    # A distro fingerprint may live in the service banner OR - very commonly - only in
+    # the host's OS fingerprint / CPE ("Ubuntu 22.04" in os_name, empty extrainfo).
+    # Checking the banner alone missed those, so a backported build read as a confident
+    # version match. Consult all three.
+    hay = f"{port.version} {port.extrainfo} " + " ".join(getattr(port, "cpe", []) or [])
+    if host is not None:
+        hay += f" {getattr(host, 'os_name', '')} {getattr(host, 'os_family', '')}"
+    return bool(_DISTRO_RE.search(hay))
 
 
 def _in_range(version: str, lo: str | None, hi: str | None,
@@ -913,7 +920,7 @@ def assess_host(host: Host) -> list[Vuln]:
             # distro often backports the fix without bumping the upstream version, so
             # the number alone can't confirm the flaw (a patched Debian vsftpd 2.3.4
             # is not the backdoored upstream tarball). Downgrade to a lead + say so.
-            if conf == "likely" and _distro_packaged(port):
+            if conf == "likely" and _distro_packaged(port, host):
                 conf = "potential"
                 note = ("  NOTE: distro-packaged build - the fix may be backported with "
                         "the version unchanged; verify the package before relying on "
