@@ -5171,7 +5171,8 @@ class LdapTest(unittest.TestCase):
         srv, port = self._serve_scripts([enum_script])
         try:
             en = L.enum_authenticated("127.0.0.1", port, "DC=corp,DC=local",
-                                      {"user": "alice", "secret": "x", "domain": "corp.local"})
+                                      {"user": "alice", "secret": "x", "domain": "corp.local"},
+                                      prefer_ldap3=False)   # this test drives the native BER parser
             self.assertIsNone(en["error"])
             self.assertEqual(len(en["users"]), 2)          # paging walked both pages
             h = Host(ip="127.0.0.1")
@@ -5289,7 +5290,8 @@ class LdapTest(unittest.TestCase):
         try:
             en = L.enum_authenticated("127.0.0.1", port, "DC=corp,DC=local",
                                       {"user": "alice", "domain": "corp.local",
-                                       "secret": "", "hash": nthash.hex()})
+                                       "secret": "", "hash": nthash.hex()},
+                                      prefer_ldap3=False)   # this test drives the native BER parser
             self.assertIsNone(en["error"])
             # Plaintext 389 + a hash -> the bind is sign+sealed, and the sealed search
             # traffic round-trips (the DC could read our requests, we read its replies).
@@ -5318,6 +5320,13 @@ class LdapTest(unittest.TestCase):
     def test_cmd_ldap_authenticated_e2e_persists_accounts(self):
         from recce import cli, xlsx, ldap as L
         from recce.store import Store
+
+        # This test drives the native BER client end-to-end via a scripted fake server;
+        # force the native path (the ldap3-preferred path would connect to the fake
+        # server itself and disturb the script).
+        _orig_ok = L._ldap3_ok
+        L._ldap3_ok = lambda: False
+        self.addCleanup(lambda: setattr(L, "_ldap3_ok", _orig_ok))
 
         def tlv(t, v):
             return bytes([t]) + L._ber_len(len(v)) + v
