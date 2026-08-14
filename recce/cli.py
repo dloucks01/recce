@@ -3954,6 +3954,13 @@ def cmd_smb(args: argparse.Namespace) -> int:
                             analysis["findings"].insert(0, f)
                         _smb_shot(args, ip, f"write_{name}",
                                   proof.get("command", ""), proof.get("evidence", ""))
+            # Spider readable shares for secret-looking files (opt-in, read-only).
+            if getattr(args, "spider", False) and shares:
+                spider_hits = smb.spider_shares(ip, shares, creds, port=port)
+                for f in spider_hits:
+                    analysis["findings"].insert(0, f)
+                if spider_hits:
+                    live["secrets"] = len(spider_hits)      # shares with secrets found
             rb_by_ip[ip]["live"] = live
 
     # De-duplicate (offline + live can overlap) by (title, target).
@@ -5952,6 +5959,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sm.add_argument("--prove-write", action="store_true",
                     help="prove a writable share REVERSIBLY (drop a marker file, list "
                          "it, delete it) - nothing is left behind")
+    sm.add_argument("--spider", action="store_true",
+                    help="spider READABLE shares for secret-looking files (answer files, "
+                         "web.config, KeePass/SSH keys, GPP, password lists, backups)")
     sm.add_argument("--screenshots", action="store_true",
                     help="capture terminal-style PROOF screenshots of executed actions "
                          "(share enum, write-proof) for the walkthrough")
