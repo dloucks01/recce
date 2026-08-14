@@ -8,6 +8,55 @@ type Tab = "dashboard" | "findings" | "hosts" | "targets";
 type TgFilter = "all" | "todo" | "enumerated" | "access" | "reviewed";
 const POLL_MS = 20000; // constantly-updating analysis: re-pull on a slow heartbeat
 
+// One-click export. Regenerates the deliverables server-side (same builder as
+// `recce report`) and downloads the file. Excel is the primary action; the rest
+// sit under the caret.
+const EXPORTS: [string, string][] = [
+  ["xlsx", "Excel workbook"], ["html", "HTML report"],
+  ["csv", "Services CSV"], ["md", "Markdown"],
+];
+function Export({ onError }: { onError: (m: string) => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  async function dl(kind: string) {
+    setOpen(false); setBusy(kind);
+    try {
+      const r = await fetch(`/api/report/${kind}`);
+      if (!r.ok) throw new Error(`${r.status}`);
+      const blob = await r.blob();
+      const cd = r.headers.get("content-disposition") || "";
+      const name = /filename="?([^"]+)"?/.exec(cd)?.[1] || `recce.${kind}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      onError("export failed — is the engagement still loading?");
+    } finally { setBusy(null); }
+  }
+  return (
+    <div className="export">
+      <button className="exp-main" onClick={() => dl("xlsx")} disabled={!!busy}
+              title="download the Excel workbook">
+        {busy ? "Exporting…" : "⭳ Excel"}
+      </button>
+      <button className="exp-caret" onClick={() => setOpen((v) => !v)} disabled={!!busy}
+              aria-label="other formats">▾</button>
+      {open && (
+        <>
+          <div className="exp-backdrop" onClick={() => setOpen(false)} />
+          <div className="exp-menu">
+            {EXPORTS.map(([k, label]) => (
+              <button key={k} onClick={() => dl(k)}>{label}</button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [ov, setOv] = useState<Overview | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
@@ -157,6 +206,7 @@ export default function App() {
           <button className="run" onClick={runScan} disabled={running || !targets.trim()}>
             {running ? "Scanning…" : "Run scan"}
           </button>
+          <Export onError={(m) => note(m)} />
         </section>
 
         {(running || log.length > 0) && (
