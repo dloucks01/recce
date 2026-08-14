@@ -243,7 +243,7 @@ class PortSweepRecoveryFidelityTest(unittest.TestCase):
     and a TRUNCATED (slow firewalled) sweep gets a longer retry - both UNION their result
     so ports like 22/80 aren't lost to a lossy or slow scan. Fully mocked - no nmap."""
 
-    def _run_worker(self, ip, fps, verify=None, enum=None):
+    def _run_worker(self, ip, fps, verify=None, enum=None, verify_all=False):
         from unittest import mock
         from recce import cli
 
@@ -254,7 +254,8 @@ class PortSweepRecoveryFidelityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             paths = cli._open_paths(d)
             prof = scanner.ScanProfile(ping_discovery=True, udp_basic=False,
-                                       ad_enrich=False, os_detect=False)
+                                       ad_enrich=False, os_detect=False,
+                                       verify_all=verify_all)
             patches = [mock.patch.object(scanner, "full_port_scan", side_effect=fps),
                        mock.patch.object(scanner, "enum_scan", side_effect=enum or fake_enum)]
             if verify:
@@ -272,8 +273,9 @@ class PortSweepRecoveryFidelityTest(unittest.TestCase):
         return host
 
     def test_partial_lossy_sweep_is_reverified_and_unioned(self):
-        # Fast pass drops 2 of 3 open ports (no drop marker) -> a congestion-adaptive
-        # re-verify fires and the union restores all three.
+        # Fast pass drops 2 of 3 open ports (no drop marker); under a thorough sweep
+        # (--verify-all here) a congestion-adaptive re-verify fires and the union
+        # restores all three. (On a plain discovery scan this stays off for speed.)
         def fps(ip, out_xml, profile):
             _ports_xml(ip, [22], out_xml)                # only 1 of 3 survived the fast pass
             return out_xml, None
@@ -282,8 +284,26 @@ class PortSweepRecoveryFidelityTest(unittest.TestCase):
             _ports_xml(ip, [22, 80, 443], out_xml)
             return out_xml, None
 
-        host = self._run_worker("10.0.0.7", fps, verify=verify)
+        host = self._run_worker("10.0.0.7", fps, verify=verify, verify_all=True)
         self.assertEqual(sorted(p.portid for p in host.open_ports), [22, 80, 443])
+
+    def test_few_port_host_not_reverified_on_plain_discovery_scan(self):
+        # Perf guard: a normal discovery scan of a plain 1-2 service host must NOT
+        # trigger the expensive congestion-adaptive re-verify.
+        calls = {"verify": 0}
+
+        def fps(ip, out_xml, profile):
+            _ports_xml(ip, [80], out_xml)                # one service, cleanly found
+            return out_xml, None
+
+        def verify(ip, out_xml, profile):
+            calls["verify"] += 1
+            _ports_xml(ip, [80], out_xml)
+            return out_xml, None
+
+        host = self._run_worker("10.0.0.9", fps, verify=verify)   # verify_all=False
+        self.assertEqual(calls["verify"], 0)
+        self.assertEqual([p.portid for p in host.open_ports], [80])
 
     def test_truncated_slow_host_retry_recovers_dropped_common_ports(self):
         # First pass times out (slow firewall) and returns 0 ports - even 22/80 gone.
