@@ -120,15 +120,14 @@ PROFILES: dict[str, ScanProfile] = {
     "quick": ScanProfile(name="quick", all_ports=False, top_ports=200,
                          os_detect=False, min_rate=2000, host_timeout=10,
                          version_intensity=6, deep_enum=False),
-    # A full 65535-port sweep per host is pathological on a default-drop firewall -
-    # every filtered port waits out its retransmits, so -p- can hit the host-timeout
-    # and return PARTIAL, turning a 200-host run into hours. The default therefore
-    # sweeps the frequency-ranked top 3000 TCP ports (covers the overwhelming majority
-    # of real services, incl. the high non-1000 ones - RDP/WinRM/8080/8443/Mongo/ES),
-    # staying pure nmap (retries + congestion control => accurate, no masscan drops).
-    # `--all-ports` / `--profile thorough` do the exhaustive 65535 sweep on demand.
-    "standard": ScanProfile(name="standard", all_ports=False, top_ports=3000),
-    "thorough": ScanProfile(name="thorough", all_ports=True, min_rate=800, udp_top=100,
+    # FULL 65535-port sweep by default: real targets hide services on random high
+    # ports, so a top-N default would silently MISS them (a false negative - the worst
+    # outcome, and the tool's long-running symptom). NOTE deliberately NOT raising
+    # --min-rate here: a min-rate FLOOR forces nmap to send faster than a lossy/
+    # firewalled network tolerates and DROPS SYNs to open ports (which is why the
+    # reliable re-scan removes it). Completeness beats speed for the default.
+    "standard": ScanProfile(name="standard"),
+    "thorough": ScanProfile(name="thorough", min_rate=800, udp_top=100,
                             extra_nse=["banner"], host_timeout=40,
                             version_all=True),
 }
