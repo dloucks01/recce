@@ -392,15 +392,21 @@ def _run(cmd, timeout: int = 120) -> tuple[str, str | None]:
 
 
 def enum_session(ip: str, user: str = "", password: str = "",
-                 port: int = _DEFAULT_PORT) -> dict:
-    """Run `nxc smb` for a (possibly null/guest) session and parse the result via
-    the shared credenum parser. Returns {ran, auth, shares, users, passpol, error}."""
+                 port: int = _DEFAULT_PORT, domain: str = "") -> dict:
+    """Run `nxc smb` for a (possibly null/guest/credentialed) session and parse the
+    result via the shared credenum parser. Returns {ran, auth, shares, users, passpol,
+    error}. `domain` selects domain auth (-d); a real user with no domain is treated
+    as a standalone/workgroup LOCAL account (--local-auth) - the common non-AD case."""
     tool = smb_tool()
     if not tool:
         return {"ran": False, "error": "nxc/netexec not installed", "shares": [],
                 "users": [], "auth": False}
     cmd = [tool, "smb", ip, "-u", user, "-p", password,
            "--shares", "--users", "--pass-pol"]
+    if domain:
+        cmd += ["-d", domain]
+    elif user and user.lower() != "guest":
+        cmd += ["--local-auth"]           # standalone/workgroup local account
     if port and port != _DEFAULT_PORT:
         cmd += ["--port", str(port)]
     out, err = _run(cmd)
@@ -413,6 +419,34 @@ def enum_session(ip: str, user: str = "", password: str = "",
     data["error"] = None
     data["output"] = out
     return data
+
+
+def enum_best_session(ip: str, port: int = _DEFAULT_PORT,
+                      creds: dict | None = None) -> tuple[dict, str]:
+    """Enumerate SMB shares with the strongest session that works: null -> guest ->
+    operator credentials. Returns (session, level) where level is one of
+    "null" | "guest" | "creds" | "none" | "error".
+
+    Anonymous access (null/guest) is itself a FINDING; a credentialed session is just
+    an inventory of what an authenticated user can see, so the caller must NOT feed a
+    "creds" session to null_session_findings (that would report authenticated access as
+    anonymous - a false positive). This closes the gap where a locked-down standalone/
+    workgroup host that denies null+guest but has valid creds listed zero shares.
+    """
+    session = enum_session(ip, "", "", port=port)
+    if session.get("error") and "not installed" in (session.get("error") or ""):
+        return session, "error"
+    if session.get("shares") or session.get("users"):
+        return session, "null"
+    guest = enum_session(ip, "guest", "", port=port)
+    if guest.get("shares") or guest.get("users"):
+        return guest, "guest"
+    if creds and creds.get("user"):
+        c = enum_session(ip, creds["user"], creds.get("secret", ""), port=port,
+                         domain=creds.get("domain", ""))
+        if c.get("auth") or c.get("shares") or c.get("users"):
+            return c, "creds"
+    return guest, "none"
 
 
 def prove_writable(ip: str, share: str, creds: dict | None = None,
