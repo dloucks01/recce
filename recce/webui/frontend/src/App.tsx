@@ -1,24 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Finding = {
-  severity: string;
-  title: string;
-  ip: string;
-  port: number | null;
-  cve: string;
-  kev: boolean;
-  epss: number;
-  tier: string;
-  source: string;
+  severity: string; title: string; ip: string; port: number | null;
+  cve: string; kev: boolean; epss: number; tier: string; source: string;
 };
 type Engagement = {
-  name: string;
-  hosts_up: number;
-  hosts_total: number;
-  services: number;
-  findings_by_severity: Record<string, number>;
-  kev: number;
-  checked_pct: number;
+  name: string; hosts_up: number; hosts_total: number; services: number;
+  findings_by_severity: Record<string, number>; kev: number; checked_pct: number;
 };
 
 const SEVS = ["critical", "high", "medium", "low"];
@@ -26,31 +14,69 @@ const SEVS = ["critical", "high", "medium", "low"];
 export default function App() {
   const [eng, setEng] = useState<Engagement | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
-  const [sev, setSev] = useState<string>("all");
+  const [sev, setSev] = useState("all");
   const [q, setQ] = useState("");
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    Promise.all([
+  // scan job state
+  const [targets, setTargets] = useState("");
+  const [profile, setProfile] = useState("quick");
+  const [log, setLog] = useState<string[]>([]);
+  const [running, setRunning] = useState(false);
+  const logRef = useRef<HTMLDivElement>(null);
+
+  async function refresh() {
+    const [e, f] = await Promise.all([
       fetch("/api/engagement").then((r) => r.json()),
       fetch("/api/findings").then((r) => r.json()),
-    ])
-      .then(([e, f]) => {
-        setEng(e);
-        setFindings(f);
-      })
-      .catch((e) => setErr(String(e)));
+    ]);
+    setEng(e);
+    setFindings(f);
+  }
+  useEffect(() => {
+    refresh().catch((e) => setErr(String(e)));
   }, []);
+  useEffect(() => {
+    logRef.current?.scrollTo(0, logRef.current.scrollHeight);
+  }, [log]);
+
+  async function runScan() {
+    if (!targets.trim() || running) return;
+    setLog([]);
+    setRunning(true);
+    const res = await fetch("/api/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targets, phase: "scan", profile }),
+    });
+    if (!res.ok) {
+      setLog([`error: ${(await res.json()).detail ?? res.statusText}`]);
+      setRunning(false);
+      return;
+    }
+    const { id } = await res.json();
+    const es = new EventSource(`/api/jobs/${id}/events`);
+    es.onmessage = (m) => {
+      const d = JSON.parse(m.data);
+      if (d.line !== undefined) setLog((l) => [...l, d.line]);
+      if (d.done) {
+        es.close();
+        setRunning(false);
+        refresh().catch(() => {});
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      setRunning(false);
+    };
+  }
 
   const rows = useMemo(() => {
-    const needle = q.toLowerCase();
+    const n = q.toLowerCase();
     return findings.filter(
       (f) =>
         (sev === "all" || f.severity === sev) &&
-        (!needle ||
-          `${f.title} ${f.ip} ${f.cve} ${f.port} ${f.source}`
-            .toLowerCase()
-            .includes(needle))
+        (!n || `${f.title} ${f.ip} ${f.cve} ${f.port} ${f.source}`.toLowerCase().includes(n))
     );
   }, [findings, sev, q]);
 
@@ -74,6 +100,36 @@ export default function App() {
           <Stat k="🔥 KEV" v={`${eng.kev}`} cls="kev" />
           <Stat k="Checked" v={`${eng.checked_pct}%`} />
         </section>
+
+        <section className="scanbar">
+          <input
+            className="scan-in"
+            placeholder="targets to scan — 10.0.0.0/24, host.corp.local …"
+            value={targets}
+            onChange={(e) => setTargets(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && runScan()}
+            disabled={running}
+          />
+          <select value={profile} onChange={(e) => setProfile(e.target.value)} disabled={running}>
+            <option value="quick">quick</option>
+            <option value="standard">standard</option>
+            <option value="thorough">thorough</option>
+          </select>
+          <button className="run" onClick={runScan} disabled={running || !targets.trim()}>
+            {running ? "Scanning…" : "Run scan"}
+          </button>
+        </section>
+
+        {(running || log.length > 0) && (
+          <div className="console" ref={logRef}>
+            {log.map((l, i) => (
+              <div key={i} className="ln">
+                {l}
+              </div>
+            ))}
+            {running && <div className="ln cursor">▋</div>}
+          </div>
+        )}
 
         <div className="controls">
           <div className="chips">
@@ -112,9 +168,7 @@ export default function App() {
                   <td>
                     <span className="sev-cell">
                       <span className={"stripe s-" + f.severity} />
-                      <span className={"sev-tag s-" + f.severity}>
-                        {f.severity.slice(0, 4)}
-                      </span>
+                      <span className={"sev-tag s-" + f.severity}>{f.severity.slice(0, 4)}</span>
                     </span>
                   </td>
                   <td>
@@ -142,7 +196,9 @@ export default function App() {
               {rows.length === 0 && (
                 <tr>
                   <td colSpan={4} className="empty">
-                    no findings match this filter
+                    {eng.hosts_up === 0
+                      ? "no hosts yet — run a scan above to begin"
+                      : "no findings match this filter"}
                   </td>
                 </tr>
               )}

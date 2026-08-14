@@ -4892,10 +4892,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     """Serve the web workbench for this engagement. One recce instance hosts it; the
     team opens http://<this-box>:<port> in a browser over the LAN. Read-only today;
     live scans + progress ticks + collaboration build on this."""
-    paths = _open_paths(args.output_dir)
-    if not os.path.exists(paths["db"]):
-        print(f"[x] No datastore at {paths['db']}. Run a scan first (e.g. recce run).")
-        return 1
+    _open_paths(args.output_dir)          # ensure the engagement dir exists (scan from UI)
     try:
         import uvicorn
         from .webui.app import create_app
@@ -4903,7 +4900,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print("[x] The web workbench needs fastapi + uvicorn (bundled in the airgap "
               "package). For a dev install: pip install 'recce[bundle]'.")
         return 1
-    app = create_app(paths["db"])
+    app = create_app(args.output_dir)
     print(f"[+] recce workbench -> http://{args.host}:{args.port}   "
           f"(engagement: {args.output_dir})")
     print("    Open it in a browser; share the URL with your team on the LAN. Ctrl-C to stop.")

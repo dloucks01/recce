@@ -59,3 +59,16 @@ main { padding: 18px 20px 40px; max-width: 1100px; }
 .tier.likely { color: var(--med); background: color-mix(in srgb, var(--med) 16%, transparent); }
 .tier.lead { color: var(--muted); background: var(--surface2); }
 .empty { padding: 34px; text-align: center; color: var(--faint); }
+
+/* scan bar + live console (Phase 2) */
+.scanbar { display: flex; gap: 8px; margin-bottom: 14px; }
+.scan-in { flex: 1; font-family: var(--mono); font-size: 13px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text); }
+.scan-in::placeholder { color: var(--faint); }
+.scanbar select { font-family: var(--sans); font-size: 12px; font-weight: 600; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--muted); }
+.run { font-family: var(--sans); font-weight: 700; font-size: 13px; padding: 9px 18px; border: 0; border-radius: 9px; background: var(--accent); color: #fff; cursor: pointer; }
+.run:disabled { opacity: .55; cursor: default; }
+.console { background: #0a0f18; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; max-height: 260px; overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 1.55; color: #b9c6da; }
+.console .ln { white-space: pre-wrap; word-break: break-word; }
+.console .cursor { color: var(--accent); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .console .cursor { animation: none; } }
