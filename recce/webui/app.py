@@ -26,11 +26,11 @@ def _tier(v) -> str:
     return "confirmed" if q >= 95 else "likely" if q >= 70 else "lead"
 
 
-def _finding_dict(v, reviewed: bool = False) -> dict:
+def _finding_dict(v, reviewed: bool = False, notes: str = "") -> dict:
     from .. import tracking
     return {
         "key": tracking.vuln_row_key(v),      # same key the Excel sheet + coverage use
-        "reviewed": reviewed,
+        "reviewed": reviewed, "notes": notes,
         "severity": v.severity or "info",
         "title": v.title or v.script_id or "finding",
         "ip": v.ip, "port": v.port,
@@ -41,18 +41,30 @@ def _finding_dict(v, reviewed: bool = False) -> dict:
     }
 
 
-def _host_dict(h) -> dict:
+def _host_key(ip: str) -> str:
+    return f"host:{ip}"
+
+
+def _host_dict(h, reviewed: bool = False, notes: str = "") -> dict:
     sev: dict[str, int] = {}
     for v in h.vulns:
         sev[v.severity] = sev.get(v.severity, 0) + 1
     return {
-        "ip": h.ip, "hostname": h.hostname or "",
+        "ip": h.ip, "key": _host_key(h.ip), "hostname": h.hostname or "",
         "os": h.os_name or h.os_family or "", "roles": list(h.roles or []),
         "up": h.is_up,
         "ports": [{"port": p.portid, "proto": p.protocol, "service": p.service,
                    "product": (f"{p.product} {p.version}".strip() or p.service)}
                   for p in h.open_ports],
         "findings": sev,
+        # completion signals (what's been looked at) - drive the Targets tracker
+        "enumerated": bool(getattr(h, "enumerated", False)),
+        "vuln_scanned": any(getattr(p, "vuln_scanned", False) for p in h.ports) or bool(h.vulns),
+        "access": bool(getattr(h, "access_gained", False)),
+        "db": bool(getattr(h, "db_scanned", False)),
+        "privesc": bool(getattr(h, "privesc_checked", False)),
+        "credenum": bool(getattr(h, "cred_enumerated", False)),
+        "reviewed": reviewed, "notes": notes,
     }
 
 
@@ -118,6 +130,14 @@ def create_app(eng_dir: str) -> FastAPI:
         finally:
             st.close()
 
+    def _scope() -> dict:
+        from ..store import Store
+        st = Store(db_path)
+        try:
+            return st.get_scope()             # {subnet: size}
+        finally:
+            st.close()
+
     @app.get("/api/engagement")
     def engagement():
         hosts, name = _hosts()
@@ -137,7 +157,14 @@ def create_app(eng_dir: str) -> FastAPI:
     @app.get("/api/hosts")
     def hosts():
         hs, _ = _hosts()
-        return [_host_dict(h) for h in hs if h.is_up]
+        tr = _tracking()
+        out = []
+        for h in hs:
+            if not h.is_up:
+                continue
+            rev, notes = tr.get(_host_key(h.ip), (False, ""))
+            out.append(_host_dict(h, bool(rev), notes))
+        return out
 
     @app.get("/api/findings")
     def findings():
@@ -149,10 +176,80 @@ def create_app(eng_dir: str) -> FastAPI:
             if not h.is_up:
                 continue
             for v in h.vulns:
-                reviewed = bool(tr.get(tracking.vuln_row_key(v), (False, ""))[0])
-                out.append(_finding_dict(v, reviewed))
+                rev, notes = tr.get(tracking.vuln_row_key(v), (False, ""))
+                out.append(_finding_dict(v, bool(rev), notes))
         out.sort(key=lambda f: (not f["kev"], _SEV_ORDER.get(f["severity"], 9), -f["epss"]))
         return out
+
+    @app.get("/api/overview")
+    def overview():
+        """Everything the dashboard needs in one cheap, live-pollable call."""
+        from .. import tracking
+        hs, name = _hosts()
+        tr = _tracking()
+        up = [h for h in hs if h.is_up]
+        scope = _scope()
+        by_sev: dict[str, int] = {}
+        kev_findings, top_hosts = [], []
+        reviewed = 0
+        total_findings = 0
+        enums = accessed = 0
+        for h in up:
+            hsev: dict[str, int] = {}
+            for v in h.vulns:
+                total_findings += 1
+                by_sev[v.severity] = by_sev.get(v.severity, 0) + 1
+                hsev[v.severity] = hsev.get(v.severity, 0) + 1
+                if tr.get(tracking.vuln_row_key(v), (False,))[0]:
+                    reviewed += 1
+                if getattr(v, "kev", False):
+                    kev_findings.append({
+                        "key": tracking.vuln_row_key(v), "ip": h.ip, "port": v.port,
+                        "title": v.title or v.script_id, "severity": v.severity or "info",
+                        "cve": (v.ids[0] if v.ids else ""),
+                        "epss": round((getattr(v, "epss", 0.0) or 0.0) * 100),
+                    })
+            if getattr(h, "enumerated", False):
+                enums += 1
+            if getattr(h, "access_gained", False):
+                accessed += 1
+            top_hosts.append({
+                "ip": h.ip, "hostname": h.hostname or "",
+                "os": h.os_name or h.os_family or "", "roles": list(h.roles or []),
+                "findings": hsev, "score": sum(
+                    hsev.get(s, 0) * w for s, w in
+                    (("critical", 1000), ("high", 100), ("medium", 10), ("low", 1)))})
+        kev_findings.sort(key=lambda f: (_SEV_ORDER.get(f["severity"], 9), -f["epss"]))
+        top_hosts.sort(key=lambda h: -h["score"])
+        scope_size = sum(scope.values())
+        return {
+            "name": name,
+            "hosts_up": len(up), "hosts_total": len(hs),
+            "scope_subnets": len(scope), "scope_size": scope_size,
+            "services": sum(len(h.open_ports) for h in up),
+            "by_severity": by_sev, "findings_total": total_findings,
+            "kev_total": len(kev_findings), "kev_findings": kev_findings[:12],
+            "top_hosts": top_hosts[:8],
+            "reviewed": reviewed,
+            "enumerated": enums, "accessed": accessed,
+        }
+
+    @app.post("/api/note")
+    def note(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        from ..store import Store
+        key = str(body.get("key", ""))
+        if not key:
+            raise HTTPException(400, "no key")
+        text = str(body.get("note", ""))
+        st = Store(db_path)
+        try:
+            # preserve the reviewed flag; only the note text changes here
+            rev = st.get_tracking().get(key, (False, ""))[0]
+            st.set_reviewed(key, bool(rev), notes=text)
+        finally:
+            st.close()
+        broker.publish({"type": "note", "key": key, "note": text, "tester": x_tester})
+        return {"ok": True}
 
     @app.post("/api/tick")
     def tick(body: dict = Body(...), x_tester: str = Header(default="someone")):
@@ -163,7 +260,7 @@ def create_app(eng_dir: str) -> FastAPI:
         reviewed = bool(body.get("reviewed", True))
         st = Store(db_path)
         try:
-            st.set_reviewed(key, reviewed, notes=f"web:{x_tester}")
+            st.set_reviewed(key, reviewed)    # notes=None preserves any existing note
         finally:
             st.close()
         broker.publish({"type": "tick", "key": key, "reviewed": reviewed,
