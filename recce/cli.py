@@ -1831,6 +1831,7 @@ _UNAUTH_SWEEP = [
     ("elasticsearch", "cmd_elasticsearch"), ("rsync", "cmd_rsync"),
     ("nfs", "cmd_nfs"), ("kerberos", "cmd_kerberos"), ("docker", "cmd_docker"),
     ("kubernetes", "cmd_kubernetes"), ("mssql", "cmd_mssql"),
+    ("mysql", "cmd_mysql"), ("postgres", "cmd_postgres"),
 ]
 # The authenticated pass: the modules that DO something new once you have creds -
 # the netexec/impacket phase plus the authenticated facets of the deep modules. The
@@ -4463,6 +4464,49 @@ def cmd_redis(args: argparse.Namespace) -> int:
         fmt=_fmt_redis)
 
 
+def _fmt_mysql(t, active) -> str:
+    if t.get("unauth"):
+        state = "EMPTY-PASSWORD LOGIN (unauth)"
+    elif t.get("auth_required"):
+        state = "auth required"
+    else:
+        state = "probed" if t.get("version") else "reachable"
+    return f"{t['ip']}:{t['port']}  {t.get('version') or 'mysql'}  {state}"
+
+
+def _fmt_postgres(t, active) -> str:
+    if t.get("unauth"):
+        state = "TRUST AUTH (no password)"
+    elif t.get("auth_required"):
+        state = "auth required"
+    else:
+        state = "probed" if t.get("version") else "reachable"
+    return f"{t['ip']}:{t['port']}  {t.get('version') or 'postgres'}  {state}"
+
+
+def cmd_mysql(args: argparse.Namespace) -> int:
+    """Deep MySQL/MariaDB enumeration: read the handshake (stdlib) and test whether an
+    account logs in with an EMPTY password (root / anonymous) - a CONFIRMED unauth data
+    exposure. Read-only (never runs a query)."""
+    return _run_service_scan(
+        args, module="mysql", source="mysql", label="MySQL", noun="MySQL endpoint(s)",
+        no_targets="[!] No MySQL endpoints in the datastore (no port 3306). Run `enum` "
+                   "against the database hosts first.",
+        fmt=_fmt_mysql)
+
+
+def cmd_postgres(args: argparse.Namespace) -> int:
+    """Deep PostgreSQL enumeration: speak the v3 startup protocol (stdlib) and test for
+    `trust` authentication (AuthenticationOk with no password) - a CONFIRMED unauth data
+    exposure. Read-only (never runs a query)."""
+    return _run_service_scan(
+        args, module="postgres", source="postgres", label="PostgreSQL",
+        noun="PostgreSQL endpoint(s)",
+        no_targets="[!] No PostgreSQL endpoints in the datastore (no port 5432). Run "
+                   "`enum` against the database hosts first.",
+        fmt=_fmt_postgres)
+
+
 def cmd_elasticsearch(args: argparse.Namespace) -> int:
     """Deep Elasticsearch enumeration: GET the HTTP API (stdlib), read the version, and
     test whether /_cat/indices works WITHOUT authentication - an exposed cluster is a
@@ -6094,6 +6138,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_io(rp)
     _add_budget(rp)
     rp.set_defaults(func=cmd_redis)
+
+    # MySQL / MariaDB enumeration.
+    myp = sub.add_parser("mysql", aliases=["mariadb"],
+                         help="MySQL/MariaDB: read the handshake (3306) -> CONFIRM an "
+                              "empty-password root/anonymous login = data exposure")
+    myp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                          "MySQL hosts in the datastore)")
+    myp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    _add_io(myp)
+    _add_budget(myp)
+    myp.set_defaults(func=cmd_mysql)
+
+    # PostgreSQL enumeration.
+    pgp = sub.add_parser("postgres", aliases=["postgresql", "psql"],
+                         help="PostgreSQL: v3 startup probe (5432) -> CONFIRM `trust` "
+                              "auth (no password) = data exposure")
+    pgp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                          "PostgreSQL hosts in the datastore)")
+    pgp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    _add_io(pgp)
+    _add_budget(pgp)
+    pgp.set_defaults(func=cmd_postgres)
 
     # Elasticsearch enumeration.
     ep = sub.add_parser("elasticsearch", aliases=["es", "elastic"],
