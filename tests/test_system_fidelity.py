@@ -20,7 +20,7 @@ import tempfile
 import threading
 import unittest
 
-from recce import ad, ldap as L, mongodb as M, mssql, redis, smb, snmp as S
+from recce import ad, ldap as L, mongodb as M, mssql, nfs as N, redis, rsync as R, smb, snmp as S
 from recce.models import Host, Port
 
 
@@ -569,6 +569,132 @@ class DatabaseServerSystemFidelityTest(unittest.TestCase):
             report_html.build_html([host], html_path, title="DB Server")
             html = open(html_path).read().lower()
         self.assertIn("mongodb", html)                   # the MongoDB finding rendered
+
+
+# --- faithful mock Linux file/print server (NFS + rsync + Samba) ----------------
+
+def _nfs_handler(sock):
+    """A mock ONC RPC server: portmapper DUMP (mountd on THIS port + nfsd) and mountd
+    EXPORT with a world-mountable ('*') share - built with recce's own RPC helpers.
+    An accepted socket's local port is the server's own port, so mountd advertises
+    itself and the probe's follow-up mountd connection lands back here."""
+    def xstr(x):
+        b = x.encode()
+        return struct.pack(">I", len(b)) + b + b"\x00" * ((4 - len(b) % 4) % 4)
+
+    def reply(xid, results):
+        body = (struct.pack(">III", xid, 1, 0) + struct.pack(">II", 0, 0)
+                + struct.pack(">I", 0) + results)
+        return struct.pack(">I", 0x80000000 | len(body)) + body
+
+    sock.settimeout(3.0)
+    myport = sock.getsockname()[1]
+    while True:
+        rec = N._recv_record(sock, 3.0)
+        if rec is None:
+            return
+        xid, _mt, _rv, prog, _ve, proc = struct.unpack_from(">IIIIII", rec, 0)
+        if prog == N._PMAP_PROG and proc == 4:               # portmap DUMP
+            res = b""
+            for pr, ve, po in ((N._MOUNT_PROG, 3, myport), (N._NFS_PROG, 3, 2049)):
+                res += struct.pack(">IIIII", 1, pr, ve, N._IPPROTO_TCP, po)
+            sock.sendall(reply(xid, res + struct.pack(">I", 0)))
+        elif prog == N._MOUNT_PROG and proc == 5:            # mountd EXPORT
+            res = (struct.pack(">I", 1) + xstr("/srv/backups")   # world-mountable ('*')
+                   + struct.pack(">I", 1) + xstr("*") + struct.pack(">I", 0)
+                   + struct.pack(">I", 1) + xstr("/home")        # host-restricted
+                   + struct.pack(">I", 1) + xstr("10.0.0.0/24") + struct.pack(">I", 0)
+                   + struct.pack(">I", 0))
+            sock.sendall(reply(xid, res))
+        else:
+            sock.sendall(reply(xid, b""))
+
+
+def _rsync_handler(sock):
+    """A mock rsync daemon: @RSYNCD greeting, #list of modules, and per-module
+    OK (anonymous) / AUTHREQD - anonymous access on two modules."""
+    sock.settimeout(3.0)
+    sock.sendall(b"@RSYNCD: 31.0\n")
+    buf = b""
+    while buf.count(b"\n") < 2:
+        try:
+            c = sock.recv(256)
+        except OSError:
+            return
+        if not c:
+            return
+        buf += c
+    req = buf.decode().split("\n")[1]
+    if req == "#list":
+        sock.sendall(b"backups\tnightly server backups\npublic\tanonymous share\n"
+                     b"secret\trestricted\n@RSYNCD: EXIT\n")
+    elif req == "secret":
+        sock.sendall(b"@RSYNCD: AUTHREQD abcdef\n")
+    else:                                                    # backups / public: anon OK
+        sock.sendall(b"@RSYNCD: OK\n")
+
+
+class LinuxFileServerSystemFidelityTest(unittest.TestCase):
+    """A composed Linux file/print server exposing NFS, rsync and Samba (SMB), each
+    driven by recce's real probes/findings on one host."""
+
+    def test_file_server_shares_are_enumerated(self):
+        ip = "127.0.0.1"
+        with _MockServer(_nfs_handler) as nfs_srv, \
+                _MockServer(_rsync_handler) as rsync_srv, \
+                _MockServer(_smb_dc_handler) as smb_srv:
+            host = Host(ip=ip, os_family="Linux", enumerated=True, ports=[
+                Port(portid=111, service="rpcbind", state="open"),
+                Port(portid=139, service="netbios-ssn", state="open"),
+                Port(portid=445, service="microsoft-ds", state="open"),
+                Port(portid=873, service="rsync", state="open"),
+                Port(portid=2049, service="nfs", state="open"),
+            ])
+            nfs_pr = N.probe(ip, pmport=nfs_srv.port, timeout=3.0)
+            smb_pr = smb.probe(ip, smb_srv.port)
+            nfs_fs = N.findings([host], {ip: nfs_pr})
+            smb_fs = smb.findings([host], {(ip, 445): smb_pr})
+            # rsync analyze probes the module list + per-module access against the daemon.
+            rhost = Host(ip=ip, ports=[Port(portid=rsync_srv.port, service="rsync",
+                                            state="open")])
+            rsync_an = R.analyze([rhost], active=True)
+
+        # NFS: world-mountable export enumerated over portmapper + mountd.
+        self.assertTrue(nfs_pr["reachable"])
+        self.assertTrue(nfs_pr["nfs"])
+        self.assertIn("/srv/backups", [e["dir"] for e in nfs_pr["exports"]])
+        self.assertIn("world-mountable", " ".join(f["title"].lower() for f in nfs_fs))
+        # rsync: modules enumerated + an anonymous-readable module flagged.
+        self.assertGreaterEqual(rsync_an["targets"][0].get("modules", 0), 3)
+        rsync_titles = " ".join(f["title"].lower() for f in rsync_an["findings"])
+        self.assertIn("without authentication", rsync_titles)
+        # Samba/SMB: signing not required (relay surface).
+        self.assertIsNotNone(smb_pr)
+        self.assertIn("signing not required",
+                      " ".join(f["title"].lower() for f in smb_fs))
+
+    def test_file_server_findings_reach_the_report(self):
+        from recce import report_html
+        ip = "127.0.0.1"
+        with _MockServer(_nfs_handler) as nfs_srv, \
+                _MockServer(_rsync_handler) as rsync_srv:
+            host = Host(ip=ip, os_family="Linux", enumerated=True, ports=[
+                Port(portid=873, service="rsync", state="open"),
+                Port(portid=2049, service="nfs", state="open")])
+            nfs_pr = N.probe(ip, pmport=nfs_srv.port, timeout=3.0)
+            host.vulns.extend(N.findings_to_vulns(N.findings([host], {ip: nfs_pr})).get(ip, []))
+            rhost = Host(ip=ip, ports=[Port(portid=rsync_srv.port, service="rsync",
+                                            state="open")])
+            rsync_fs = R.analyze([rhost], active=True)["findings"]
+            host.vulns.extend(R.findings_to_vulns(rsync_fs).get(ip, []))
+
+        self.assertTrue(host.vulns, "no vulns folded from the file-server enumeration")
+        with tempfile.TemporaryDirectory() as d:
+            html_path = os.path.join(d, "report.html")
+            report_html.build_html([host], html_path, title="File Server")
+            html = open(html_path).read().lower()
+        self.assertIn("nfs", html)
+        self.assertIn("rsync", html)
 
 
 if __name__ == "__main__":
