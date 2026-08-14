@@ -29,7 +29,7 @@ from .models import Host
 from .report_excel import read_workbook_edits, update_workbook
 from .report_markdown import build_csv, build_markdown
 from .store import Store, StoreError
-from .targets import expand_excludes, ip_matcher, load_targets
+from .targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 BANNER = r"""
   ____  _____ ____ ____ _____
@@ -104,6 +104,25 @@ def _swept_ports_for_host(xml_path: str, ip: str) -> list:
         if h.ip == ip:
             return list(h.ports)
     return []
+
+
+# A fast sweep that returns fewer than this many open ports on a non-reliable pass is
+# treated as possibly under-reported (a lossy firewall silently dropping SYNs) and gets
+# a congestion-adaptive re-scan whose results are UNIONED in. Small so a genuinely
+# sparse host isn't re-scanned needlessly.
+_UNDERREPORT_THRESHOLD = 3
+
+
+def _union_swept(a: list, b: list) -> list:
+    """Union two lists of sweep Port objects by (protocol, portid), keeping the first
+    seen. Used to merge a re-scan's authoritative open ports into the first pass's."""
+    out = list(a)
+    have = {(p.protocol, p.portid) for p in a}
+    for p in b:
+        if (p.protocol, p.portid) not in have:
+            have.add((p.protocol, p.portid))
+            out.append(p)
+    return out
 
 
 def _fold_swept_ports(host, swept) -> None:
@@ -677,13 +696,16 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
             truncated = iss.kind == "host-timeout"
         open_ports = _ports_for_host(fp_xml, ip)
         swept_ports = _swept_ports_for_host(fp_xml, ip)
-        # Completeness safeguard: a host that came back with ZERO ports may be
-        # genuinely empty - or the fast pass dropped every probe. Confirm it with
-        # an independent congestion-adaptive re-scan before we trust "no ports"
-        # (everything downstream keys off this). Gated so dead -Pn IPs on a clean
-        # network aren't all re-scanned: verify discovered-live hosts always, and
-        # -Pn hosts only with --verify-all.
-        if (not open_ports and profile.verify and not truncated
+        # Completeness safeguard: re-scan (congestion-adaptive) when the fast pass
+        # looks under-reported, and UNION the result in (never replace). Two triggers:
+        #  - ZERO ports: genuinely empty, or every probe was dropped.
+        #  - SUSPICIOUSLY FEW ports on a non-reliable pass: a lossy default-drop
+        #    firewall can silently swallow SYNs to open ports (even 22/80) without
+        #    nmap printing any drop marker, so a partial result would otherwise never
+        #    be re-checked - the exact "a few of the open ports are missing" bug.
+        # Gated so dead -Pn IPs on a clean network aren't all re-scanned.
+        few = 0 < len(open_ports) < _UNDERREPORT_THRESHOLD and not profile.reliable
+        if ((not open_ports or few) and profile.verify and not truncated
                 and (profile.ping_discovery or profile.verify_all)):
             vx = os.path.join(paths["raw"], f"{ip}_verify.xml")
             _, viss = scanner.verify_port_scan(ip, vx, profile)
@@ -691,12 +713,39 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
             if viss and viss.kind == "host-timeout":
                 truncated = True
             if vports:
-                open_ports = vports
-                swept_ports = _swept_ports_for_host(vx, ip)
+                before = set(open_ports)
+                open_ports = sorted(before | set(vports))
+                swept_ports = _union_swept(swept_ports, _swept_ports_for_host(vx, ip))
+                gained = len(open_ports) - len(before)
+                if gained > 0:
+                    issues.append(_mkissue(scanner.ScanIssue(
+                        "warning", f"port-sweep: fast pass found {len(before)} port(s); a "
+                        f"congestion-adaptive re-scan found {gained} more - the first "
+                        "sweep under-reported (network likely lossy); merged both"),
+                        "port-sweep"))
+        # Host-timeout auto-retry: a slow firewalled host whose sweep hit --host-timeout
+        # is NOT a dead end. If it showed any sign of life (some ports, or a discovery/
+        # named-target reply), give it ONE more pass with DOUBLE the host-timeout and
+        # congestion-adaptive timing, and union what it finds. Without this a slow host
+        # times out mid-sweep and shows 0 ports even though 22/80 are open. Gated on
+        # signs-of-life so a genuinely dead -Pn IP isn't re-scanned at 2x cost.
+        if (truncated and profile.retry_truncated and profile.host_timeout
+                and (open_ports or up_reason)):
+            import dataclasses
+            rprof = dataclasses.replace(
+                profile, reliable=True, host_timeout=max(1, profile.host_timeout) * 2)
+            rx = os.path.join(paths["raw"], f"{ip}_retry.xml")
+            _, riss = scanner.full_port_scan(ip, rx, rprof)
+            rports = _ports_for_host(rx, ip)
+            truncated = bool(riss and riss.kind == "host-timeout")
+            if rports:
+                before = set(open_ports)
+                open_ports = sorted(before | set(rports))
+                swept_ports = _union_swept(swept_ports, _swept_ports_for_host(rx, ip))
                 issues.append(_mkissue(scanner.ScanIssue(
-                    "warning", f"port-sweep: fast pass found 0 ports but a "
-                    f"verification re-scan found {len(vports)} - the first sweep "
-                    "under-reported (network likely lossy); used the re-scan"),
+                    "warning", f"port-sweep: host timed out; a retry with a "
+                    f"{rprof.host_timeout}m host-timeout recovered "
+                    f"{len(open_ports) - len(before)} additional port(s)"),
                     "port-sweep"))
         # UDP fallback: still silent on TCP, no discovery reply, and we're treating
         # this IP as up on faith (-Pn / discovery blocked). A UDP ping to common
@@ -955,13 +1004,25 @@ def _discover(args, profile, store, paths):
                     disc_reasons.update(recovered)
                     print(f"    [+] Reconfirm recovered {len(recovered)} host(s) that "
                           "blocked ping but answered a port scan.")
-                # Anything still unanswered is NOT scanned (full -Pn scanning every
-                # non-responder would reintroduce the cost the reconfirm cap avoids) -
-                # but it must not silently vanish. Persist the exact list as a durable
-                # issue so a firewalled-but-alive target the operator named is visible
-                # in the report with explicit -Pn guidance, not just a console line.
+                # A host the operator NAMED individually (a bare IP / hostname, not a
+                # CIDR-expanded scope host) that blocked discovery + reconfirm is very
+                # likely a firewalled-but-alive box the operator cares about - force a
+                # real -Pn port scan of it rather than dropping it. Bounded to named
+                # targets, so a dead CIDR IP is still not full-scanned.
                 still_ips = sorted((ip for ip in missed if ip not in set(live_ips)),
                                    key=_ip_key)
+                named = explicit_targets(args.targets)
+                named_still = [ip for ip in still_ips if ip in named]
+                if named_still:
+                    live_ips = list(live_ips) + named_still
+                    for ip in named_still:
+                        disc_reasons.setdefault(ip, "named-target (-Pn, blocked discovery)")
+                    still_ips = [ip for ip in still_ips if ip not in named]
+                    print(f"    [+] {len(named_still)} named target(s) blocked discovery "
+                          "- force-scanning them with -Pn anyway.")
+                # Any REMAINING (CIDR-expanded) non-responders are not scanned - full-
+                # scanning every one would reintroduce the cost the reconfirm cap avoids -
+                # but must not silently vanish. Persist the list as a durable issue.
                 if still_ips:
                     shown = ", ".join(still_ips[:20]) + (" …" if len(still_ips) > 20 else "")
                     _record_issues(store, paths, "(discovery)", [_mkissue(

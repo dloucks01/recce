@@ -172,8 +172,9 @@ class MasscanTopPortsFidelityTest(unittest.TestCase):
 
 
 class DiscoveryDropFidelityTest(unittest.TestCase):
-    """A target that blocks host discovery AND the reconfirm probe must be RECORDED
-    as unscanned, not silently dropped from the engagement (fully mocked, no nmap)."""
+    """A host that blocks discovery + reconfirm must never silently vanish: a NAMED
+    target is force-scanned (-Pn); a CIDR-expanded host is recorded as unscanned.
+    Fully mocked - no nmap."""
 
     @staticmethod
     def _up_xml(ips, path):
@@ -183,24 +184,24 @@ class DiscoveryDropFidelityTest(unittest.TestCase):
         with open(path, "w") as fh:
             fh.write(f'<?xml version="1.0"?><nmaprun start="1">{rows}</nmaprun>')
 
-    def test_unreconfirmed_live_target_is_persisted_as_unscanned(self):
+    def _discover(self, targets, up_ips):
         from unittest import mock
         from types import SimpleNamespace
         from recce import cli
 
         def fake_discover(targets_file, out_xml):
-            self._up_xml(["10.99.0.1"], out_xml)        # only .1 answers discovery
+            self._up_xml(up_ips, out_xml)
             return out_xml, None
 
         def fake_reconfirm(targets_file, out_xml, profile):
-            self._up_xml([], out_xml)                   # .2 answers nothing on reconfirm
+            self._up_xml([], out_xml)                   # reconfirm recovers nothing
             return out_xml, None
 
         with tempfile.TemporaryDirectory() as d:
             paths = cli._open_paths(d)
             store = Store(paths["db"])
             profile = scanner.ScanProfile(ping_discovery=True)
-            args = SimpleNamespace(targets=["10.99.0.1", "10.99.0.2"], exclude=[])
+            args = SimpleNamespace(targets=targets, exclude=[])
             try:
                 with mock.patch.object(scanner, "discover_hosts", side_effect=fake_discover), \
                         mock.patch.object(scanner, "reconfirm_hosts", side_effect=fake_reconfirm):
@@ -208,11 +209,96 @@ class DiscoveryDropFidelityTest(unittest.TestCase):
                 issues = store.get_issues()
             finally:
                 store.close()
-        # .2 was not port-scanned, but it must be recorded (not silently dropped).
+        return live_ips, " ".join(i.get("message", "") for i in issues)
+
+    def test_named_ping_blocker_is_force_scanned(self):
+        # The operator NAMED 10.99.0.2; it blocks discovery + reconfirm but must still
+        # get a real -Pn port scan (added to live_ips), not be dropped - this is the
+        # "firewalled host shows nothing open" fix.
+        live_ips, _msgs = self._discover(["10.99.0.1", "10.99.0.2"], ["10.99.0.1"])
+        self.assertIn("10.99.0.2", live_ips)
+
+    def test_cidr_host_blocking_discovery_is_recorded_unscanned(self):
+        # A host inside a CIDR scope (not individually named) is NOT force-scanned
+        # (would explode cost on dead subnets) but must be recorded, not silently lost.
+        live_ips, msgs = self._discover(["10.99.0.0/29"], ["10.99.0.1"])
         self.assertNotIn("10.99.0.2", live_ips)
-        msgs = " ".join(i.get("message", "") for i in issues)
         self.assertIn("10.99.0.2", msgs)
-        self.assertIn("-Pn", msgs)                      # actionable guidance persisted
+        self.assertIn("-Pn", msgs)
+
+
+def _ports_xml(ip, ports, path):
+    rows = "".join(
+        f'<port protocol="tcp" portid="{p}"><state state="open" reason="syn-ack"/></port>'
+        for p in ports)
+    with open(path, "w") as fh:
+        fh.write(f'<?xml version="1.0"?><nmaprun start="1"><host>'
+                 f'<status state="up" reason="user-set"/>'
+                 f'<address addr="{ip}" addrtype="ipv4"/><ports>{rows}</ports>'
+                 f'</host></nmaprun>')
+
+
+class PortSweepRecoveryFidelityTest(unittest.TestCase):
+    """The per-host recovery paths in _enum_worker: a lossy PARTIAL sweep is re-verified,
+    and a TRUNCATED (slow firewalled) sweep gets a longer retry - both UNION their result
+    so ports like 22/80 aren't lost to a lossy or slow scan. Fully mocked - no nmap."""
+
+    def _run_worker(self, ip, fps, verify=None, enum=None):
+        from unittest import mock
+        from recce import cli
+
+        def fake_enum(ip_, ports, out_xml, profile, creds=None):
+            _ports_xml(ip_, [], out_xml)
+            return out_xml, None
+
+        with tempfile.TemporaryDirectory() as d:
+            paths = cli._open_paths(d)
+            prof = scanner.ScanProfile(ping_discovery=True, udp_basic=False,
+                                       ad_enrich=False, os_detect=False)
+            patches = [mock.patch.object(scanner, "full_port_scan", side_effect=fps),
+                       mock.patch.object(scanner, "enum_scan", side_effect=enum or fake_enum)]
+            if verify:
+                patches.append(mock.patch.object(scanner, "verify_port_scan",
+                                                 side_effect=verify))
+            for p in patches:
+                p.start()
+            try:
+                host, _iss = cli._enum_worker(ip, prof, paths, None, None,
+                                              {ip: "10.0.0.0/24"}, active_probe=False,
+                                              disc_reason="syn-ack")
+            finally:
+                for p in patches:
+                    p.stop()
+        return host
+
+    def test_partial_lossy_sweep_is_reverified_and_unioned(self):
+        # Fast pass drops 2 of 3 open ports (no drop marker) -> a congestion-adaptive
+        # re-verify fires and the union restores all three.
+        def fps(ip, out_xml, profile):
+            _ports_xml(ip, [22], out_xml)                # only 1 of 3 survived the fast pass
+            return out_xml, None
+
+        def verify(ip, out_xml, profile):
+            _ports_xml(ip, [22, 80, 443], out_xml)
+            return out_xml, None
+
+        host = self._run_worker("10.0.0.7", fps, verify=verify)
+        self.assertEqual(sorted(p.portid for p in host.open_ports), [22, 80, 443])
+
+    def test_truncated_slow_host_retry_recovers_dropped_common_ports(self):
+        # First pass times out (slow firewall) and returns 0 ports - even 22/80 gone.
+        # The auto-retry with a doubled host-timeout + adaptive timing recovers them.
+        def fps(ip, out_xml, profile):
+            if not profile.reliable:                     # first pass: truncated, nothing
+                _ports_xml(ip, [], out_xml)
+                return out_xml, scanner.ScanIssue("warning", "host timeout",
+                                                  kind="host-timeout")
+            _ports_xml(ip, [22, 80], out_xml)            # retry: found the common ports
+            return out_xml, None
+
+        host = self._run_worker("10.0.0.8", fps)
+        self.assertEqual(sorted(p.portid for p in host.open_ports), [22, 80])
+        self.assertFalse(host.incomplete_scan)           # cleared: the retry completed
 
 
 # --- live real-listener integration ---------------------------------------------
