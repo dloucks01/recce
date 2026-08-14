@@ -110,6 +110,10 @@ class ScanProfile:
                                       # firewalled-but-alive box isn't written off down
     reconfirm_cap: int = 1024         # skip that re-probe when more than this many
                                       # hosts missed discovery (huge scope -> use -Pn)
+    retry_truncated: bool = True      # a host whose port sweep hit --host-timeout gets
+                                      # ONE congestion-adaptive retry with 2x the
+                                      # timeout, so a slow firewalled host doesn't end
+                                      # up showing 0 ports just because it was slow
 
 
 PROFILES: dict[str, ScanProfile] = {
@@ -515,8 +519,12 @@ def reconfirm_hosts(targets_file: str, out_xml: str,
     full-scanning every dead IP (top 100 ports, --open, fail-fast, one bounded sweep
     over all the missed IPs). Callers cap the input size (profile.reconfirm_cap)."""
     scan_type = _scan_type()
+    # --max-retries 4 (not 2): a lossy default-drop firewall can swallow the SYN-ACK
+    # from an open common port (22/80/443), and too few retries then reads a live-but-
+    # firewalled host as dead and drops it from the scan entirely. A slightly longer
+    # host-timeout (4m) covers a slow firewalled host whose ports answer late.
     cmd = ["nmap", scan_type, "-Pn", "-n", "--open", "--top-ports", "100",
-           f"-T{profile.timing}", "--max-retries", "2", "--host-timeout", "2m",
+           f"-T{profile.timing}", "--max-retries", "4", "--host-timeout", "4m",
            "-iL", targets_file, "-oX", out_xml]
     try:
         with open(targets_file) as fh:

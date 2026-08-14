@@ -125,6 +125,42 @@ def load_targets(tokens: list[str]) -> tuple[list[str], dict[str, str], dict[str
     return hosts, subnet_map, hostname_map
 
 
+def explicit_targets(tokens: list[str]) -> set[str]:
+    """Hosts the operator named INDIVIDUALLY - a token that expands to exactly one
+    host (a bare IP or a hostname), NOT a CIDR/range/@file-of-many expansion.
+
+    A named host the operator typed deserves a real -Pn port scan even if it blocks
+    discovery; a dead IP inside a swept CIDR does not. This is the named-vs-scope
+    distinction used to rescue a firewalled named target without full-scanning a
+    whole dead subnet."""
+    named: set[str] = set()
+
+    def consider(tok: str) -> None:
+        try:
+            exp = _expand_token(tok)
+        except (ValueError, OSError):
+            return
+        if len(exp) == 1:
+            named.add(exp[0])
+
+    for token in tokens:
+        if token.startswith("@"):
+            path = token[1:]
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path) as fh:
+                    for line in fh:
+                        line = line.split("#", 1)[0].strip()
+                        if line:
+                            consider(_split_ip_hostname(line)[0])
+            except OSError:
+                continue
+        else:
+            consider(token)
+    return named
+
+
 def ip_matcher(tokens: list[str]):
     """Build a predicate(ip)->bool from IP / range / CIDR / @file tokens.
 
