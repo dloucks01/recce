@@ -271,7 +271,7 @@ def _nxc_cmd(tool: str, ip: str, creds: dict) -> list[str]:
     cmd = [tool, "smb", ip, "-u", creds["username"], "-p", creds.get("password", "")]
     if creds.get("domain"):
         cmd += ["-d", creds["domain"]]
-    cmd += ["--shares", "--users", "--sessions", "--loggedon-users", "--pass-pol"]
+    cmd += ["--shares", "--users", "--smb-sessions", "--loggedon-users", "--pass-pol"]
     return cmd
 
 
