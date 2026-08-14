@@ -208,6 +208,7 @@ class Domain:
     password_policy: dict[str, Any] = field(default_factory=dict)
     trusts: list[dict[str, Any]] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
+    enum_errors: list[str] = field(default_factory=list)   # LDAP searches that failed
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
