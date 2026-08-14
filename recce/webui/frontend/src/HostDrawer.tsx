@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { HostDetail, VulnDetail, getHost } from "./api";
 import { SevTag, NoteCell } from "./ui";
+import { FindingDetail } from "./FindingDetail";
 
 // Slide-in panel with everything about one host: posture, services, full findings
 // (each expandable to raw output + remediation + QoD), AD accounts, and a note.
@@ -98,16 +99,7 @@ export function HostDrawer(
                       </div>
                     </div>
                     {openV === v.key && (
-                      <div className="dv-detail">
-                        <div className="kv"><span>Port</span><b className="mono">{v.port ?? "—"}</b>
-                          <span>QoD</span><b className="mono">{v.qod} {v.qod_type}</b>
-                          {v.epss > 0 && <><span>EPSS</span><b className="mono">{v.epss}%</b></>}
-                          {v.cwes.length > 0 && <><span>CWE</span><b className="mono">{v.cwes.join(", ")}</b></>}
-                        </div>
-                        {v.output && <pre className="dv-output">{v.output}</pre>}
-                        {v.remediation && <div className="dv-fix"><b>Fix:</b> {v.remediation}</div>}
-                        <div className="dv-note"><NoteCell value={v.notes} onSave={(t) => note(v.key, t, false)} /></div>
-                      </div>
+                      <FindingDetail v={v} onNote={(k, t) => note(k, t, false)} />
                     )}
                   </div>
                 ))}
