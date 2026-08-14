@@ -65,7 +65,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
 
   // cross-tab filter state (lifted so the dashboard can drill into a filtered view)
-  const [ff, setFf] = useState<FindingFilters>({ sev: "all", host: "", kev: false, unreviewed: false, q: "" });
+  const [ff, setFf] = useState<FindingFilters>({ sev: "all", host: "", kev: false, unreviewed: false, leads: false, q: "" });
   const [hostQ, setHostQ] = useState(""); const [hostSev, setHostSev] = useState("all");
   const [tgQ, setTgQ] = useState(""); const [tgFilter, setTgFilter] = useState<TgFilter>("all");
 
@@ -145,7 +145,7 @@ export default function App() {
 
   const nav: Nav = {
     toFindings: (o) => {
-      setFf({ sev: "all", host: "", kev: false, unreviewed: false, q: "", ...o });
+      setFf({ sev: "all", host: "", kev: false, unreviewed: false, leads: false, q: "", ...o });
       setTab("findings");
     },
     toHosts: (o) => { setHostQ(o?.q ?? ""); setHostSev(o?.sev ?? "all"); setTab("hosts"); },

@@ -5,7 +5,7 @@ import {
 import { Stat, SevTag, SevBar, NoteCell, Chips, useBounded } from "./ui";
 
 export type FindingFilters = {
-  sev: string; host: string; kev: boolean; unreviewed: boolean; q: string;
+  sev: string; host: string; kev: boolean; unreviewed: boolean; leads: boolean; q: string;
 };
 export type Nav = {
   toFindings: (o?: Partial<FindingFilters>) => void;
@@ -26,7 +26,7 @@ export function Dashboard(
         <Stat k="Hosts up" v={`${ov.hosts_up}`} sub={`/ ${ov.hosts_total}`} onClick={() => nav.toHosts()} />
         <Stat k="Services" v={`${ov.services}`} />
         <Stat k="Critical" v={`${ov.by_severity.critical ?? 0}`} cls="crit"
-              onClick={() => nav.toFindings({ sev: "critical" })} />
+              onClick={() => nav.toFindings({ sev: "critical", leads: true })} />
         <Stat k="🔥 KEV" v={`${ov.kev_total}`} cls="kev"
               onClick={() => nav.toFindings({ kev: true })} />
         <Stat k="Reviewed" v={`${reviewPct}%`} sub={`${ov.reviewed}/${ov.findings_total}`}
@@ -42,7 +42,7 @@ export function Dashboard(
             const c = ov.by_severity[s] ?? 0;
             return (
               <button key={s} className={"sevblock s-bg-" + s} disabled={!c}
-                      onClick={() => nav.toFindings({ sev: s })}>
+                      onClick={() => nav.toFindings({ sev: s, leads: true })}>
                 <span className="n">{c}</span>
                 <span className="l">{s}</span>
               </button>
@@ -122,9 +122,14 @@ export function Findings(
   { findings: Finding[]; f: FindingFilters; setF: (o: Partial<FindingFilters>) => void;
     nav: Nav; onTick: (k: string, r: boolean) => void; onNote: (k: string, t: string) => void }
 ) {
+  // Leads = QoD-below-threshold version/banner inferences (tier "lead"). They are the
+  // bulk of the noise and the classic false-positive class, so they are hidden by
+  // default; the "Leads" toggle brings them back when a tester wants to dig.
+  const leadCount = useMemo(() => findings.filter((x) => x.tier === "lead").length, [findings]);
   const rows = useMemo(() => {
     const n = f.q.toLowerCase();
     return findings.filter((x) =>
+      (f.leads || x.tier !== "lead") &&
       (f.sev === "all" || x.severity === f.sev) &&
       (!f.host || x.ip === f.host) &&
       (!f.unreviewed || !x.reviewed) &&
@@ -132,7 +137,7 @@ export function Findings(
       (!n || `${x.title} ${x.ip} ${x.cve} ${x.port} ${x.source}`.toLowerCase().includes(n)));
   }, [findings, f]);
   const { shown, limit, total, sentinel } =
-    useBounded(rows, 120, [f.sev, f.host, f.kev, f.unreviewed, f.q]);
+    useBounded(rows, 120, [f.sev, f.host, f.kev, f.unreviewed, f.leads, f.q]);
 
   return (
     <>
@@ -141,6 +146,12 @@ export function Findings(
         <div className="toggles">
           <button className={"toggle" + (f.unreviewed ? " on" : "")} onClick={() => setF({ unreviewed: !f.unreviewed })}>Unreviewed</button>
           <button className={"toggle" + (f.kev ? " on" : "")} onClick={() => setF({ kev: !f.kev })}>🔥 KEV</button>
+          {leadCount > 0 && (
+            <button className={"toggle" + (f.leads ? " on" : "")} onClick={() => setF({ leads: !f.leads })}
+                    title="version/banner inferences below the confidence threshold">
+              Leads <span className="ct">{leadCount}</span>
+            </button>
+          )}
         </div>
         <input className="search" placeholder="filter: cve, host, port…" value={f.q}
                onChange={(e) => setF({ q: e.target.value })} spellCheck={false} />
@@ -171,12 +182,23 @@ export function Findings(
                 <td className="note-col"><NoteCell value={x.notes} onSave={(t) => onNote(x.key, t)} /></td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={6} className="empty">no findings match this filter</td></tr>}
+            {rows.length === 0 && (
+              <tr><td colSpan={6} className="empty">
+                {!f.leads && leadCount > 0
+                  ? `no confirmed findings match — ${leadCount} lead${leadCount > 1 ? "s" : ""} hidden (toggle “Leads” to show)`
+                  : "no findings match this filter"}
+              </td></tr>
+            )}
           </tbody>
         </table>
       </div>
       {sentinel}
-      {total > 0 && <div className="rowcount">showing {limit.toLocaleString()} of {total.toLocaleString()} findings</div>}
+      {total > 0 && (
+        <div className="rowcount">
+          showing {limit.toLocaleString()} of {total.toLocaleString()} findings
+          {!f.leads && leadCount > 0 && <span className="muted"> · {leadCount} leads hidden</span>}
+        </div>
+      )}
     </>
   );
 }
