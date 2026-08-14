@@ -4888,6 +4888,29 @@ def _service_module_coverage(store, hosts) -> list[dict]:
     return out
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Serve the web workbench for this engagement. One recce instance hosts it; the
+    team opens http://<this-box>:<port> in a browser over the LAN. Read-only today;
+    live scans + progress ticks + collaboration build on this."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run a scan first (e.g. recce run).")
+        return 1
+    try:
+        import uvicorn
+        from .webui.app import create_app
+    except Exception:
+        print("[x] The web workbench needs fastapi + uvicorn (bundled in the airgap "
+              "package). For a dev install: pip install 'recce[bundle]'.")
+        return 1
+    app = create_app(paths["db"])
+    print(f"[+] recce workbench -> http://{args.host}:{args.port}   "
+          f"(engagement: {args.output_dir})")
+    print("    Open it in a browser; share the URL with your team on the LAN. Ctrl-C to stop.")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -6164,6 +6187,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="print live review coverage")
     _add_io(st, title=False)
     st.set_defaults(func=cmd_status)
+
+    sv = sub.add_parser("serve", help="serve the web workbench (local, multi-tester) "
+                                      "for this engagement")
+    _add_io(sv, title=False)
+    sv.add_argument("--host", default="0.0.0.0",
+                    help="bind address (default 0.0.0.0 = reachable across the LAN)")
+    sv.add_argument("--port", type=int, default=8008, help="port (default 8008)")
+    sv.set_defaults(func=cmd_serve)
 
     nx = sub.add_parser("next", help="the ranked next-best-actions for an engagement")
     _add_io(nx, title=False)

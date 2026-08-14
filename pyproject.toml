@@ -23,7 +23,7 @@ test = ["openpyxl", "pytest-xdist"]
 # Baked into the airgap bundle (tools/build_bundle.sh installs `.[bundle]`). recce
 # still runs without these - it falls back to its hand-rolled clients / CLI tools -
 # but bundled they replace the fragile shell-outs with maintained libraries.
-bundle = ["impacket", "ldap3", "openpyxl"]
+bundle = ["impacket", "ldap3", "openpyxl", "fastapi", "uvicorn"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -47,4 +47,5 @@ version = { attr = "recce.__version__" }
 [tool.setuptools.package-data]
 # Ship the bundled demo scan, the on-target enum scripts, and the Kali-side
 # per-service enumeration suite alongside the code.
-recce = ["sample_scan.xml", "local/*", "scripts/*", "scripts/services/*"]
+recce = ["sample_scan.xml", "local/*", "scripts/*", "scripts/services/*",
+         "webui/static/*", "webui/static/assets/*"]
