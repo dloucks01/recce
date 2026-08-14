@@ -1089,8 +1089,8 @@ def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
     if is_full:
         print(f"[*] Port scope: {scope_label} per host (full sweep).")
     else:
-        print(f"[!] Port scope: {scope_label} per host - PARTIAL, NOT a full scan. "
-              "Pass --all-ports (or --profile standard) for all 65535 ports.")
+        print(f"[!] Port scope: {scope_label} per host - covers the common services, "
+              "NOT a full scan. Pass --all-ports (or --profile thorough) for all 65535.")
     print(f"[*] Enumerating {len(live_ips)} host(s) with {workers} worker(s) "
           f"(ports + services) ...")
     completed = 0
@@ -5476,8 +5476,8 @@ def _add_discovery(pp) -> None:
     g.add_argument("--masscan", action="store_true", help="use masscan for port sweep")
     g.add_argument("--all-ports", action="store_true",
                    help="force the full 65535-port TCP sweep, overriding the profile "
-                        "and any --top-ports (the `standard`/`thorough` profiles already "
-                        "do this; use it to force a full scan under `quick`/`--fast`)")
+                        "and any --top-ports (the `thorough` profile already does this; "
+                        "the default `standard` sweeps the top 3000 ports for speed)")
     g.add_argument("--top-ports", type=int,
                    help="scan only the top-N TCP ports (PARTIAL - faster but can miss a "
                         "service on an unusual port; recce prints a warning)")

@@ -9097,8 +9097,11 @@ class DiscoveryReconfirmTest(unittest.TestCase):
 
     def test_port_scope_label_and_all_ports_override(self):
         from recce import cli, scanner
-        # standard = full sweep; quick = partial (top-N).
-        self.assertEqual(scanner.port_scope_label(scanner.PROFILES["standard"]),
+        # standard = fast top-3000 (partial); thorough = full 65535; quick = top-200.
+        s_label, s_full = scanner.port_scope_label(scanner.PROFILES["standard"])
+        self.assertFalse(s_full)
+        self.assertIn("top 3000", s_label)
+        self.assertEqual(scanner.port_scope_label(scanner.PROFILES["thorough"]),
                          ("all 65535 TCP ports", True))
         label, is_full = scanner.port_scope_label(scanner.PROFILES["quick"])
         self.assertFalse(is_full)
