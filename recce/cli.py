@@ -4139,7 +4139,8 @@ def cmd_kubernetes(args: argparse.Namespace) -> int:
     hosts = _selected_hosts(store.all_hosts(), args)
 
     active = not args.no_probe
-    analysis = k8s.analyze(hosts, active=active)
+    analysis = k8s.analyze(hosts, active=active, **_probe_kwargs(args, "kubernetes"))
+    _report_partial(analysis["stats"])
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No Kubernetes endpoints in the datastore (no kubelet/apiserver/etcd "
@@ -4267,7 +4268,8 @@ def cmd_api(args: argparse.Namespace) -> int:
     _import_excel_tracking(store, paths)
     hosts = _selected_hosts(store.all_hosts(), args)
     active = not getattr(args, "no_probe", False)
-    analysis = api.analyze(hosts, active=active)
+    analysis = api.analyze(hosts, active=active, **_probe_kwargs(args, "api"))
+    _report_partial(analysis["stats"])
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No web services to enumerate for APIs. Run `enum`/`vulns` first, or "
@@ -5974,6 +5976,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     kp.add_argument("--no-probe", action="store_true",
                     help="skip the live unauthenticated reads; just write the commands")
     _add_io(kp)
+    _add_budget(kp)
     kp.set_defaults(func=cmd_kubernetes)
 
     # LDAP / AD directory enumeration.
@@ -6007,6 +6010,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_io(ap)
     ap.add_argument("--no-probe", action="store_true",
                     help="don't send API probes (list web targets only)")
+    _add_budget(ap)
     ap.set_defaults(func=cmd_api)
 
     sp = sub.add_parser("snmp",
@@ -6318,8 +6322,10 @@ def main(argv: list[str] | None = None) -> int:
                   "set RECCE_DEBUG=1 to see the full traceback for a bug report.")
         return 1
     finally:
-        # Relax the engagement folder to 777 on every exit path (success, Ctrl-C,
-        # or crash) so a sudo run never leaves the operator locked out of outputs.
+        # Hand the engagement folder back to the sudo-invoking operator on every exit
+        # path (success, Ctrl-C, or crash) so a sudo run never leaves them locked out of
+        # outputs. _relax_perms restores ownership + OWNER-ONLY perms (dirs 0700, files
+        # 0600) - never group/world-readable, since the tree holds captured creds/hashes.
         out_dir = getattr(args, "output_dir", None)
         if out_dir:
             _relax_perms(out_dir)

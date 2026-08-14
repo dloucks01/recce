@@ -430,13 +430,18 @@ def findings_to_vulns(fs: list[dict]) -> dict:
     return _f2v(fs, "kubernetes", _KUBELET, prefix="k8s")
 
 
-def analyze(hosts: list[Host], active: bool = True) -> dict:
-    """Full Kubernetes analysis. Returns {targets, findings, runbooks, stats}."""
+def analyze(hosts: list[Host], active: bool = True,
+            budget: float | None = None, progress=None) -> dict:
+    """Full Kubernetes analysis. Returns {targets, findings, runbooks, stats}.
+    `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
+    from . import svcprobe
     targets = k8s_targets(hosts)
     probes: dict = {}
+    state: dict = {}
     if active:
-        for t in targets:
-            pr = probe(t["ip"], t["port"])
+        for t, pr in svcprobe.iter_probe(
+                targets, lambda t: probe(t["ip"], t["port"]),
+                budget=budget, progress=progress, state=state):
             if pr:
                 probes[(t["ip"], t["port"])] = pr
                 t["reachable"] = True
@@ -451,4 +456,5 @@ def analyze(hosts: list[Host], active: bool = True) -> dict:
                 for t in targets]
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
-            "stats": {"targets": len(targets), "findings": len(fs)}}
+            "stats": {"targets": len(targets), "findings": len(fs),
+                      "stopped": state.get("stopped")}}

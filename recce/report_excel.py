@@ -109,8 +109,10 @@ TAB_COLORS = {
 def _ip_sort_key(ip: str):
     try:
         return tuple(int(o) for o in ip.split("."))
-    except ValueError:
-        return (999, ip)
+    except (ValueError, AttributeError):
+        # AttributeError guards a None/non-str ip (a hostname-only or malformed row);
+        # str() keeps the fallback tuples mutually comparable (never int vs None).
+        return (999, str(ip))
 
 
 def _col_sqref(letter: str, rows: list[int]) -> str:

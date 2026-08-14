@@ -960,11 +960,11 @@ def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
     doc.heading("Findings", 1)
     rows = []
     for fid, f in findings_with_ids:
-        hosts = sorted({a[0] for a in f.affected})
-        hosts_txt = ", ".join(hosts)
+        f_hosts = sorted({a[0] for a in f.affected})
+        f_hosts_txt = ", ".join(f_hosts)
         rows.append([fid, f.severity.upper(), f.title,
                      ", ".join(f.cwes) or "-",
-                     hosts_txt if len(hosts_txt) < 60 else f"{len(hosts)} systems"])
+                     f_hosts_txt if len(f_hosts_txt) < 60 else f"{len(f_hosts)} systems"])
     doc.table(["ID", "Severity", "Finding", "CWE", "Affected"], rows,
               widths=[900, 1100, 3860, 1500, 2000])
 
