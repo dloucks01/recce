@@ -30,7 +30,12 @@ _REPORTS = {
 
 
 def _tier(v) -> str:
-    q = getattr(v, "qod", 0) or 0
+    # qod_of, not v.qod: findings are persisted BEFORE qod.annotate runs (annotation
+    # happens in-memory at report time and isn't written back), so v.qod is often 0 in
+    # the store. qod_of fail-open-computes the score from the detection method, so a
+    # real confirmed service finding isn't mis-tiered as a hidden "lead".
+    from .. import qod
+    q = qod.qod_of(v)
     return "confirmed" if q >= 95 else "likely" if q >= 70 else "lead"
 
 
@@ -178,7 +183,7 @@ def create_app(eng_dir: str) -> FastAPI:
     def host_detail(ip: str):
         """Everything about one host — services, full findings (with output +
         remediation + QoD), AD accounts, posture — for the drill-down drawer."""
-        from .. import tracking
+        from .. import qod, tracking
         hs, _ = _hosts()
         h = next((x for x in hs if x.ip == ip), None)
         if h is None:
@@ -189,10 +194,12 @@ def create_app(eng_dir: str) -> FastAPI:
         for v in h.vulns:
             rev, notes = trk.get(tracking.vuln_row_key(v), (False, ""))
             d = _finding_dict(v, bool(rev), notes)
+            qscore, qtype = qod.score(v)
             d.update({
                 "output": (v.output or "")[:4000], "remediation": v.remediation or "",
-                "cwes": list(v.cwes or []), "qod": getattr(v, "qod", 0),
-                "qod_type": getattr(v, "qod_type", ""), "state": v.state or "",
+                "cwes": list(v.cwes or []),
+                "qod": getattr(v, "qod", 0) or qscore,
+                "qod_type": getattr(v, "qod_type", "") or qtype, "state": v.state or "",
             })
             vulns.append(d)
         vulns.sort(key=lambda f: (not f["kev"], _SEV_ORDER.get(f["severity"], 9), -f["epss"]))

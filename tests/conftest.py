@@ -26,6 +26,7 @@ _SLOW_MODULES = {
     "test_netmap_scale",            # large-scope map rendering
     "test_workflow",                # real nmap: end-to-end workflow/usability
     "test_credentialed_ad_integration",  # real Samba DC (also env-gated)
+    "test_db_integration",               # real PostgreSQL + MariaDB servers
 }
 
 
