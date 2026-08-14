@@ -87,8 +87,11 @@ jobs:
     name: credentialed AD (Samba DC)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Real Samba AD DC provisioning in CI is timing/DNS-sensitive; keep it informational
-    # until it's confirmed green on a runner, then flip continue-on-error off.
+    # The tier is a real signal now: 5 pass (LDAP, SMB, both kerberoast paths via
+    # recce's native RC4 roast) + 1 documented xfail (secretsdump/DRSUAPI, an
+    # impacket-vs-Samba issue). continue-on-error stays only because Samba DC
+    # provisioning ON A GITHUB RUNNER isn't yet confirmed reliable (timing/DNS); flip
+    # it off once a few runs are green end-to-end.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

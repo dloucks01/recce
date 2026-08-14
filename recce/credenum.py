@@ -331,15 +331,25 @@ def _fold_nxc(host: Host, data: dict, label: str = "supplied credentials",
 
 def _spn_targets_native(dc_ip: str, creds: dict) -> list[dict] | None:
     """SPN accounts via recce's own authenticated LDAP. Returns a list (possibly empty)
-    on a successful bind, or None if the bind/connection was refused (the caller then
-    tries impacket's LDAP - some DCs, e.g. Samba, reject recce's simple/NTLM bind)."""
+    on a successful bind, or None if every bind was refused (the caller then tries
+    impacket's LDAP)."""
     from . import ldap
     realm = (creds.get("domain") or "").strip()
     if not realm:
         return None
+    # credenum uses {username,password,hash}; the ldap client uses {user,secret,hash}.
+    # Passing the wrong keys binds as an empty principal (rejected) - translate.
+    lcreds = {"user": creds.get("username", ""), "secret": creds.get("password", ""),
+              "domain": realm, "hash": creds.get("hash", "")}
     base = "DC=" + ",DC=".join(realm.split("."))
-    en = ldap.enum_authenticated(dc_ip, 389, base, creds)
-    if en.get("error"):
+    # LDAPS (636) first (a signing-required DC refuses a cleartext simple bind), then
+    # plain 389 as a fallback for DCs that don't expose 636.
+    en = None
+    for port in (636, 389):
+        en = ldap.enum_authenticated(dc_ip, port, base, lcreds)
+        if not en.get("error"):
+            break
+    if en is None or en.get("error"):
         return None
     out = []
     for attrs in en.get("users", []):
