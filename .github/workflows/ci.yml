@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# A newer push to the same branch/PR cancels the older, still-running run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # recce targets Python >= 3.9; this covers the modern range and can be
+        # widened to 3.9/3.10 if you want to verify the floor.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install nmap
+        # The scan/service/system fidelity suites drive REAL nmap against local
+        # listeners; without it those tests skipUnless(nmap) and silently reduce
+        # coverage. nmap also ships nmap-services, which the masscan top-N test reads.
+        run: sudo apt-get update && sudo apt-get install -y nmap
+
+      - name: Install recce + test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]" pytest
+
+      - name: Run the test suite
+        run: pytest -q
+
+  lint:
+    name: pyflakes
+    runs-on: ubuntu-latest
+    # Informational for now (the runtime is stdlib-only and the suite is the gate);
+    # flip continue-on-error off to make lint blocking once it's confirmed clean.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pyflakes
+      - run: python -m pyflakes recce
+
+  ad-integration:
+    name: credentialed AD (Samba DC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Real Samba AD DC provisioning in CI is timing/DNS-sensitive; keep it informational
+    # until it's confirmed green on a runner, then flip continue-on-error off.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install recce + AD tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]" pytest impacket netexec
+      - name: Stand up the Samba AD DC
+        run: |
+          docker compose -f tests/integration/docker-compose.ad.yml up -d
+          bash tests/integration/provision-ad.sh
+      - name: Run the credentialed AD integration test
+        env:
+          RECCE_AD_IT: "1"
+          RECCE_AD_HOST: "127.0.0.1"
+          RECCE_AD_DOMAIN: "RECCE.LOCAL"
+          RECCE_AD_ADMIN: "Administrator"
+          RECCE_AD_PASS: "Recce!Passw0rd"
+          RECCE_AD_SPN_USER: "svc_sql"
+        run: pytest tests/test_credentialed_ad_integration.py -v
+      - name: Tear down
+        if: always()
+        run: docker compose -f tests/integration/docker-compose.ad.yml down -v || true
