@@ -3913,24 +3913,31 @@ def cmd_smb(args: argparse.Namespace) -> int:
     if not args.no_run:
         for t in tgts:
             ip, port = t["ip"], t["port"]
-            # Try a null session first, then guest.
-            session = smb.enum_session(ip, "", "", port=port)
-            if session.get("error") and "not installed" in (session["error"] or ""):
+            # Enumerate with the strongest session that works: null -> guest -> creds.
+            session, level = smb.enum_best_session(ip, port=port, creds=creds)
+            if level == "error":
                 print("      [i] nxc/netexec not installed - writing the commands to "
                       "run instead (see the SMB sheet).")
                 break
-            if not (session.get("shares") or session.get("users")):
-                session = smb.enum_session(ip, "guest", "", port=port)
             ran_live = True
             shares = session.get("shares") or []
-            live = {"shares": shares, "writable": [],
-                    "session": (f"anonymous session: {len(shares)} share(s), "
-                                f"{len(session.get('users') or [])} user(s)")}
-            analysis["findings"].extend(smb.null_session_findings(ip, port, session))
+            nusers = len(session.get("users") or [])
+            if level == "creds":
+                # An authenticated inventory - NOT an anonymous-access finding.
+                label = (f"credentialed session (as {creds.get('user')}): "
+                         f"{len(shares)} share(s), {nusers} user(s)")
+                cmd_shown = (f"nxc smb {ip} -u {creds.get('user')} -p *** "
+                             + (f"-d {creds['domain']} " if creds.get("domain") else "--local-auth ")
+                             + "--shares --users")
+            else:
+                label = (f"anonymous session ({level}): {len(shares)} share(s), "
+                         f"{nusers} user(s)")
+                cmd_shown = f"nxc smb {ip} -u '' -p '' --shares --users --pass-pol"
+                # Anonymous access to shares/users is itself a finding.
+                analysis["findings"].extend(smb.null_session_findings(ip, port, session))
+            live = {"shares": shares, "writable": [], "session": label}
             if session.get("output"):
-                _smb_shot(args, ip, "enum",
-                          f"nxc smb {ip} -u '' -p '' --shares --users --pass-pol",
-                          session["output"])
+                _smb_shot(args, ip, "enum", cmd_shown, session["output"])
             # Prove writable shares (reversible) when requested.
             if args.prove_write:
                 for s in shares:
