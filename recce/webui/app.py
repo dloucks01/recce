@@ -19,6 +19,14 @@ from .jobs import JobManager, recce_argv
 
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 _PHASES = {"run", "scan", "enum", "vulns", "sweep"}
+# downloadable deliverables: kind -> (paths-key, download filename, media type)
+_REPORTS = {
+    "xlsx": ("xlsx", "enumeration.xlsx",
+             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    "html": ("html", "report.html", "text/html"),
+    "md": ("md", "enumeration.md", "text/markdown"),
+    "csv": ("csv", "services.csv", "text/csv"),
+}
 
 
 def _tier(v) -> str:
@@ -266,6 +274,28 @@ def create_app(eng_dir: str) -> FastAPI:
         broker.publish({"type": "tick", "key": key, "reviewed": reviewed,
                         "tester": x_tester})
         return {"ok": True}
+
+    @app.get("/api/report/{kind}")
+    def report(kind: str):
+        """Regenerate the deliverables from the live datastore and hand back the
+        requested file as a download - byte-for-byte what `recce report` produces
+        (same builder), so the UI export and the CLI export never diverge."""
+        if kind not in _REPORTS:
+            raise HTTPException(404, f"unknown report kind {kind!r}")
+        from ..store import Store
+        from ..cli import _generate_reports, _open_paths
+        paths = _open_paths(eng_dir)
+        st = Store(db_path)
+        try:
+            title = st.get_meta("engagement") or "recce engagement"
+            _generate_reports(st, paths, title, quiet=True)
+        finally:
+            st.close()
+        pkey, fname, media = _REPORTS[kind]
+        path = paths[pkey]
+        if not os.path.exists(path):
+            raise HTTPException(500, "report generation produced no file")
+        return FileResponse(path, media_type=media, filename=fname)
 
     @app.get("/api/events")
     async def events():
