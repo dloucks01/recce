@@ -16,9 +16,20 @@ dynamic = ["version"]
 dependencies = []
 
 [project.optional-dependencies]
-# Only the test suite needs a third-party package (to validate the hand-rolled
-# .xlsx against a real reader); the tool itself never imports it.
-test = ["openpyxl"]
+# The tool itself is stdlib-only; the test suite pulls two dev-only packages:
+# openpyxl (validate the hand-rolled .xlsx against a real reader) and pytest-xdist
+# (run the real-nmap fidelity suites across cores - `-n auto`).
+test = ["openpyxl", "pytest-xdist"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Parallel by default: the fidelity suites spend their time WAITING on real nmap,
+# so spreading them across cores cuts wall-clock dramatically. Needs pytest-xdist
+# (in the `test` extra). Drop `-n auto` if running without it.
+addopts = "-n auto"
+markers = [
+    "slow: real-nmap / real-listener high-fidelity test (deselect with -m 'not slow')",
+]
 
 [project.scripts]
 recce = "recce.cli:main"
