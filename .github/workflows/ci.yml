@@ -4,6 +4,8 @@ on:
   push:
     branches: [master]
   pull_request:
+  schedule:
+    - cron: "0 6 * * *"        # nightly: the full real-nmap fidelity suite
 
 # A newer push to the same branch/PR cancels the older, still-running run.
 concurrency:
@@ -40,8 +42,32 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]" pytest
 
-      - name: Run the test suite
-        run: pytest -q
+      - name: Run the fast test suite (parallel, real-nmap suites deselected)
+        # The pure-logic tests run in seconds across cores (-n auto is the pyproject
+        # default via pytest-xdist). The slow real-nmap fidelity suites are marked
+        # `slow` (tests/conftest.py) and run in the `fidelity` job on master + nightly.
+        run: pytest -q -m "not slow"
+
+  fidelity:
+    name: fidelity (real nmap)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The real-nmap / real-listener suites: expensive, so only on master pushes and the
+    # nightly schedule, not on every PR (the fast job gates PRs).
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install nmap
+        run: sudo apt-get update && sudo apt-get install -y nmap
+      - name: Install recce + test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]" pytest
+      - name: Run the real-nmap fidelity suite
+        run: pytest -q -m slow
 
   lint:
     name: pyflakes
