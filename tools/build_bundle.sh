@@ -29,6 +29,14 @@ echo "[*] Building $NAME (airgap bundle)"
 rm -rf "$OUT" "$BUILD"
 mkdir -p "$OUT/app" "$OUT/tools/bin" "$OUT/tools/libexec" "$BUILD"
 
+# --- 0. build the React frontend into recce/webui/static (needs Node; online build) ---
+if [ -d recce/webui/frontend ] && command -v npm >/dev/null 2>&1; then
+  echo "[*] Building the React frontend ..."
+  ( cd recce/webui/frontend && npm install --silent && npm run build --silent )
+else
+  echo "[!] Node/npm or the frontend not found - the web workbench UI won't be bundled"
+fi
+
 # --- 1. throwaway build venv with recce + its deps + pyinstaller ----------------
 echo "[*] Creating build venv + installing recce (+ deps) + PyInstaller ..."
 python3 -m venv "$VENV"
@@ -48,6 +56,7 @@ PY
 "$VENV/bin/pyinstaller" --onedir --name recce --noconfirm \
   --collect-submodules recce --collect-data recce \
   --collect-all impacket --collect-all ldap3 --collect-all openpyxl \
+  --collect-all fastapi --collect-all uvicorn \
   --distpath "$BUILD/pyi-dist" --workpath "$BUILD/pyi-work" --specpath "$BUILD" \
   "$BUILD/entry.py" >/dev/null 2>&1
 cp -a "$BUILD/pyi-dist/recce/." "$OUT/app/"
