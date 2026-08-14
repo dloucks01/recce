@@ -1,0 +1,48 @@
+# A real Samba Active Directory domain controller for the credentialed-AD integration
+# test (tests/test_credentialed_ad_integration.py). It provides a live KDC, LDAP, and an
+# authenticated SMB session - the tier recce cannot fake with an in-process responder.
+#
+# CI (and `docker compose -f this up -d`) brings it up; tests/integration/provision-ad.sh
+# then adds a Kerberoastable service account. Self-provisions the RECCE.LOCAL domain on
+# first boot from the env below.
+#
+# NOTE: Samba AD DC needs a privileged container (it manages its own DNS/Kerberos). The
+# image + env here follow nowsci/samba-domain's documented interface; if a future image
+# release changes it, adjust the env keys - the test itself is image-agnostic (it only
+# needs a reachable DC on 445/389/88 with the credentials below).
+services:
+  dc:
+    image: nowsci/samba-domain:latest
+    container_name: recce-ad-dc
+    hostname: dc01
+    privileged: true
+    dns:
+      - 127.0.0.1
+    environment:
+      DOMAIN: RECCE.LOCAL
+      DOMAINPASS: "Recce!Passw0rd"
+      DNSFORWARDER: "8.8.8.8"
+      HOSTIP: 127.0.0.1
+      INSECURELDAP: "true"          # allow plain LDAP on 389 for the RootDSE probe
+      NOCOMPLEXITY: "false"
+    ports:
+      - "53:53"
+      - "53:53/udp"
+      - "88:88"
+      - "88:88/udp"
+      - "135:135"
+      - "139:139"
+      - "389:389"
+      - "389:389/udp"
+      - "445:445"
+      - "464:464"
+      - "464:464/udp"
+      - "636:636"
+      - "3268:3268"
+      - "3269:3269"
+    healthcheck:
+      test: ["CMD-SHELL", "samba-tool domain info 127.0.0.1 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 8s
+      retries: 30
+      start_period: 60s
