@@ -979,7 +979,6 @@ def reachability_svg(hosts: list[Host], ad_data=None, max_nodes: int = 60) -> st
                 continue
             oseen.add(e["dst"])
             others.append(e["dst"])
-    drawn = {e for e in range(len(adj["edges"]))}
 
     cardW, cardH, vgap, m, colGap = 214, 76, 14, 18, 150
     top = 52

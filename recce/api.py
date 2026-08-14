@@ -101,19 +101,31 @@ def _probe_port(ip: str, port) -> list[dict]:
     return out
 
 
-def analyze(hosts, active: bool = True, **_kw) -> dict:
+def analyze(hosts, active: bool = True, budget: float | None = None,
+            progress=None, **_kw) -> dict:
     """Probe every web port for API surface. Returns the deep-service analysis shape
-    ({findings, targets, stats}) so it folds through _fold_service_findings unchanged."""
+    ({findings, targets, stats}) so it folds through _fold_service_findings unchanged.
+    `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
+    from . import svcprobe
     findings: list[dict] = []
     targets: list[dict] = []
-    for h in hosts:
+    port_by: dict = {}                    # (ip, portid) -> Port, so the probe keeps the
+    for h in hosts:                       # Port object while `targets` stays JSON-clean
         for p in h.open_ports:
             if not web.is_web(p):
                 continue
             targets.append({"ip": h.ip, "port": p.portid})
-            if active:
-                findings.extend(_probe_port(h.ip, p))
-    return {"findings": findings, "targets": targets, "stats": {}}
+            port_by[(h.ip, p.portid)] = p
+    state: dict = {}
+    if active:
+        for t, fs in svcprobe.iter_probe(
+                targets, lambda t: _probe_port(t["ip"], port_by[(t["ip"], t["port"])]),
+                budget=budget, progress=progress, state=state):
+            if fs:
+                findings.extend(fs)
+    return {"findings": findings, "targets": targets,
+            "stats": {"targets": len(targets), "findings": len(findings),
+                      "stopped": state.get("stopped")}}
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:

