@@ -243,3 +243,13 @@ main { padding: 18px 20px 40px; max-width: 1100px; }
 .mini { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .mini td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 .mini tr:last-child td { border-bottom: 0; }
+
+/* inline finding expansion on the Findings tab */
+.tbl td.expand { cursor: pointer; }
+.tbl td.expand .caret { color: var(--faint); font-size: 11px; margin-right: 2px; }
+.tbl tr.open { background: var(--surface2); }
+.tbl tr.open td { border-bottom: 0; }
+.tbl tr.detail-row td { padding: 2px 12px 14px; background: var(--surface2); }
+.tbl tr.detail-row:hover { background: var(--surface2); }
+.tbl tr.detail-row .dv-detail { border: 0; padding: 0; background: transparent; }
+.tbl tr.detail-row .dv-output { max-height: 200px; }

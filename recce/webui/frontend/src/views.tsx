@@ -1,8 +1,9 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
-  Finding, Host, Overview, SEVS, SEV_ALL, hostScore, sevTotal,
+  Finding, Host, Overview, VulnDetail, SEVS, SEV_ALL, hostScore, sevTotal, getHost,
 } from "./api";
 import { Stat, SevTag, SevBar, NoteCell, Chips, useBounded } from "./ui";
+import { FindingDetail } from "./FindingDetail";
 
 export type FindingFilters = {
   sev: string; host: string; kev: boolean; unreviewed: boolean; leads: boolean; q: string;
@@ -140,6 +141,22 @@ export function Findings(
   const { shown, limit, total, sentinel } =
     useBounded(rows, 120, [f.sev, f.host, f.kev, f.unreviewed, f.leads, f.q]);
 
+  // Inline expansion: full detail (output/remediation/QoD) isn't in the findings list
+  // payload, so lazy-fetch it per host (one /api/host call, cached) on first expand.
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const [cache, setCache] = useState<Record<string, VulnDetail[]>>({});
+  async function toggle(x: Finding) {
+    if (openKey === x.key) { setOpenKey(null); return; }
+    setOpenKey(x.key);
+    if (!cache[x.ip]) {
+      try {
+        const h = await getHost(x.ip);
+        setCache((c) => ({ ...c, [x.ip]: h.vulns }));
+      } catch { /* leave it; the row just won't expand */ }
+    }
+  }
+  const detailFor = (x: Finding) => cache[x.ip]?.find((v) => v.key === x.key);
+
   return (
     <>
       <div className="controls">
@@ -162,14 +179,17 @@ export function Findings(
         <table className="tbl">
           <thead><tr><th className="tick-col">✓</th><th>Sev</th><th>Finding</th><th>Host</th><th>Conf.</th><th>Note</th></tr></thead>
           <tbody>
-            {shown.map((x) => (
-              <tr key={x.key} className={x.reviewed ? "done" : ""}>
+            {shown.map((x) => {
+              const open = openKey === x.key;
+              const detail = open ? detailFor(x) : undefined;
+              return [
+              <tr key={x.key} className={(x.reviewed ? "done" : "") + (open ? " open" : "")}>
                 <td className="tick-col">
                   <input type="checkbox" checked={x.reviewed} onChange={() => onTick(x.key, !x.reviewed)} />
                 </td>
                 <td><SevTag severity={x.severity} /></td>
-                <td>
-                  <div className="t">{x.title}</div>
+                <td className="expand" onClick={() => toggle(x)} title="show detail">
+                  <div className="t"><span className="caret">{open ? "▾" : "▸"}</span> {x.title}</div>
                   <div className="m">{x.cve && <span>{x.cve} · </span>}{x.source}</div>
                   <div className="badges">
                     {x.kev && <span className="badge kev">🔥 KEV</span>}
@@ -181,8 +201,19 @@ export function Findings(
                 </td>
                 <td><span className={"tier " + x.tier}>{x.tier === "lead" ? "lead · verify" : x.tier}</span></td>
                 <td className="note-col"><NoteCell value={x.notes} onSave={(t) => onNote(x.key, t)} /></td>
-              </tr>
-            ))}
+              </tr>,
+              open && (
+                <tr key={x.key + ":d"} className="detail-row">
+                  <td />
+                  <td colSpan={5}>
+                    {detail
+                      ? <FindingDetail v={detail} onNote={onNote} />
+                      : <div className="muted small">loading detail…</div>}
+                  </td>
+                </tr>
+              ),
+              ];
+            })}
             {rows.length === 0 && (
               <tr><td colSpan={6} className="empty">
                 {!f.leads && leadCount > 0
