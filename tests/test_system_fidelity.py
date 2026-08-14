@@ -20,7 +20,7 @@ import tempfile
 import threading
 import unittest
 
-from recce import ad, ldap as L, smb, snmp as S
+from recce import ad, ldap as L, mongodb as M, mssql, redis, smb, snmp as S
 from recce.models import Host, Port
 
 
@@ -385,6 +385,190 @@ class NetworkApplianceSystemFidelityTest(unittest.TestCase):
             report_html.build_html([host], html_path, title="Appliance")
             html = open(html_path).read().lower()
         self.assertIn("community", html)                 # the SNMP finding rendered
+
+
+# --- faithful mock database server ----------------------------------------------
+
+def _tds_prelogin_response(major=15, minor=0, build=2000, encrypt=0):
+    """A TDS PRELOGIN response (SQL Server 2019, login encryption OFF) - a 0x04
+    packet with VERSION + ENCRYPTION options, mirroring recce's own request format."""
+    options = [(0x00, 6), (0x01, 1)]                     # VERSION, ENCRYPTION
+    values = {0x00: bytes([major, minor]) + struct.pack(">H", build) + b"\x00\x00",
+              0x01: bytes([encrypt])}
+    offset = 5 * len(options) + 1
+    table = b""
+    data = b""
+    for tok, ln in options:
+        table += struct.pack(">BHH", tok, offset, ln)
+        data += values[tok]
+        offset += ln
+    payload = table + b"\xff" + data
+    return struct.pack(">BBHHBB", 0x04, 0x01, 8 + len(payload), 0, 0, 0) + payload
+
+
+def _mssql_handler(sock):
+    sock.recv(4096)                                      # the PRELOGIN request
+    sock.sendall(_tds_prelogin_response())
+
+
+def _resp_read_command(sock):
+    """Read one RESP array-of-bulk-strings command; return list[str] or None."""
+    buf = b""
+
+    def line():
+        nonlocal buf
+        while b"\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise OSError("closed")
+            buf += chunk
+        ln, _, rest = buf.partition(b"\r\n")
+        buf = rest
+        return ln
+
+    try:
+        first = line()
+        if not first.startswith(b"*"):
+            return None
+        args = []
+        for _ in range(int(first[1:])):
+            length = int(line()[1:])
+            while len(buf) < length + 2:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise OSError("closed")
+                buf += chunk
+            args.append(buf[:length].decode())
+            buf = buf[length + 2:]
+        return args
+    except (OSError, ValueError):
+        return None
+
+
+_REDIS_INFO = ("# Server\r\nredis_version:7.0.11\r\nos:Linux\r\nredis_mode:standalone\r\n"
+               "# Replication\r\nrole:master\r\n# Keyspace\r\ndb0:keys=12,expires=0\r\n")
+
+
+def _redis_handler(sock):
+    while True:
+        cmd = _resp_read_command(sock)
+        if not cmd:
+            return
+        name = cmd[0].upper()
+        if name == "PING":
+            sock.sendall(b"+PONG\r\n")
+        elif name == "INFO":
+            body = _REDIS_INFO.encode()
+            sock.sendall(b"$" + str(len(body)).encode() + b"\r\n" + body + b"\r\n")
+        elif name == "CONFIG" and len(cmd) >= 3:
+            val = {"dir": "/var/lib/redis", "dbfilename": "dump.rdb",
+                   "requirepass": "", "protected-mode": "no"}.get(cmd[2], "")
+            v = val.encode()
+            sock.sendall(b"*2\r\n$" + str(len(cmd[2])).encode() + b"\r\n" + cmd[2].encode()
+                         + b"\r\n$" + str(len(v)).encode() + b"\r\n" + v + b"\r\n")
+        else:
+            sock.sendall(b"+OK\r\n")
+
+
+def _mongo_handler(sock):
+    """A real MongoDB wire server answering hello / buildInfo / listDatabases WITHOUT
+    auth, built with recce's own BSON/OP_MSG encoders -> a CONFIRMED unauth exposure."""
+    def e_double(name, v):
+        return b"\x01" + M._cstr(name) + struct.pack("<d", v)
+
+    def e_bool(name, v):
+        return b"\x08" + M._cstr(name) + bytes([1 if v else 0])
+
+    def e_doc(name, doc):
+        return b"\x03" + M._cstr(name) + doc
+
+    def e_array(name, docs):
+        inner = M.bson_doc(*[e_doc(str(i), d) for i, d in enumerate(docs)])
+        return b"\x04" + M._cstr(name) + inner
+
+    hello = M.bson_doc(e_bool("isWritablePrimary", True),
+                       M._e_int32("maxWireVersion", 17), e_double("ok", 1.0))
+    build = M.bson_doc(M._e_str("version", "6.0.1"), e_double("ok", 1.0))
+    dbs = e_array("databases", [
+        M.bson_doc(M._e_str("name", "admin"), e_double("sizeOnDisk", 4096.0)),
+        M.bson_doc(M._e_str("name", "customers"), e_double("sizeOnDisk", 99990.0))])
+    listdbs = M.bson_doc(dbs, e_double("totalSize", 104086.0), e_double("ok", 1.0))
+    replies = {"hello": hello, "isMaster": hello, "ismaster": hello,
+               "buildInfo": build, "listDatabases": listdbs}
+    while True:
+        hdr = M._recvn(sock, 16)
+        if len(hdr) < 16:
+            return
+        length, rid = struct.unpack("<i", hdr[:4])[0], struct.unpack("<i", hdr[4:8])[0]
+        body = M._recvn(sock, length - 16)
+        try:
+            doc, _ = M.bson_parse(hdr + body, 16 + 4 + 1)
+        except (IndexError, ValueError, struct.error):
+            return
+        cmd = next(iter(doc), "")
+        reply = replies.get(cmd) or M.bson_doc(
+            M._e_str("errmsg", "no such command"), e_double("ok", 0.0))
+        sock.sendall(M.op_msg(rid, reply))
+
+
+class DatabaseServerSystemFidelityTest(unittest.TestCase):
+    """A composed database server exposing several unauthenticated data stores -
+    MSSQL (TDS), MongoDB (wire) and Redis (RESP) - enumerated on one host."""
+
+    def test_exposed_database_server_is_enumerated(self):
+        ip = "127.0.0.1"
+        with _MockServer(_mssql_handler) as mssql_srv, \
+                _MockServer(_mongo_handler) as mongo_srv, \
+                _MockServer(_redis_handler) as redis_srv:
+            host = Host(ip=ip, enumerated=True, ports=[
+                Port(portid=1433, service="ms-sql-s", state="open"),
+                Port(portid=6379, service="redis", state="open"),
+                Port(portid=27017, service="mongodb", state="open"),
+            ])
+            mssql_pr = mssql.probe_target(ip, mssql_srv.port, active=True)
+            mongo_pr = M.probe(ip, mongo_srv.port)
+            redis_pr = redis.probe(ip, redis_srv.port)
+            mssql_fs = mssql.findings([host], {(ip, 1433): mssql_pr})
+            mongo_fs = M.findings([host], {(ip, 27017): mongo_pr})
+            redis_fs = redis.findings([host], {(ip, 6379): redis_pr})
+
+        # MSSQL: TDS pre-login read - SQL Server 2019, login encryption not enforced.
+        self.assertEqual(mssql_pr["prelogin"]["version"], "15.0.2000")
+        self.assertIn("off", mssql_pr["prelogin"]["encryption"])
+        # MongoDB: unauthenticated - version + database names recovered.
+        self.assertIsNotNone(mongo_pr)
+        self.assertTrue(mongo_pr["unauth"])
+        self.assertEqual(mongo_pr["version"], "6.0.1")
+        self.assertIn("customers", [db["name"] for db in mongo_pr["databases"]])
+        # Redis: unauthenticated - version + role fingerprinted.
+        self.assertTrue(redis_pr["unauth"])
+        self.assertEqual(redis_pr["version"], "7.0.11")
+        # Every data store produced findings on the one host.
+        self.assertTrue(mongo_fs, "MongoDB not enumerated on the DB server")
+        self.assertTrue(redis_fs, "Redis not enumerated on the DB server")
+        mongo_titles = " ".join(f["title"].lower() for f in mongo_fs)
+        self.assertIn("without authentication", mongo_titles)
+
+    def test_database_findings_reach_the_report(self):
+        from recce import report_html
+        ip = "127.0.0.1"
+        with _MockServer(_mongo_handler) as mongo_srv, \
+                _MockServer(_redis_handler) as redis_srv:
+            host = Host(ip=ip, enumerated=True, ports=[
+                Port(portid=6379, service="redis", state="open"),
+                Port(portid=27017, service="mongodb", state="open")])
+            for by_ip in (M.findings_to_vulns(M.findings(
+                              [host], {(ip, 27017): M.probe(ip, mongo_srv.port)})),
+                          redis.findings_to_vulns(redis.findings(
+                              [host], {(ip, 6379): redis.probe(ip, redis_srv.port)}))):
+                host.vulns.extend(by_ip.get(ip, []))
+
+        self.assertTrue(host.vulns, "no vulns folded from the DB enumeration")
+        with tempfile.TemporaryDirectory() as d:
+            html_path = os.path.join(d, "report.html")
+            report_html.build_html([host], html_path, title="DB Server")
+            html = open(html_path).read().lower()
+        self.assertIn("mongodb", html)                   # the MongoDB finding rendered
 
 
 if __name__ == "__main__":
