@@ -275,7 +275,114 @@ def _nxc_cmd(tool: str, ip: str, creds: dict) -> list[str]:
     return cmd
 
 
+def _impacket_smb(ip: str, creds: dict) -> dict | None:
+    """Credentialed SMB enumeration via the impacket LIBRARY (no netexec CLI, so no
+    flag-drift fragility). Returns the same dict shape as parse_nxc_smb; None only when
+    impacket is unavailable or the host isn't SMB-reachable (so the caller falls back to
+    netexec). An authenticated bind that is rejected returns the dict with auth=False."""
+    try:
+        from impacket.smbconnection import SMBConnection
+        from impacket.dcerpc.v5 import samr, transport
+    except Exception:
+        return None
+    import socket
+    try:                                               # fast reachability gate on 445
+        socket.create_connection((ip, 445), timeout=2).close()
+    except OSError:
+        return None                                    # not reachable -> let netexec try
+    user = creds.get("username", "") or ""
+    pw = creds.get("password", "") or ""
+    dom = creds.get("domain", "") or ""
+    nthash = creds.get("hash", "") or ""
+    res: dict = {"admin": False, "auth": False, "host_info": "", "shares": [],
+                 "users": [], "sessions": [], "loggedon": [], "passpol": {}}
+    try:
+        conn = SMBConnection(ip, ip, sess_port=445, timeout=8)
+    except Exception:
+        return None                                    # unreachable -> let netexec try
+    try:
+        if nthash:
+            conn.login(user, "", dom, "0" * 32, nthash.split(":")[-1])
+        else:
+            conn.login(user, pw, dom)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return res                                     # bind rejected -> auth=False result
+    res["auth"] = True
+    try:
+        res["host_info"] = ("%s (%s)" % (conn.getServerOS(),
+                            conn.getServerDomain() or conn.getServerName())).strip()
+    except Exception:
+        pass
+    try:
+        for s in conn.listShares():
+            name = str(s["shi1_netname"]).rstrip("\x00")
+            perms = ""
+            try:
+                tid = conn.connectTree(name)
+                perms = "READ"
+                try:                                   # reversible write probe
+                    conn.createDirectory(name, "recce_wprobe")
+                    conn.deleteDirectory(name, "recce_wprobe")
+                    perms = "READ,WRITE"
+                except Exception:
+                    pass
+                conn.disconnectTree(tid)
+            except Exception:
+                pass
+            res["shares"].append({"name": name, "perms": perms})
+    except Exception:
+        pass
+    for adm in ("C$", "ADMIN$"):                        # local-admin reach (Pwn3d)
+        try:
+            tid = conn.connectTree(adm)
+            conn.disconnectTree(tid)
+            res["admin"] = True
+            break
+        except Exception:
+            pass
+    try:                                               # domain users + password policy via SAMR
+        rpc = transport.SMBTransport(conn.getRemoteHost(), 445, r"\samr", smb_connection=conn)
+        dce = rpc.get_dce_rpc()
+        dce.connect()
+        dce.bind(samr.MSRPC_UUID_SAMR)
+        server = samr.hSamrConnect(dce)["ServerHandle"]
+        for d in samr.hSamrEnumerateDomainsInSamServer(dce, server)["Buffer"]["Buffer"]:
+            dn = str(d["Name"])
+            if dn.upper() == "BUILTIN":
+                continue
+            sid = samr.hSamrLookupDomainInSamServer(dce, server, dn)["DomainId"]
+            dh = samr.hSamrOpenDomain(dce, server, domainId=sid)["DomainHandle"]
+            enum = samr.hSamrEnumerateUsersInDomain(
+                dce, dh, userAccountControl=samr.USER_NORMAL_ACCOUNT)
+            for u in enum["Buffer"]["Buffer"]:
+                res["users"].append({"name": str(u["Name"]), "domain": dn})
+            try:
+                pol = samr.hSamrQueryInformationDomain2(
+                    dce, dh, samr.DOMAIN_INFORMATION_CLASS.DomainPasswordInformation
+                )["Buffer"]["Password"]
+                res["passpol"]["minimum password length"] = str(pol["MinPasswordLength"])
+                res["passpol"]["password history length"] = str(pol["PasswordHistoryLength"])
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        conn.close()
+    except Exception:
+        pass
+    return res
+
+
 def run_nxc_smb(ip: str, creds: dict) -> tuple[dict | None, str | None]:
+    # Prefer the impacket library (no CLI to flag-drift); fall back to the netexec CLI
+    # only when impacket isn't present or the host isn't SMB-reachable.
+    data = _impacket_smb(ip, creds)
+    if data is not None:
+        return data, None
     tool = smb_tool()
     if not tool:
         return None, None
