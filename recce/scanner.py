@@ -120,13 +120,13 @@ PROFILES: dict[str, ScanProfile] = {
     "quick": ScanProfile(name="quick", all_ports=False, top_ports=200,
                          os_detect=False, min_rate=2000, host_timeout=10,
                          version_intensity=6, deep_enum=False),
-    # FULL 65535-port sweep by default: real targets hide services on random high
-    # ports, so a top-N default would silently MISS them (a false negative - the worst
-    # outcome, and the tool's long-running symptom). NOTE deliberately NOT raising
-    # --min-rate here: a min-rate FLOOR forces nmap to send faster than a lossy/
-    # firewalled network tolerates and DROPS SYNs to open ports (which is why the
-    # reliable re-scan removes it). Completeness beats speed for the default.
-    "standard": ScanProfile(name="standard"),
+    # FULL 65535-port sweep by default, and at least as RELIABLE as a plain `nmap -p-`
+    # (the manual scan recce is measured against). real targets hide services on random
+    # high ports, so a top-N default would silently MISS them. min_rate=0 => no
+    # --min-rate floor (a floor forces overspeed and drops SYNs to open ports); retries
+    # fall back to nmap's own -T default (6 at -T4), never the old too-low 3. Speed is
+    # opt-in: `quick`, `--top-ports`, `--min-rate`, `--fast`.
+    "standard": ScanProfile(name="standard", min_rate=0),
     "thorough": ScanProfile(name="thorough", min_rate=800, udp_top=100,
                             extra_nse=["banner"], host_timeout=40,
                             version_all=True),
@@ -414,6 +414,13 @@ def port_scope_label(profile: ScanProfile) -> tuple[str, bool]:
     return f"top {profile.top_ports} TCP ports", False
 
 
+def _nmap_default_retries(timing: int) -> int:
+    """nmap's OWN default --max-retries for a -T level (-T5=2, -T4=6, else 10). recce
+    must never retry fewer than this, or it silently loses open ports that a plain
+    `nmap -p-` at the same -T would have found."""
+    return {5: 2, 4: 6}.get(timing, 10)
+
+
 def _portscan_cmd(ip: str, out_xml: str, profile: ScanProfile,
                   reliable: bool) -> tuple[list, int | None]:
     scan_type = _scan_type()
@@ -433,13 +440,18 @@ def _portscan_cmd(ip: str, out_xml: str, profile: ScanProfile,
                *to_args, *port_spec, ip, "-oX", out_xml]
     else:
         to_args, kill = _timeout_args(profile)
-        # A dropped SYN with too few retries silently loses an open port, so retry
-        # enough to survive minor loss (default 3, not nmap's fast 1-2). Dead -Pn
-        # IPs are still bounded by --host-timeout, and a 0-port host gets a
-        # verification re-scan, so completeness no longer hinges on this alone.
-        cmd = ["nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
-               "--min-rate", str(profile.min_rate),
-               "--max-retries", str(profile.max_retries), "--open",
+        # Be at least as reliable as a plain `nmap -p-` (the manual scan recce is
+        # measured against). Two rules:
+        #  * NEVER retry fewer times than nmap's own default for this -T level (-T4=6,
+        #    -T3=10). recce used to force --max-retries 3 - HALF of nmap -T4 - so a
+        #    dropped SYN to an open port was lost that stock nmap would have found.
+        #  * A --min-rate FLOOR is opt-in only (profile.min_rate>0): it forces nmap to
+        #    send faster than a lossy/firewalled link tolerates and drops SYNs to open
+        #    ports. With no floor nmap adapts + retransmits, which is what finds them.
+        retries = max(profile.max_retries, _nmap_default_retries(profile.timing))
+        rate = ["--min-rate", str(profile.min_rate)] if profile.min_rate and profile.min_rate > 0 else []
+        cmd = ["nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}", *rate,
+               "--max-retries", str(retries), "--open",
                *to_args, *port_spec, ip, "-oX", out_xml]
     return cmd, kill
 
