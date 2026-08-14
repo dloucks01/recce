@@ -623,12 +623,82 @@ def _authenticate(sock, creds: dict, timeout: float, seal: bool) -> tuple[bool, 
     return result_code(_read_message(sock, timeout)) == 0, "simple bind", None
 
 
+def _ldap3_ok() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("ldap3") is not None
+
+
+def _enum_authenticated_ldap3(ip: str, port: int, base: str, creds: dict,
+                              timeout: float) -> dict | None:
+    """Authenticated enumeration via the ldap3 library. Same return shape as
+    enum_authenticated; None when ldap3 is unavailable or the bind fails, so the caller
+    falls back to the hand-rolled client (the two cover different DC bind policies)."""
+    try:
+        from ldap3 import ALL, BASE, NTLM, SIMPLE, SUBTREE, Connection, Server
+    except Exception:
+        return None
+    tmo = max(1, int(timeout))                             # ldap3 wants int timeouts
+    try:
+        server = Server(ip, port=port, use_ssl=_is_tls_port(port), get_info=ALL,
+                        connect_timeout=tmo)
+        if creds.get("hash"):                              # pass-the-hash -> NTLM
+            nt = creds["hash"].split(":")[-1]
+            conn = Connection(server, user=f"{creds.get('domain', '')}\\{creds.get('user', '')}",
+                              password="0" * 32 + ":" + nt, authentication=NTLM,
+                              receive_timeout=tmo)
+        else:                                              # password -> simple bind (UPN)
+            conn = Connection(server, user=_bind_dn(creds), password=creds.get("secret", ""),
+                              authentication=SIMPLE, receive_timeout=tmo)
+        if not conn.bind():
+            return None
+    except Exception:
+        return None
+
+    def _norm(a: dict) -> dict:
+        # match the native client's {attr: [str, ...]} shape (downstream expects strings)
+        return {k: [str(x) for x in (v if isinstance(v, list) else [v])]
+                for k, v in a.items()}
+
+    def _rows(filt: str, attrs: list) -> list:
+        try:
+            res = conn.extend.standard.paged_search(base, filt, search_scope=SUBTREE,
+                                                    attributes=attrs, paged_size=500,
+                                                    generator=False)
+        except Exception:
+            return []
+        return [_norm(r["attributes"]) for r in res
+                if r.get("type") != "searchResRef" and r.get("attributes")]
+
+    users = _rows("(&(objectCategory=person)(objectClass=user))", _USER_ATTRS)
+    computers = _rows("(objectClass=computer)", _COMPUTER_ATTRS)
+    dom: dict = {}
+    try:
+        conn.search(base, "(objectClass=*)", search_scope=BASE, attributes=_DOMAIN_ATTRS)
+        if conn.entries:
+            dom = _norm(conn.entries[0].entry_attributes_as_dict)
+    except Exception:
+        pass
+    try:
+        conn.unbind()
+    except Exception:
+        pass
+    return {"users": users, "computers": computers, "domain": dom,
+            "bind_dn": _bind_dn(creds),
+            "bind_method": "ldap3 " + ("ntlm" if creds.get("hash") else "simple"),
+            "error": None}
+
+
 def enum_authenticated(ip: str, port: int, base: str, creds: dict,
-                       timeout: float = _TIMEOUT) -> dict:
-    """Authenticated LDAP enumeration over the stdlib client: bind with creds (simple
-    bind with a password, or an NTLM SASL bind for pass-the-hash - sign+sealed on
-    plaintext 389 so a signing-required DC accepts it), then paged-search users +
-    computers + the domain object. {users, computers, domain, error}."""
+                       timeout: float = _TIMEOUT, prefer_ldap3: bool = True) -> dict:
+    """Authenticated LDAP enumeration: prefer the ldap3 library when present, else the
+    hand-rolled stdlib client (simple bind with a password, or an NTLM SASL bind for
+    pass-the-hash - sign+sealed on plaintext 389 so a signing-required DC accepts it),
+    then paged-search users + computers + the domain object. {users, computers, domain,
+    error}. prefer_ldap3=False forces the native client (used by its own unit tests)."""
+    if prefer_ldap3 and _ldap3_ok():
+        r = _enum_authenticated_ldap3(ip, port, base, creds, timeout)
+        if r is not None:
+            return r
     sock = _open(ip, port, timeout)
     if sock is None:
         return {"error": "connect failed"}
