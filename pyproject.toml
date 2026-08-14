@@ -20,6 +20,10 @@ dependencies = []
 # openpyxl (validate the hand-rolled .xlsx against a real reader) and pytest-xdist
 # (run the real-nmap fidelity suites across cores - `-n auto`).
 test = ["openpyxl", "pytest-xdist"]
+# Baked into the airgap bundle (tools/build_bundle.sh installs `.[bundle]`). recce
+# still runs without these - it falls back to its hand-rolled clients / CLI tools -
+# but bundled they replace the fragile shell-outs with maintained libraries.
+bundle = ["impacket", "ldap3", "openpyxl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
