@@ -496,9 +496,7 @@ _DOMAIN_ATTRS = ["ms-DS-MachineAccountQuota", "minPwdLength", "lockoutThreshold"
 _PW_HINT = ("pass", "pwd", "pw=", "pw:", "secret", "cred", "kennwort", "mot de passe")
 # Word-boundary match so a description doesn't fire on bypass/compass/passport (pass),
 # accredited/incredible (cred), or passenger/passive - only on an actual credential hint.
-_PW_DESC_RE = re.compile(
-    r"\b(pass(word|wd)?|pwd|secret|cred(ential)?|kennwort|mot\s+de\s+passe)\b"
-    r"|pw\s*[:=]", re.I)
+from .util import PW_DESC_RE as _PW_DESC_RE   # shared with bloodhound (was duplicated)
 
 
 def _open(ip: str, port: int, timeout: float):

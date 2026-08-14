@@ -399,8 +399,8 @@ def _enum_ldap3(
             ffl = info.other.get("forestFunctionality", [""])
             dom.forest = _func_level(ffl[0] if isinstance(ffl, list) else ffl)
         dom.naming_context = base_dn
-    except Exception:
-        pass
+    except Exception as e:
+        dom.enum_errors.append(str(e))
     if not base_dn and domain:
         base_dn = ",".join(f"DC={p}" for p in domain.split("."))
         dom.naming_context = base_dn
@@ -431,8 +431,8 @@ def _enum_ldap3(
             maq = e["ms-DS-MachineAccountQuota"].value if "ms-DS-MachineAccountQuota" in e else None
             if maq is not None:
                 dom.machine_account_quota = str(maq)
-    except Exception:
-        pass
+    except Exception as e:
+        dom.enum_errors.append(str(e))
 
     # Users.
     try:
@@ -444,8 +444,8 @@ def _enum_ldap3(
                                 "description", "pwdLastSet"],
                     paged_size=500)
         accounts += _accounts_from_entries(conn, dc_ip, domain, kind="user")
-    except Exception:
-        pass
+    except Exception as e:
+        dom.enum_errors.append(str(e))
 
     # Computers (delegation + OS).
     try:
@@ -454,8 +454,8 @@ def _enum_ldap3(
                                 "operatingSystemVersion", "userAccountControl"],
                     paged_size=500)
         accounts += _accounts_from_entries(conn, dc_ip, domain, kind="computer")
-    except Exception:
-        pass
+    except Exception as e:
+        dom.enum_errors.append(str(e))
 
     # Privileged groups + members.
     try:
@@ -472,8 +472,8 @@ def _enum_ldap3(
                     detail=f"{len(members)} member(s)",
                     attrs={"members": "; ".join(_cn(m) for m in members),
                            "admincount": "1"}))
-    except Exception:
-        pass
+    except Exception as e:
+        dom.enum_errors.append(str(e))
 
     # Trusts.
     try:
@@ -486,8 +486,8 @@ def _enum_ldap3(
                 "direction": _dir.get(str(e.trustDirection.value), str(e.trustDirection.value)),
                 "type": str(e.trustType.value or ""),
             })
-    except Exception:
-        pass
+    except Exception as e:
+        dom.enum_errors.append(str(e))
 
     conn.unbind()
     return dom, accounts

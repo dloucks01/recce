@@ -34,9 +34,7 @@ from collections import deque
 _HIGHVALUE_RID = {"512", "516", "518", "519", "521"}   # DA, DCs, Schema, EA, RODC-ish
 # Credential-hint match for account descriptions, word-boundary so it doesn't fire on
 # bypass/compass/passport (pass) or accredited/incredible (cred).
-_PW_DESC_RE = re.compile(
-    r"\b(pass(word|wd)?|pwd|secret|cred(ential)?|kennwort|mot\s+de\s+passe)\b"
-    r"|pw\s*[:=]", re.I)
+from .util import PW_DESC_RE as _PW_DESC_RE   # shared with ldap (was duplicated)
 _HIGHVALUE_SID = {
     "S-1-5-32-544": "Administrators",
     "S-1-5-32-548": "Account Operators",

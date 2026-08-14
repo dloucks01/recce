@@ -10,6 +10,12 @@ import os
 import re
 import subprocess
 
+# A description/notes field that looks like it contains a password (AD accounts often
+# stash them there). Shared by the ldap and bloodhound enumeration paths.
+PW_DESC_RE = re.compile(
+    r"\b(pass(word|wd)?|pwd|secret|cred(ential)?|kennwort|mot\s+de\s+passe)\b"
+    r"|pw\s*[:=]", re.I)
+
 # Signatures in a tool's output that mean the INVOCATION itself was broken - recce built
 # a wrong command (a stale/renamed CLI flag) or the tool crashed - as opposed to "the
 # tool ran fine and the operation just didn't succeed" (a failed auth, no roastable
