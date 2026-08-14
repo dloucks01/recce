@@ -83,6 +83,37 @@ def test_findings_are_present_with_honest_confidence(client):
     assert findings[0]["kev"] is True
 
 
+def test_unannotated_service_finding_is_not_hidden_as_a_lead(tmp_path):
+    """Regression: findings are persisted BEFORE qod.annotate runs, so v.qod is 0 in
+    the store. The web layer must qod_of-compute the tier, or a real confirmed service
+    finding (e.g. MySQL empty-password) is mis-tiered "lead" and hidden by default."""
+    from fastapi.testclient import TestClient
+
+    from recce.cli import _open_paths
+    from recce.models import Host, Port, Vuln
+    from recce.store import Store
+    from recce.webui.app import create_app
+
+    eng = tmp_path / "eng_qod"
+    st = Store(_open_paths(str(eng))["db"])
+    st.set_meta("engagement", "qod regression")
+    h = Host(ip="10.9.9.9", up_reason="syn-ack",
+             ports=[Port(portid=3306, service="mysql", state="open")])
+    h.vulns = [Vuln(ip="10.9.9.9", port=3306, protocol="tcp", script_id="mysql:x",
+                    state="finding", title="MySQL 'root' login with empty password",
+                    severity="high", source="mysql", confidence="confirmed")]  # qod defaults to 0
+    st.upsert_host(h)
+    st.close()
+
+    with TestClient(create_app(str(eng))) as c:
+        rows = c.get("/api/findings").json()
+        assert rows, "the confirmed service finding was hidden entirely"
+        assert rows[0]["tier"] == "confirmed", rows[0]
+        # and the drawer detail exposes a real QoD, not 0
+        d = c.get("/api/host/10.9.9.9").json()
+        assert d["vulns"][0]["qod"] >= 95
+
+
 def test_host_detail_drawer_payload(client):
     d = client.get("/api/host/10.20.10.10").json()
     assert "Domain Controller" in d["roles"]
