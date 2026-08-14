@@ -83,6 +83,21 @@ def test_findings_are_present_with_honest_confidence(client):
     assert findings[0]["kev"] is True
 
 
+def test_host_detail_drawer_payload(client):
+    d = client.get("/api/host/10.20.10.10").json()
+    assert "Domain Controller" in d["roles"]
+    assert d["smb_signing"] == "required" and d["access"] is True
+    # services carry product/version for the drawer's Services table
+    assert any(p["port"] == 445 for p in d["ports"])
+    # findings carry the drill-down detail: raw output, remediation, QoD
+    zl = next(v for v in d["vulns"] if "Zerologon" in v["title"])
+    assert zl["output"] and zl["remediation"] and zl["qod"] >= 95
+    assert zl["cwes"]
+    # AD accounts surfaced (incl. the kerberoastable service account)
+    assert any(a["name"] == "svc_sql" and a["attrs"].get("spn") for a in d["accounts"])
+    assert client.get("/api/host/9.9.9.9").status_code == 404
+
+
 def test_tick_and_note_round_trip(client):
     findings = client.get("/api/findings").json()
     key = findings[0]["key"]

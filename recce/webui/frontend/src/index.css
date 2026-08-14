@@ -201,3 +201,45 @@ main { padding: 18px 20px 40px; max-width: 1100px; }
 .exp-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 31; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 5px; min-width: 170px; box-shadow: 0 10px 30px rgba(0,0,0,.45); display: flex; flex-direction: column; }
 .exp-menu button { text-align: left; background: none; border: 0; color: var(--text); font-family: var(--sans); font-size: 13px; padding: 8px 11px; border-radius: 7px; cursor: pointer; }
 .exp-menu button:hover { background: var(--surface2); color: var(--accent); }
+
+/* ============================ host detail drawer ======================== */
+.drawer-backdrop { position: fixed; inset: 0; background: rgba(4,8,14,.55); z-index: 40; animation: fade .12s ease; }
+@keyframes fade { from { opacity: 0; } }
+.drawer { position: fixed; top: 0; right: 0; height: 100vh; width: min(620px, 94vw); z-index: 41; background: var(--ground); border-left: 1px solid var(--line); box-shadow: -16px 0 40px rgba(0,0,0,.4); overflow-y: auto; padding: 22px 24px 60px; animation: slide .16s ease; }
+@keyframes slide { from { transform: translateX(24px); opacity: .6; } }
+@media (prefers-reduced-motion: reduce) { .drawer, .drawer-backdrop { animation: none; } }
+.drawer-x { position: absolute; top: 16px; right: 18px; background: var(--surface2); border: 1px solid var(--line); color: var(--muted); width: 30px; height: 30px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+.drawer-x:hover { color: var(--text); border-color: var(--accent); }
+.dh { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 4px; }
+.dh-ip { font-size: 22px; font-weight: 700; }
+.dh-name { color: var(--muted); font-family: var(--mono); font-size: 13px; margin-top: 2px; }
+.dh-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.tagpill { font-size: 11px; font-weight: 600; color: var(--muted); background: var(--surface2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; }
+.tagpill.role { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.tagpill.sm { text-transform: uppercase; letter-spacing: .04em; font-size: 10px; padding: 2px 6px; }
+.dh-access { margin-top: 10px; color: var(--ok); font-size: 13px; font-weight: 600; }
+.steps.big { margin-top: 12px; }
+.steps.big .step { font-size: 11px; padding: 4px 11px; }
+.drawer-sec { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.drawer-sec-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.drawer-sec-h h4 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.small { font-size: 12px; }
+.dv-list { display: flex; flex-direction: column; gap: 6px; }
+.dv { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--surface); }
+.dv.done { opacity: .55; }
+.dv-row { display: flex; align-items: center; gap: 10px; padding: 9px 11px; cursor: pointer; }
+.dv-row:hover { background: var(--surface2); }
+.dv-row input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--ok); }
+.dv-title { flex: 1; min-width: 0; }
+.dv-title .t { font-weight: 600; font-size: 13px; }
+.dv-badges { display: flex; align-items: center; gap: 7px; }
+.dv-badges .caret { color: var(--faint); font-size: 11px; width: 12px; }
+.dv-detail { padding: 4px 12px 12px; border-top: 1px solid var(--line); background: var(--ground); }
+.kv { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px 10px; font-size: 12px; margin: 8px 0; }
+.kv span { color: var(--muted); } .kv b { font-weight: 600; }
+.dv-output { background: #0a0f18; border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; color: #b9c6da; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; margin: 8px 0; }
+.dv-fix { font-size: 12.5px; margin: 6px 0; } .dv-fix b { color: var(--ok); }
+.dv-note { margin-top: 6px; }
+.mini { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.mini td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.mini tr:last-child td { border-bottom: 0; }

@@ -174,6 +174,47 @@ def create_app(eng_dir: str) -> FastAPI:
             out.append(_host_dict(h, bool(rev), notes))
         return out
 
+    @app.get("/api/host/{ip}")
+    def host_detail(ip: str):
+        """Everything about one host — services, full findings (with output +
+        remediation + QoD), AD accounts, posture — for the drill-down drawer."""
+        from .. import tracking
+        hs, _ = _hosts()
+        h = next((x for x in hs if x.ip == ip), None)
+        if h is None:
+            raise HTTPException(404, "no such host")
+        trk = _tracking()
+        hrev, hnotes = trk.get(_host_key(h.ip), (False, ""))
+        vulns = []
+        for v in h.vulns:
+            rev, notes = trk.get(tracking.vuln_row_key(v), (False, ""))
+            d = _finding_dict(v, bool(rev), notes)
+            d.update({
+                "output": (v.output or "")[:4000], "remediation": v.remediation or "",
+                "cwes": list(v.cwes or []), "qod": getattr(v, "qod", 0),
+                "qod_type": getattr(v, "qod_type", ""), "state": v.state or "",
+            })
+            vulns.append(d)
+        vulns.sort(key=lambda f: (not f["kev"], _SEV_ORDER.get(f["severity"], 9), -f["epss"]))
+        base = _host_dict(h, bool(hrev), hnotes)
+        base.update({
+            "access_detail": getattr(h, "access_detail", ""),
+            "smb_signing": getattr(h, "smb_signing", ""),
+            "defenses": list(getattr(h, "defenses", []) or []),
+            "ports": [{"port": p.portid, "proto": p.protocol, "state": p.state,
+                       "service": p.service, "product": p.product, "version": p.version,
+                       "banner": (p.service_banner or p.banner or "")[:200]}
+                      for p in h.open_ports],
+            "vulns": vulns,
+            "accounts": [{"kind": a.kind, "name": a.name, "domain": a.domain,
+                          "rid": a.rid, "detail": a.detail,
+                          "attrs": {k: a.attrs.get(k) for k in
+                                    ("spn", "enabled", "admincount", "memberof",
+                                     "asrep_roastable", "delegation") if a.attrs.get(k)}}
+                         for a in (getattr(h, "accounts", []) or [])],
+        })
+        return base
+
     @app.get("/api/findings")
     def findings():
         from .. import tracking

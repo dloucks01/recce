@@ -11,6 +11,7 @@ export type Nav = {
   toFindings: (o?: Partial<FindingFilters>) => void;
   toHosts: (o?: { q?: string; sev?: string }) => void;
   toTargets: () => void;
+  openHost: (ip: string) => void;
 };
 
 /* ------------------------------- Dashboard ------------------------------- */
@@ -58,7 +59,7 @@ export function Dashboard(
           <ul className="risklist">
             {ov.top_hosts.length === 0 && <li className="muted">no findings yet</li>}
             {ov.top_hosts.map((h) => (
-              <li key={h.ip} onClick={() => nav.toFindings({ host: h.ip })}>
+              <li key={h.ip} onClick={() => nav.openHost(h.ip)}>
                 <div className="ri">
                   <span className="mono ip">{h.ip}</span>
                   {h.hostname && <span className="hn">{h.hostname}</span>}
@@ -76,7 +77,7 @@ export function Dashboard(
           <ul className="kevlist">
             {ov.kev_findings.length === 0 && <li className="muted">no KEV findings</li>}
             {ov.kev_findings.map((f) => (
-              <li key={f.key} onClick={() => nav.toFindings({ host: f.ip, kev: true })}>
+              <li key={f.key} onClick={() => nav.openHost(f.ip)}>
                 <SevTag severity={f.severity} />
                 <div className="kf">
                   <div className="t">{f.title}</div>
@@ -175,7 +176,7 @@ export function Findings(
                     {x.epss > 0 && <span className="badge epss">EPSS {x.epss}%</span>}
                   </div>
                 </td>
-                <td className="mono host-link" onClick={() => nav.toHosts({ q: x.ip })} title="see host">
+                <td className="mono host-link" onClick={() => nav.openHost(x.ip)} title="host detail">
                   {x.ip}{x.port ? `:${x.port}` : ""}
                 </td>
                 <td><span className={"tier " + x.tier}>{x.tier === "lead" ? "lead · verify" : x.tier}</span></td>
@@ -233,7 +234,7 @@ export function Hosts(
             {shown.map((h) => (
               <tr key={h.ip} className={h.reviewed ? "done" : ""}>
                 <td className="tick-col"><input type="checkbox" checked={h.reviewed} onChange={() => onTick(h.key, !h.reviewed)} /></td>
-                <td className="host-link" onClick={() => nav.toFindings({ host: h.ip })}>
+                <td className="host-link" onClick={() => nav.openHost(h.ip)}>
                   <div className="t mono">{h.ip}</div>
                   {h.hostname && <div className="m">{h.hostname}</div>}
                   {h.roles.length > 0 && <div className="badges">{h.roles.slice(0, 3).map((r) => <span key={r} className="badge role">{r}</span>)}</div>}
@@ -323,7 +324,7 @@ export function Targets(
             {shown.map((h) => (
               <tr key={h.ip} className={h.reviewed ? "done" : ""}>
                 <td className="tick-col"><input type="checkbox" checked={h.reviewed} onChange={() => onTick(h.key, !h.reviewed)} title="mark this host done" /></td>
-                <td className="host-link" onClick={() => nav.toFindings({ host: h.ip })}>
+                <td className="host-link" onClick={() => nav.openHost(h.ip)}>
                   <div className="t mono">{h.ip}</div>
                   {h.hostname && <div className="m">{h.hostname}</div>}
                 </td>

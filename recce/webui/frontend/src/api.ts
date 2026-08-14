@@ -30,6 +30,23 @@ export type Overview = {
   reviewed: number; enumerated: number; accessed: number;
 };
 
+export type Account = {
+  kind: string; name: string; domain: string; rid: string; detail: string;
+  attrs: Record<string, string>;
+};
+export type VulnDetail = Finding & {
+  output: string; remediation: string; cwes: string[];
+  qod: number; qod_type: string; state: string;
+};
+export type HostDetail = Host & {
+  access_detail: string; smb_signing: string; defenses: string[];
+  ports: (Port & { state?: string; version?: string; banner?: string })[];
+  vulns: VulnDetail[]; accounts: Account[];
+};
+export async function getHost(ip: string) {
+  return getJSON<HostDetail>(`/api/host/${encodeURIComponent(ip)}`);
+}
+
 export const SEVS = ["critical", "high", "medium", "low"];
 export const SEV_ALL = ["critical", "high", "medium", "low", "info"];
 

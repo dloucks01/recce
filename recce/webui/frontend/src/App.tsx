@@ -3,6 +3,7 @@ import {
   Finding, Host, Overview, fetchAll, postTick, postNote, postScan,
 } from "./api";
 import { Dashboard, Findings, Hosts, Targets, Nav, FindingFilters } from "./views";
+import { HostDrawer } from "./HostDrawer";
 
 type Tab = "dashboard" | "findings" | "hosts" | "targets";
 type TgFilter = "all" | "todo" | "enumerated" | "access" | "reviewed";
@@ -68,6 +69,7 @@ export default function App() {
   const [ff, setFf] = useState<FindingFilters>({ sev: "all", host: "", kev: false, unreviewed: false, leads: false, q: "" });
   const [hostQ, setHostQ] = useState(""); const [hostSev, setHostSev] = useState("all");
   const [tgQ, setTgQ] = useState(""); const [tgFilter, setTgFilter] = useState<TgFilter>("all");
+  const [drawerIp, setDrawerIp] = useState<string | null>(null);
 
   // tester identity
   const [who, setWho] = useState(() => localStorage.getItem("recce.tester") || "");
@@ -150,6 +152,7 @@ export default function App() {
     },
     toHosts: (o) => { setHostQ(o?.q ?? ""); setHostSev(o?.sev ?? "all"); setTab("hosts"); },
     toTargets: () => setTab("targets"),
+    openHost: (ip) => setDrawerIp(ip),
   };
 
   async function runScan() {
@@ -230,6 +233,8 @@ export default function App() {
                    nav={nav} onTick={onTick} onNote={onNote} />
         )}
       </main>
+
+      <HostDrawer ip={drawerIp} onClose={() => setDrawerIp(null)} onTick={onTick} onNote={onNote} />
     </div>
   );
 }
