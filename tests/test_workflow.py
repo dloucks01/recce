@@ -793,9 +793,10 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIsNotNone(calls[0][1])         # subprocess timeout set
 
     def test_pn_scan_retries_for_completeness_bounded_by_host_timeout(self):
-        # -Pn no longer drops to a single retry (that silently lost open ports on
-        # any lossy link). It uses the profile's max_retries (default 3) so a
-        # dropped SYN doesn't lose a port; dead IPs are bounded by --host-timeout.
+        # The default sweep must be at least as reliable as a plain `nmap -p-`: never
+        # retry fewer than nmap's own -T4 default (6, not the old too-low 3), and no
+        # --min-rate floor (a floor forces overspeed and drops SYNs to open ports).
+        # Dead IPs stay bounded by --host-timeout.
         import copy
         import recce.scanner as s
         prof = copy.copy(s.PROFILES["standard"])
@@ -804,9 +805,9 @@ class ScannerCommandTest(unittest.TestCase):
             calls = self._capture(s.full_port_scan, "1.2.3.4",
                                   os.path.join(d, "p.xml"), prof)
         cmd = calls[0][0]
-        self.assertEqual(cmd[cmd.index("--max-retries") + 1], "3")   # completeness
+        self.assertEqual(cmd[cmd.index("--max-retries") + 1], "6")   # >= nmap -T4 default
         self.assertIn("--host-timeout", cmd)                         # bounds dead IPs
-        self.assertIn("--min-rate", cmd)                             # packet floor
+        self.assertNotIn("--min-rate", cmd)                          # no overspeed floor
 
     def test_port_sweep_auto_retries_reliably_on_dropped_probes(self):
         """A rate-limiting network (nmap drops probes) must trigger an automatic
