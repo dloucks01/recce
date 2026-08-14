@@ -7,9 +7,21 @@
 # is present), each containing a single top-level recce-<version>/ directory, plus
 # SHA256SUMS for burn/transfer verification.
 #
-# Usage:  ./make_package.sh            # build tar.gz (+ zip if available)
-#         ./make_package.sh --verify   # also run the test suite before packaging
+# Usage:  ./make_package.sh                  # build tar.gz (+ zip if available)
+#         ./make_package.sh --verify         # also run the test suite before packaging
+#         ./make_package.sh --refresh-intel  # refresh KEV/EPSS snapshots from the
+#                                            # upstream feeds first (needs internet;
+#                                            # falls back to the committed snapshots)
 set -eu
+
+REFRESH_INTEL=0
+VERIFY=0
+for _arg in "$@"; do
+  case "$_arg" in
+    --refresh-intel) REFRESH_INTEL=1 ;;
+    --verify) VERIFY=1 ;;
+  esac
+done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
@@ -20,7 +32,13 @@ NAME="recce-$VER"
 DIST="$HERE/dist"
 STAGE="$DIST/$NAME"
 
-if [ "${1:-}" = "--verify" ]; then
+if [ "$REFRESH_INTEL" = 1 ]; then
+  echo "[*] Refreshing KEV/EPSS snapshots from upstream feeds ..."
+  python3 tools/refresh_intel.py \
+    || echo "[!] intel refresh failed (network?) - keeping the committed snapshots"
+fi
+
+if [ "$VERIFY" = 1 ]; then
   echo "[*] Running test suite before packaging ..."
   python3 -m unittest discover -s tests -p "test_*.py" >/dev/null
   echo "[+] tests passed"
