@@ -33,7 +33,7 @@ name_to_svc() {
     smtp|smtps|submission) echo smtp;;
     domain|dns) echo dns;;
     finger) echo finger;;
-    http|http-proxy|http-alt|https|ssl/http|https-alt|http-mgmt) echo http;;
+    http|http-proxy|http-alt|https|ssl/http|https-alt|http-mgmt|www) echo http;;
     kerberos|kerberos-sec|kpasswd) echo kerberos;;
     pop3|pop3s|imap|imaps) echo pop-imap;;
     rpcbind|nfs|nfs_acl|mountd) echo rpc-nfs;;
