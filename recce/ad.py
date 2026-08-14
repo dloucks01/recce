@@ -189,18 +189,27 @@ def smbv1_hosts(hosts: list[Host]) -> list[Host]:
 
 
 def kerberoastable(hosts: list[Host]) -> list[Account]:
-    """Accounts carrying an SPN (excluding krbtgt) -> Kerberoasting targets."""
+    """Accounts carrying an SPN (excluding krbtgt) -> Kerberoasting targets.
+
+    A DISABLED account is excluded: the KDC will not issue a TGS for it
+    (KDC_ERR_CLIENT_REVOKED), so surfacing it is a false target. `enabled` is only
+    dropped when explicitly "no" (fail-open: an unknown state stays a target, so a
+    real roastable account is never hidden by missing UAC data). Matches the
+    BloodHound path, which already requires enabled.
+    """
     out = []
     for h in hosts:
         for a in h.accounts:
-            if a.attrs.get("spn") and a.name.lower() != "krbtgt":
+            if (a.attrs.get("spn") and a.name.lower() != "krbtgt"
+                    and a.attrs.get("enabled") != "no"):
                 out.append(a)
     return out
 
 
 def asrep_roastable(hosts: list[Host]) -> list[Account]:
+    # Same rule as kerberoastable: a disabled DONT_REQ_PREAUTH account can't be roasted.
     return [a for h in hosts for a in h.accounts
-            if a.attrs.get("asrep_roastable") == "yes"]
+            if a.attrs.get("asrep_roastable") == "yes" and a.attrs.get("enabled") != "no"]
 
 
 def delegation_accounts(hosts: list[Host]) -> list[Account]:
