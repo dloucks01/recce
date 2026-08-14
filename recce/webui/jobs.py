@@ -42,15 +42,15 @@ class JobManager:
         self._counter = itertools.count(1)
         self._lock = threading.Lock()
 
-    def start(self, argv: list[str]) -> Job:
+    def start(self, argv: list[str], on_done=None) -> Job:
         jid = str(next(self._counter))
         job = Job(jid, argv)
         with self._lock:
             self._jobs[jid] = job
-        threading.Thread(target=self._run, args=(job, argv), daemon=True).start()
+        threading.Thread(target=self._run, args=(job, argv, on_done), daemon=True).start()
         return job
 
-    def _run(self, job: Job, argv: list[str]) -> None:
+    def _run(self, job: Job, argv: list[str], on_done=None) -> None:
         try:
             # PYTHONUNBUFFERED so recce's progress streams live (a piped child otherwise
             # block-buffers its stdout, and the browser sees nothing until it exits).
@@ -68,6 +68,11 @@ class JobManager:
             job.returncode = -1
         job.ended = time.time()
         job.status = "done" if job.returncode == 0 else "failed"
+        if on_done is not None:
+            try:
+                on_done(job)
+            except Exception:
+                pass
 
     def get(self, jid: str) -> Job | None:
         return self._jobs.get(jid)

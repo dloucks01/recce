@@ -10,7 +10,7 @@ import asyncio
 import json
 import os
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,8 +26,11 @@ def _tier(v) -> str:
     return "confirmed" if q >= 95 else "likely" if q >= 70 else "lead"
 
 
-def _finding_dict(v) -> dict:
+def _finding_dict(v, reviewed: bool = False) -> dict:
+    from .. import tracking
     return {
+        "key": tracking.vuln_row_key(v),      # same key the Excel sheet + coverage use
+        "reviewed": reviewed,
         "severity": v.severity or "info",
         "title": v.title or v.script_id or "finding",
         "ip": v.ip, "port": v.port,
@@ -53,6 +56,37 @@ def _host_dict(h) -> dict:
     }
 
 
+class _Broker:
+    """A tiny in-memory pub/sub so every connected browser sees the others' changes
+    (a tick, a finished scan) live. Thread-safe publish - the job threads use it too."""
+
+    def __init__(self) -> None:
+        self._subs: set = set()
+        self._loop = None
+
+    def bind(self, loop) -> None:
+        self._loop = loop
+
+    async def subscribe(self):
+        q: asyncio.Queue = asyncio.Queue()
+        self._subs.add(q)
+        try:
+            while True:
+                yield await q.get()
+        finally:
+            self._subs.discard(q)
+
+    def publish(self, event: dict) -> None:
+        if self._loop is None:
+            return
+
+        def _emit():
+            for q in list(self._subs):
+                q.put_nowait(event)
+
+        self._loop.call_soon_threadsafe(_emit)
+
+
 def create_app(eng_dir: str) -> FastAPI:
     from .. import __version__
     from ..cli import _open_paths
@@ -62,12 +96,25 @@ def create_app(eng_dir: str) -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                        allow_headers=["*"])
     jobs = JobManager()
+    broker = _Broker()
+
+    @app.on_event("startup")
+    async def _bind():
+        broker.bind(asyncio.get_running_loop())
 
     def _hosts():
         from ..store import Store
         st = Store(db_path)
         try:
             return st.all_hosts(), (st.get_meta("engagement") or "recce engagement")
+        finally:
+            st.close()
+
+    def _tracking() -> dict:
+        from ..store import Store
+        st = Store(db_path)
+        try:
+            return st.get_tracking()          # {key: (reviewed_bool, notes)}
         finally:
             st.close()
 
@@ -94,15 +141,48 @@ def create_app(eng_dir: str) -> FastAPI:
 
     @app.get("/api/findings")
     def findings():
+        from .. import tracking
         hs, _ = _hosts()
-        out = [_finding_dict(v) for h in hs if h.is_up for v in h.vulns]
+        tr = _tracking()
+        out = []
+        for h in hs:
+            if not h.is_up:
+                continue
+            for v in h.vulns:
+                reviewed = bool(tr.get(tracking.vuln_row_key(v), (False, ""))[0])
+                out.append(_finding_dict(v, reviewed))
         out.sort(key=lambda f: (not f["kev"], _SEV_ORDER.get(f["severity"], 9), -f["epss"]))
         return out
+
+    @app.post("/api/tick")
+    def tick(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        from ..store import Store
+        key = str(body.get("key", ""))
+        if not key:
+            raise HTTPException(400, "no key")
+        reviewed = bool(body.get("reviewed", True))
+        st = Store(db_path)
+        try:
+            st.set_reviewed(key, reviewed, notes=f"web:{x_tester}")
+        finally:
+            st.close()
+        broker.publish({"type": "tick", "key": key, "reviewed": reviewed,
+                        "tester": x_tester})
+        return {"ok": True}
+
+    @app.get("/api/events")
+    async def events():
+        async def gen():
+            yield "retry: 3000\n\n"                    # SSE reconnect hint
+            async for ev in broker.subscribe():
+                yield f"data: {json.dumps(ev)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
 
     # --- scan jobs + live progress ------------------------------------------------
 
     @app.post("/api/scan")
-    def start_scan(body: dict = Body(...)):
+    def start_scan(body: dict = Body(...), x_tester: str = Header(default="someone")):
         phase = str(body.get("phase", "run"))
         if phase not in _PHASES:
             raise HTTPException(400, f"phase must be one of {sorted(_PHASES)}")
@@ -113,7 +193,14 @@ def create_app(eng_dir: str) -> FastAPI:
         profile = str(body.get("profile", "")).lower()
         if profile in ("quick", "standard", "thorough"):
             argv += ["--profile", profile]
-        job = jobs.start(recce_argv(*argv, *targets))
+
+        def _done(job):
+            broker.publish({"type": "scan", "status": job.status, "tester": x_tester,
+                            "targets": " ".join(targets)})
+
+        job = jobs.start(recce_argv(*argv, *targets), on_done=_done)
+        broker.publish({"type": "scan_started", "tester": x_tester,
+                        "targets": " ".join(targets)})
         return {"id": job.id, "status": job.status, "cmd": job.cmd}
 
     @app.get("/api/jobs")
