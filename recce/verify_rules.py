@@ -37,6 +37,12 @@ VERIFY_RULES: list[dict] = [
      "confirm": "nmap -p<port> --script http-vuln-cve2015-1635 <ip>"},
     {"cves": ["CVE-2010-2861"], "nse": "http-vuln-cve2010-2861", "tier": "B",
      "confirm": "nmap -p<port> --script http-vuln-cve2010-2861 <ip>"},
+    {"cves": ["CVE-2012-2122"], "nse": "mysql-vuln-cve2012-2122", "tier": "B",
+     "confirm": "nmap -p3306 --script mysql-vuln-cve2012-2122 <ip>"},
+    {"cves": ["CVE-2012-1823"], "nse": "http-vuln-cve2012-1823", "tier": "B",
+     "confirm": "nmap -p<port> --script http-vuln-cve2012-1823 <ip>"},
+    {"cves": ["CVE-2015-1427"], "nse": "http-vuln-cve2015-1427", "tier": "B",
+     "confirm": "nmap -p<port> --script http-vuln-cve2015-1427 <ip>"},
 ]
 
 
