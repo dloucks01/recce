@@ -1,0 +1,139 @@
+"""MySQL + PostgreSQL deep modules, validated against fake servers that speak enough
+of each wire protocol to exercise the real probe (not mocks)."""
+from __future__ import annotations
+
+import socket
+import socketserver
+import struct
+import threading
+
+from recce import mysql, postgres
+from recce.models import Host, Port
+
+
+def _serve(handler_fn):
+    """Start a one-shot threaded TCP server; return (host, port, server)."""
+    class H(socketserver.BaseRequestHandler):
+        def handle(self):
+            handler_fn(self.request)
+
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv.server_address[0], srv.server_address[1], srv
+
+
+# ------------------------------- PostgreSQL --------------------------------------
+
+def _pg_msg(type_byte: bytes, body: bytes) -> bytes:
+    return type_byte + struct.pack("!I", len(body) + 4) + body
+
+
+def _pg_server(auth_code=None, error=False):
+    def handle(sock):
+        sock.recv(4096)                                   # consume StartupMessage
+        if error:
+            # ErrorResponse fields: S(everity), C(ode), M(essage), each null-terminated.
+            sock.sendall(_pg_msg(b"E", b"SFATAL\x00C28000\x00Mno pg_hba.conf entry\x00\x00"))
+            return
+        sock.sendall(_pg_msg(b"R", struct.pack("!I", auth_code)))
+        if auth_code == 0:                                # trust: stream a version + ready
+            sock.sendall(_pg_msg(b"S", b"server_version\x0016.2\x00"))
+            sock.sendall(_pg_msg(b"Z", b"I"))
+    return handle
+
+
+def test_postgres_trust_auth_is_unauth():
+    ip, port, srv = _serve(_pg_server(auth_code=0))
+    try:
+        pr = postgres.probe(ip, port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert pr["reachable"] and pr["unauth"] and not pr["auth_required"]
+    assert pr["version"] == "16.2"
+
+
+def test_postgres_md5_requires_auth():
+    ip, port, srv = _serve(_pg_server(auth_code=5))       # AuthenticationMD5Password
+    try:
+        pr = postgres.probe(ip, port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert pr["reachable"] and not pr["unauth"] and pr["auth_required"]
+
+
+def test_postgres_error_response_is_not_unauth():
+    ip, port, srv = _serve(_pg_server(error=True))
+    try:
+        pr = postgres.probe(ip, port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert not pr["unauth"]
+    assert "pg_hba" in pr["error"]
+
+
+def test_postgres_findings_and_fold():
+    h = Host(ip="10.0.0.5", ports=[Port(portid=5432, service="postgresql", state="open")])
+    probes = {("10.0.0.5", 5432): {"unauth": True, "version": "16.2"}}
+    fs = postgres.findings([h], probes)
+    assert fs and fs[0]["severity"] == "high" and "trust" in fs[0]["title"].lower()
+    by_ip = postgres.findings_to_vulns(fs)
+    assert by_ip["10.0.0.5"][0].source == "postgres"
+
+
+# --------------------------------- MySQL -----------------------------------------
+
+def _my_packet(payload: bytes, seq: int) -> bytes:
+    return struct.pack("<I", len(payload))[:3] + bytes([seq]) + payload
+
+
+_MY_HANDSHAKE = bytes([10]) + b"8.0.32\x00" + b"\x00" * 20     # proto 10 + version string
+
+
+def _my_server(login_ok: bool):
+    def handle(sock):
+        sock.sendall(_my_packet(_MY_HANDSHAKE, 0))
+        sock.recv(4096)                                   # consume HandshakeResponse
+        if login_ok:
+            sock.sendall(_my_packet(b"\x00\x00\x00\x02\x00\x00\x00", 2))   # OK packet
+        else:
+            # ERR 1045 Access denied
+            sock.sendall(_my_packet(b"\xff" + struct.pack("<H", 1045) + b"#28000denied", 2))
+    return handle
+
+
+def test_mysql_empty_password_login_is_unauth():
+    ip, port, srv = _serve(_my_server(login_ok=True))
+    try:
+        pr = mysql.probe(ip, port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert pr["reachable"] and pr["unauth"]
+    assert pr["user"] == "root"
+    assert pr["version"] == "8.0.32"
+
+
+def test_mysql_access_denied_requires_auth():
+    ip, port, srv = _serve(_my_server(login_ok=False))
+    try:
+        pr = mysql.probe(ip, port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert pr["reachable"] and not pr["unauth"] and pr["auth_required"]
+    assert pr["version"] == "8.0.32"
+
+
+def test_mysql_findings_and_fold():
+    h = Host(ip="10.0.0.6", ports=[Port(portid=3306, service="mysql", state="open")])
+    probes = {("10.0.0.6", 3306): {"unauth": True, "user": "root", "version": "8.0.32"}}
+    fs = mysql.findings([h], probes)
+    assert fs and fs[0]["severity"] == "high" and "empty password" in fs[0]["title"].lower()
+    by_ip = mysql.findings_to_vulns(fs)
+    assert by_ip["10.0.0.6"][0].source == "mysql"
+
+
+def test_is_predicates_respect_open_state():
+    assert mysql.is_mysql(Port(portid=3306, service="mysql", state="open"))
+    assert not mysql.is_mysql(Port(portid=3306, service="mysql", state="closed"))
+    assert postgres.is_postgres(Port(portid=5432, service="postgresql", state="open"))
+    assert not postgres.is_postgres(Port(portid=80, service="http", state="open"))
