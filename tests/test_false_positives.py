@@ -31,6 +31,34 @@ def _blank_fired(host):
     return any(f.get("kind") == "blank_login" for f in mssql.findings([host]))
 
 
+class MixedVerdictNseTest(unittest.TestCase):
+    """A vuln NSE script that confirms one CVE but clears others must not stamp the
+    not-present CVEs onto the positive finding."""
+
+    MIXED = ("  CVE-2021-1111:\n"
+             "    State: VULNERABLE\n"
+             "    IDs:  CVE:CVE-2021-1111\n"
+             "  CVE-2021-2222:\n"
+             "    State: NOT VULNERABLE\n"
+             "    IDs:  CVE:CVE-2021-2222\n")
+
+    def test_not_present_cve_is_dropped_from_positive_finding(self):
+        from recce.parser import _classify_vuln
+        p = Port(portid=443, protocol="tcp", state="open", service="https")
+        v = _classify_vuln("10.0.0.1", p, Script(id="http-vuln-multi", output=self.MIXED))
+        self.assertIsNotNone(v)
+        self.assertIn("CVE-2021-1111", v.ids)          # the VULNERABLE one stays
+        self.assertNotIn("CVE-2021-2222", v.ids)       # the NOT-VULNERABLE one is dropped
+
+    def test_single_verdict_keeps_all_referenced_cves(self):
+        from recce.parser import _classify_vuln
+        out = "  State: VULNERABLE\n  IDs: CVE:CVE-2020-0001\n  Refs: CVE-2020-0002\n"
+        p = Port(portid=445, protocol="tcp", state="open", service="microsoft-ds")
+        v = _classify_vuln("10.0.0.1", p, Script(id="smb-vuln-x", output=out))
+        self.assertIn("CVE-2020-0001", v.ids)
+        self.assertIn("CVE-2020-0002", v.ids)          # unchanged - no NOT-VULNERABLE segment
+
+
 class MssqlBlankPasswordTest(unittest.TestCase):
     def test_script_ran_but_found_nothing_is_not_a_finding(self):
         # nmap emitted the script (it always runs on 1433) with empty/negative output.

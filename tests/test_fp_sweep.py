@@ -96,6 +96,23 @@ class VulndbTest(unittest.TestCase):
         self.assertEqual(v.confidence, "potential")
         self.assertIn("backport", v.output.lower())
 
+    def test_distro_from_host_os_only_is_potential(self):
+        # The distro fingerprint is in the host OS, NOT the service banner - nmap
+        # commonly does this. The backport guard must still downgrade to a lead.
+        h = Host(ip="10.0.0.7", os_name="Ubuntu 22.04.3 LTS", os_family="Linux",
+                 ports=[_port(portid=22, service="ssh", product="OpenSSH", version="9.2p1")])
+        v = _vdb(h, "regreSSHion")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.confidence, "potential")     # was "likely" (false positive)
+
+    def test_upstream_build_stays_a_lead_not_downgraded(self):
+        # No distro fingerprint anywhere -> a concrete match stays "likely" (visible).
+        h = Host(ip="10.0.0.8", os_name="", os_family="",
+                 ports=[_port(portid=22, service="ssh", product="OpenSSH", version="9.2p1")])
+        v = _vdb(h, "regreSSHion")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.confidence, "likely")
+
 
 # --- Group C: web.py predicates --------------------------------------------------
 def _web_pred(web_id):

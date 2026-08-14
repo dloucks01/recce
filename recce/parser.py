@@ -53,6 +53,29 @@ def _severity_from_cvss(score: float) -> str:
     return "info"
 
 
+def _negated_only_cves(out: str) -> set:
+    """CVEs that appear ONLY under a `NOT VULNERABLE` state in the script output.
+
+    nmap's `vulns` library emits per-CVE blocks each led by a `State:` line, so a
+    mixed-verdict script reads as segments. A CVE named under a NOT-VULNERABLE segment
+    but never under a positive one is a not-present CVE and must not ride along on the
+    finding. Single-verdict output has no NOT-VULNERABLE segment -> returns empty.
+    """
+    # Each `State:` line carries a verdict; a CVE header sits just ABOVE its State while
+    # its `IDs:` echo sits just below, so associate every CVE with the NEAREST State by
+    # text distance (robust to header-before-State layout) rather than by segment order.
+    marks = [(m.start(), bool(re.search(r"NOT\s+VULNERABLE", m.group(1), re.I)))
+             for m in re.finditer(r"(?im)^\s*State:\s*(.+)$", out)]
+    if not marks:
+        return set()
+    positive, negated = set(), set()
+    for cm in _CVE_RE.finditer(out):
+        cve = cm.group(1).upper()
+        _, neg = min(marks, key=lambda mk: abs(mk[0] - cm.start()))
+        (negated if neg else positive).add(cve)
+    return negated - positive
+
+
 def _parse_elements(node: ET.Element) -> dict:
     """Flatten <elem key=..> and nested <table> into a dict for structured access."""
     result: dict = {}
@@ -108,7 +131,12 @@ def _classify_vuln(host_ip: str, port: Port | None, script: Script) -> Vuln | No
     elif positive:
         state = "VULNERABLE"
 
-    ids = sorted(set(_CVE_RE.findall(out)))
+    # A mixed-verdict script (e.g. an http-vuln-* / vulners run that says VULNERABLE
+    # for one CVE and NOT VULNERABLE for others) must NOT stamp the not-present CVEs
+    # onto this positive finding - that both overstates the finding and blocks those
+    # CVEs from ever being refuted. Drop CVEs that appear ONLY under a NOT-VULNERABLE
+    # state segment (single-verdict scripts have no such segment, so nothing changes).
+    ids = sorted(set(_CVE_RE.findall(out)) - _negated_only_cves(out))
     cvss_scores = [float(g) for tup in _CVSS_RE.findall(out) for g in tup if g]
     cvss_scores += [float(s) for s in _VULNERS_RE.findall(out)]
     # A confirmed-vulnerable NSE script with no embedded CVSS defaults to "high", but
