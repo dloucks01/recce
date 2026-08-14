@@ -1004,28 +1004,38 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Deny anonymous read on the directory (dsHeuristics / anonymous ACLs); "
                     "require authentication for all reads.",
                     ["CWE-306", "CWE-200"], kind="ldap_anon_read"))
+            # A bare anonymous *bind* success is the Windows AD default (it is anonymous
+            # *reads* that are denied, flagged separately above as HIGH). Reporting it as
+            # a medium finding on every DC is a false positive, so it is info-level and
+            # only interesting where it is NOT expected / where no anonymous read fired.
             if pr.get("anon_bind"):
                 out.append(_finding(
-                    "medium", "Anonymous LDAP bind allowed", tgt,
+                    "info", "Anonymous LDAP bind allowed", tgt,
                     "The server accepted a simple bind with an empty username and "
-                    "password (anonymous session). "
+                    "password (anonymous session). This is the default on a Windows AD "
+                    "DC and is only a real exposure if anonymous reads are also permitted "
+                    "(reported separately). "
                     + (f"Directory: {summary}." if summary else ""),
                     "ldapsearch / netexec",
                     f"ldapsearch -x -H ldap://{h.ip}:{p.portid} -s base -b '' "
                     "'(objectClass=*)'   # anonymous RootDSE, then try -b the naming context",
-                    "Disable anonymous LDAP binds unless a specific application needs them.",
+                    "Expected on AD; only disable anonymous binds if no application needs "
+                    "them. The actionable control is denying anonymous directory reads.",
                     ["CWE-287", "CWE-306"], kind="ldap_anon_bind"))
-                if not pr.get("tls") and p.portid == _DEFAULT_PORT:
-                    out.append(_finding(
-                        "medium", "LDAP over cleartext (no TLS on 389)", tgt,
-                        "A simple bind is accepted on cleartext 389, so credentialed "
-                        "binds transmit the password in the clear (sniffable) and the "
-                        "missing transport protection is an NTLM->LDAP relay surface.",
-                        "wireshark / ntlmrelayx",
-                        "ntlmrelayx.py -t ldap://<ip> --escalate-user <user>   # relay coerced auth",
-                        "Require LDAPS/StartTLS; enforce LDAP signing and channel binding "
-                        "(LdapEnforceChannelBinding).",
-                        ["CWE-319", "CWE-522"], kind="ldap_cleartext"))
+            # Cleartext LDAP on 389 is an NTLM->LDAP relay / sniff surface whenever the
+            # service answers without TLS - independent of whether ANONYMOUS binds are
+            # allowed, since a credentialed simple bind still crosses the wire in clear.
+            if not pr.get("tls") and p.portid == _DEFAULT_PORT:
+                out.append(_finding(
+                    "medium", "LDAP over cleartext (no TLS on 389)", tgt,
+                    "A simple bind is accepted on cleartext 389, so credentialed "
+                    "binds transmit the password in the clear (sniffable) and the "
+                    "missing transport protection is an NTLM->LDAP relay surface.",
+                    "wireshark / ntlmrelayx",
+                    "ntlmrelayx.py -t ldap://<ip> --escalate-user <user>   # relay coerced auth",
+                    "Require LDAPS/StartTLS; enforce LDAP signing and channel binding "
+                    "(LdapEnforceChannelBinding).",
+                    ["CWE-319", "CWE-522"], kind="ldap_cleartext"))
             if pr.get("rootdse_ok") and summary:
                 out.append(_finding(
                     "info", "LDAP RootDSE information disclosure", tgt,
