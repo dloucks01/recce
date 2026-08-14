@@ -11,14 +11,16 @@ and both LDAP and SMB findings reach the rendered report.
 No nmap and no real AD needed - the protocol exchanges are real (recce's own wire
 encoders build the DC's replies), only the port topology is modelled.
 """
+import http.server
 import os
+import socket
 import socketserver
 import struct
 import tempfile
 import threading
 import unittest
 
-from recce import ad, ldap as L, smb
+from recce import ad, ldap as L, smb, snmp as S
 from recce.models import Host, Port
 
 
@@ -213,6 +215,176 @@ class WindowsADSystemFidelityTest(unittest.TestCase):
         low = html.lower()
         self.assertIn("signing not required", low)
         self.assertIn("anonymous ldap", low)
+
+
+# --- faithful mock network appliance (router/switch) ----------------------------
+
+def _appliance_mib():
+    """A Cisco-style switch MIB: system group + an interface table, but no Windows
+    LanManager users / process inventory (an appliance, not a server). Values are the
+    already-BER-encoded value bytes, built with recce's own encoder."""
+    return {
+        "1.3.6.1.2.1.1.1.0": S._octet("Cisco IOS Software, C2960X Software "
+            "(C2960X-UNIVERSALK9-M), Version 15.2(7)E3, RELEASE SOFTWARE"),   # sysDescr
+        "1.3.6.1.2.1.1.4.0": S._octet("netops@corp.local"),                    # sysContact
+        "1.3.6.1.2.1.1.5.0": S._octet("core-sw01"),                            # sysName
+        "1.3.6.1.2.1.1.6.0": S._octet("DC1 Rack 12"),                          # sysLocation
+        "1.3.6.1.2.1.2.2.1.2.1": S._octet("GigabitEthernet0/1"),               # ifDescr...
+        "1.3.6.1.2.1.2.2.1.2.2": S._octet("GigabitEthernet0/2"),
+        "1.3.6.1.2.1.2.2.1.2.3": S._octet("Vlan1"),
+    }
+
+
+class _SnmpAgent:
+    """A live SNMPv2c UDP agent that answers a single community, using recce's own
+    BER/OID encoders. Serves exact GETs and a numeric GETNEXT walk (context manager)."""
+
+    def __init__(self, mib, community="public"):
+        self.mib = mib
+        self.community = community
+        self._sorted = sorted(mib, key=lambda o: [int(x) for x in o.split(".")])
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        self._stop = False
+
+    def __enter__(self):
+        threading.Thread(target=self._serve, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop = True
+        self.sock.close()
+
+    def _get_response(self, community, rid, oid, value_bytes):
+        pdu = S._tlv(0xA2, S._int(rid) + S._int(0) + S._int(0)
+                     + S._tlv(0x30, S._tlv(0x30, S.encode_oid(oid) + value_bytes)))
+        return S._tlv(0x30, S._int(1) + S._octet(community) + pdu)
+
+    def _parse(self, data):
+        _, msg, _ = S._parse_tlv(data, 0)
+        _, _ver, i = S._parse_tlv(msg, 0)
+        _, comm, i = S._parse_tlv(msg, i)
+        tag, pdu, _ = S._parse_tlv(msg, i)
+        _, rid_b, j = S._parse_tlv(pdu, 0)
+        _, _e, j = S._parse_tlv(pdu, j)
+        _, _ei, j = S._parse_tlv(pdu, j)
+        _, vbs, _ = S._parse_tlv(pdu, j)
+        _, vb, _ = S._parse_tlv(vbs, 0)
+        _, oid_b, _ = S._parse_tlv(vb, 0)
+        return comm.decode(), int.from_bytes(rid_b, "big"), tag, S.decode_oid(oid_b)
+
+    def _serve(self):
+        end_of_mib = b"\x82\x00"
+
+        def tup(o):
+            return [int(x) for x in o.split(".")]
+
+        while not self._stop:
+            try:
+                self.sock.settimeout(0.3)
+                data, addr = self.sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                comm, rid, tag, oid = self._parse(data)
+                if comm != self.community:
+                    continue
+                if tag == 0xA0:                          # GetRequest (exact)
+                    resp = self._get_response(comm, rid, oid,
+                                              self.mib.get(oid) or end_of_mib)
+                else:                                    # GetNextRequest (walk)
+                    nxt = next((k for k in self._sorted if tup(k) > tup(oid)), None)
+                    resp = (self._get_response(comm, rid, nxt, self.mib[nxt]) if nxt
+                            else self._get_response(comm, rid, oid, end_of_mib))
+                self.sock.sendto(resp, addr)
+            except (IndexError, ValueError):
+                pass
+
+
+class _HttpMgmt:
+    """A minimal live web-management UI (no security headers), for probes.http_findings."""
+
+    def __init__(self):
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                body = b"<html><title>core-sw01 login</title></html>"
+                self.send_response(200)
+                self.send_header("Server", "GoAhead-Webs")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.srv.server_address[1]
+
+    def __enter__(self):
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+def _appliance_host(ip="127.0.0.1"):
+    """A host modelling a managed switch's open ports (telnet + web UI + SNMP + HTTPS)."""
+    return Host(ip=ip, enumerated=True, ports=[
+        Port(portid=23, service="telnet", state="open"),
+        Port(portid=80, service="http", state="open"),
+        Port(portid=161, protocol="udp", service="snmp", state="open"),
+        Port(portid=443, service="https", state="open"),
+    ])
+
+
+class NetworkApplianceSystemFidelityTest(unittest.TestCase):
+    """A composed network appliance (managed switch): SNMP + a web management UI, run
+    through recce's real probes/findings on one host."""
+
+    def test_snmp_appliance_is_enumerated(self):
+        from recce import probes
+        ip = "127.0.0.1"
+        with _SnmpAgent(_appliance_mib()) as agent, _HttpMgmt() as web:
+            host = _appliance_host(ip)
+            snmp_pr = S.probe(ip, agent.port, timeout=1.0, known_open=True)
+            snmp_fs = S.findings([host], {(ip, 161): snmp_pr})
+            web_fs = probes.http_findings(
+                ip, Port(portid=web.port, service="http", state="open"))
+
+        # SNMP: default community, appliance identity, interface table - and NOT the
+        # Windows user/process MIBs (this is a switch, not a server).
+        self.assertIsNotNone(snmp_pr)
+        self.assertEqual(snmp_pr["community"], "public")
+        self.assertIn("Cisco", snmp_pr["sys_descr"])
+        self.assertEqual(snmp_pr["sys_name"], "core-sw01")
+        self.assertIn("GigabitEthernet0/1", snmp_pr["interfaces"])
+        self.assertFalse(snmp_pr["users"])
+        snmp_titles = " ".join(f["title"].lower() for f in snmp_fs)
+        self.assertIn("guessable community", snmp_titles)
+        # Web management UI: missing security headers flagged by the live HTTP probe.
+        web_titles = " ".join(f.title.lower() for f in web_fs)
+        self.assertIn("content-security-policy", web_titles)
+
+    def test_appliance_findings_reach_the_report(self):
+        from recce import report_html
+        ip = "127.0.0.1"
+        with _SnmpAgent(_appliance_mib()) as agent:
+            host = _appliance_host(ip)
+            pr = S.probe(ip, agent.port, timeout=1.0, known_open=True)
+            host.vulns.extend(
+                S.findings_to_vulns(S.findings([host], {(ip, 161): pr})).get(ip, []))
+
+        self.assertTrue(host.vulns, "no vulns folded from the SNMP enumeration")
+        with tempfile.TemporaryDirectory() as d:
+            html_path = os.path.join(d, "report.html")
+            report_html.build_html([host], html_path, title="Appliance")
+            html = open(html_path).read().lower()
+        self.assertIn("community", html)                 # the SNMP finding rendered
 
 
 if __name__ == "__main__":
