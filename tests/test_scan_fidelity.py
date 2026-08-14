@@ -307,18 +307,23 @@ class PortSweepRecoveryFidelityTest(unittest.TestCase):
 
     def test_truncated_slow_host_retry_recovers_dropped_common_ports(self):
         # First pass times out (slow firewall) and returns 0 ports - even 22/80 gone.
-        # The auto-retry with a doubled host-timeout + adaptive timing recovers them.
+        # The auto-retry with a longer (capped) host-timeout + adaptive timing recovers
+        # them. Default host_timeout is 20m -> the retry is CAPPED at 30m (not 40m).
+        seen = {}
+
         def fps(ip, out_xml, profile):
             if not profile.reliable:                     # first pass: truncated, nothing
                 _ports_xml(ip, [], out_xml)
                 return out_xml, scanner.ScanIssue("warning", "host timeout",
                                                   kind="host-timeout")
+            seen["retry_ht"] = profile.host_timeout      # the retry's (capped) timeout
             _ports_xml(ip, [22, 80], out_xml)            # retry: found the common ports
             return out_xml, None
 
         host = self._run_worker("10.0.0.8", fps)
         self.assertEqual(sorted(p.portid for p in host.open_ports), [22, 80])
         self.assertFalse(host.incomplete_scan)           # cleared: the retry completed
+        self.assertEqual(seen["retry_ht"], 30)           # capped, not 2x (40)
 
 
 # --- live real-listener integration ---------------------------------------------
