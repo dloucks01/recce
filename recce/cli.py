@@ -696,17 +696,21 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
             truncated = iss.kind == "host-timeout"
         open_ports = _ports_for_host(fp_xml, ip)
         swept_ports = _swept_ports_for_host(fp_xml, ip)
-        # Completeness safeguard: re-scan (congestion-adaptive) when the fast pass
-        # looks under-reported, and UNION the result in (never replace). Two triggers:
-        #  - ZERO ports: genuinely empty, or every probe was dropped.
-        #  - SUSPICIOUSLY FEW ports on a non-reliable pass: a lossy default-drop
-        #    firewall can silently swallow SYNs to open ports (even 22/80) without
-        #    nmap printing any drop marker, so a partial result would otherwise never
-        #    be re-checked - the exact "a few of the open ports are missing" bug.
-        # Gated so dead -Pn IPs on a clean network aren't all re-scanned.
-        few = 0 < len(open_ports) < _UNDERREPORT_THRESHOLD and not profile.reliable
-        if ((not open_ports or few) and profile.verify and not truncated
-                and (profile.ping_discovery or profile.verify_all)):
+        # Completeness safeguard: re-scan (congestion-adaptive) and UNION the result
+        # in (never replace) when the fast pass looks under-reported. Two triggers:
+        #  - ZERO ports: genuinely empty, or every probe was dropped. Verified for a
+        #    discovered-live host always; for a -Pn host only with --verify-all (so a
+        #    big dead-IP scope isn't all re-scanned).
+        #  - SUSPICIOUSLY FEW ports (possible partial drop: a lossy firewall silently
+        #    swallowing SYNs to some open ports, even 22/80). This re-scan is as
+        #    expensive as the sweep, and a plain 1-2 service host is the COMMON case,
+        #    so it only fires when we're already being thorough - under -Pn/assume-up
+        #    or --verify-all - never slowing a clean discovery scan of a normal host.
+        few = (0 < len(open_ports) < _UNDERREPORT_THRESHOLD and not profile.reliable)
+        do_verify = profile.verify and not truncated and (
+            (not open_ports and (profile.ping_discovery or profile.verify_all))
+            or (few and (profile.assume_up or profile.verify_all)))
+        if do_verify:
             vx = os.path.join(paths["raw"], f"{ip}_verify.xml")
             _, viss = scanner.verify_port_scan(ip, vx, profile)
             vports = _ports_for_host(vx, ip)
