@@ -33,7 +33,7 @@ mkdir -p "$OUT/app" "$OUT/tools/bin" "$OUT/tools/libexec" "$BUILD"
 echo "[*] Creating build venv + installing recce (+ deps) + PyInstaller ..."
 python3 -m venv "$VENV"
 "$VENV/bin/pip" install --quiet --upgrade pip
-"$VENV/bin/pip" install --quiet .            # recce + whatever pyproject declares
+"$VENV/bin/pip" install --quiet '.[bundle]'  # recce + the bundled libraries (impacket/ldap3/openpyxl)
 "$VENV/bin/pip" install --quiet pyinstaller
 
 # --- 2. freeze the recce app (onedir) -------------------------------------------
@@ -43,8 +43,11 @@ from recce.cli import main
 if __name__ == "__main__":
     main()
 PY
+# --collect-all for the bundled libs: recce imports them conditionally (find_spec),
+# which PyInstaller's static analysis would otherwise miss.
 "$VENV/bin/pyinstaller" --onedir --name recce --noconfirm \
   --collect-submodules recce --collect-data recce \
+  --collect-all impacket --collect-all ldap3 --collect-all openpyxl \
   --distpath "$BUILD/pyi-dist" --workpath "$BUILD/pyi-work" --specpath "$BUILD" \
   "$BUILD/entry.py" >/dev/null 2>&1
 cp -a "$BUILD/pyi-dist/recce/." "$OUT/app/"

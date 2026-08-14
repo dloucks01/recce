@@ -2655,9 +2655,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from . import credenum as _ce
     if _ce.impacket_tool("GetUserSPNs"):
         print(f"  {'impacket':<15} {'OK  ':<20} Kerberoast / AS-REP / secretsdump")
-    import importlib.util
-    if importlib.util.find_spec("openpyxl") is not None:
-        print("  openpyxl        OK   (not required; stdlib xlsx is built in)")
+    import importlib.util as _ilu
+    print("\nBundled Python libraries (baked into the airgap package)")
+    for lib, note in (
+        ("impacket", "Kerberos / SMB / DCSync as a library (no CLI shell-out)"),
+        ("ldap3", "credentialed LDAP enumeration"),
+        ("openpyxl", "richer .xlsx workbooks (stdlib xlsx is the fallback)"),
+    ):
+        ok = _ilu.find_spec(lib) is not None
+        mark = "OK  " if ok else "-   (native/CLI fallback)"
+        print(f"  {lib:<15} {mark:<24} {note}")
 
     # Optional real self-scan to prove the pipeline end-to-end on THIS box.
     scan_ok = None
