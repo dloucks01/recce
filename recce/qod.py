@@ -24,6 +24,15 @@ from __future__ import annotations
 MIN_QOD_VISIBLE = 70
 MIN_QOD_VERIFIED = 95
 
+# Deep-service / AD modules that actively speak the protocol to produce a finding
+# (so a severity-bearing finding is a live corroboration). They used to fall through
+# to the confidence fallback and get pinned at 95 "verified" regardless of nature -
+# so an informational RootDSE disclosure read as verified as a real exposure.
+_SERVICE_SOURCES = frozenset({
+    "smb", "mssql", "docker", "kubernetes", "ldap", "kerberos", "redis", "mongodb",
+    "elasticsearch", "ftp", "nfs", "rsync", "snmp", "api", "web", "adcs",
+})
+
 # The tier table (docs/ARCHITECTURE.md §3.1), for reference and reverse lookup.
 TIERS: dict[str, int] = {
     "exploit": 100,             # recce actively exploited / got an unauth read
@@ -75,6 +84,18 @@ def score(vuln, port=None) -> tuple[int, str]:
     # Non-NSE observed config/hygiene finding.
     if src == "config":
         return 90, "config_observed"
+
+    # Deep-service / AD modules: score by the finding's NATURE, not a blanket
+    # "confirmed". A positive VULNERABLE state is an active check; a severity-bearing
+    # finding is a live-probed exposure (verified); an informational row (RootDSE
+    # disclosure, a default-but-benign posture, an anonymous *bind*) is an observation
+    # that is shown but must never reach the CONFIRMED/exploitable tier.
+    if src in _SERVICE_SOURCES:
+        if "VULNERABLE" in state_up and "NOT VULNERABLE" not in state_up:
+            return 99, "active_vuln"
+        if (getattr(vuln, "severity", "") or "").lower() == "info":
+            return 90, "config_observed"
+        return 95, "active_app"
 
     # Version-db: a banner/version inference - the low-confidence, backport-prone class.
     if src == "version-db":
