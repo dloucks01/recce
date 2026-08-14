@@ -22,6 +22,7 @@ posture: see SECURITY.md.
 """
 from __future__ import annotations
 
+import re
 import shlex
 import socket
 import struct
@@ -447,6 +448,109 @@ def enum_best_session(ip: str, port: int = _DEFAULT_PORT,
         if c.get("auth") or c.get("shares") or c.get("users"):
             return c, "creds"
     return guest, "none"
+
+
+# --- share spidering for secrets -------------------------------------------------
+
+# Paths that are worth a tester's attention when readable off a share. Ordered; the
+# first match wins so the "why" is the most specific one.
+_SECRET_FILE_PATTERNS = [
+    (re.compile(r"(?:^|[\\/])(?:auto)?unattend\.xml$|(?:^|[\\/])sysprep\.(?:xml|inf)$", re.I),
+     "unattended-install answer file (often holds a local admin password)"),
+    (re.compile(r"(?:^|[\\/])Groups\.xml$", re.I),
+     "GPP Groups.xml (decryptable cpassword)"),
+    (re.compile(r"(?:^|[\\/])web\.config$|(?:^|[\\/])appsettings\.json$", re.I),
+     "app config (connection strings / secrets)"),
+    (re.compile(r"\.kdbx$", re.I), "KeePass database"),
+    (re.compile(r"(?:^|[\\/])id_[rd]sa$|\.ppk$|\.pem$", re.I), "private key"),
+    (re.compile(r"(?:^|[\\/])(?:\.pgpass|\.my\.cnf|\.git-credentials|\.npmrc)$", re.I),
+     "credential-bearing dotfile"),
+    (re.compile(r"(?:pass(?:word)?s?|creds?|secrets?)\.(?:txt|csv|xlsx?|docx?)$", re.I),
+     "file named like a credential store"),
+    (re.compile(r"\.(?:bak|backup|old|vhdx?|ova|kdb)$", re.I), "backup / disk image"),
+]
+
+
+def flag_secret_files(files: list[str]) -> list[dict]:
+    """Given file paths seen on readable shares, return [{path, why}] for the sensitive
+    ones (deduped, first pattern wins). Pure - the unit-testable core of spidering."""
+    hits: list[dict] = []
+    seen: set = set()
+    for path in files:
+        p = (path or "").strip()
+        if not p or p in seen:
+            continue
+        for rx, why in _SECRET_FILE_PATTERNS:
+            if rx.search(p):
+                seen.add(p)
+                hits.append({"path": p, "why": why})
+                break
+    return hits
+
+
+def _parse_smbclient_ls(out: str, share: str) -> list[str]:
+    """Extract file paths from `smbclient recurse ON; ls` output. Directory headers are
+    lines like '\\dir\\sub'; entries are '  name   A   size   Day Mon ...'."""
+    paths: list[str] = []
+    cwd = ""
+    for line in out.splitlines():
+        s = line.rstrip()
+        if not s:
+            continue
+        if s.lstrip().startswith("\\"):                 # a directory header line
+            cwd = s.strip().rstrip("\\")
+            continue
+        m = re.match(r"\s+(.+?)\s+([ADHSRNI]+)\s+\d+\s+\w{3}\s", line)
+        if m and "D" not in m.group(2):                 # a file (not a directory entry)
+            name = m.group(1).strip()
+            if name in (".", ".."):
+                continue
+            paths.append(f"{share}{cwd}\\{name}")
+    return paths
+
+
+def _smbclient_auth(creds: dict | None) -> list[str]:
+    creds = creds or {}
+    if not creds.get("user"):
+        return ["-N"]
+    dom = creds.get("domain") or ""
+    who = f"{dom}\\{creds['user']}" if dom else creds["user"]
+    return ["-U", f"{who}%{creds.get('secret', '')}"]
+
+
+def spider_shares(ip: str, shares: list[dict], creds: dict | None = None,
+                  port: int = _DEFAULT_PORT, max_shares: int = 12) -> list[dict]:
+    """Spider READABLE shares for secret-looking files and return finding-dicts. Uses
+    smbclient recursive listing; read-only (it lists, never fetches)."""
+    tool = smbclient_tool()
+    if not tool:
+        return []
+    findings: list[dict] = []
+    readable = [s for s in shares
+                if "READ" in (s.get("perms") or "").upper()
+                and (s.get("name") or "").upper() not in ("IPC$", "PRINT$")]
+    for s in readable[:max_shares]:
+        name = s["name"]
+        cmd = [tool, f"//{ip}/{name}"] + _smbclient_auth(creds) + ["-c", "recurse ON; ls"]
+        if port and port != _DEFAULT_PORT:
+            cmd += ["-p", str(port)]
+        out, err = _run(cmd, timeout=90)
+        if err:
+            continue
+        hits = flag_secret_files(_parse_smbclient_ls(out, name))
+        if hits:
+            listing = "\n".join(f"  {h['path']}  - {h['why']}" for h in hits[:25])
+            findings.append({
+                "title": f"Sensitive files readable on share '{name}'",
+                "target": f"{ip}:{port}", "severity": "high",
+                "detail": f"{len(hits)} secret-looking file(s) on //{ip}/{name}:\n{listing}",
+                "narrative": "Readable secrets on a share are a direct path to credentials "
+                             "or further access without exploiting anything.",
+                "remediation": "Restrict the share ACL; remove secrets from file shares; "
+                               "rotate any exposed credential.",
+                "cwes": ["CWE-200", "CWE-522"], "confidence": "confirmed",
+            })
+    return findings
 
 
 def prove_writable(ip: str, share: str, creds: dict | None = None,

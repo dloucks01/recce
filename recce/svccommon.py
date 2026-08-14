@@ -28,13 +28,19 @@ def findings_to_vulns(fs: list[dict], source: str, default_port: int,
             out_text += f"\n\nWhat this enables:\n{f['narrative']}"
         if f.get("command"):
             out_text += f"\n\nProve / next step:\n{f['command']}"
+        # Most deep-service findings are live protocol actions (confidence="confirmed"),
+        # but a module can mark a heuristic/observed one honestly by putting its own
+        # "confidence" on the finding dict. Only a genuinely confirmed finding carries a
+        # positive live-probe Evidence - otherwise the verifier would treat a guess as a
+        # live corroboration.
+        conf = f.get("confidence", "confirmed")
+        evidence = ([Evidence(kind="live-probe", positive=True, detail=f["title"][:120])]
+                    if conf == "confirmed" else [])
         by_ip.setdefault(ip, []).append(Vuln(
             ip=ip, port=port, protocol="tcp",
             script_id=f"{prefix}:{f['title'][:40]}", state="finding", title=f["title"],
-            severity=f["severity"], source=source, confidence="confirmed",
+            severity=f["severity"], source=source, confidence=conf,
             cwes=list(f.get("cwes") or ["CWE-284"]),
             output=out_text.strip(), remediation=f.get("remediation", ""),
-            # The deep-service modules actively speak the protocol to produce these, so
-            # they are live corroborations the verifier can confirm on.
-            evidence=[Evidence(kind="live-probe", positive=True, detail=f["title"][:120])]))
+            evidence=evidence))
     return by_ip

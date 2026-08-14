@@ -77,3 +77,57 @@ def test_tool_missing_short_circuits(monkeypatch):
         monkeypatch, null={"error": "nxc/netexec not installed", "shares": [], "users": []})
     session, level = smb.enum_best_session("10.0.0.5", 445, None)
     assert level == "error"
+
+
+# --- share spidering for secrets -------------------------------------------------
+
+def test_flag_secret_files_matches_the_right_things():
+    from recce import smb
+    files = [
+        "Public\\readme.txt",                       # ignore
+        "IT\\unattend.xml",                         # answer file
+        "Web\\inetpub\\web.config",                 # app config
+        "Backups\\db-2023.bak",                     # backup
+        "Users\\jdoe\\.ssh\\id_rsa",                # private key
+        "HR\\passwords.xlsx",                       # credential store
+        "Policies\\{GUID}\\Groups.xml",             # GPP cpassword
+        "Media\\vacation.jpg",                      # ignore
+    ]
+    hits = {h["path"] for h in smb.flag_secret_files(files)}
+    assert "IT\\unattend.xml" in hits
+    assert "Web\\inetpub\\web.config" in hits
+    assert "Backups\\db-2023.bak" in hits
+    assert "Users\\jdoe\\.ssh\\id_rsa" in hits
+    assert "HR\\passwords.xlsx" in hits
+    assert "Policies\\{GUID}\\Groups.xml" in hits
+    assert "Public\\readme.txt" not in hits
+    assert "Media\\vacation.jpg" not in hits
+
+
+def test_parse_smbclient_ls_extracts_files_not_dirs():
+    from recce import smb
+    out = (
+        "\\\n"
+        "  .                                   D        0  Mon Jan  1 00:00:00 2024\n"
+        "  unattend.xml                        A     1024  Mon Jan  1 00:00:00 2024\n"
+        "  logs                                D        0  Mon Jan  1 00:00:00 2024\n"
+        "\\logs\n"
+        "  app.log                             A      500  Mon Jan  1 00:00:00 2024\n")
+    paths = smb._parse_smbclient_ls(out, "Data")
+    assert "Data\\unattend.xml" in paths
+    assert "Data\\logs\\app.log" in paths
+    assert not any(p.endswith("logs") for p in paths)     # the directory itself isn't a file
+
+
+def test_spider_shares_flags_readable_share(monkeypatch):
+    from recce import smb
+    monkeypatch.setattr(smb, "smbclient_tool", lambda: "smbclient")
+    ls = ("\\\n  web.config   A   200   Mon Jan  1 00:00:00 2024\n"
+          "  index.html    A   100   Mon Jan  1 00:00:00 2024\n")
+    monkeypatch.setattr(smb, "_run", lambda cmd, timeout=90: (ls, ""))
+    shares = [{"name": "wwwroot", "perms": "READ"},
+              {"name": "IPC$", "perms": "READ"}]         # IPC$ skipped
+    fs = smb.spider_shares("10.0.0.5", shares, {"user": "svc", "secret": "p"})
+    assert len(fs) == 1
+    assert "wwwroot" in fs[0]["title"] and fs[0]["severity"] == "high"
+    assert "web.config" in fs[0]["detail"]
