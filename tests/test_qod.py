@@ -48,6 +48,26 @@ class QodScoreTest(unittest.TestCase):
     def test_live_probe_is_verified(self):
         self.assertTrue(qod.is_verified(_v(source="probe")))
 
+    def test_service_info_finding_is_observed_not_verified(self):
+        # a deep-service INFORMATIONAL row (LDAP RootDSE disclosure, anonymous bind,
+        # a benign-default posture) is shown but must not read as verified/exploitable,
+        # even though svccommon stamps every finding confidence="confirmed".
+        v = _v(source="ldap", confidence="confirmed", severity="info", state="finding")
+        self.assertEqual(qod.score(v), (90, "config_observed"))
+        self.assertTrue(qod.is_visible(v))
+        self.assertFalse(qod.is_verified(v))
+
+    def test_service_exposure_stays_verified(self):
+        # a severity-bearing live-probed exposure (e.g. Redis with no auth) is verified.
+        v = _v(source="redis", confidence="confirmed", severity="high", state="finding")
+        self.assertEqual(qod.score(v), (95, "active_app"))
+        self.assertTrue(qod.is_verified(v))
+
+    def test_service_vulnerable_state_is_active_vuln(self):
+        v = _v(source="smb", confidence="confirmed", severity="critical", state="VULNERABLE")
+        self.assertEqual(qod.score(v), (99, "active_vuln"))
+        self.assertTrue(qod.is_verified(v))
+
     def test_credentialed_and_ontarget_are_verified(self):
         self.assertTrue(qod.is_verified(_v(source="cred")))
         self.assertTrue(qod.is_verified(_v(source="ingest")))
