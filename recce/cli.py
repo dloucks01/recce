@@ -106,6 +106,13 @@ def _swept_ports_for_host(xml_path: str, ip: str) -> list:
     return []
 
 
+# The host-timeout auto-retry (a slow truncated host gets one more, longer pass)
+# doubles the host-timeout - but capped, so it can't turn a 20-minute default into a
+# 40-minute-per-host runaway on a dead/very-slow target. A small timeout still gets a
+# real bump up to this floor; a host-timeout already >= this never grows on retry.
+_RETRY_HOST_TIMEOUT_CAP_MIN = 30      # minutes
+
+
 # A fast sweep that returns fewer than this many open ports on a non-reliable pass is
 # treated as possibly under-reported (a lossy firewall silently dropping SYNs) and gets
 # a congestion-adaptive re-scan whose results are UNIONED in. Small so a genuinely
@@ -729,15 +736,18 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
                         "port-sweep"))
         # Host-timeout auto-retry: a slow firewalled host whose sweep hit --host-timeout
         # is NOT a dead end. If it showed any sign of life (some ports, or a discovery/
-        # named-target reply), give it ONE more pass with DOUBLE the host-timeout and
-        # congestion-adaptive timing, and union what it finds. Without this a slow host
-        # times out mid-sweep and shows 0 ports even though 22/80 are open. Gated on
-        # signs-of-life so a genuinely dead -Pn IP isn't re-scanned at 2x cost.
+        # named-target reply), give it ONE more pass with a LONGER (but capped)
+        # host-timeout and congestion-adaptive timing, and union what it finds. Without
+        # this a slow host times out mid-sweep and shows 0 ports even though 22/80 are
+        # open. Gated on signs-of-life so a genuinely dead -Pn IP isn't re-scanned.
         if (truncated and profile.retry_truncated and profile.host_timeout
                 and (open_ports or up_reason)):
             import dataclasses
-            rprof = dataclasses.replace(
-                profile, reliable=True, host_timeout=max(1, profile.host_timeout) * 2)
+            # Double the host-timeout, but capped so a dead/very-slow host can't become
+            # a runaway (2x a 20-minute default would be 40 minutes for one host).
+            retry_ht = min(max(1, profile.host_timeout) * 2,
+                           max(_RETRY_HOST_TIMEOUT_CAP_MIN, profile.host_timeout))
+            rprof = dataclasses.replace(profile, reliable=True, host_timeout=retry_ht)
             rx = os.path.join(paths["raw"], f"{ip}_retry.xml")
             _, riss = scanner.full_port_scan(ip, rx, rprof)
             rports = _ports_for_host(rx, ip)
