@@ -28,8 +28,9 @@ _NAME = {
     "vnc": "vnc", "vnc-http": "vnc",
     "redis": "redis", "wsman": "winrm", "winrm": "winrm",
     "mongodb": "mongodb", "mongod": "mongodb",
-    "oracle": "oracle", "oracle-tns": "oracle",
-    "ajp13": "ajp", "ajp": "ajp", "elasticsearch": "elasticsearch",
+    "oracle": "oracle", "oracle-tns": "oracle", "ncube-lm": "oracle",
+    "ajp13": "ajp", "ajp": "ajp",
+    "elasticsearch": "elasticsearch", "wap-wsp": "elasticsearch",
 }
 
 # port number -> per-service script (fallback when the service name is unknown).
