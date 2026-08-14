@@ -1869,6 +1869,20 @@ def _write_findings_table(sh, fs) -> None:
         sh.write([""])
 
 
+def _write_runbooks(sh, runbooks) -> None:
+    """The per-target 'Runbook' step block, shared by every deep-service sheet (they
+    wrote this identical loop nine times)."""
+    for rb in runbooks or []:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+
+
 def _build_mssql(wb, analysis: dict) -> None:
     """MSSQL offensive sheet: endpoints (version/encryption/access/priv), findings,
     and the credential-free + credentialed runbook with the attack chain."""
@@ -2133,15 +2147,7 @@ def _build_docker(wb, analysis: dict) -> None:
                   "" if t.get("images") is None else str(t.get("images"))])
     sh.write([""])
     _write_findings_table(sh, fs)
-    for rb in runbooks:
-        sh.write([(f"Runbook - {rb['target']}", "boldred")])
-        cur = None
-        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
-            if step["phase"] != cur:
-                cur = step["phase"]
-                sh.write([(cur, "bold")])
-            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
-        sh.write([""])
+    _write_runbooks(sh, runbooks)
     sh.set_col(1, 22)
     sh.set_col(2, 120)
 
@@ -2246,15 +2252,7 @@ def _build_ldap(wb, analysis: dict) -> None:
                   t.get("dc_dns", ""), lvl, enum])
     sh.write([""])
     _write_findings_table(sh, fs)
-    for rb in runbooks:
-        sh.write([(f"Runbook - {rb['target']}", "boldred")])
-        cur = None
-        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
-            if step["phase"] != cur:
-                cur = step["phase"]
-                sh.write([(cur, "bold")])
-            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
-        sh.write([""])
+    _write_runbooks(sh, runbooks)
     sh.set_col(1, 22)
     sh.set_col(2, 120)
 
@@ -2293,15 +2291,7 @@ def _build_snmp(wb, analysis: dict) -> None:
                   "" if not t.get("users") else str(t.get("users"))])
     sh.write([""])
     _write_findings_table(sh, fs)
-    for rb in runbooks:
-        sh.write([(f"Runbook - {rb['target']}", "boldred")])
-        cur = None
-        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
-            if step["phase"] != cur:
-                cur = step["phase"]
-                sh.write([(cur, "bold")])
-            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
-        sh.write([""])
+    _write_runbooks(sh, runbooks)
     sh.set_col(1, 22)
     sh.set_col(2, 120)
 
@@ -2342,15 +2332,7 @@ def _build_mongodb(wb, analysis: dict) -> None:
                   "" if not t.get("databases") else str(t.get("databases"))])
     sh.write([""])
     _write_findings_table(sh, fs)
-    for rb in runbooks:
-        sh.write([(f"Runbook - {rb['target']}", "boldred")])
-        cur = None
-        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
-            if step["phase"] != cur:
-                cur = step["phase"]
-                sh.write([(cur, "bold")])
-            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
-        sh.write([""])
+    _write_runbooks(sh, runbooks)
     sh.set_col(1, 22)
     sh.set_col(2, 120)
 
@@ -2390,15 +2372,7 @@ def _build_redis(wb, analysis: dict) -> None:
                   "" if not t.get("keys") else str(t.get("keys"))])
     sh.write([""])
     _write_findings_table(sh, fs)
-    for rb in runbooks:
-        sh.write([(f"Runbook - {rb['target']}", "boldred")])
-        cur = None
-        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
-            if step["phase"] != cur:
-                cur = step["phase"]
-                sh.write([(cur, "bold")])
-            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
-        sh.write([""])
+    _write_runbooks(sh, runbooks)
     sh.set_col(1, 22)
     sh.set_col(2, 120)
 
@@ -2437,15 +2411,7 @@ def _build_elasticsearch(wb, analysis: dict) -> None:
                   "" if not t.get("indices") else str(t.get("indices"))])
     sh.write([""])
     _write_findings_table(sh, fs)
-    for rb in runbooks:
-        sh.write([(f"Runbook - {rb['target']}", "boldred")])
-        cur = None
-        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
-            if step["phase"] != cur:
-                cur = step["phase"]
-                sh.write([(cur, "bold")])
-            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
-        sh.write([""])
+    _write_runbooks(sh, runbooks)
     sh.set_col(1, 22)
     sh.set_col(2, 120)
 
@@ -2486,15 +2452,7 @@ def _build_rsync(wb, analysis: dict) -> None:
                       m.get("comment", "")])
     sh.write([""])
     _write_findings_table(sh, fs)
-    for rb in runbooks:
-        sh.write([(f"Runbook - {rb['target']}", "boldred")])
-        cur = None
-        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
-            if step["phase"] != cur:
-                cur = step["phase"]
-                sh.write([(cur, "bold")])
-            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
-        sh.write([""])
+    _write_runbooks(sh, runbooks)
     sh.set_col(1, 22)
     sh.set_col(2, 120)
 
@@ -2535,15 +2493,7 @@ def _build_nfs(wb, analysis: dict) -> None:
             sh.write([t["ip"], e.get("dir", ""), shared, cell])
     sh.write([""])
     _write_findings_table(sh, fs)
-    for rb in runbooks:
-        sh.write([(f"Runbook - {rb['target']}", "boldred")])
-        cur = None
-        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
-            if step["phase"] != cur:
-                cur = step["phase"]
-                sh.write([(cur, "bold")])
-            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
-        sh.write([""])
+    _write_runbooks(sh, runbooks)
     sh.set_col(1, 22)
     sh.set_col(2, 120)
 
@@ -2583,15 +2533,7 @@ def _build_kerberos(wb, analysis: dict) -> None:
         sh.write([r["user"], cell, str(r.get("etype", "")) if r.get("etype") else ""])
     sh.write([""])
     _write_findings_table(sh, fs)
-    for rb in runbooks:
-        sh.write([(f"Runbook - {rb['target']}", "boldred")])
-        cur = None
-        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
-            if step["phase"] != cur:
-                cur = step["phase"]
-                sh.write([(cur, "bold")])
-            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
-        sh.write([""])
+    _write_runbooks(sh, runbooks)
     sh.set_col(1, 24)
     sh.set_col(2, 120)
 
