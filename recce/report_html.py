@@ -530,6 +530,28 @@ def _ad_architecture(ad_arch, hosts=None, credentials=None):
         '</section>')
 
 
+def _attack_coverage(hosts):
+    """MITRE ATT&CK technique coverage, grouped by tactic along the kill chain."""
+    from . import attack
+    cov = attack.coverage(hosts)
+    if not cov["by_tactic"]:
+        return ""
+    out = ['<section><h2>MITRE ATT&amp;CK coverage</h2>',
+           f'<p class="muted">{cov["technique_count"]} technique(s) across '
+           f'{cov["tactic_count"]} tactic(s), mapped from the findings.</p>',
+           '<table><thead><tr><th>Tactic</th><th>Technique</th><th>Hosts</th></tr>'
+           '</thead><tbody>']
+    for tactic, techs in cov["by_tactic"].items():
+        tac = f'{escape(tactic)} <span class="muted">{attack.TACTICS.get(tactic, "")}</span>'
+        for t in techs:
+            out.append(f'<tr><td>{tac}</td><td><a href="{t["url"]}" target="_blank" '
+                       f'rel="noopener">{t["id"]} {escape(t["name"])}</a></td>'
+                       f'<td>{len(t["hosts"])}</td></tr>')
+            tac = ""      # label the tactic only on its first row
+    out.append('</tbody></table></section>')
+    return "".join(out)
+
+
 def _attack_path(hosts):
     steps = ap.build(hosts)
     if not steps:
@@ -805,6 +827,7 @@ def build_html(hosts: list[Host], out_path: str, *, title: str = "",
         _scoring_legend(),
         _findings_table(hosts),
         _attack_path(hosts),
+        _attack_coverage(hosts),
         _findings_detail(hosts),
         _progress_checklist(hosts, tracking),
         _hosts_table(hosts),
