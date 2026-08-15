@@ -99,6 +99,22 @@ def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration R
         lines.append("_No high/critical findings from automated scripts._")
     lines.append("")
 
+    # MITRE ATT&CK coverage - techniques the findings map to, along the kill chain.
+    from . import attack
+    cov = attack.coverage(hosts)
+    if cov["by_tactic"]:
+        lines += ["## MITRE ATT&CK coverage", "",
+                  f"{cov['technique_count']} technique(s) across "
+                  f"{cov['tactic_count']} tactic(s).", "",
+                  "| Tactic | Technique | Hosts |", "| --- | --- | --- |"]
+        for tactic, techs in cov["by_tactic"].items():
+            tac = f"{tactic} ({attack.TACTICS.get(tactic, '')})"
+            for t in techs:
+                lines.append(f"| {tac} | [{t['id']} {t['name']}]({t['url']}) "
+                             f"| {len(t['hosts'])} |")
+                tac = ""      # only label the tactic on its first row
+        lines.append("")
+
     # Per-host checklist.
     lines += ["## Hosts checklist", ""]
     for h in sorted(hosts, key=lambda x: _ip_key(x.ip)):
