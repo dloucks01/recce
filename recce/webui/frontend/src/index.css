@@ -253,3 +253,48 @@ main { padding: 18px 20px 40px; max-width: 1100px; }
 .tbl tr.detail-row:hover { background: var(--surface2); }
 .tbl tr.detail-row .dv-detail { border: 0; padding: 0; background: transparent; }
 .tbl tr.detail-row .dv-output { max-height: 200px; }
+
+/* ---- Act view (the action plan) ---- */
+.actview { display: flex; flex-direction: column; gap: 16px; }
+.actview .top-actions { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.tier-label { text-transform: capitalize; }
+.actcard { border: 1px solid var(--line); border-left: 3px solid var(--faint); border-radius: 10px; padding: 11px 13px; margin-top: 10px; background: var(--surface2); }
+.actcard.tier-0 { border-left-color: var(--ok); }      /* auto / read-only */
+.actcard.tier-1 { border-left-color: var(--accent); }  /* ready */
+.actcard.tier-2 { border-left-color: var(--med); }     /* blocked */
+.actcard.tier-3 { border-left-color: var(--faint); }   /* lead */
+.top-actions .actcard { background: color-mix(in srgb, var(--accent) 7%, var(--surface2)); }
+.actcard-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.actcard-h .arch { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.actcard-h .acttitle { font-weight: 700; color: var(--text); }
+.actcard-h .actscore { margin-left: auto; font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--accent); background: var(--ground); padding: 2px 9px; border-radius: 10px; }
+.actyield { font-size: 13px; color: var(--muted); margin: 5px 0 8px; }
+.actcmd { display: flex; align-items: center; gap: 8px; background: var(--ground); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; overflow-x: auto; }
+.actcmd code { font-family: var(--mono); font-size: 12px; color: var(--text); white-space: pre; }
+.copy { margin-left: auto; flex: none; border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 7px; cursor: pointer; }
+.copy:hover { border-color: var(--accent); color: var(--text); }
+.acttags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+.acttags .tag { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--muted); background: var(--ground); border: 1px solid var(--line); padding: 2px 8px; border-radius: 7px; text-decoration: none; }
+.acttags .tag.atk { color: var(--kev); border-color: color-mix(in srgb, var(--kev) 35%, var(--line)); }
+.acttags .tag.warn { color: var(--high); border-color: color-mix(in srgb, var(--high) 40%, var(--line)); }
+.acttags .tag.safety.readonly { color: var(--ok); }
+.acttags .tag.safety.intrusive { color: var(--crit); }
+/* ATT&CK coverage grid */
+.atkgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin-top: 10px; }
+.atktac { border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; background: var(--surface2); }
+.atktac-h { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+.atktech { display: block; font-family: var(--mono); font-size: 11.5px; color: var(--text); text-decoration: none; padding: 2px 0; }
+.atktech:hover { color: var(--accent); }
+
+/* ---- Loot view (extracted credentials) ---- */
+.lootview { display: flex; flex-direction: column; gap: 16px; }
+.tablewrap { overflow-x: auto; }
+.loottable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+.loottable th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--faint); font-weight: 700; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.loottable td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.loottable .secret { white-space: nowrap; }
+.loottable .secretval { cursor: pointer; color: var(--text); letter-spacing: .02em; }
+.loottable .secretval:hover { color: var(--accent); }
+.loottable td.notes { color: var(--muted); font-size: 12px; max-width: 320px; }
+.loottable .tag { font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--ground); border: 1px solid var(--line); padding: 1px 7px; border-radius: 6px; }
+.empty { color: var(--muted); text-align: center; padding: 48px 20px; font-size: 14px; }

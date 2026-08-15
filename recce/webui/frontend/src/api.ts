@@ -92,6 +92,27 @@ export async function postScan(targets: string, profile: string): Promise<{ id: 
   return r.json();
 }
 
+// --- Act phase / Loot / ATT&CK ------------------------------------------------
+export type ActCard = {
+  archetype: string; title: string; target: string; command: string; yields: string;
+  safety: string; tier: number; score: number; count: number;
+  attack_id: string; attack_name: string; cwe: string; verify_first: boolean;
+  why: string; needs: string[];
+};
+export type ActPlan = { top: ActCard[]; tiers: { tier: number; label: string; cards: ActCard[] }[] };
+export type Credential = {
+  username: string; secret: string; kind: string; domain: string;
+  source: string; origin_ip: string; notes: string; label: string;
+};
+export type AttackTech = { id: string; name: string; url: string; hosts: string[] };
+export type AttackCoverage = {
+  technique_count: number; tactic_count: number;
+  tactics: { tactic: string; tactic_id: string; techniques: AttackTech[] }[];
+};
+export const getAct = () => getJSON<ActPlan>("/api/act");
+export const getCredentials = () => getJSON<Credential[]>("/api/credentials");
+export const getAttack = () => getJSON<AttackCoverage>("/api/attack");
+
 // weighted risk score for sorting hosts most-dangerous-first
 export function hostScore(f: Record<string, number>): number {
   return (f.critical || 0) * 1000 + (f.high || 0) * 100 + (f.medium || 0) * 10 + (f.low || 0);

@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Finding, Host, Overview, VulnDetail, SEVS, SEV_ALL, hostScore, sevTotal, getHost,
+  ActPlan, ActCard, Credential, AttackCoverage, getAct, getCredentials, getAttack,
 } from "./api";
 import { Stat, SevTag, SevBar, NoteCell, Chips, useBounded } from "./ui";
 import { FindingDetail } from "./FindingDetail";
@@ -384,4 +385,146 @@ export function Targets(
 
 function Step({ on, label, cls }: { on: boolean; label: string; cls?: string }) {
   return <span className={"step" + (on ? " on" : "") + (on && cls ? " " + cls : "")} title={on ? `${label} done` : `${label} pending`}>{label}</span>;
+}
+
+/* ----------------------------------- Act ----------------------------------- */
+// "I found things — what do I DO?" The ranked, guided action plan, so the UI
+// carries the operator from findings to next moves instead of stopping at a list.
+
+const ARCH_ICON: Record<string, string> = {
+  loot: "🔓", crack: "🔑", spray: "💧", exploit: "💥", escalate: "⬆️",
+  pivot: "↪️", "ad-path": "👑", "default-cred": "🔐",
+};
+
+function ActCardRow({ c, nav }: { c: ActCard; nav: Nav }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => navigator.clipboard?.writeText(c.command).then(() => {
+    setCopied(true); setTimeout(() => setCopied(false), 1200);
+  });
+  const host = c.target && c.target !== "engagement" ? c.target.split(":")[0] : "";
+  return (
+    <div className={"actcard tier-" + c.tier}>
+      <div className="actcard-h">
+        <span className="arch">{ARCH_ICON[c.archetype] || "•"} {c.archetype}</span>
+        <span className="acttitle">{c.title}{c.count > 1 ? ` ·+${c.count - 1}` : ""}</span>
+        {host && <span className="mono host-link" onClick={() => nav.openHost(host)} title="host detail">{c.target}</span>}
+        <span className="actscore" title="impact × confidence × leverage">{c.score}</span>
+      </div>
+      <div className="actyield">→ {c.yields}
+        {c.verify_first && <span className="tag warn"> candidate — verify</span>}
+        {c.needs.length > 0 && <span className="muted"> · needs: {c.needs.join(", ")}</span>}
+      </div>
+      <div className="actcmd"><code>{c.command}</code>
+        <button className="copy" onClick={copy}>{copied ? "✓ copied" : "copy"}</button>
+      </div>
+      <div className="acttags">
+        {c.attack_id && <a className="tag atk" target="_blank" rel="noopener"
+          href={`https://attack.mitre.org/techniques/${c.attack_id.replace(".", "/")}/`}>ATT&CK {c.attack_id}</a>}
+        {c.cwe && <span className="tag">{c.cwe}</span>}
+        <span className={"tag safety " + c.safety.replace(/[^a-z]/g, "")}>{c.safety}</span>
+      </div>
+    </div>
+  );
+}
+
+export function Act({ nav }: { nav: Nav }) {
+  const [plan, setPlan] = useState<ActPlan | null>(null);
+  const [atk, setAtk] = useState<AttackCoverage | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    getAct().then(setPlan).catch((e) => setErr(String(e)));
+    getAttack().then(setAtk).catch(() => {});
+  }, []);
+  if (err) return <div className="err">{err}</div>;
+  if (!plan) return <div className="loading">Building the action plan…</div>;
+  if (plan.top.length === 0)
+    return <div className="empty">Nothing actionable yet — run a scan, then the deep modules, and the plan builds itself.</div>;
+  return (
+    <div className="actview">
+      <section className="panel top-actions">
+        <div className="panel-h"><h3>★ Top priorities</h3><span className="muted">highest impact you can act on now</span></div>
+        {plan.top.map((c, i) => <ActCardRow key={i} c={c} nav={nav} />)}
+      </section>
+      {plan.tiers.map((t) => (
+        <section className="panel" key={t.tier}>
+          <div className="panel-h"><h3 className="tier-label">{t.label}</h3><span className="muted">{t.cards.length}</span></div>
+          {t.cards.map((c, i) => <ActCardRow key={i} c={c} nav={nav} />)}
+        </section>
+      ))}
+      {atk && atk.tactics.length > 0 && (
+        <section className="panel">
+          <div className="panel-h"><h3>MITRE ATT&CK coverage</h3>
+            <span className="muted">{atk.technique_count} techniques · {atk.tactic_count} tactics</span></div>
+          <div className="atkgrid">
+            {atk.tactics.map((tac) => (
+              <div className="atktac" key={tac.tactic}>
+                <div className="atktac-h">{tac.tactic} <span className="muted">{tac.tactic_id}</span></div>
+                {tac.techniques.map((te) => (
+                  <a className="atktech" key={te.id} href={te.url} target="_blank" rel="noopener"
+                     title={`${te.hosts.length} host(s)`}>{te.id} {te.name} <span className="muted">×{te.hosts.length}</span></a>
+                ))}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/* ----------------------------------- Loot ---------------------------------- */
+// "What did we extract?" The credential store — looted (web/db/share) + captured
+// (kerberoast/gpp/secretsdump) — which the UI never surfaced before.
+
+const KIND_LABEL: Record<string, string> = {
+  password: "password", nthash: "NT hash", hash: "hash", blank: "blank",
+};
+
+export function Loot() {
+  const [creds, setCreds] = useState<Credential[] | null>(null);
+  const [reveal, setReveal] = useState<Set<number>>(new Set());
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { getCredentials().then(setCreds).catch((e) => setErr(String(e))); }, []);
+  if (err) return <div className="err">{err}</div>;
+  if (!creds) return <div className="loading">Loading loot…</div>;
+  if (creds.length === 0)
+    return <div className="empty">No credentials extracted yet. Loot lands here after the loot-bearing modules run — web .git/.env, DB trust/empty-password, SMB shares, kerberoast, GPP.</div>;
+  const bySource: Record<string, number> = {};
+  creds.forEach((c) => { bySource[c.source] = (bySource[c.source] || 0) + 1; });
+  const toggle = (i: number) => setReveal((s) => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n; });
+  return (
+    <div className="lootview">
+      <section className="stats">
+        <Stat k="credentials" v={String(creds.length)} />
+        <Stat k="sources" v={String(Object.keys(bySource).length)} />
+        <Stat k="plaintext" v={String(creds.filter((c) => c.kind === "password").length)} />
+        <Stat k="hashes" v={String(creds.filter((c) => c.kind === "nthash" || c.kind === "hash").length)} />
+      </section>
+      <section className="panel">
+        <div className="panel-h"><h3>Extracted credentials</h3>
+          <span className="muted">what recce looted / captured — spray with <code>recce creds --plan</code></span></div>
+        <div className="tablewrap">
+          <table className="loottable">
+            <thead><tr><th>Account</th><th>Secret</th><th>Kind</th><th>Source</th><th>From</th><th>Notes</th></tr></thead>
+            <tbody>
+              {creds.map((c, i) => (
+                <tr key={i}>
+                  <td className="mono">{c.label}</td>
+                  <td className="mono secret">
+                    <span className="secretval" onClick={() => toggle(i)} title="click to reveal / hide">
+                      {reveal.has(i) ? (c.secret || "—") : "•".repeat(Math.min(12, (c.secret || "").length || 4))}</span>
+                    {c.secret && <button className="copy" onClick={() => navigator.clipboard?.writeText(c.secret)} title="copy secret">copy</button>}
+                  </td>
+                  <td><span className="tag">{KIND_LABEL[c.kind] || c.kind}</span></td>
+                  <td className="mono">{c.source}</td>
+                  <td className="mono">{c.origin_ip}</td>
+                  <td className="muted notes">{c.notes}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
 }
