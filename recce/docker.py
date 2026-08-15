@@ -271,14 +271,21 @@ def findings_to_vulns(fs: list[dict]) -> dict:
     return _f2v(fs, "docker", 2375)
 
 
-def analyze(hosts: list[Host], active: bool = True) -> dict:
+def analyze(hosts: list[Host], active: bool = True, budget: float | None = None,
+            progress=None) -> dict:
     """Full Docker analysis. Returns {targets, findings, runbooks, stats}."""
+    from . import svcprobe
     targets = docker_targets(hosts)
     probes: dict = {}
+    state: dict = {}
     if active:
-        for t in targets:
+        # Route through iter_probe like every other deep module, so a Ctrl-C / budget /
+        # one hostile endpoint stops cleanly with partials instead of losing the whole
+        # docker phase (it was a bare for-loop with no interrupt or crash safety).
+        for t, pr in svcprobe.iter_probe(
+                targets, lambda t: probe(t["ip"], t["port"]),
+                budget=budget, progress=progress, state=state):
             t["probed"] = True
-            pr = probe(t["ip"], t["port"])
             if pr:
                 probes[(t["ip"], t["port"])] = pr
                 t["exposed"] = pr.get("exposed", False)
@@ -296,4 +303,5 @@ def analyze(hosts: list[Host], active: bool = True) -> dict:
                 for t in targets]
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
-            "stats": {"targets": len(targets), "findings": len(fs)}}
+            "stats": {"targets": len(targets), "findings": len(fs),
+                      "stopped": state.get("stopped")}}

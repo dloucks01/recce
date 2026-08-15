@@ -2645,6 +2645,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("searchsploit", False, "offline exploit mapping (Exploits sheet)"),
         ("ldap", False, "credentialed AD LDAP enum (ldapsearch or the ldap3 package)"),
         ("netexec", False, "credentialed SMB/AD enum (credenum phase)"),
+        ("smbclient", False, "SMB share spider + writable-share proof (cmd_smb --spider/--prove-write)"),
         ("ssh", False, "credentialed Linux local checks (credenum phase)"),
         ("browser", False, "auto web screenshots in write-ups (firefox/chromium)"),
         ("proxychains4", False, "pivot support: route the run through a proxy (--proxy)"),
@@ -2682,6 +2683,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from . import credenum as _ce
     if _ce.impacket_tool("GetUserSPNs"):
         print(f"  {'impacket':<15} {'OK  ':<20} Kerberoast / AS-REP / secretsdump")
+    # The MSSQL deep enum (linked servers, data-mine, xp_cmdshell) needs the
+    # impacket-mssqlclient CLI specifically - it silently no-ops without it, so surface
+    # it explicitly (GetUserSPNs being present does not imply mssqlclient is).
+    from . import mssql as _mssql
+    _msc = "OK  " if _mssql.mssqlclient_tool() else "-   (deep MSSQL enum disabled)"
+    print(f"  {'mssqlclient':<15} {_msc:<20} MSSQL deep enum (impacket-mssqlclient)")
     import importlib.util as _ilu
     print("\nBundled Python libraries (baked into the airgap package)")
     for lib, note in (
@@ -3672,6 +3679,10 @@ def cmd_mssql(args: argparse.Namespace) -> int:
     # Deep enumeration via impacket-mssqlclient: run the queries, detect the actual
     # escalation chain per instance, and enrich the findings + runbook from live data.
     ran_impacket = False
+    if creds and not args.no_run and not mssql.mssqlclient_tool():
+        print("      [!] impacket-mssqlclient not installed - MSSQL deep enumeration "
+              "(linked servers, data-mine, xp_cmdshell, write-proof) SKIPPED; the sheet "
+              "shows commands only. `recce doctor` flags this; install impacket to run it.")
     if creds and not args.no_run and mssql.mssqlclient_tool():
         for t in tgts:
             if t.get("access") is False:            # nxc already said the creds fail
@@ -3922,6 +3933,15 @@ def cmd_smb(args: argparse.Namespace) -> int:
         if t.get("smbv1"):
             bits.append("SMBv1 ENABLED")
         print(f"      {t['ip']}:{t['port']}  " + "  ".join(b for b in bits if b))
+
+    # A missing smbclient makes --spider / --prove-write return "nothing found"
+    # silently (they no-op without the tool) - warn ONCE up front so an empty result
+    # isn't mistaken for a clean host. `recce doctor` also flags it.
+    if (getattr(args, "spider", False) or getattr(args, "prove_write", False)) \
+            and not smb.smbclient_tool():
+        print("[!] smbclient not installed - --spider and --prove-write will be SKIPPED "
+              "(an empty result here means 'not checked', not 'nothing there'). "
+              "Install smbclient to run them.")
 
     # Record the directly-observed signing posture on each host so the prove engine
     # (_v_smb_signing) can adjudicate a relay finding as CONFIRMED, not a guess.
@@ -5568,8 +5588,9 @@ def _add_discovery(pp) -> None:
                         "service on an unusual port; recce prints a warning)")
     g.add_argument("--min-rate", type=int, help="nmap --min-rate override")
     g.add_argument("--max-retries", type=int, metavar="N",
-                   help="nmap --max-retries on the port sweep (default 3; raise for "
-                        "lossy links, lower for speed on clean ones)")
+                   help="nmap --max-retries on the port sweep. Floored at nmap's own -T "
+                        "default (6 at -T4, 10 at -T3) so a lower value can't silently "
+                        "drop open ports; raise it for very lossy links.")
     g.add_argument("--no-verify", action="store_true",
                    help="skip the confirmation re-scan of hosts that come back with "
                         "0 open ports (faster; may trust a missed sweep)")
