@@ -5,9 +5,21 @@ throwaway data dirs and drives the REAL probes against them - positive (unauth) 
 negative (password required) - so the wire protocol is exercised end to end, not
 mocked. Skips cleanly when the server binaries aren't installed.
 
-Auto-marked `slow` (see tests/conftest.py); run with `pytest -m slow`.
+Heavily gated: it stands up real database servers (pg_ctl / mariadbd), which is
+environment-sensitive and can stall, so it runs ONLY on explicit opt-in with
+RECCE_DB_IT=1 (and when the server binaries are installed). The fake-server tests in
+tests/test_db_modules.py validate the probe protocol on every run; this tier is the
+extra real-server confirmation:
+
+    RECCE_DB_IT=1 pytest tests/test_db_integration.py
+
+Auto-marked `slow` (see tests/conftest.py).
 """
 from __future__ import annotations
+
+import os as _os
+
+_DB_IT = _os.environ.get("RECCE_DB_IT") == "1"
 
 import glob
 import os
@@ -47,7 +59,7 @@ def _pg_bindir():
     return None
 
 
-@unittest.skipUnless(_pg_bindir(), "PostgreSQL server binaries not installed")
+@unittest.skipUnless(_DB_IT and _pg_bindir(), "set RECCE_DB_IT=1 + PostgreSQL binaries")
 class PostgresRealServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -110,7 +122,7 @@ def _mariadb_tools():
     return None
 
 
-@unittest.skipUnless(_mariadb_tools(), "MariaDB/MySQL server binaries not installed")
+@unittest.skipUnless(_DB_IT and _mariadb_tools(), "set RECCE_DB_IT=1 + MariaDB binaries")
 class MysqlRealServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
