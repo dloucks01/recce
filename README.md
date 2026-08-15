@@ -27,6 +27,23 @@ paths from your account to Domain Admin.
 > opt-in/flag-gated, and your responsibilities as an operator are all documented
 > in **[SECURITY.md](SECURITY.md)** — read it before your first engagement.
 
+## Documentation
+
+| Doc | What it covers |
+| --- | --- |
+| [QUICKSTART.md](QUICKSTART.md) | Zero to a filled-in workbook in five commands |
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Fixes for the common engagement snags |
+| [SECURITY.md](SECURITY.md) | Safety model, authorized-use, opt-in intrusive actions |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The QoD / honesty model and the staged design |
+| [docs/ACT-PHASE.md](docs/ACT-PHASE.md) | The Act phase: findings → a ranked, guided action plan |
+| [docs/DETECTION-RULES.md](docs/DETECTION-RULES.md) | The `--rules` JSON format |
+| [docs/](docs/) | Design notes: active verification, proofs/honesty, proxy/pivot, workflow |
+
+Handy commands beyond the scan pipeline: **`recce run`** (the one-command
+discover→enum→vulns→report), **`recce act`** (found things → what to do next, ranked),
+**`recce attack`** (MITRE ATT&CK coverage), **`recce import`** (fold in a manual nmap
+scan), and **`recce verify`** / **`recce next`**.
+
 ## Why this over raw nmap / AutoRecon?
 
 Existing tools scan well but leave you with per-host output files. `recce`
