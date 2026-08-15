@@ -3288,8 +3288,15 @@ def cmd_import(args: argparse.Namespace) -> int:
     use_ss = getattr(args, "searchsploit", False) and exploits.available()
     enum_only = getattr(args, "enum_only", False)
     n_hosts = n_ports = n_findings = n_scanned = 0
+    # Net-new tracking: exactly which open ports this scan adds that recce did NOT
+    # already have. This is the point of the manual-nmap fallback - "did my manual
+    # nmap catch ports recce's own sweep missed?" - so we report it explicitly.
+    new_host_ips: list[str] = []
+    added_by_ip: dict[str, list[int]] = {}
     for ip, group in by_ip.items():
         subnet = ".".join(ip.split(".")[:3]) + ".0/24" if ip.count(".") == 3 else ""
+        prior = store.get_host(ip)                 # pre-merge snapshot, for the diff
+        prior_open = {(p.protocol, p.portid) for p in prior.open_ports} if prior else set()
         host = _fold_host(ip, group, {ip: subnet})
         host.enumerated = True
         if not enum_only:
@@ -3302,6 +3309,12 @@ def cmd_import(args: argparse.Namespace) -> int:
         vulndb.assess_host_inplace(host)          # offline version->CVE/CWE findings
         if use_ss:
             exploits.enrich_hosts([host])
+        added = [p.portid for p in host.open_ports
+                 if (p.protocol, p.portid) not in prior_open]
+        if prior is None:
+            new_host_ips.append(ip)
+        if added:
+            added_by_ip[ip] = sorted(added)
         store.upsert_host(host)                    # merges with existing (tracking kept)
         n_hosts += 1
         n_ports += len(host.open_ports)
@@ -3313,10 +3326,28 @@ def cmd_import(args: argparse.Namespace) -> int:
     print(f"\n[+] Imported {n_hosts} host(s) / {n_ports} open port(s) from "
           f"{len(files)} file(s): {n_findings} offline finding(s), "
           f"{n_scanned} port(s) marked vuln-scanned (had NSE output).")
+    # Surface exactly what the imported scan ADDED over what recce already had - the
+    # whole reason for the manual-nmap fallback.
+    total_added = sum(len(v) for v in added_by_ip.values())
+    if total_added:
+        print(f"[+] This scan added {total_added} open port(s) recce did not already "
+              f"have, across {len(added_by_ip)} host(s)"
+              + (f" ({len(new_host_ips)} brand-new host(s))" if new_host_ips else "")
+              + ":")
+        for ip in sorted(added_by_ip, key=_ip_key)[:20]:
+            tag = "  (NEW host)" if ip in new_host_ips else ""
+            ports = added_by_ip[ip]
+            shown = ", ".join(str(p) for p in ports[:15]) + ("  …" if len(ports) > 15 else "")
+            print(f"      {ip}{tag}: {shown}")
+        if len(added_by_ip) > 20:
+            print(f"      … and {len(added_by_ip) - 20} more host(s)")
+    else:
+        print("[i] No new open ports vs. what recce already had (re-import is a safe "
+              "no-op - hosts/ports/findings are merged by key, never duplicated).")
     print("    Checklist 'Enumerated'"
           + ("" if enum_only else " + 'Vuln-scan' (where scripts ran)")
-          + " are ticked. Run `vulns` to add recce's deeper detection, or "
-          "`status` to see what's left.")
+          + " are ticked. Run `vulns` (recce's deeper detection on these ports), the "
+          "service deep-scans, or `status` to see what's left.")
     return 0
 
 
@@ -5991,8 +6022,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ing.set_defaults(func=cmd_ingest)
 
     # Import an existing nmap scan (XML / grepable) -> workbook, no scanning.
-    imp = sub.add_parser("import",
-                         help="import an existing nmap scan (-oX / -oG / -oN) -> sheet")
+    imp = sub.add_parser("import", aliases=["import-nmap"],
+                         help="import a manual/external nmap scan (-oX / -oG / -oN) into "
+                              "the engagement - the fallback when recce's own sweep "
+                              "missed ports",
+                         description="Ingest an nmap scan you ran by hand (or any external "
+                         "nmap) and merge it into the engagement - no re-scanning. Hosts, "
+                         "ports, and findings are merged by key, so it is safe to run "
+                         "repeatedly and safe to overlap recce's own results: nothing is "
+                         "duplicated. It reports exactly which open ports the scan ADDED "
+                         "over what recce already had. Best output is `nmap -p- -sV -oX "
+                         "scan.xml <target>`; grepable (-oG) and normal (-oN .nmap) work "
+                         "too. After importing, run `vulns` / the service deep-scans to "
+                         "enumerate the newly-added ports.")
     imp.add_argument("files", nargs="+",
                      help="nmap .xml / .gnmap / .nmap file(s), a directory, or a glob")
     _add_io(imp, title=False)
