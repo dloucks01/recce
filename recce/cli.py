@@ -2244,6 +2244,13 @@ def cmd_web(args: argparse.Namespace) -> int:
                 tech = f"  [{', '.join(pr['tech'])}]" if pr["tech"] else ""
                 wv = sum(1 for v in h.vulns if v.port == pr["port"] and v.source == "web")
                 total_findings += wv
+                looted = 0
+                for c in pr.get("credentials", []):
+                    if store.add_credential(c):
+                        looted += 1
+                if looted:
+                    print(f"    [+] looted {looted} cleartext credential(s) from "
+                          f"{pr['url']} -> credential store (spray with `recce creds`)")
                 print(f"    {pr['url']:<28} {pr.get('server', '') or '?':<20}"
                       f"{tech}  ({wv} finding(s))")
     if stopped_budget:
