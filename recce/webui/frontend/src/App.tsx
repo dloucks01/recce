@@ -14,6 +14,7 @@ const POLL_MS = 20000; // constantly-updating analysis: re-pull on a slow heartb
 // sit under the caret.
 const EXPORTS: [string, string][] = [
   ["xlsx", "Excel workbook"], ["html", "HTML report"],
+  ["docx", "Findings write-ups (Word)"],
   ["csv", "Services CSV"], ["md", "Markdown"],
 ];
 function Export({ onError }: { onError: (m: string) => void }) {
