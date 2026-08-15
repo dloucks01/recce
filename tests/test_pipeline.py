@@ -911,7 +911,10 @@ class WriteupTest(unittest.TestCase):
         used = set()
         for fn in glob.glob(os.path.join(os.path.dirname(os.path.dirname(
                 os.path.abspath(__file__))), "recce", "*.py")):
-            if fn.endswith("report_docx.py"):
+            # report_docx.py and cwe.py are the CWE naming/typing tables themselves - they
+            # LIST CWEs for reference, they don't EMIT them as findings, so they aren't
+            # bound by the "every emitted CWE must be typed here" guarantee.
+            if fn.endswith(("report_docx.py", "cwe.py")):
                 continue
             with open(fn) as fh:
                 used |= set(re.findall(r"CWE-\d+", fh.read()))
