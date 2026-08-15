@@ -157,6 +157,71 @@ def test_version_writeback_replaces_open_ended_nmap_banner(tmp_path):
         st.close()
 
 
+class _FakeSock:
+    """A socket that replays scripted bytes - drives the loot result-set parsers."""
+    def __init__(self, blob: bytes):
+        self.buf = blob
+        self.sent: list = []
+
+    def sendall(self, b):
+        self.sent.append(b)
+
+    def recv(self, n):
+        d, self.buf = self.buf[:n], self.buf[n:]
+        return d
+
+    def settimeout(self, *a):
+        pass
+
+    def close(self):
+        pass
+
+
+def test_mysql_query_parses_a_result_set():
+    from recce import mysql
+
+    def pkt(payload, seq):
+        return struct.pack("<I", len(payload))[:3] + bytes([seq]) + payload
+
+    def lenstr(s):
+        b = s.encode()
+        return bytes([len(b)]) + b
+
+    eof = b"\xfe\x00\x00\x02\x00"
+    blob = (pkt(b"\x02", 1)                       # 2 columns
+            + pkt(b"\x03def", 2) + pkt(b"\x03def", 3)          # column defs (skipped)
+            + pkt(eof, 4)                          # EOF after columns
+            + pkt(lenstr("root") + lenstr("*ABC123"), 5)       # a row
+            + pkt(lenstr("app") + b"\xfb", 6)      # a row with a NULL hash
+            + pkt(eof, 7))                         # trailing EOF
+    rows = mysql._query(_FakeSock(blob), "SELECT user, authentication_string FROM mysql.user")
+    assert rows == [["root", "*ABC123"], ["app", None]]
+
+
+def test_postgres_simple_query_parses_datarows():
+    from recce import postgres
+
+    def msg(t, body):
+        return t + struct.pack("!I", len(body) + 4) + body
+
+    def datarow(vals):
+        b = struct.pack("!H", len(vals))
+        for v in vals:
+            if v is None:
+                b += struct.pack("!i", -1)
+            else:
+                bb = v.encode()
+                b += struct.pack("!i", len(bb)) + bb
+        return msg(b"D", b)
+
+    blob = (datarow(["postgres", "SCRAM-SHA-256$..."])
+            + datarow(["app_svc", None])
+            + msg(b"C", b"SELECT 2\x00")
+            + msg(b"Z", b"I"))                     # ReadyForQuery -> done
+    rows = postgres._simple_query(_FakeSock(blob), "SELECT usename, passwd FROM pg_shadow")
+    assert rows == [["postgres", "SCRAM-SHA-256$..."], ["app_svc", None]]
+
+
 def test_is_predicates_respect_open_state():
     assert mysql.is_mysql(Port(portid=3306, service="mysql", state="open"))
     assert not mysql.is_mysql(Port(portid=3306, service="mysql", state="closed"))
