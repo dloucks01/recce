@@ -51,6 +51,18 @@ if [ "$VERIFY" = 1 ]; then
   fi
 fi
 
+# Build the web workbench UI into recce/webui/static so the burn package SHIPS it.
+# (build_bundle.sh does this for the airgap bundle; the source burn package needs it
+# too, else `recce serve` has no UI.) node_modules are local, so this works offline.
+if [ -d recce/webui/frontend ] && command -v npm >/dev/null 2>&1; then
+  echo "[*] Building the web workbench UI ..."
+  ( cd recce/webui/frontend && npm install --silent && npm run build --silent ) \
+    && echo "[+] web UI built into recce/webui/static" \
+    || echo "[!] web UI build failed - the burn package will ship without the workbench UI"
+elif [ ! -f recce/webui/static/index.html ]; then
+  echo "[!] npm/frontend not found and no prebuilt UI - burn package ships without the workbench UI"
+fi
+
 echo "[*] Staging $NAME ..."
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
@@ -69,6 +81,10 @@ find "$STAGE" -type d -name '*.egg-info' -prune -exec rm -rf {} + 2>/dev/null ||
 find "$STAGE" \( -name '*.pyc' -o -name '*.sqlite' -o -name '*.xlsx' -o -name '*.rdb' \
      -o -name '.DS_Store' \) -delete 2>/dev/null || true
 rm -rf "$STAGE/engagement" "$STAGE/demo_engagement" "$STAGE/dist" "$STAGE/.git" 2>/dev/null || true
+# The frontend SOURCE + node_modules are build inputs, not runtime - the burn package
+# ships the built SPA (recce/webui/static) only. Dropping node_modules also avoids
+# bloating the archive by hundreds of MB.
+rm -rf "$STAGE/recce/webui/frontend" 2>/dev/null || true
 # Ensure the shell tools stay executable after copy.
 chmod +x "$STAGE/bin/recce" "$STAGE/recce/local/"*.sh \
          "$STAGE/recce/scripts/"*.sh "$STAGE/recce/scripts/services/"*.sh \
