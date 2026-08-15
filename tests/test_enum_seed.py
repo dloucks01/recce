@@ -51,6 +51,14 @@ class EnumSeedTest(unittest.TestCase):
             udp_basic=False, udp_fallback=False, verify=True)
         self._orig = {name: getattr(scanner, name) for name in
                       ("full_port_scan", "enum_scan", "verify_port_scan")}
+        # The completeness union re-scan calls verify_port_scan for any LIVE host; default
+        # it to a no-op (finds nothing new) so these unit tests never hit real nmap. Tests
+        # that exercise the re-scan itself override it.
+        def _noop_verify(ip, out_xml, profile):
+            with open(out_xml, "w") as fh:
+                fh.write(_host_xml(ip, []))
+            return out_xml, None
+        scanner.verify_port_scan = _noop_verify
 
     def tearDown(self):
         for name, fn in self._orig.items():

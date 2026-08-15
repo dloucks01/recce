@@ -30,9 +30,11 @@ def test_no_profile_retries_below_nmaps_own_default():
         assert retries >= scanner._nmap_default_retries(timing), (name, retries, timing)
 
 
-def test_standard_default_has_no_min_rate_floor():
-    # the default is adaptive like manual nmap: no --min-rate floor to overspeed +
-    # drop SYNs to open ports; and it retries at nmap's -T4 default (6), not 3.
+def test_standard_default_has_no_min_rate_floor_and_retries_at_nmap_default():
+    # PROVEN: a --min-rate floor makes recce outpace a firewall's scan/rate-limit
+    # detection -> source throttled -> ports vanish (root -sS -Pn behind a firewall).
+    # The default must therefore have NO floor and retry at nmap's own -T4 default (6),
+    # never the old too-low 3.
     cmd = _sweep(scanner.PROFILES["standard"])
     assert "--min-rate" not in cmd
     assert cmd[cmd.index("--max-retries") + 1] == "6"
