@@ -120,6 +120,7 @@ _ARCHETYPE = {
     "escalate": _t("T1068", "Exploitation for Privilege Escalation", "Privilege Escalation"),
     "pivot": _t("T1090", "Proxy", "Command and Control"),
     "ad-path": _t("T1003.006", "OS Credential Dumping: DCSync", "Credential Access"),
+    "default-cred": _t("T1078.001", "Valid Accounts: Default Accounts", "Initial Access"),
 }
 
 # --- attackpath kill-chain stage -> tactic ---------------------------------------
