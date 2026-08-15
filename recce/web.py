@@ -204,6 +204,57 @@ def _leaked_secrets(body: str, limit: int = 8) -> list[str]:
     return out
 
 
+# --- plaintext credential loot from exposed config/secret files ----------------
+# Unlike a DB hash, these are cleartext and directly sprayable, so we lift them into
+# the credential store (via the profile) to feed the spray chain. Read-only: the file
+# was already fetched for the finding; we just parse what leaked.
+_URL_CRED_RE = re.compile(r"://([^:/@\s]+):([^@/\s]+)@")          # scheme://user:pass@host
+_ENV_USER_RE = re.compile(r"(?im)^\s*(?:export\s+)?(?:DB_USER(?:NAME)?|DATABASE_USER|"
+                          r"MYSQL_USER|POSTGRES_USER|PG_USER|REDIS_USER|"
+                          r"ADMIN_USER)\s*[:=]\s*[\"']?([^\s\"']+)")
+_ENV_PASS_RE = re.compile(r"(?im)^\s*(?:export\s+)?(?:DB_PASS(?:WORD)?|DATABASE_PASSWORD|"
+                          r"MYSQL_PASSWORD|POSTGRES_PASSWORD|PG_PASSWORD|REDIS_PASSWORD|"
+                          r"ADMIN_PASS(?:WORD)?)\s*[:=]\s*[\"']?([^\s\"']+)")
+
+
+def _web_credentials(sid: str, body: str, ip: str, port: int):
+    """Extract cleartext, sprayable credentials from an exposed secret-bearing file.
+    Returns a list of Credential objects (empty when nothing usable leaked)."""
+    from .models import Credential
+    out: list = []
+    seen: set = set()
+
+    def _add(user: str, secret: str, kind: str, note: str) -> None:
+        user, secret = (user or "").strip(), (secret or "").strip()
+        if not secret or secret in ("null", "changeme", "your_password_here"):
+            return
+        k = (user.lower(), secret)
+        if k in seen:
+            return
+        seen.add(k)
+        out.append(Credential(username=user, secret=secret, kind=kind,
+                              source="web-loot", origin_ip=ip, notes=note))
+
+    if sid == "web-gitconfig":
+        # remote URL of the form https://user:token@host/repo.git
+        for u, pw in _URL_CRED_RE.findall(body):
+            _add(u, pw, "password",
+                 f"embedded in .git/config remote URL on {ip}:{port} (sprayable)")
+    elif sid == "web-dotenv":
+        users = _ENV_USER_RE.findall(body)
+        passes = _ENV_PASS_RE.findall(body)
+        user = users[0] if users else ""
+        for pw in passes:
+            _add(user, pw, "password", f"leaked in exposed .env on {ip}:{port}")
+    elif sid == "web-aws":
+        akid = re.search(r"(?im)^\s*aws_access_key_id\s*=\s*(\S+)", body)
+        secret = re.search(r"(?im)^\s*aws_secret_access_key\s*=\s*(\S+)", body)
+        if akid and secret:
+            _add(akid.group(1), secret.group(1), "password",
+                 f"AWS key pair leaked in .aws/credentials on {ip}:{port}")
+    return out
+
+
 # --- Spring Boot Actuator deep-dive --------------------------------------------
 # Only probed when the base /actuator responds, so it costs nothing elsewhere.
 _ACTUATOR_SUB = [
@@ -1381,6 +1432,7 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
             break
     # High-signal exposure paths.
     seen_sid: set[str] = set()
+    looted_creds: list = []
     for path, sev, sid, title, cwes, fix, confirm in _PATHS:
         r = _fetch(ip, port, "/" + path, auth=auth)
         if not r:
@@ -1398,6 +1450,12 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                     sec = _leaked_secrets(bd)
                     if sec:
                         detail += "  leaked: " + "; ".join(sec)
+                creds_here = _web_credentials(sid, bd, ip, getattr(port, "portid", port))
+                if creds_here:
+                    looted_creds.extend(creds_here)
+                    detail += (f"  CAPTURED {len(creds_here)} cleartext credential(s) "
+                               "-> credential store (sprayable): "
+                               + ", ".join(c.label for c in creds_here))
                 findings.append(_mk(ip, port, sid, sev, title, cwes, detail, fix))
         except Exception:  # noqa: BLE001 - a bad body never breaks the sweep
             continue
@@ -1414,6 +1472,7 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                                               "/api/whoami", "/api/overview"]))
         findings.extend(_form_login_defaults(ip, port, base, fp["tech"]))
     profile["findings"] = len(findings)
+    profile["credentials"] = looted_creds
     return profile, findings
 
 

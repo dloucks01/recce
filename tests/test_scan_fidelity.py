@@ -287,9 +287,12 @@ class PortSweepRecoveryFidelityTest(unittest.TestCase):
         host = self._run_worker("10.0.0.7", fps, verify=verify, verify_all=True)
         self.assertEqual(sorted(p.portid for p in host.open_ports), [22, 80, 443])
 
-    def test_few_port_host_not_reverified_on_plain_discovery_scan(self):
-        # Perf guard: a normal discovery scan of a plain 1-2 service host must NOT
-        # trigger the expensive congestion-adaptive re-verify.
+    def test_live_host_is_reverified_even_with_few_ports(self):
+        # Reliability contract (the firewall fix): EVERY live host - even a plain 1-2
+        # service one - gets a second, independent congestion-adaptive sweep, because a
+        # finite retry count can't guarantee a port dropped in the first pass is caught.
+        # The accepted trade-off is one extra pass per live host; the union is persisted,
+        # so a clean host's port set is unchanged.
         calls = {"verify": 0}
 
         def fps(ip, out_xml, profile):
@@ -302,7 +305,7 @@ class PortSweepRecoveryFidelityTest(unittest.TestCase):
             return out_xml, None
 
         host = self._run_worker("10.0.0.9", fps, verify=verify)   # verify_all=False
-        self.assertEqual(calls["verify"], 0)
+        self.assertEqual(calls["verify"], 1)             # re-verified once (the union pass)
         self.assertEqual([p.portid for p in host.open_ports], [80])
 
     def test_truncated_slow_host_retry_recovers_dropped_common_ports(self):
