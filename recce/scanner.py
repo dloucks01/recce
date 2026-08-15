@@ -136,7 +136,13 @@ PROFILES: dict[str, ScanProfile] = {
     # _enum_worker) - a port dropped in one pass is caught by the other. Speed is opt-in:
     # `quick`, `--top-ports`, `--min-rate`, `--fast`.
     "standard": ScanProfile(name="standard", min_rate=0),
-    "thorough": ScanProfile(name="thorough", min_rate=800, udp_top=100,
+    # NO --min-rate floor here either (min_rate=0): a floor forces nmap to send faster
+    # than a scan-detecting firewall tolerates, throttles the source, and drops open
+    # ports - the exact bug the standard profile was fixed for. "thorough" must not be
+    # MORE likely to miss ports behind a firewall than "standard" (an operator worried
+    # about coverage reaches for it first). Thoroughness comes from the wider UDP top-N,
+    # version-all, banner NSE, and longer host-timeout - not from a rate floor.
+    "thorough": ScanProfile(name="thorough", min_rate=0, udp_top=100,
                             extra_nse=["banner"], host_timeout=40,
                             version_all=True),
 }

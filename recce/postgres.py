@@ -135,9 +135,16 @@ def _simple_query(sock: socket.socket, sql: str) -> list[list]:
         if typ is None or typ == b"Z":          # ReadyForQuery -> query done
             break
         if typ == b"D":                          # DataRow
+            # Length-guard every read: a truncated/hostile response (RST mid-message, a
+            # non-Postgres service that faked the handshake) must degrade to the rows
+            # parsed so far, never raise struct.error out of loot() and abort the phase.
+            if len(body) < 2:
+                continue
             n = struct.unpack("!H", body[:2])[0]
             off, row = 2, []
             for _c in range(n):
+                if off + 4 > len(body):
+                    break
                 ln = struct.unpack("!i", body[off:off + 4])[0]
                 off += 4
                 if ln == -1:
@@ -175,7 +182,9 @@ def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres") 
             sock.sendall(b"X" + struct.pack("!I", 4))   # Terminate, politely
         except OSError:
             pass
-    except OSError:
+    except (OSError, struct.error, ValueError):
+        # never let a malformed loot response escape and abort the Postgres phase -
+        # the trust-auth finding (built later from the probe) must still be emitted.
         pass
     finally:
         try:

@@ -222,6 +222,26 @@ def test_postgres_simple_query_parses_datarows():
     assert rows == [["postgres", "SCRAM-SHA-256$..."], ["app_svc", None]]
 
 
+def test_postgres_simple_query_survives_truncated_datarow():
+    # A DataRow that claims 2 columns but whose body is cut short (RST mid-message, or
+    # a non-Postgres service that faked the handshake) must NOT raise struct.error out
+    # of _simple_query -> loot() -> analyze() and abort the whole Postgres phase (which
+    # would drop the critical trust-auth finding for every host). It degrades to the
+    # rows parsed so far.
+    from recce import postgres
+
+    def msg(t, body):
+        return t + struct.pack("!I", len(body) + 4) + body
+
+    good = struct.pack("!H", 1) + struct.pack("!i", 4) + b"prod"     # one clean row
+    truncated = struct.pack("!H", 2) + struct.pack("!i", 8) + b"abc"  # says 2 cols, cut off
+    blob = (msg(b"D", good)
+            + msg(b"D", truncated)
+            + msg(b"Z", b"I"))                     # ReadyForQuery -> done
+    rows = postgres._simple_query(_FakeSock(blob), "SELECT datname FROM pg_database")
+    assert rows[0] == ["prod"]                     # the clean row survived, no exception
+
+
 def test_is_predicates_respect_open_state():
     assert mysql.is_mysql(Port(portid=3306, service="mysql", state="open"))
     assert not mysql.is_mysql(Port(portid=3306, service="mysql", state="closed"))

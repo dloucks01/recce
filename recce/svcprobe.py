@@ -35,8 +35,11 @@ def iter_probe(targets, probe_one, *, budget=None, progress=None, state=None):
         state["total"]   = number of targets requested
 
     A KeyboardInterrupt during a probe stops the loop cleanly and yields whatever
-    completed before it. Exceptions raised by `progress` are swallowed (progress must
-    never break a scan).
+    completed before it. Any OTHER exception from a single probe (a hostile/broken
+    server response: struct.error, IndexError, UnicodeDecodeError, ...) is recorded in
+    state["errors"] and skipped - one bad target must never abort the whole sweep and
+    discard every host already probed. Exceptions raised by `progress` are swallowed
+    (progress must never break a scan).
     """
     st = state if state is not None else {}
     total = len(targets)
@@ -58,5 +61,9 @@ def iter_probe(targets, probe_one, *, budget=None, progress=None, state=None):
         except KeyboardInterrupt:
             st["stopped"] = "interrupt"
             return
+        except Exception as e:  # noqa: BLE001 - one hostile target never aborts the sweep
+            st.setdefault("errors", []).append((t, repr(e)))
+            st["done"] = i
+            continue
         st["done"] = i
         yield t, r
