@@ -5475,6 +5475,25 @@ def cmd_access(args: argparse.Namespace) -> int:
 
     if changed:
         _generate_reports(store, paths, store.get_meta("engagement") or args.title)
+
+    # --act: cap the pipeline with the Act phase - auto-run the read-only links (loot the
+    # flagged unauth services, refresh the spray plan) and print the ranked action plan.
+    if getattr(args, "act", False):
+        from . import act
+        print("\n" + "=" * 60)
+        print("[*] Act phase - what to do with what was found")
+        print("=" * 60)
+        summary = act.execute_auto(store, args.output_dir)
+        if summary["looted"]:
+            print(f"[+] Auto-looted {len(summary['looted'])} credential(s) (read-only); "
+                  "spray plan refreshed.")
+        cards = act.action_plan(_selected_hosts(store.all_hosts(), args),
+                                store.all_credentials(), args.output_dir)
+        for c in act.top_moves(cards, 3):
+            where = "" if c.target == "engagement" else f" @ {c.target}"
+            print(f"  ★ [{c.archetype}] {c.title}{where}  ->  {c.yields}")
+            print(f"        $ {c.command}")
+        print(f"\n  Full ranked plan:  recce act -o {args.output_dir}")
     store.close()
     return 0
 
@@ -6097,6 +6116,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="deep modules to skip (e.g. --skip mssql docker)")
     rn.add_argument("--only-modules", nargs="*", metavar="MOD",
                     help="run only these deep modules")
+    rn.add_argument("--act", action="store_true",
+                    help="after the pipeline, run the Act phase: auto-loot the read-only "
+                         "links, refresh the spray plan, and print the ranked action plan")
     rn.set_defaults(func=cmd_run)
 
     s = sub.add_parser("scan", help="run enum then vulns in one shot "
