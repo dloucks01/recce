@@ -137,6 +137,7 @@ def _exec_summary(hosts, domains, creds):
     crit = sum(1 for f in findings if f.severity in ("critical", "high"))
     confirmed = sum(1 for f in findings if (f.confidence or "").lower() == "confirmed")
     potential = sum(1 for f in findings if (f.confidence or "").lower() == "potential")
+    kev = sum(1 for f in findings if getattr(f, "kev", False))   # actively exploited (fix-first)
     accessed = sum(1 for h in hosts if getattr(h, "access_gained", False))
     dcs = ad.domain_controllers(hosts)
     doms = domains or ad.derive_domains(hosts)
@@ -147,8 +148,10 @@ def _exec_summary(hosts, domains, creds):
         _tile(len(findings), "Findings"),
         _tile(crit, "High / Critical", alert=crit > 0),
         _tile(confirmed, "Confirmed"),
-        _tile(f"{len(doms)} / {len(dcs)}", "Domains / DCs"),
     ]
+    if kev:                                        # lead with the fix-first number
+        tiles.append(_tile(kev, "Known-exploited", alert=True))
+    tiles.append(_tile(f"{len(doms)} / {len(dcs)}", "Domains / DCs"))
     if accessed:
         tiles.append(_tile(accessed, "Footholds"))
     if creds:
@@ -167,6 +170,11 @@ def _exec_summary(hosts, domains, creds):
         if confirmed:
             bits.append(f"<b>{confirmed}</b> confirmed by direct observation")
         assess = [", ".join(bits) + "."]
+        if kev:
+            assess.append(
+                f"<b>{kev}</b> {'involves' if kev == 1 else 'involve'} a CVE in CISA's "
+                "<b>Known Exploited Vulnerabilities</b> catalogue — confirmed exploited in "
+                "the wild and the priority to remediate first.")
         if potential:
             assess.append(
                 f"<b>{potential}</b> {'is' if potential == 1 else 'are'} marked "
@@ -280,6 +288,16 @@ def _dashboard(hosts):
     return "".join(out)
 
 
+def _kev_badge(f):
+    """A fix-first 🔥 KEV badge (+ EPSS) for a finding whose CVE is actively exploited."""
+    if not getattr(f, "kev", False):
+        return ""
+    epss = f' EPSS {round((f.epss or 0) * 100)}%' if getattr(f, "epss", 0) else ""
+    return (f'<span class="badge" style="background:#B00020" '
+            f'title="in CISA Known Exploited Vulnerabilities - patch first">'
+            f'🔥 KEV{epss}</span> ')
+
+
 def _conf_badge(confidence):
     label, col = _CONF.get((confidence or "").lower(), _CONF[""])
     return f'<span class="badge" style="background:{col}">{escape(label)}</span>'
@@ -389,7 +407,7 @@ def _findings_detail(hosts):
         border = _SEV.get(f.severity, "#5F6F6E")
         card = [f'<div class="fcard" style="border-left-color:{border}">',
                 f'<h3>{_sev_badge(f.severity)} {_conf_badge(f.confidence)} '
-                f'{escape(f.title)}</h3>',
+                f'{_kev_badge(f)}{escape(f.title)}</h3>',
                 f'<div class="meta">{"".join(meta)}</div>',
                 f'<div class="mono muted">Affected: {escape(aff)}</div>',
                 f'<div class="basis">{_severity_basis(f)}</div>']
