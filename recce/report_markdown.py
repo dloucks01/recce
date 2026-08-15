@@ -115,6 +115,18 @@ def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration R
                 tac = ""      # only label the tactic on its first row
         lines.append("")
 
+    # CWE weakness coverage - the weakness classes the findings map to.
+    from . import cwe as _cwe
+    wcov = _cwe.coverage(hosts)
+    if wcov["weaknesses"]:
+        lines += ["## CWE weakness coverage", "",
+                  f"{wcov['count']} distinct weakness class(es).", "",
+                  "| CWE | Weakness | Hosts |", "| --- | --- | --- |"]
+        for w in wcov["weaknesses"]:
+            nm = w["name"] or "—"
+            lines.append(f"| [{w['id']}]({w['url']}) | {nm} | {len(w['hosts'])} |")
+        lines.append("")
+
     # Per-host checklist.
     lines += ["## Hosts checklist", ""]
     for h in sorted(hosts, key=lambda x: _ip_key(x.ip)):

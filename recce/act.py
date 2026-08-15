@@ -87,6 +87,7 @@ class ActionCard:
     tool: str = ""                 # the concrete tool this action uses (msf/impacket/...)
     attack_id: str = ""            # MITRE ATT&CK technique id, e.g. "T1558.003"
     attack_name: str = ""          # e.g. "Kerberoasting"
+    cwe: str = ""                  # primary CWE, e.g. "CWE-522"
 
     @property
     def score(self) -> float:
@@ -466,13 +467,16 @@ def action_plan(hosts, credentials=None, output_dir: str = "engagement") -> list
 
 
 def _tag_attack(cards: list[ActionCard]) -> None:
-    """Annotate each card with its MITRE ATT&CK technique: the specific one implied by
-    the finding title, else the archetype's default."""
-    from . import attack
+    """Annotate each card with its MITRE ATT&CK technique and primary CWE - the specific
+    ones implied by the finding title, else the archetype's default technique."""
+    from . import attack, cwe
     for c in cards:
         tech = attack.technique_for_text(c.title) or attack.technique_for_archetype(c.archetype)
         if tech:
             c.attack_id, c.attack_name = tech.id, tech.name
+        cwes = cwe.for_text(c.title)
+        if cwes:
+            c.cwe = cwes[0]
 
 
 def _dedup_loot(cards: list[ActionCard]) -> list[ActionCard]:
@@ -632,7 +636,8 @@ def format_plan(cards: list[ActionCard], top: int = 0) -> list[str]:
             lines.append(f"  [{c.archetype}] {c.title}{where}  ->  {c.yields}{tag}{flag}")
             lines.append(f"      $ {c.command}")
             att = f"  ·  ATT&CK {c.attack_id} {c.attack_name}" if c.attack_id else ""
+            cw = f"  ·  {c.cwe}" if c.cwe else ""
             lines.append(f"      · {c.why}  ·  score {c.score} "
                          f"(impact {c.impact} × conf {c.confidence:g} × lev {c.leverage:g})"
-                         + att)
+                         + att + cw)
     return lines

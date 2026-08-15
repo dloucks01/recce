@@ -156,8 +156,10 @@ _CWE_NAME = {
 
 
 def cwe_label(cwe: str) -> str:
-    """'CWE-22 (Path Traversal)' - the id plus its short name for reference."""
-    name = _CWE_NAME.get(cwe)
+    """'CWE-22 (Path Traversal)' - the id plus its short name for reference. Falls back
+    to the fuller recce.cwe name table so more CWEs resolve to a name, not a bare id."""
+    from . import cwe as _cwe
+    name = _CWE_NAME.get(cwe) or _cwe.NAMES.get(cwe)
     return f"{cwe} ({name})" if name else cwe
 
 _SOURCE_TOOL = {
