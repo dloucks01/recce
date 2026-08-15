@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Finding, Host, Overview, fetchAll, postTick, postNote, postScan,
 } from "./api";
-import { Dashboard, Findings, Hosts, Targets, Nav, FindingFilters } from "./views";
+import { Dashboard, Findings, Hosts, Targets, Act, Loot, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
 
-type Tab = "dashboard" | "findings" | "hosts" | "targets";
+type Tab = "dashboard" | "findings" | "act" | "loot" | "hosts" | "targets";
 type TgFilter = "all" | "todo" | "enumerated" | "access" | "reviewed";
 const POLL_MS = 20000; // constantly-updating analysis: re-pull on a slow heartbeat
 
@@ -173,8 +173,11 @@ export default function App() {
   if (err) return <div className="err">Could not reach the recce API: {err}</div>;
   if (!ov) return <div className="loading">Loading engagement…</div>;
 
+  // Ordered to follow the operator's path: overview -> what's wrong -> what to DO ->
+  // what we EXTRACTED -> host/target detail.
   const TABS: [Tab, string][] = [
-    ["dashboard", "Dashboard"], ["findings", "Findings"], ["hosts", "Hosts"], ["targets", "Targets"],
+    ["dashboard", "Dashboard"], ["findings", "Findings"], ["act", "Act"],
+    ["loot", "Loot"], ["hosts", "Hosts"], ["targets", "Targets"],
   ];
 
   return (
@@ -224,6 +227,8 @@ export default function App() {
           <Findings findings={findings} f={ff} setF={(o) => setFf((p) => ({ ...p, ...o }))}
                     nav={nav} onTick={onTick} onNote={onNote} />
         )}
+        {tab === "act" && <Act nav={nav} />}
+        {tab === "loot" && <Loot />}
         {tab === "hosts" && (
           <Hosts hosts={hosts} q={hostQ} sev={hostSev} setQ={setHostQ} setSev={setHostSev}
                  nav={nav} onTick={onTick} onNote={onNote} />

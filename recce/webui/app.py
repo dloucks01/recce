@@ -237,6 +237,58 @@ def create_app(eng_dir: str) -> FastAPI:
         out.sort(key=lambda f: (not f["kev"], _SEV_ORDER.get(f["severity"], 9), -f["epss"]))
         return out
 
+    @app.get("/api/credentials")
+    def credentials():
+        """The credential store — looted (web/db/share) + captured (kerberoast/gpp/…).
+        This is 'what was extracted', which the UI never surfaced before."""
+        from ..store import Store
+        st = Store(db_path)
+        try:
+            creds = st.all_credentials()
+        finally:
+            st.close()
+        return [{"username": c.username, "secret": c.secret, "kind": c.kind,
+                 "domain": c.domain, "source": c.source, "origin_ip": c.origin_ip,
+                 "notes": c.notes, "label": c.label} for c in creds]
+
+    def _card_dict(c):
+        return {"archetype": c.archetype, "title": c.title, "target": c.target,
+                "command": c.command, "yields": c.yields, "safety": c.safety,
+                "tier": c.tier, "score": c.score, "count": c.count,
+                "attack_id": c.attack_id, "attack_name": c.attack_name, "cwe": c.cwe,
+                "verify_first": c.verify_first, "why": c.why,
+                "needs": [d for d, met in c.preconditions if not met]}
+
+    @app.get("/api/act")
+    def act_plan():
+        """The Act phase: findings -> ranked, guided action plan. 'What do I do now?'."""
+        from .. import act
+        from ..store import Store
+        st = Store(db_path)
+        try:
+            hosts, creds = st.all_hosts(), st.all_credentials()
+        finally:
+            st.close()
+        cards = act.action_plan(hosts, creds, eng_dir)
+        tiers: dict = {}
+        for c in cards:
+            tiers.setdefault(c.tier, []).append(_card_dict(c))
+        return {"top": [_card_dict(c) for c in act.top_moves(cards, 5)],
+                "tiers": [{"tier": t, "label": act._TIER_LABEL[t], "cards": tiers[t]}
+                          for t in sorted(tiers)]}
+
+    @app.get("/api/attack")
+    def attack_coverage():
+        """MITRE ATT&CK coverage: techniques the findings map to, by tactic."""
+        from .. import attack
+        hs, _ = _hosts()
+        cov = attack.coverage(hs)
+        return {"technique_count": cov["technique_count"],
+                "tactic_count": cov["tactic_count"],
+                "tactics": [{"tactic": t, "tactic_id": attack.TACTICS.get(t, ""),
+                             "techniques": techs}
+                            for t, techs in cov["by_tactic"].items()]}
+
     @app.get("/api/overview")
     def overview():
         """Everything the dashboard needs in one cheap, live-pollable call."""
