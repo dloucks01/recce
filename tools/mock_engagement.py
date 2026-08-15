@@ -178,11 +178,23 @@ def _linux_web(ip, hostname, *, log4shell=False, heartbleed=False) -> Host:
            confidence="confirmed",
            output="Accepted protocols: TLSv1.0, TLSv1.1, TLSv1.2. TLS 1.0/1.1 are deprecated.",
            remediation="Disable TLS 1.0/1.1; serve TLS 1.2+ only with a modern cipher suite."),
-        _v(ip, 80, "http-git", "Exposed .git directory",
-           "medium", cwes=["CWE-538"], source="probe", qod=95, qod_type="active_vuln",
+        _v(ip, 80, "web-gitconfig", "Exposed .git/config — embedded credential looted",
+           "high", cwes=["CWE-538"], source="web", qod=95, qod_type="active_vuln",
            confidence="confirmed",
-           output="GET /.git/HEAD → 200 'ref: refs/heads/main'. Full repo history retrievable.",
-           remediation="Block /.git in the web server; deploy from an artifact, not a working tree."),
+           output=("GET /.git/config → 200. remote \"origin\" URL embeds a token:\n"
+                   "  https://deploybot:ghp_****@github.com/contoso/webapp.git\n"
+                   "CAPTURED 1 cleartext credential (deploybot) → credential store (sprayable)."),
+           remediation="Block /.git in the web server; deploy from an artifact, not a working "
+                       "tree; rotate the leaked token.",
+           evidence=[{"kind": "live-probe", "detail": "GET /.git/config → 200, remote URL parsed", "positive": True}]),
+        _v(ip, 80, "web-dotenv", "Exposed .env — DB credentials looted",
+           "high", cwes=["CWE-538", "CWE-215"], source="web", qod=95, qod_type="active_vuln",
+           confidence="confirmed",
+           output=("GET /.env → 200.  leaked: DB_USER=webapp; DB_PASSWORD=Su…DB; "
+                   "REDIS_PASSWORD=re…11\n"
+                   "CAPTURED 2 cleartext credential(s) → credential store (sprayable)."),
+           remediation="Move .env outside the web root; deny dotfiles; rotate the DB password.",
+           evidence=[{"kind": "live-probe", "detail": "GET /.env → 200, secret pairs parsed", "positive": True}]),
         _v(ip, 8080, "http-default-creds", "Tomcat Manager default credentials",
            "high", cwes=["CWE-1392"], source="probe", qod=92, qod_type="active_enum",
            confidence="confirmed",
@@ -218,7 +230,8 @@ def _linux_web(ip, hostname, *, log4shell=False, heartbleed=False) -> Host:
 def _linux_db(ip, hostname, kind) -> Host:
     svc = {"redis": (6379, "redis", "Redis key-value store", "6.0.16"),
            "mongo": (27017, "mongodb", "MongoDB", "5.0.14"),
-           "mysql": (3306, "mysql", "MySQL", "8.0.32")}[kind]
+           "mysql": (3306, "mysql", "MySQL", "8.0.32"),
+           "postgres": (5432, "postgresql", "PostgreSQL DB", "16.2")}[kind]
     ports = [_p(22, "ssh", "OpenSSH", version="8.9p1", banner="SSH-2.0-OpenSSH_8.9p1"),
              _p(svc[0], svc[1], svc[2], version=svc[3])]
     for p in ports:
@@ -236,11 +249,24 @@ def _linux_db(ip, hostname, kind) -> Host:
             confidence="confirmed",
             output="listDatabases returned 6 DBs (incl. 'prod') with no credentials.",
             remediation="Enable authorization (security.authorization: enabled); bind to private iface."))
-    else:
-        vulns.append(_v(ip, 3306, "mysql-empty-password", "MySQL root with empty password",
-            "high", cwes=["CWE-521"], source="probe", qod=90, qod_type="active_enum",
+    elif kind == "postgres":
+        vulns.append(_v(ip, 5432, "postgres-trust-auth",
+            "PostgreSQL trust authentication (no password) — pg_shadow looted", "high",
+            cwes=["CWE-306", "CWE-287"], source="postgres", qod=95, qod_type="active_vuln",
             confidence="confirmed",
-            output="mysql -uroot (no password) connected; mysql.user readable.",
+            output=("v3 startup for user 'postgres' returned AuthenticationOk with NO password "
+                    "(trust in pg_hba.conf).\nLOOTED (read-only): 3 databases (postgres, "
+                    "app_prod, billing); 2 password hash(es) captured (crackable) → postgres, app_svc."),
+            remediation="Replace trust with scram-sha-256 in pg_hba.conf; bind to localhost; "
+                        "require TLS for remote access.",
+            evidence=[{"kind": "live-probe", "detail": "AuthenticationOk (code 0) with zero-length password", "positive": True}]))
+    else:
+        vulns.append(_v(ip, 3306, "mysql-empty-password",
+            "MySQL root with empty password — mysql.user looted", "high",
+            cwes=["CWE-521"], source="mysql", qod=90, qod_type="active_enum",
+            confidence="confirmed",
+            output=("mysql -uroot (no password) connected.\nLOOTED (read-only): mysql.user read "
+                    "— 2 password hash(es) captured (root, app); crack with hashcat -m 300."),
             remediation="Set a strong root password; remove anonymous accounts; bind to localhost."))
     return Host(ip=ip, up_reason="syn-ack", hostnames=[hostname],
                 os_name="Debian 12", os_family="Linux", ports=ports, vulns=vulns,
@@ -286,6 +312,60 @@ def _netgear(ip, hostname) -> Host:
                 os_name="Cisco IOS 15.1", os_family="IOS", ports=ports, vulns=vulns)
 
 
+# --- non-AD file server (standalone SMB + NFS shares) ------------------------
+# The user's environments aren't all AD — plenty are workgroup NAS/Linux boxes
+# whose exposure is unauthenticated SMB/NFS shares. This archetype exercises the
+# non-AD share-enum + spider + secret-file path.
+
+def _fileserver(ip, hostname) -> Host:
+    ports = [
+        _p(111, "rpcbind", "2-4", version="2-4 (RPC #100000)"),
+        _p(139, "netbios-ssn", "Samba smbd", version="4.15.13-Ubuntu"),
+        _p(445, "microsoft-ds", "Samba smbd", version="4.15.13-Ubuntu", banner="SMB 3.1.1"),
+        _p(2049, "nfs", "3-4", version="3-4 (RPC #100003)"),
+    ]
+    for p in ports:
+        p.vuln_scanned = True
+    vulns = [
+        _v(ip, 445, "smb-null-session-shares", "SMB shares readable over a null/guest session",
+           "high", cwes=["CWE-306"], source="smb", qod=95, qod_type="active_enum",
+           confidence="confirmed",
+           output=("Null session (-U '' -N) listed shares; guest mapped to 'Finance' and\n"
+                   "'IT-Backup' with READ. No domain — standalone workgroup (WORKGROUP)."),
+           remediation="Set 'restrict anonymous', disable the guest account, require "
+                       "authenticated access; remove world-readable shares.",
+           evidence=[{"kind": "on-target", "detail": "smbclient -N -L → Finance, IT-Backup (READ)", "positive": True}]),
+        _v(ip, 445, "smb-secret-file", "Credential-bearing file found in an open share",
+           "high", cwes=["CWE-538", "CWE-256"], source="smb", qod=92, qod_type="active_enum",
+           confidence="confirmed",
+           output=("Spidered //%s/IT-Backup → unattend.xml contains an AutoLogon local\n"
+                   "administrator password (cleartext). Captured → credential store." % ip),
+           remediation="Remove secrets from shares; scrub unattend/sysprep answer files; "
+                       "rotate the exposed local admin password.",
+           evidence=[{"kind": "on-target", "detail": "IT-Backup/unattend.xml → <Password> cleartext", "positive": True}]),
+        _v(ip, 2049, "nfs-world-export", "NFS export world-readable with no_root_squash",
+           "high", cwes=["CWE-306", "CWE-732"], source="probe", qod=93, qod_type="active_enum",
+           confidence="confirmed",
+           output=("showmount -e → /srv/nfs/backups *(rw,no_root_squash). Any host can mount\n"
+                   "read-write AND write files owned by root → trivial privilege escalation."),
+           remediation="Restrict exports to specific hosts; set root_squash; drop rw where not needed."),
+    ]
+    h = Host(ip=ip, up_reason="syn-ack", hostnames=[hostname],
+             os_name="Ubuntu 22.04 (Samba)", os_family="Linux",
+             ports=ports, vulns=vulns, roles=["File server"],
+             smb_signing="not required", enumerated=True, access_gained=True,
+             access_detail="unattend.xml local admin looted from IT-Backup share")
+    h.accounts = [
+        Account(ip=ip, source="smb-enum-shares", kind="share", name="Finance",
+                detail="READ via guest — 4.2 GB of finance spreadsheets"),
+        Account(ip=ip, source="smb-enum-shares", kind="share", name="IT-Backup",
+                detail="READ via guest — contains unattend.xml (local admin password)"),
+        Account(ip=ip, source="nfs-showmount", kind="share", name="/srv/nfs/backups",
+                detail="NFS export *(rw,no_root_squash) — world-mountable"),
+    ]
+    return h
+
+
 def build(eng_dir: str, hosts: int = 48, seed: int = 1337,
           engagement: str = "Contoso Corp — internal network assessment") -> dict:
     """Seed a realistic engagement into eng_dir. Returns summary counts."""
@@ -309,10 +389,13 @@ def build(eng_dir: str, hosts: int = 48, seed: int = 1337,
         made.append(_linux_db("10.20.20.30", "redis01.contoso.local", "redis"))
         made.append(_linux_db("10.20.20.31", "mongo01.contoso.local", "mongo"))
         made.append(_linux_db("10.20.20.32", "db01.contoso.local", "mysql"))
+        made.append(_linux_db("10.20.20.33", "pg01.contoso.local", "postgres"))
+        made.append(_fileserver("10.20.20.40", "nas01"))       # non-AD workgroup NAS
         made.append(_netgear("10.20.30.1", "core-sw01.contoso.local"))
 
-        # fill out the rest with workstations + the odd extra server, across subnets
-        i = 40
+        # fill out the rest with workstations + the odd extra server, across subnets.
+        # Start above the fixed-archetype host numbers (…40 nas01) to avoid IP collisions.
+        i = 50
         while len(made) < hosts:
             sub = random.choice([10, 20, 30])
             ip = f"10.20.{sub}.{i}"
@@ -331,7 +414,9 @@ def build(eng_dir: str, hosts: int = 48, seed: int = 1337,
             st.upsert_host(h, merge=False)
             nf += len(h.vulns)
 
-        # captured credentials (from kerberoast + GPP + default logins)
+        # captured credentials — the full loot surface: kerberoast + GPP + default
+        # logins (AD), web-loot (.git/.env cleartext), DB-loot (pg_shadow / mysql.user
+        # hashes), and a share-looted local admin. These stack for the spray chain.
         creds = [
             Credential(username="svc_sql", secret="Summer2023!", kind="password", domain=domain,
                        source="kerberoast", origin_ip="10.20.10.10", notes="cracked TGS (RC4), 6h"),
@@ -341,6 +426,23 @@ def build(eng_dir: str, hosts: int = 48, seed: int = 1337,
                        source="gpp", origin_ip="10.20.10.10", notes="GPP cpassword in SYSVOL Groups.xml"),
             Credential(username="tomcat", secret="tomcat", kind="password", domain="",
                        source="default", origin_ip="10.20.20.15"),
+            # web-loot: cleartext, directly sprayable (from web01's exposed .git/.env)
+            Credential(username="deploybot", secret="ghp_A1b2C3d4E5f6DEADBEEFcafe0011",
+                       kind="password", domain="", source="web-loot", origin_ip="10.20.20.15",
+                       notes="embedded in .git/config remote URL (sprayable)"),
+            Credential(username="webapp", secret="Sup3rS3cr3t!DB", kind="password", domain="",
+                       source="web-loot", origin_ip="10.20.20.15", notes="DB_PASSWORD from exposed .env"),
+            # db-loot: password hashes (crackable, not directly sprayable)
+            Credential(username="postgres", secret="SCRAM-SHA-256$4096:Hh8…$rk9…", kind="hash",
+                       domain="", source="postgres-loot", origin_ip="10.20.20.33",
+                       notes="pg_shadow hash from trust-auth PostgreSQL"),
+            Credential(username="root", secret="*81F5E21E35407D884A6CD4A731AEBFB6AF209E1B",
+                       kind="nthash", domain="", source="mysql-loot", origin_ip="10.20.20.32",
+                       notes="mysql.user hash (empty-password root); hashcat -m 300"),
+            # share-loot: cleartext local admin from an open SMB share (non-AD)
+            Credential(username="Administrator", secret="Nas-Local-Adm!n2022", kind="password",
+                       domain="", source="loot", origin_ip="10.20.20.40",
+                       notes="unattend.xml AutoLogon password from //nas01/IT-Backup"),
         ]
         ncred = sum(1 for c in creds if st.add_credential(c))
         st.add_issue("10.20.10.23", "vulns", "warn",
