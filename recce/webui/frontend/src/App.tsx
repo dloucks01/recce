@@ -152,6 +152,7 @@ export default function App() {
     },
     toHosts: (o) => { setHostQ(o?.q ?? ""); setHostSev(o?.sev ?? "all"); setTab("hosts"); },
     toTargets: () => setTab("targets"),
+    toAct: () => setTab("act"),
     openHost: (ip) => setDrawerIp(ip),
   };
 

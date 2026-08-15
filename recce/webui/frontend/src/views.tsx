@@ -13,6 +13,7 @@ export type Nav = {
   toFindings: (o?: Partial<FindingFilters>) => void;
   toHosts: (o?: { q?: string; sev?: string }) => void;
   toTargets: () => void;
+  toAct: () => void;
   openHost: (ip: string) => void;
 };
 
@@ -35,6 +36,8 @@ export function Dashboard(
         <Stat k="Reviewed" v={`${reviewPct}%`} sub={`${ov.reviewed}/${ov.findings_total}`}
               onClick={() => nav.toFindings({ unreviewed: true })} />
       </section>
+
+      <NextMoves nav={nav} />
 
       <section className="panel">
         <div className="panel-h">
@@ -115,6 +118,33 @@ function Meter({ label, now, total, unit, pct, cls }:
       <div className="meter-h"><span>{label}</span><span className="mono">{now}{total ? ` / ${total}` : ""} {unit}</span></div>
       <div className="track"><div className={"fill" + (cls ? " " + cls : "")} style={{ width: `${Math.min(p, 100)}%` }} /></div>
     </div>
+  );
+}
+
+// Landing-page "so what": the top action-plan moves, so the operator lands on WHAT
+// TO DO, not just what's wrong. Click through to the full Act plan.
+function NextMoves({ nav }: { nav: Nav }) {
+  const [top, setTop] = useState<ActCard[] | null>(null);
+  useEffect(() => { getAct().then((p) => setTop(p.top.slice(0, 3))).catch(() => setTop([])); }, []);
+  if (!top || top.length === 0) return null;
+  return (
+    <section className="panel nextmoves">
+      <div className="panel-h"><h3>★ Next moves</h3>
+        <button className="link" onClick={() => nav.toAct()}>full action plan →</button></div>
+      <ul className="nmlist">
+        {top.map((c, i) => (
+          <li key={i} onClick={() => nav.toAct()}>
+            <span className="nm-rank">{i + 1}</span>
+            <div className="nm-body">
+              <div className="nm-t">{ARCH_ICON[c.archetype] || "•"} {c.title}
+                {c.target && c.target !== "engagement" && <span className="mono nm-tgt"> {c.target}</span>}</div>
+              <div className="nm-y muted">→ {c.yields}</div>
+            </div>
+            <span className="badge nm-arch">{c.archetype}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
