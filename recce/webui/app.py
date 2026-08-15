@@ -24,6 +24,8 @@ _REPORTS = {
     "xlsx": ("xlsx", "enumeration.xlsx",
              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     "html": ("html", "report.html", "text/html"),
+    "docx": ("docx", "findings_report.docx",
+             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
     "md": ("md", "enumeration.md", "text/markdown"),
     "csv": ("csv", "services.csv", "text/csv"),
 }

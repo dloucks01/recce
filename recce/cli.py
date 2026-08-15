@@ -258,6 +258,7 @@ def _open_paths(out_dir: str) -> dict[str, str]:
         "md": os.path.join(out_dir, "enumeration.md"),
         "csv": os.path.join(out_dir, "services.csv"),
         "html": os.path.join(out_dir, "report.html"),
+        "docx": os.path.join(out_dir, "findings_report.docx"),
         "assets": os.path.join(out_dir, "assets.html"),
         "log": os.path.join(out_dir, "recce.log"),
     }
@@ -457,6 +458,17 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
                     credentials=credentials)
     build_markdown(hosts, paths["md"], title=title, domains=domains, proxy_note=proxy_note)
     build_csv(hosts, paths["csv"])
+    # A client-facing write-up for EVERY true finding, following the write-up template
+    # (Narrative / Finding Details / Mission Risk & Impact / Recommendations / Evidence
+    # / Obtained Access / Technical Walkthrough). Auto-generated each run so the operator
+    # never has to request them one by one; leads/version-guesses and info are excluded
+    # by default (build_combined's _is_real filter). `recce writeup <id>` still targets one.
+    try:
+        from .report_docx import build_combined
+        build_combined(hosts, paths["docx"], title=title)
+    except Exception as e:  # noqa: BLE001 - a writeup failure never blocks the other reports
+        if not quiet:
+            print(f"    [!] findings write-up doc skipped: {e}")
     from .report_html import build_html, build_assets_html
     gen = _now()
     build_html(hosts, paths["html"], title=title, domains=domains,
