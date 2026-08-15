@@ -81,6 +81,24 @@ def test_low_qod_exploit_is_a_lead_and_flagged_verify_first():
     assert card.tier == act.LEAD and card.verify_first is True
 
 
+def test_sqli_finding_bridges_to_sqlmap():
+    # a SQLi finding recce has no msf module for -> a sqlmap command, not a bare writeup.
+    h = _host("10.0.0.5", [8080],
+              vulns=[_vuln("10.0.0.5", 8080, "web-sqli", "SQLi in the login form",
+                           "high", ids=["CVE-2099-9"], qod=95)])
+    card = next(c for c in act.action_plan([h]) if c.archetype == "exploit")
+    assert "sqlmap" in card.command
+    assert card.attack_id == "T1190"          # Exploit Public-Facing Application
+
+
+def test_web_bridge_offers_sqlmap():
+    from recce import web
+    from recce.models import Port
+    cmds = web.bridge_commands("http://10.0.0.5:8080", "Apache",
+                               Port(portid=8080, service="http", state="open"))
+    assert "sqlmap -u http://10.0.0.5:8080" in cmds
+
+
 def test_exploit_without_a_known_module_falls_back_to_writeup():
     # a confirmed high-QoD RCE recce has no msf/tool action for -> guided writeup, and
     # because it's confirmed it is NOT flagged verify-first.

@@ -1520,7 +1520,10 @@ def bridge_commands(url: str, tech: str, port: Port) -> str:
     cmds = [f"whatweb -a3 {url}",
             f"nuclei -u {url}",
             f"nikto -h {url}",
-            f"gobuster dir -u {url} -w /usr/share/wordlists/dirb/common.txt -x php,txt,bak"]
+            f"gobuster dir -u {url} -w /usr/share/wordlists/dirb/common.txt -x php,txt,bak",
+            # SQLi: crawl the site and test every form/parameter it finds (recce doesn't
+            # reimplement a SQLi engine - it bridges to sqlmap, in-philosophy).
+            f"sqlmap -u {url} --batch --crawl=2 --forms --level=3 --risk=2 --threads=4 --dbs"]
     low = f"{tech} {url}".lower()
     if "wordpress" in low:
         cmds.append(f"wpscan --url {url} --enumerate p,t,u")

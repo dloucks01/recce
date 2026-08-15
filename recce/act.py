@@ -212,6 +212,13 @@ def _exploit_card(host, v, o, xp_idx, qv, conf, text) -> ActionCard:
                   "Exploitation sheet"
         tool, preconds = "", []
         verified = qv >= qod.MIN_QOD_VERIFIED
+    # SQLi has a purpose-built tool - bridge to sqlmap (recce doesn't reimplement a SQLi
+    # engine), overriding the generic writeup even when no msf module matched.
+    if ("sqli" in text or "sql injection" in text) and not (action and action.get("tool")):
+        scheme = "https" if (v.port or 0) in (443, 8443) else "http"
+        command = (f"sqlmap -u '{scheme}://{host.ip}:{v.port or 80}/' --batch --crawl=2 "
+                   "--forms --level=3 --risk=2 --dbs   # confirm + dump the injectable endpoint")
+        tool = "sqlmap"
     # A confirmed finding is a ready action; an unverified version-inference lead is a
     # LEAD (verify before you fire an exploit at it).
     tier = READY if verified or qv >= qod.MIN_QOD_VISIBLE else LEAD
