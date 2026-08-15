@@ -800,8 +800,6 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [0.2.4] - 2026-07-23
 
-## [0.2.4] - 2026-07-23
-
 _Adds four deep offensive service modules (SMB, FTP, Docker, Kubernetes), live AD
 Kerberos capture, executed web proofs (PUT / JWT alg:none), and closes the
 prove-out audit gaps — every finding is now proven by execution and wired into the

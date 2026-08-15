@@ -39,7 +39,11 @@ markers = [
 recce = "recce.cli:main"
 
 [tool.setuptools]
-packages = ["recce"]
+# recce.webui MUST be listed explicitly: cli.py imports `from .webui.app import
+# create_app`, so a plain `pip install` that shipped only "recce" produced a package
+# whose `serve`/web-UI command ImportErrors at runtime. (recce.scripts / recce.local
+# are data, not import packages - they ride along via package-data below.)
+packages = ["recce", "recce.webui"]
 
 [tool.setuptools.dynamic]
 version = { attr = "recce.__version__" }
