@@ -457,6 +457,8 @@ class Finding:
     evidence: list[tuple] = field(default_factory=list)    # (ip, port, output)
     services: dict = field(default_factory=dict)           # (ip,port) -> "product version"
     exploits: list[tuple] = field(default_factory=list)    # (edb_id, title)
+    kev: bool = False                                      # any CVE actively exploited (CISA KEV)
+    epss: float = 0.0                                      # max EPSS exploit probability (0-1)
 
 
 # Common nmap NSE vuln/enum scripts -> CWE(s). Matched as a substring of the
@@ -566,6 +568,10 @@ def group_findings(hosts: list[Host]) -> list[Finding]:
                 if c not in f.cves:
                     f.cves.append(c)
             f.sources.add(v.source)
+            # Exploitation-in-the-wild aggregates: KEV if ANY member CVE is exploited,
+            # EPSS = the highest across the group (so the report can lead fix-first).
+            f.kev = f.kev or bool(getattr(v, "kev", False))
+            f.epss = max(f.epss, getattr(v, "epss", 0.0) or 0.0)
             if v.script_id:
                 f.scripts.add(v.script_id)
             f.remediation = f.remediation or v.remediation

@@ -123,3 +123,28 @@ class ReportContentFidelityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_report_surfaces_kev_known_exploited():
+    """group_findings must propagate KEV/EPSS, and the HTML report must surface it
+    (exec-summary tile + per-finding badge) - the fix-first signal, previously dropped."""
+    import os
+    import tempfile
+
+    from recce.models import Host, Port, Vuln
+    from recce.report_docx import group_findings
+    from recce.report_html import build_html
+
+    h = Host(ip="10.0.0.5", up_reason="syn-ack",
+             ports=[Port(portid=445, service="microsoft-ds", state="open")],
+             vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp", script_id="ms17",
+                         title="EternalBlue", severity="critical", ids=["CVE-2017-0144"],
+                         kev=True, epss=0.97, source="nse", state="VULNERABLE")])
+    f = group_findings([h])[0]
+    assert f.kev is True and abs(f.epss - 0.97) < 1e-6
+
+    out = os.path.join(tempfile.mkdtemp(), "report.html")
+    build_html([h], out, title="t")
+    html = open(out).read()
+    assert "Known-exploited" in html       # exec-summary tile
+    assert "🔥 KEV" in html                 # per-finding fix-first badge
