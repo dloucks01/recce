@@ -86,5 +86,6 @@ commands. An unproven action reads "candidate — verify" and points at `recce p
   keystone** card (from `attackpath`) leads the plan; unverified leads are flagged
   "candidate — verify". Also fixed classification precedence: a clear exploit (KEV / RCE
   hint) wins over a loot marker, so an *unauthenticated RCE* is an exploit, not a read.
-- **P4 — `recce run --act` tail** so a full pipeline ends by auto-looting/spraying and
-  printing the guided action plan.
+- **P4 — `recce run --act` tail.** ✅ Shipped. A full `recce run` pipeline can end
+  with the Act phase: it auto-loots the read-only links, refreshes the spray plan, and
+  prints the top-3 ranked moves (with `recce act` for the full plan).
