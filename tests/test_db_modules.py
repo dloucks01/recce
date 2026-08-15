@@ -227,3 +227,183 @@ def test_is_predicates_respect_open_state():
     assert not mysql.is_mysql(Port(portid=3306, service="mysql", state="closed"))
     assert postgres.is_postgres(Port(portid=5432, service="postgresql", state="open"))
     assert not postgres.is_postgres(Port(portid=80, service="http", state="open"))
+
+
+# =============================================================================
+# High-fidelity LOOT round-trip: the fake servers below speak enough of each
+# wire protocol to serve the loot QUERIES (not just the auth handshake), so the
+# real loot()/analyze() code runs end-to-end over a live socket - connect ->
+# startup/handshake -> (trust | empty-password) auth -> query pg_shadow /
+# mysql.user -> parse the result set -> build Credential objects. This exercises
+# the whole path, where the parser-only tests above replay canned bytes.
+# =============================================================================
+
+def _recv_exact(sock, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return buf
+        buf += chunk
+    return buf
+
+
+# ------------------------------- PostgreSQL loot ---------------------------------
+
+def _pg_datarow(vals) -> bytes:
+    b = struct.pack("!H", len(vals))
+    for v in vals:
+        if v is None:
+            b += struct.pack("!i", -1)
+        else:
+            bb = v.encode()
+            b += struct.pack("!i", len(bb)) + bb
+    return b
+
+
+def _pg_loot_server(databases, shadow):
+    """Trust-auth PostgreSQL that answers the two loot queries. `shadow` is a list
+    of (usename, passwd_or_None, is_super_bool)."""
+    def handle(sock):
+        sock.recv(4096)                                       # StartupMessage
+        sock.sendall(_pg_msg(b"R", struct.pack("!I", 0)))     # AuthenticationOk (trust)
+        sock.sendall(_pg_msg(b"S", b"server_version\x0016.2\x00"))
+        sock.sendall(_pg_msg(b"K", struct.pack("!II", 42, 42)))   # BackendKeyData
+        sock.sendall(_pg_msg(b"Z", b"I"))                     # ReadyForQuery
+        while True:
+            typ = _recv_exact(sock, 1)
+            if not typ or typ == b"X":                        # closed or Terminate
+                return
+            ln = _recv_exact(sock, 4)
+            if len(ln) < 4:
+                return
+            body = _recv_exact(sock, struct.unpack("!I", ln)[0] - 4)
+            if typ != b"Q":
+                continue
+            sql = body.split(b"\x00")[0].decode("utf-8", "replace").lower()
+            if "pg_database" in sql:
+                rows = [[d] for d in databases]
+            elif "pg_shadow" in sql:
+                rows = [[u, pw, ("t" if sup else "f")] for (u, pw, sup) in shadow]
+            else:
+                rows = []
+            # RowDescription is ignored by the client parser (only D/Z matter), but
+            # sending it exercises the skip path - real fidelity.
+            sock.sendall(_pg_msg(b"T", struct.pack("!H", 0)))
+            for r in rows:
+                sock.sendall(_pg_msg(b"D", _pg_datarow(r)))
+            sock.sendall(_pg_msg(b"C", b"SELECT\x00"))
+            sock.sendall(_pg_msg(b"Z", b"I"))
+    return handle
+
+
+def test_postgres_loot_reads_shadow_over_socket():
+    shadow = [("postgres", "SCRAM-SHA-256$4096:abc$def", True),
+              ("app_svc", "md5deadbeefcafe0011", False),
+              ("nologin", None, False)]                        # NULL passwd -> no hash
+    ip, port, srv = _serve(_pg_loot_server(["postgres", "app_prod", "billing"], shadow))
+    try:
+        lt = postgres.loot(ip, port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert lt["databases"] == ["postgres", "app_prod", "billing"]
+    assert {r["name"] for r in lt["roles"]} == {"postgres", "app_svc", "nologin"}
+    assert next(r for r in lt["roles"] if r["name"] == "postgres")["super"] is True
+    # two crackable hashes captured; the NULL-password role yields none
+    assert {h["user"] for h in lt["hashes"]} == {"postgres", "app_svc"}
+
+
+def test_postgres_analyze_captures_credentials_end_to_end():
+    shadow = [("postgres", "SCRAM-SHA-256$4096:abc$def", True)]
+    ip, port, srv = _serve(_pg_loot_server(["postgres"], shadow))
+    try:
+        h = Host(ip=ip, ports=[Port(portid=port, service="postgresql", state="open")])
+        analysis = postgres.analyze([h], active=True)
+    finally:
+        srv.shutdown()
+    creds = analysis["credentials"]
+    assert len(creds) == 1
+    c = creds[0]
+    assert c.username == "postgres" and c.kind == "hash" and c.source == "postgres-loot"
+    assert c.secret.startswith("SCRAM-SHA-256$")
+    # the trust-auth finding also reflects the loot
+    assert any("trust" in f["title"].lower() for f in analysis["findings"])
+
+
+# --------------------------------- MySQL loot ------------------------------------
+
+def _my_lenenc_str(s) -> bytes:
+    if s is None:
+        return b"\xfb"                                         # NULL
+    b = s.encode()
+    return bytes([len(b)]) + b                                 # len < 251 -> 1-byte prefix
+
+
+def _my_resultset(cols: int, rows, seq0: int = 1) -> bytes:
+    eof = b"\xfe\x00\x00\x02\x00"
+    seq = seq0
+    out = _my_packet(bytes([cols]), seq); seq += 1             # column count
+    for _ in range(cols):
+        out += _my_packet(b"\x03def", seq); seq += 1           # column def (skipped)
+    out += _my_packet(eof, seq); seq += 1                      # EOF after columns
+    for row in rows:
+        out += _my_packet(b"".join(_my_lenenc_str(v) for v in row), seq); seq += 1
+    out += _my_packet(eof, seq)                                # trailing EOF
+    return out
+
+
+def _my_loot_server(user_rows, databases):
+    """Empty-password MySQL that answers loot's two queries (mysql.user, SHOW
+    DATABASES). `user_rows` is a list of [user, host, auth_string_or_None, plugin]."""
+    def handle(sock):
+        sock.sendall(_my_packet(_MY_HANDSHAKE, 0))
+        sock.recv(4096)                                       # HandshakeResponse
+        sock.sendall(_my_packet(b"\x00\x00\x00\x02\x00\x00\x00", 2))   # OK -> authed
+        while True:
+            hdr = _recv_exact(sock, 4)
+            if len(hdr) < 4:
+                return
+            plen = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16)
+            payload = _recv_exact(sock, plen)
+            if not payload or payload[0] == 0x01:             # COM_QUIT
+                return
+            if payload[0] != 0x03:                            # not COM_QUERY
+                continue
+            sql = payload[1:].decode("utf-8", "replace").lower()
+            if "mysql.user" in sql:
+                sock.sendall(_my_resultset(4, user_rows))
+            elif "databases" in sql:
+                sock.sendall(_my_resultset(1, [[d] for d in databases]))
+            else:
+                sock.sendall(_my_resultset(1, []))
+    return handle
+
+
+def test_mysql_loot_reads_user_table_over_socket():
+    users = [["root", "localhost", "*81F5E21E35407D884A6CD4A731AEBFB6AF209E1B", "mysql_native_password"],
+             ["app", "%", "$A$005$deadbeef", "caching_sha2_password"],
+             ["anon", "%", None, "mysql_native_password"]]     # NULL hash -> skipped
+    ip, port, srv = _serve(_my_loot_server(users, ["information_schema", "app_prod"]))
+    try:
+        lt = mysql.loot(ip, port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert lt["databases"] == ["information_schema", "app_prod"]
+    assert {u["user"] for u in lt["users"]} == {"root", "app", "anon"}
+    assert {h["user"] for h in lt["hashes"]} == {"root", "app"}   # anon (NULL) excluded
+
+
+def test_mysql_analyze_captures_credentials_end_to_end():
+    users = [["root", "localhost", "*81F5E21E35407D884A6CD4A731AEBFB6AF209E1B", "mysql_native_password"],
+             ["app", "%", "$A$005$deadbeef", "caching_sha2_password"]]
+    ip, port, srv = _serve(_my_loot_server(users, ["app_prod"]))
+    try:
+        h = Host(ip=ip, ports=[Port(portid=port, service="mysql", state="open")])
+        analysis = mysql.analyze([h], active=True)
+    finally:
+        srv.shutdown()
+    creds = {c.username: c for c in analysis["credentials"]}
+    assert set(creds) == {"root", "app"}
+    # native-password hash is hashcat -m 300 (nthash-style tag), sha2 stays generic hash
+    assert creds["root"].kind == "nthash" and creds["root"].source == "mysql-loot"
+    assert creds["app"].kind == "hash"
