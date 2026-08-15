@@ -377,6 +377,33 @@ def _norm_title(s: str) -> str:
     return (s[:39] + "…") if len(s) > 40 else s
 
 
+def _default_cred_cards(hosts, o: str) -> list[ActionCard]:
+    """One guided card per service type that has known default creds, aggregated across
+    the hosts exposing it. Default creds are instant access for near-zero effort - but
+    testing them sends auth attempts (lockout risk), so these are guided, not auto."""
+    from . import defaultcreds
+    by_svc: dict[str, list[str]] = {}
+    for h in hosts:
+        for p in getattr(h, "open_ports", []):
+            key = defaultcreds.service_key(p)
+            if key and defaultcreds.creds_for(p):
+                by_svc.setdefault(key, [])
+                if h.ip not in by_svc[key]:
+                    by_svc[key].append(h.ip)
+    out: list[ActionCard] = []
+    for svc, ips in by_svc.items():
+        out.append(ActionCard(
+            archetype="default-cred",
+            title=f"Test default credentials on {len(ips)} {svc.upper()} host(s)",
+            target=ips[0] if len(ips) == 1 else "engagement", count=len(ips),
+            command=defaultcreds.test_command(svc, ips),
+            safety="intrusive", tier=READY, impact=_IMPACT["shell"], confidence=1.0,
+            leverage=1 + min(0.6, len(ips) / 20), yields="a valid login (instant access)",
+            preconditions=[("check the account-lockout policy first", True)],
+            why=f"{svc} ships with well-known default creds; {len(ips)} host(s) expose it"))
+    return out
+
+
 def _crack_mode(c) -> str:
     # Prefer an explicit "hashcat -m NNN" the loot module already worked out (mysql/pg).
     note = (c.notes or "").lower()
@@ -421,6 +448,7 @@ def action_plan(hosts, credentials=None, output_dir: str = "engagement") -> list
                 cards.append(piv)
 
     cards.extend(_cred_cards(hosts, creds, o))
+    cards.extend(_default_cred_cards(hosts, o))
     ad = _adpath_card(hosts, o)                    # the synthesized route to DA (keystone)
     if ad:
         cards.append(ad)
