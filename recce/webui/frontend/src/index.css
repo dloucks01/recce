@@ -306,3 +306,16 @@ main { padding: 18px 20px 40px; max-width: 1100px; }
 .act-controls .run.auto-loot:hover:not(:disabled) { background: color-mix(in srgb, var(--ok) 28%, var(--surface)); }
 .act-controls .run.auto-loot:disabled { opacity: .6; cursor: default; }
 .ranmsg { background: color-mix(in srgb, var(--ok) 12%, var(--surface2)); border: 1px solid color-mix(in srgb, var(--ok) 40%, var(--line)); color: var(--text); font-size: 13px; padding: 9px 13px; border-radius: 9px; margin-bottom: 6px; }
+
+/* ---- Dashboard "Next moves" panel ---- */
+.nextmoves { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.nmlist { list-style: none; margin: 0; padding: 0; }
+.nmlist li { display: flex; align-items: center; gap: 12px; padding: 10px 4px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.nmlist li:last-child { border-bottom: 0; }
+.nmlist li:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.nm-rank { flex: none; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 800; font-size: 12px; }
+.nm-body { flex: 1; min-width: 0; }
+.nm-t { font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nm-t .nm-tgt { color: var(--accent); font-size: 12px; font-weight: 600; }
+.nm-y { font-size: 12px; }
+.nm-arch { flex: none; text-transform: uppercase; font-size: 10px; letter-spacing: .04em; }
