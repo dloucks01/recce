@@ -105,6 +105,20 @@ class VulndbTest(unittest.TestCase):
         self.assertIsNotNone(v)
         self.assertEqual(v.confidence, "potential")     # was "likely" (false positive)
 
+    def test_open_ended_version_does_not_match_an_eol_upper_bound(self):
+        # nmap fingerprints a real PostgreSQL 18 as "9.6.0 or later" (open-ended lower
+        # bound). It must NOT match "End-of-life PostgreSQL < 11" - the true version may
+        # be well above the bound.
+        h = Host(ip="10.0.0.9", ports=[_port(portid=5432, service="postgresql",
+                                             product="PostgreSQL DB", version="9.6.0 or later")])
+        self.assertFalse(any("End-of-life PostgreSQL" in t for t in _vdb_titles(h)))
+
+    def test_concrete_eol_version_still_flagged(self):
+        # a concrete in-range version must still produce the EOL finding (no over-suppression)
+        h = Host(ip="10.0.0.9", ports=[_port(portid=5432, service="postgresql",
+                                             product="PostgreSQL DB", version="9.6.0")])
+        self.assertTrue(any("End-of-life PostgreSQL" in t for t in _vdb_titles(h)))
+
     def test_upstream_build_stays_a_lead_not_downgraded(self):
         # No distro fingerprint anywhere -> a concrete match stays "likely" (visible).
         h = Host(ip="10.0.0.8", os_name="", os_family="",

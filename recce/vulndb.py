@@ -875,6 +875,13 @@ def _matches(sig: dict, port: Port, host: Host) -> bool:
             return False
         return True   # OS-gated sig without a service version requirement
     version = _clean_version(port.version)
+    # nmap emits an OPEN-ENDED lower bound ("X or later" / "X and later") when it can't
+    # pin the exact version. An upper-bound signature ("vulnerable/EOL BELOW N": lt/le)
+    # can't be trusted then - the true version may exceed the bound (a real PostgreSQL
+    # 18 fingerprinted "9.6.0 or later" must NOT match "End-of-life PostgreSQL < 11").
+    if (any(k in sig for k in ("lt", "le")) and "eq" not in sig
+            and re.search(r"\b(?:or|and)\s+later\b", f"{port.version} {port.extrainfo}", re.I)):
+        return False
     if any(k in sig for k in ("eq", "lt", "le", "ge", "gt")):
         if not version:
             return False
