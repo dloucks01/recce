@@ -6,8 +6,14 @@ crack/spray/blocked cards.
 """
 from __future__ import annotations
 
+import http.server
+import threading
+from pathlib import Path
+
 from recce import act
+from recce.cli import _open_paths
 from recce.models import Credential, Host, Port, Vuln
+from recce.store import Store
 
 
 def _vuln(ip, port, sid, title, sev, **kw):
@@ -103,6 +109,70 @@ def test_foothold_emits_an_escalate_card():
     h = _host("10.0.0.5", [22], access_gained=True, privesc_checked=False)
     esc = [c for c in act.action_plan([h]) if c.archetype == "escalate"]
     assert esc and esc[0].yields.startswith("SYSTEM")
+
+
+# ------------------------------ P2: auto-execution -------------------------------
+
+def _serve_http(root: Path):
+    handler = lambda *a, **k: http.server.SimpleHTTPRequestHandler(*a, directory=str(root), **k)
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_execute_auto_builds_spray_plan_from_existing_creds(tmp_path):
+    st = Store(_open_paths(str(tmp_path / "e"))["db"])
+    try:
+        st.upsert_host(_host("10.0.0.5", [445]))          # an SMB surface
+        st.add_credential(Credential(username="svc", secret="P@ss", kind="password",
+                                     source="loot"))
+        summary = act.execute_auto(st, str(tmp_path / "e"))
+        assert summary["looted"] == []                    # nothing to loot
+        assert "passwords.txt" in summary["spray"]["files"]
+        assert "P@ss" in Path(summary["spray"]["files"]["passwords.txt"]).read_text()
+    finally:
+        st.close()
+
+
+def test_execute_auto_loots_web_env_then_spray_carries_the_password(tmp_path):
+    # The full P2 loop: a flagged .env exposure -> auto-loot the cleartext DB cred ->
+    # persist it -> the spray plan is (re)built carrying that looted password.
+    root = tmp_path / "web"
+    root.mkdir()
+    (root / ".env").write_text("DB_USER=webapp\nDB_PASSWORD=Pa55w0rd-Prod\n")
+    srv = _serve_http(root)
+    port = srv.server_address[1]
+    st = Store(_open_paths(str(tmp_path / "eng"))["db"])
+    try:
+        h = Host(ip="127.0.0.1",
+                 ports=[Port(portid=port, service="http", state="open"),
+                        Port(portid=22, service="ssh", state="open")],   # spray surface
+                 vulns=[Vuln(ip="127.0.0.1", port=port, protocol="tcp",
+                             script_id="web-dotenv", title="Exposed .env", state="VULNERABLE",
+                             severity="high", qod=95)])
+        st.upsert_host(h)
+        summary = act.execute_auto(st, str(tmp_path / "eng"))
+    finally:
+        srv.shutdown()
+    try:
+        assert any(c.secret == "Pa55w0rd-Prod" for c in summary["looted"])
+        assert any(c.secret == "Pa55w0rd-Prod" for c in st.all_credentials())
+        pw = Path(summary["spray"]["files"]["passwords.txt"]).read_text()
+        assert "Pa55w0rd-Prod" in pw                       # loot -> store -> spray plan
+    finally:
+        st.close()
+
+
+def test_execute_auto_is_bounded_and_idempotent(tmp_path):
+    # No loot opportunities -> exactly one pass, no crash, empty loot.
+    st = Store(_open_paths(str(tmp_path / "e"))["db"])
+    try:
+        st.upsert_host(_host("10.0.0.9", [80]))            # web host, but NO loot finding
+        summary = act.execute_auto(st, str(tmp_path / "e"))
+        assert summary["passes"] == 1 and summary["looted"] == []
+    finally:
+        st.close()
 
 
 def test_plan_is_ordered_auto_then_ready_then_blocked():
