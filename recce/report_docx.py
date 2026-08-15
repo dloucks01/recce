@@ -974,6 +974,19 @@ def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
     doc.table(["ID", "Severity", "Finding", "CWE", "Affected"], rows,
               widths=[900, 1100, 3860, 1500, 2000])
 
+    # MITRE ATT&CK coverage - techniques mapped from the findings, by tactic.
+    from . import attack
+    _cov = attack.coverage(hosts)
+    if _cov["by_tactic"]:
+        doc.heading("MITRE ATT&CK Coverage", 1)
+        _atk_rows = []
+        for _tac, _techs in _cov["by_tactic"].items():
+            for _t in _techs:
+                _atk_rows.append([f"{_tac} ({attack.TACTICS.get(_tac, '')})",
+                                  f"{_t['id']} {_t['name']}", str(len(_t['hosts']))])
+        doc.table(["Tactic", "Technique", "Hosts"], _atk_rows,
+                  widths=[3000, 4600, 1100])
+
     # Each finding as a section.
     for fid, f in findings_with_ids:
         doc.page_break()
