@@ -544,9 +544,10 @@ def _attack_coverage(hosts):
     for tactic, techs in cov["by_tactic"].items():
         tac = f'{escape(tactic)} <span class="muted">{attack.TACTICS.get(tactic, "")}</span>'
         for t in techs:
-            out.append(f'<tr><td>{tac}</td><td><a href="{t["url"]}" target="_blank" '
-                       f'rel="noopener">{t["id"]} {escape(t["name"])}</a></td>'
-                       f'<td>{len(t["hosts"])}</td></tr>')
+            # No external link: the HTML report is fully self-contained (airgap-safe).
+            # The T-code is a stable reference the reader can look up on attack.mitre.org.
+            out.append(f'<tr><td>{tac}</td><td><strong>{t["id"]}</strong> '
+                       f'{escape(t["name"])}</td><td>{len(t["hosts"])}</td></tr>')
             tac = ""      # label the tactic only on its first row
     out.append('</tbody></table></section>')
     return "".join(out)
