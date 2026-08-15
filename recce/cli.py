@@ -1686,6 +1686,38 @@ def cmd_next(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_act(args: argparse.Namespace) -> int:
+    """The Act phase: 'I found things - what do I DO?'. Classifies every finding into
+    an action archetype (loot / crack / spray / exploit / escalate / pivot), ranks the
+    cards by tier (readiness × safety × confidence) then impact × confidence × leverage,
+    and prints the guided plan. Read-only/reversible actions are flagged as ones recce
+    can run for you; intrusive ones are guided (exact command), never auto-fired."""
+    from . import act
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No engagement at {args.output_dir}. Start one:  recce run <targets> "
+              f"-o {args.output_dir}")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    hosts = _selected_hosts(store.all_hosts(), args)
+    cards = act.action_plan(hosts, store.all_credentials(), args.output_dir)
+    store.close()
+    only = getattr(args, "only", None)
+    if only:
+        cards = [c for c in cards if c.archetype == only]
+    print(BANNER)
+    print("Action plan — highest-value, most-actionable first:")
+    for line in act.format_plan(cards, top=getattr(args, "top", 0) or 0):
+        print(line)
+    print()
+    if any(c.tier == act.AUTO for c in cards):
+        print("[i] The read-only/reversible items above are ones recce can run for you "
+              "(auto-execution lands in a later slice); for now run them as shown.")
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Active verification (verify-don't-infer): confirm or refute version-inference LEADS by
     running the SAFE (Tier-A/B) NSE check each one names, then re-correlating.
@@ -6514,6 +6546,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     nx = sub.add_parser("next", help="the ranked next-best-actions for an engagement")
     _add_io(nx, title=False)
     nx.set_defaults(func=cmd_next)
+
+    act_p = sub.add_parser("act", help="the Act phase: found things -> ranked, guided "
+                           "action plan (loot / crack / spray / exploit / escalate / pivot)",
+                           description="Turn findings into a ranked action plan. Every "
+                           "finding is classified into an action archetype and scored by "
+                           "tier (what you can do now) then impact × confidence × leverage. "
+                           "Read-only/reversible items are flagged as ones recce can run "
+                           "for you; intrusive ones are guided (exact command), never "
+                           "auto-fired.")
+    _add_io(act_p, title=False)
+    act_p.add_argument("--host", action="append", metavar="IP",
+                       help="limit the plan to these host(s) (repeatable)")
+    act_p.add_argument("--only", metavar="ARCHETYPE",
+                       choices=["loot", "crack", "spray", "exploit", "escalate", "pivot"],
+                       help="show only this archetype")
+    act_p.add_argument("--top", type=int, default=0, metavar="N",
+                       help="cap the plan to the top N cards per tier")
+    act_p.set_defaults(func=cmd_act)
 
     vf = sub.add_parser("verify", help="confirm/refute version leads by re-running their "
                                        "safe NSE check (dry-run; --run to execute)")
