@@ -1832,6 +1832,7 @@ _UNAUTH_SWEEP = [
     ("nfs", "cmd_nfs"), ("kerberos", "cmd_kerberos"), ("docker", "cmd_docker"),
     ("kubernetes", "cmd_kubernetes"), ("mssql", "cmd_mssql"),
     ("mysql", "cmd_mysql"), ("postgres", "cmd_postgres"), ("smtp", "cmd_smtp"),
+    ("dns", "cmd_dns"),
 ]
 # The authenticated pass: the modules that DO something new once you have creds -
 # the netexec/impacket phase plus the authenticated facets of the deep modules. The
@@ -4527,6 +4528,23 @@ def cmd_smtp(args: argparse.Namespace) -> int:
         fmt=_fmt_smtp)
 
 
+def _fmt_dns(t, active) -> str:
+    state = "ZONE TRANSFER ALLOWED" if t.get("axfr") else \
+            ("probed" if t.get("version") else "reachable")
+    return f"{t['ip']}:{t['port']}  {state}"
+
+
+def cmd_dns(args: argparse.Namespace) -> int:
+    """Deep DNS enumeration: attempt a zone transfer (AXFR) for each domain recce has
+    already discovered from hostnames (no brute force), + version.bind (stdlib). AXFR
+    leaks the whole internal zone - an instant network map."""
+    return _run_service_scan(
+        args, module="dns", source="dns", label="DNS", noun="DNS endpoint(s)",
+        no_targets="[!] No DNS endpoints in the datastore (no port 53 / domain service). "
+                   "Run `enum` against the DNS hosts first.",
+        fmt=_fmt_dns)
+
+
 def cmd_elasticsearch(args: argparse.Namespace) -> int:
     """Deep Elasticsearch enumeration: GET the HTTP API (stdlib), read the version, and
     test whether /_cat/indices works WITHOUT authentication - an exposed cluster is a
@@ -6206,6 +6224,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_io(smp)
     _add_budget(smp)
     smp.set_defaults(func=cmd_smtp)
+
+    # DNS enumeration.
+    dnp = sub.add_parser("dns",
+                         help="DNS: attempt zone transfer (AXFR) for each discovered "
+                              "domain + version.bind (53) - AXFR leaks the whole zone")
+    dnp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                          "DNS hosts in the datastore)")
+    dnp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    _add_io(dnp)
+    _add_budget(dnp)
+    dnp.set_defaults(func=cmd_dns)
 
     # Elasticsearch enumeration.
     ep = sub.add_parser("elasticsearch", aliases=["es", "elastic"],
