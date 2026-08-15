@@ -298,3 +298,11 @@ main { padding: 18px 20px 40px; max-width: 1100px; }
 .loottable td.notes { color: var(--muted); font-size: 12px; max-width: 320px; }
 .loottable .tag { font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--ground); border: 1px solid var(--line); padding: 1px 7px; border-radius: 6px; }
 .empty { color: var(--muted); text-align: center; padding: 48px 20px; font-size: 14px; }
+
+/* ---- Act view controls (filter + auto-loot) ---- */
+.act-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; }
+.act-controls .chips { display: flex; gap: 5px; flex-wrap: wrap; }
+.act-controls .run.auto-loot { margin-left: auto; background: color-mix(in srgb, var(--ok) 18%, var(--surface)); border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line)); color: var(--text); font-weight: 700; font-size: 13px; padding: 7px 14px; border-radius: 9px; cursor: pointer; }
+.act-controls .run.auto-loot:hover:not(:disabled) { background: color-mix(in srgb, var(--ok) 28%, var(--surface)); }
+.act-controls .run.auto-loot:disabled { opacity: .6; cursor: default; }
+.ranmsg { background: color-mix(in srgb, var(--ok) 12%, var(--surface2)); border: 1px solid color-mix(in srgb, var(--ok) 40%, var(--line)); color: var(--text); font-size: 13px; padding: 9px 13px; border-radius: 9px; margin-bottom: 6px; }

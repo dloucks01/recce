@@ -277,6 +277,24 @@ def create_app(eng_dir: str) -> FastAPI:
                 "tiers": [{"tier": t, "label": act._TIER_LABEL[t], "cards": tiers[t]}
                           for t in sorted(tiers)]}
 
+    @app.post("/api/act/run")
+    def act_run():
+        """Execute the AUTO (read-only / reversible) links: loot the flagged unauth
+        services, refresh the spray plan, feed yields back. Intrusive actions are never
+        run. Returns what was looted so the UI can point the operator at the Loot tab."""
+        from .. import act
+        from ..store import Store
+        st = Store(db_path)
+        try:
+            summary = act.execute_auto(st, eng_dir)
+        finally:
+            st.close()
+        spray = summary.get("spray") or {}
+        broker.publish({"type": "act_run", "looted": len(summary["looted"])})
+        return {"looted": len(summary["looted"]),
+                "creds": [{"label": c.label, "source": c.source} for c in summary["looted"]],
+                "spray_files": sorted((spray.get("files") or {}).keys())}
+
     @app.get("/api/attack")
     def attack_coverage():
         """MITRE ATT&CK coverage: techniques the findings map to, by tactic."""
