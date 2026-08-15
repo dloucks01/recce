@@ -1007,6 +1007,14 @@ def _discover(args, profile, store, paths):
                 # on precisely the large, discovery-blocked scope we want to move fast.
                 profile.assume_up = True
                 profile.ping_discovery = False
+                # Discovery is fully blocked => this is the firewalled scope where a
+                # single fast pass can silently drop every SYN with no drop-marker to
+                # trigger the adaptive rescan. Force the union re-verify on EVERY host
+                # (incl. ones that came back with 0 ports), so a firewalled-but-alive
+                # box that the first pass missed gets a real second look instead of
+                # being recorded as 0 ports. This is exactly the "manual nmap finds
+                # ports recce didn't" engagement - be thorough here, not fast.
+                profile.verify_all = True
                 live_ips = hosts
             elif len(live_ips) < len(hosts):
                 # Partial sweep: DON'T drop the non-responders on faith - a live host
@@ -1067,7 +1075,12 @@ def _discover(args, profile, store, paths):
                       "(--no-udp-fallback to skip).")
 
     if getattr(args, "resume", False):
-        done = store.scanned_ips()
+        # Skip only hosts the enum phase actually finished (host.enumerated, set at the
+        # end of _enum_worker), NOT every seeded row. _seed_targets pre-writes a row for
+        # every target before scanning, so store.scanned_ips() would wrongly treat a
+        # host that was seeded-but-not-yet-enumerated (a run interrupted right after
+        # seeding) as done and skip it forever.
+        done = {h.ip for h in store.all_hosts() if h.enumerated}
         live_ips = [ip for ip in live_ips if ip not in done]
         print(f"[+] Resume: {len(live_ips)} host(s) remaining.")
     # Authoritative list: seed each responder's up-reason so a provided host is shown
@@ -4932,7 +4945,9 @@ def _fold_service_findings(store, hosts, analysis, source, to_vulns, label):
                 have.add(v.key)
                 host.vulns.append(v)
         store.upsert_host(host, merge=False)
-    store.set_meta(source, json.dumps(analysis))
+    # default=str: per-host vulns are already committed above; a stray non-JSON object
+    # left in `analysis` by a module must not raise here and abort report generation.
+    store.set_meta(source, json.dumps(analysis, default=str))
     fs = analysis["findings"]
     if fs:
         by_sev: dict = {}
