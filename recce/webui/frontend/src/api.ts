@@ -112,6 +112,12 @@ export type AttackCoverage = {
 export const getAct = () => getJSON<ActPlan>("/api/act");
 export const getCredentials = () => getJSON<Credential[]>("/api/credentials");
 export const getAttack = () => getJSON<AttackCoverage>("/api/attack");
+export type ActRunResult = { looted: number; creds: { label: string; source: string }[]; spray_files: string[] };
+export async function postActRun(): Promise<ActRunResult> {
+  const r = await fetch("/api/act/run", { method: "POST", headers: jsonHeaders() });
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
 
 // weighted risk score for sorting hosts most-dangerous-first
 export function hostScore(f: Record<string, number>): number {

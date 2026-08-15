@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Finding, Host, Overview, VulnDetail, SEVS, SEV_ALL, hostScore, sevTotal, getHost,
-  ActPlan, ActCard, Credential, AttackCoverage, getAct, getCredentials, getAttack,
+  ActPlan, ActCard, Credential, AttackCoverage, getAct, getCredentials, getAttack, postActRun,
 } from "./api";
 import { Stat, SevTag, SevBar, NoteCell, Chips, useBounded } from "./ui";
 import { FindingDetail } from "./FindingDetail";
@@ -427,30 +427,64 @@ function ActCardRow({ c, nav }: { c: ActCard; nav: Nav }) {
   );
 }
 
+const ARCHETYPES = ["loot", "spray", "exploit", "escalate", "crack", "default-cred", "ad-path", "pivot"];
+
 export function Act({ nav }: { nav: Nav }) {
   const [plan, setPlan] = useState<ActPlan | null>(null);
   const [atk, setAtk] = useState<AttackCoverage | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    getAct().then(setPlan).catch((e) => setErr(String(e)));
-    getAttack().then(setAtk).catch(() => {});
-  }, []);
+  const [arch, setArch] = useState<string>("all");   // archetype filter (declutter)
+  const [running, setRunning] = useState(false);
+  const [ranMsg, setRanMsg] = useState<string | null>(null);
+  const load = () => getAct().then(setPlan).catch((e) => setErr(String(e)));
+  useEffect(() => { load(); getAttack().then(setAtk).catch(() => {}); }, []);
+
+  async function runAuto() {
+    setRunning(true); setRanMsg(null);
+    try {
+      const r = await postActRun();
+      setRanMsg(r.looted > 0
+        ? `Looted ${r.looted} new credential(s) — see the Loot tab. Spray plan refreshed.`
+        : "No new credentials to loot (already captured, or hosts unreachable).");
+      await load();
+    } catch { setRanMsg("run failed — is the engagement reachable?"); }
+    finally { setRunning(false); }
+  }
+
   if (err) return <div className="err">{err}</div>;
   if (!plan) return <div className="loading">Building the action plan…</div>;
   if (plan.top.length === 0)
     return <div className="empty">Nothing actionable yet — run a scan, then the deep modules, and the plan builds itself.</div>;
+  const keep = (c: ActCard) => arch === "all" || c.archetype === arch;
   return (
     <div className="actview">
+      <div className="act-controls">
+        <div className="chips">
+          <button className={"chip" + (arch === "all" ? " sel" : "")} onClick={() => setArch("all")}>all</button>
+          {ARCHETYPES.map((a) => (
+            <button key={a} className={"chip" + (arch === a ? " sel" : "")} onClick={() => setArch(a)}>{a}</button>
+          ))}
+        </div>
+        <button className="run auto-loot" onClick={runAuto} disabled={running}
+                title="loot the read-only unauth services + refresh the spray plan (intrusive actions are never auto-run)">
+          {running ? "Looting…" : "⚡ Run read-only loot"}
+        </button>
+      </div>
+      {ranMsg && <div className="ranmsg">{ranMsg}</div>}
       <section className="panel top-actions">
         <div className="panel-h"><h3>★ Top priorities</h3><span className="muted">highest impact you can act on now</span></div>
-        {plan.top.map((c, i) => <ActCardRow key={i} c={c} nav={nav} />)}
+        {plan.top.filter(keep).map((c, i) => <ActCardRow key={i} c={c} nav={nav} />)}
       </section>
-      {plan.tiers.map((t) => (
-        <section className="panel" key={t.tier}>
-          <div className="panel-h"><h3 className="tier-label">{t.label}</h3><span className="muted">{t.cards.length}</span></div>
-          {t.cards.map((c, i) => <ActCardRow key={i} c={c} nav={nav} />)}
-        </section>
-      ))}
+      {plan.tiers.map((t) => {
+        const cards = t.cards.filter(keep);
+        if (cards.length === 0) return null;
+        return (
+          <section className="panel" key={t.tier}>
+            <div className="panel-h"><h3 className="tier-label">{t.label}</h3><span className="muted">{cards.length}</span></div>
+            {cards.map((c, i) => <ActCardRow key={i} c={c} nav={nav} />)}
+          </section>
+        );
+      })}
       {atk && atk.tactics.length > 0 && (
         <section className="panel">
           <div className="panel-h"><h3>MITRE ATT&CK coverage</h3>

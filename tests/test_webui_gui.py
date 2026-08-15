@@ -72,6 +72,20 @@ class ApiShape(unittest.TestCase):
         self.assertGreater(cov["technique_count"], 0)
         self.assertTrue(cov["tactics"] and cov["tactics"][0]["techniques"])
 
+    def test_act_run_button_endpoint_is_safe(self):
+        # the "Run read-only loot" button POSTs here; on an empty engagement it must be a
+        # fast, clean no-op (the real loot chain is covered by the act unit tests).
+        empty = tempfile.mkdtemp()
+        from recce.store import Store
+        Store(_open_paths(empty)["db"]).close()
+        try:
+            with _client(empty) as c:
+                r = c.post("/api/act/run")
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.json()["looted"], 0)
+        finally:
+            __import__("shutil").rmtree(empty, ignore_errors=True)
+
 
 @unittest.skipUnless(_BUILT, "frontend not built (recce/webui/static absent)")
 class ShippedSpa(unittest.TestCase):
