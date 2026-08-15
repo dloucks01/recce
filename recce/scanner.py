@@ -13,6 +13,7 @@ No scanning happens on import - callers drive the phases explicitly.
 from __future__ import annotations
 
 import functools
+import ipaddress
 import os
 import re
 import shutil
@@ -265,6 +266,49 @@ def _proxied() -> bool:
     return proxy.is_active()
 
 
+def _maybe_ipv6(cmd: list) -> list:
+    """nmap REFUSES an IPv6 target without -6 (exits nonzero, writes no XML) -> 0 ports
+    for every v6 host, even though recce parses and groups IPv6 end to end. Inject -6
+    right after the binary for any nmap command that carries an IPv6 LITERAL target,
+    unless the family is already pinned. One choke point in _run so every per-host
+    builder is covered without threading -6 through each. File-list scans (-iL) have no
+    literal in argv, so their builders flag the family explicitly (_file_family_args)."""
+    if not cmd or "nmap" not in os.path.basename(str(cmd[0])):
+        return cmd
+    if "-6" in cmd or "-4" in cmd:
+        return cmd
+    for a in cmd[1:]:
+        if isinstance(a, str) and not a.startswith("-"):
+            try:
+                if ipaddress.ip_address(a).version == 6:
+                    return [cmd[0], "-6", *cmd[1:]]
+            except ValueError:
+                continue
+    return cmd
+
+
+def _file_family_args(targets_file: str) -> list:
+    """`-6` for a discovery/reconfirm target file whose entries are ALL IPv6 (nmap
+    can't mix families in one run). A mixed or all-v4 file gets nothing (v4 default);
+    a pure-v6 subnet file becomes scannable instead of silently erroring out."""
+    try:
+        with open(targets_file, encoding="utf-8", errors="replace") as fh:
+            toks = [t for line in fh for t in line.split()]
+    except OSError:
+        return []
+    v6 = v4 = 0
+    for t in toks:
+        addr = t.split("/", 1)[0]
+        try:
+            if ipaddress.ip_address(addr).version == 6:
+                v6 += 1
+            else:
+                v4 += 1
+        except ValueError:
+            continue
+    return ["-6"] if v6 and not v4 else []
+
+
 def _scan_type() -> str:
     """SYN scan when we can, EXCEPT through a proxy: a SYN scan uses raw packets that
     bypass proxychains and would fire from the operator's real IP. A TCP connect scan
@@ -314,6 +358,7 @@ def _run(cmd: list[str], timeout: int | None = None) -> RunOutcome:
     """Run a command, capturing output. Never raises - returns a RunOutcome the
     caller inspects, so one bad host can't stall or crash a run. `errors=replace`
     keeps a non-UTF-8 service banner from raising UnicodeDecodeError mid-scan."""
+    cmd = _maybe_ipv6(cmd)          # -6 for any nmap command targeting an IPv6 literal
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
                            errors="replace", timeout=timeout)
@@ -382,7 +427,7 @@ def _issue_from(outcome: RunOutcome, out_xml: str, phase: str,
 def discover_hosts(targets_file: str, out_xml: str) -> tuple[str, ScanIssue | None]:
     """Ping-sweep the targets; return (xml path, issue|None) listing live hosts."""
     cmd = [
-        "nmap", "-sn", "-PE", "-PP",
+        "nmap", "-sn", *_file_family_args(targets_file), "-PE", "-PP",
         # SYN-ping a broad port set - incl. the ports firewalled Windows/AD hosts most
         # often still answer (88 Kerberos, 389 LDAP, 5985 WinRM) so they aren't ruled
         # down. --max-retries 2 (not 1) so a single dropped probe doesn't lose a host.
@@ -556,9 +601,9 @@ def reconfirm_hosts(targets_file: str, out_xml: str,
     # from an open common port (22/80/443), and too few retries then reads a live-but-
     # firewalled host as dead and drops it from the scan entirely. A slightly longer
     # host-timeout (4m) covers a slow firewalled host whose ports answer late.
-    cmd = ["nmap", scan_type, "-Pn", "-n", "--open", "--top-ports", "100",
-           f"-T{profile.timing}", "--max-retries", "4", "--host-timeout", "4m",
-           "-iL", targets_file, "-oX", out_xml]
+    cmd = ["nmap", scan_type, *_file_family_args(targets_file), "-Pn", "-n", "--open",
+           "--top-ports", "100", f"-T{profile.timing}", "--max-retries", "4",
+           "--host-timeout", "4m", "-iL", targets_file, "-oX", out_xml]
     try:
         with open(targets_file) as fh:
             ntargets = sum(1 for ln in fh if ln.strip())
@@ -575,8 +620,8 @@ def _masscan_ports(ip: str, out_xml: str,
                    profile: ScanProfile) -> tuple[str, ScanIssue | None]:
     port_range = _masscan_port_spec(profile)
     tmp = out_xml + ".masscan.xml"
-    _run(["masscan", ip, "-p", port_range, "--rate", str(profile.min_rate * 10),
-          "-oX", tmp], timeout=(profile.host_timeout * 60 + 120) or None)
+    mout = _run(["masscan", ip, "-p", port_range, "--rate", str(profile.min_rate * 10),
+                 "-oX", tmp], timeout=(profile.host_timeout * 60 + 120) or None)
     # Re-emit as an nmap-shaped XML by re-scanning just the open ports with nmap.
     ports = _extract_masscan_ports(tmp)
     try:                                      # clean up the intermediate masscan XML
@@ -584,7 +629,17 @@ def _masscan_ports(ip: str, out_xml: str,
     except OSError:
         pass
     if not ports:
-        return _empty_xml(out_xml), None
+        # 0 ports AND a non-clean masscan exit (needs root for raw sockets, bad rate,
+        # timeout) is NOT proof the host is closed - don't record a silent clean zero.
+        if mout.missing or mout.timed_out or mout.returncode != 0:
+            return _empty_xml(out_xml), ScanIssue(
+                "warning", f"masscan produced no ports for {ip} and did not exit "
+                f"cleanly (rc={mout.returncode}"
+                + (", not found" if mout.missing else "")
+                + (", timed out" if mout.timed_out else "")
+                + "). masscan needs root for raw sockets; re-scan this host with nmap "
+                "(drop --fast) before trusting a 0-port result.")
+        return _empty_xml(out_xml), None      # clean run: genuinely no open ports
     scan_type = _scan_type()
     to_args, kill = _timeout_args(profile)
     outcome = _run(["nmap", scan_type, "-Pn", "-n", "--open", *to_args,

@@ -44,3 +44,24 @@ def test_thorough_profile_also_has_no_min_rate_floor():
     cmd = scanner._portscan_cmd("10.0.0.9", os.devnull, scanner.PROFILES["thorough"],
                                 reliable=False)
     assert "--min-rate" not in cmd
+
+
+def test_ipv6_target_gets_dash6_injected():
+    # nmap refuses an IPv6 literal without -6 (0 ports otherwise). _run injects it.
+    v6 = scanner._maybe_ipv6(["nmap", "-sS", "-Pn", "-p-", "2001:db8::1", "-oX", "/x"])
+    assert v6[:2] == ["nmap", "-6"] and "2001:db8::1" in v6
+    # an IPv4 target is untouched...
+    v4 = scanner._maybe_ipv6(["nmap", "-sS", "-Pn", "10.0.0.1", "-oX", "/x"])
+    assert "-6" not in v4
+    # ...already-pinned family is left alone, and non-nmap commands are ignored
+    assert scanner._maybe_ipv6(["nmap", "-4", "10.0.0.1"]).count("-6") == 0
+    assert scanner._maybe_ipv6(["masscan", "2001:db8::1", "-p", "80"])[0] == "masscan"
+
+
+def test_ipv6_only_target_file_gets_dash6(tmp_path):
+    f6 = tmp_path / "v6.txt"
+    f6.write_text("2001:db8::1\n2001:db8::2\n")
+    assert scanner._file_family_args(str(f6)) == ["-6"]
+    fmix = tmp_path / "mixed.txt"
+    fmix.write_text("10.0.0.1\n2001:db8::1\n")           # mixed -> no -6 (v4 default)
+    assert scanner._file_family_args(str(fmix)) == []

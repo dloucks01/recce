@@ -962,6 +962,24 @@ def _discover(args, profile, store, paths):
             else:
                 live_ips = sorted(port_map, key=_ip_key)
                 print(f"[+] masscan found {len(live_ips)} host(s) with open ports.")
+                # masscan is stateless and drops SYNs under load, so a target it did
+                # NOT report is NOT necessarily closed - it may be a live host whose
+                # probes were dropped. Never silently discard them: warn + record a
+                # durable issue so they're recoverable, not lost from the engagement.
+                missed = [ip for ip in hosts if ip not in set(port_map)]
+                if missed:
+                    print(f"[!] masscan reported 0 open ports on {len(missed)} of "
+                          f"{len(hosts)} target(s). masscan can drop SYNs under load, so "
+                          "this may hide live hosts. They are NOT enumerated in --fast - "
+                          "re-run without --fast (accurate nmap sweep), or with "
+                          "--targets-up to force-enumerate every target.")
+                    _record_issues(store, paths, "(fast-sweep)", [{
+                        "phase": "discovery", "level": "warning",
+                        "message": f"--fast/masscan reported 0 open ports on "
+                        f"{len(missed)} target(s); NOT enumerated (masscan drops SYNs "
+                        "under load). Re-scan without --fast or use --targets-up. "
+                        "Missed: " + ", ".join(missed[:50])
+                        + (" …" if len(missed) > 50 else "")}])
         else:
             print("[!] masscan unavailable/empty; falling back to nmap.")
             port_map, fast_mode = None, False
@@ -1113,6 +1131,14 @@ def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
           f"(ports + services) ...")
     completed = 0
     refresher = _Refresher(args)
+    # B5 - detect the scanning source getting rate-limited/blocked mid-run: once we've
+    # seen real signal (some hosts with open ports), a long run of consecutive 0-port
+    # hosts is the classic "IPS blocked our source IP" symptom. Warn ONCE so the tail
+    # of the scope isn't silently written off as clean.
+    hosts_with_ports = 0
+    zero_streak = 0
+    ips_block_warned = False
+    _IPS_ZERO_STREAK = 15
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_enum_worker, ip, profile, paths, creds, port_map,
                              subnet_map, active_probe, disc_reasons.get(ip, ""),
@@ -1137,6 +1163,27 @@ def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
             print(f"    [{completed}/{len(live_ips)}] {ip}: "
                   f"{len(host.open_ports)} open port(s){extra}")
             refresher.tick(store, paths, args.title)
+            # B5: track the open-port hit-rate; a long zero-streak AFTER real signal
+            # smells like the source got throttled/blocked partway through.
+            if host.open_ports:
+                hosts_with_ports += 1
+                zero_streak = 0
+            else:
+                zero_streak += 1
+            if (not ips_block_warned and hosts_with_ports >= 5
+                    and zero_streak >= _IPS_ZERO_STREAK):
+                ips_block_warned = True
+                msg = (f"{zero_streak} consecutive host(s) returned 0 open ports after "
+                       f"{hosts_with_ports} host(s) with open ports earlier - the "
+                       "scanning source may have been rate-limited/blocked by an IPS. "
+                       "Pause, switch source IP, or lower --workers / timing, then "
+                       "re-scan the tail (recce merges, so nothing is duplicated).")
+                print("\n" + "!" * 64
+                      + f"\n[!] POSSIBLE SOURCE-IP BLOCK (IPS?): {msg}\n"
+                      + "!" * 64 + "\n")
+                _record_issues(store, paths, "(enum)", [{
+                    "phase": "enum", "level": "warning",
+                    "message": "possible IPS / source-IP block mid-scan: " + msg}])
 
 
 # --- phase 2b: vulnerability scanning (per open port) ---------------------------
@@ -2699,6 +2746,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ok = _ilu.find_spec(lib) is not None
         mark = "OK  " if ok else "-   (native/CLI fallback)"
         print(f"  {lib:<15} {mark:<24} {note}")
+    # Honesty about the library-vs-CLI split: a few features (AS-REP roast,
+    # secretsdump, mssqlclient deep-enum) shell out to the impacket CLI scripts, which
+    # are NOT the same as the importable library. On the airgap bundle the library is
+    # frozen in but the CLIs aren't (there's no general python3 to run them), so those
+    # features go dark even though 'impacket OK' above. Say so, so it isn't a surprise
+    # mid-engagement. Kerberoast + SMB enum are library-based and keep working.
+    if _ilu.find_spec("impacket") is not None and not _ce.impacket_tool("GetUserSPNs"):
+        print("  [!] impacket library is present but its CLI scripts are not on PATH -> "
+              "AS-REP roast, secretsdump, and mssqlclient deep-enum are UNAVAILABLE "
+              "(they shell out to the CLI). Kerberoast + SMB enum still work (library).")
 
     # Optional real self-scan to prove the pipeline end-to-end on THIS box.
     scan_ok = None
