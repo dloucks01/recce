@@ -24,6 +24,7 @@ docs/ACT-PHASE.md. This slice (P1) is guidance-only: it classifies, ranks, and p
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 from . import qod
@@ -353,6 +354,98 @@ def _dedup_loot(cards: list[ActionCard]) -> list[ActionCard]:
 def _rank_key(c: ActionCard):
     # tier ascending, then score descending, then a stable tie-break on target.
     return (c.tier, -c.score, c.target)
+
+
+# --- P2: auto-run the read-only / reversible links + the feedback loop -----------
+# These execute ONLY read-only wire-protocol loot (the cheap creds we already extract)
+# and a read-only spray-PLAN generation. Nothing intrusive ever runs here. Each is
+# scoped to hosts that ALREADY carry the matching loot finding, so `act --run` never
+# blind-rescans the whole scope. Every call is defensively wrapped: one unreachable or
+# hostile target can't abort the loop.
+
+def _has_finding(host, *needles: str) -> bool:
+    for v in getattr(host, "vulns", []):
+        t = f"{v.script_id} {v.title}".lower()
+        if any(n in t for n in needles):
+            return True
+    return False
+
+
+def _loot_db(store, hosts, o) -> list:
+    """Re-run the read-only DB loot (Postgres trust-auth, MySQL empty-password) on hosts
+    already flagged for it; persist any NEW credential. Returns the new creds."""
+    from . import mysql, postgres
+    flagged = [h for h in hosts if _has_finding(h, "trust", "empty-password",
+                                                "empty password", "postgres", "mysql")]
+    new: list = []
+    for mod in (postgres, mysql):
+        try:
+            analysis = mod.analyze(flagged, active=True)
+        except Exception:  # noqa: BLE001 - a bad target never aborts the loop
+            continue
+        for c in analysis.get("credentials", []):
+            if store.add_credential(c):
+                new.append(c)
+    return new
+
+
+def _loot_web(store, hosts, o) -> list:
+    """Re-run the read-only web loot (.git/.env/.aws) on hosts already flagged; persist
+    any NEW credential."""
+    from . import web
+    new: list = []
+    for h in hosts:
+        if not _has_finding(h, "web-git", "gitconfig", "dotenv", ".env", "web-aws"):
+            continue
+        try:
+            profiles = web.scan_host(h, active=True)
+        except Exception:  # noqa: BLE001
+            continue
+        for pr in profiles:
+            for c in pr.get("credentials", []):
+                if store.add_credential(c):
+                    new.append(c)
+    return new
+
+
+# command prefix (as emitted by _loot_action) -> executor
+_AUTO_LOOT = {"recce db": _loot_db, "recce web": _loot_web}
+
+
+def execute_auto(store, output_dir: str = "engagement", max_passes: int = 3) -> dict:
+    """Run the AUTO read-only links and feed yields back until nothing new appears.
+
+    Loop: loot the flagged unauth services -> persist new creds -> re-plan. A looted
+    cred changes the plan (a Spray card appears / leverage rises), which is exactly the
+    'found -> act -> new access -> act again' loop, bounded by max_passes. Finally
+    (re)generate the lockout-safe spray PLAN from the accumulated cred set. Read-only
+    throughout: loot is non-mutating, the spray plan only WRITES local files (it does
+    not spray). Returns a summary for the caller to print."""
+    from . import credentials as cr
+    summary = {"looted": [], "passes": 0, "spray": {}}
+    for _ in range(max(1, max_passes)):
+        hosts = store.all_hosts()
+        cards = action_plan(hosts, store.all_credentials(), output_dir)
+        auto_loot_cmds = {c.command for c in cards
+                          if c.tier == AUTO and c.archetype == "loot"}
+        new: list = []
+        for cmd in auto_loot_cmds:
+            for prefix, fn in _AUTO_LOOT.items():
+                if cmd.startswith(prefix):
+                    new.extend(fn(store, hosts, output_dir))
+        summary["passes"] += 1
+        summary["looted"].extend(new)
+        if not new:                    # fixpoint: nothing new to loot -> stop
+            break
+    # Regenerate the spray plan from the final accumulated credential set.
+    hosts = store.all_hosts()
+    stacked = cr.stack(hosts, store.all_credentials())
+    if stacked:
+        try:
+            summary["spray"] = cr.build_spray(stacked, hosts, output_dir)
+        except Exception:  # noqa: BLE001 - plan generation must not crash the phase
+            summary["spray"] = {}
+    return summary
 
 
 # --- rendering -------------------------------------------------------------------

@@ -1701,20 +1701,38 @@ def cmd_act(args: argparse.Namespace) -> int:
     store = _open_store(paths["db"])
     if store is None:
         return 1
+    print(BANNER)
+    # --run: auto-execute the read-only/reversible links (loot flagged unauth services,
+    # regenerate the spray plan) and feed the yields back, before printing the plan.
+    if getattr(args, "run", False):
+        print("[*] Act --run: executing read-only loot + regenerating the spray plan "
+              "(intrusive actions are never auto-run) ...")
+        summary = act.execute_auto(store, args.output_dir)
+        looted = summary["looted"]
+        if looted:
+            print(f"[+] Looted {len(looted)} new credential(s) over {summary['passes']} "
+                  "pass(es):")
+            for c in looted[:20]:
+                print(f"      {c.label}  [{c.kind} · {c.source}]")
+        else:
+            print("[i] No new credentials to loot (already captured, or none reachable).")
+        if summary.get("spray", {}).get("files"):
+            print("[+] Spray plan refreshed: "
+                  + ", ".join(sorted(summary['spray']['files'])) + f"  (in {summary['spray'].get('dir', args.output_dir)})")
+
     hosts = _selected_hosts(store.all_hosts(), args)
     cards = act.action_plan(hosts, store.all_credentials(), args.output_dir)
     store.close()
     only = getattr(args, "only", None)
     if only:
         cards = [c for c in cards if c.archetype == only]
-    print(BANNER)
-    print("Action plan — highest-value, most-actionable first:")
+    print("\nAction plan — highest-value, most-actionable first:")
     for line in act.format_plan(cards, top=getattr(args, "top", 0) or 0):
         print(line)
     print()
-    if any(c.tier == act.AUTO for c in cards):
-        print("[i] The read-only/reversible items above are ones recce can run for you "
-              "(auto-execution lands in a later slice); for now run them as shown.")
+    if not getattr(args, "run", False) and any(c.tier == act.AUTO for c in cards):
+        print("[i] The read-only/reversible items above are ones recce can run for you: "
+              "`recce act --run -o " + args.output_dir + "` loots + builds the spray plan.")
     return 0
 
 
@@ -6563,6 +6581,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                        help="show only this archetype")
     act_p.add_argument("--top", type=int, default=0, metavar="N",
                        help="cap the plan to the top N cards per tier")
+    act_p.add_argument("--run", action="store_true",
+                       help="auto-execute the read-only/reversible links (loot the "
+                            "flagged unauth services, regenerate the spray plan) and feed "
+                            "the yields back; intrusive actions are never auto-run")
     act_p.set_defaults(func=cmd_act)
 
     vf = sub.add_parser("verify", help="confirm/refute version leads by re-running their "

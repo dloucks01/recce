@@ -74,9 +74,12 @@ commands. An unproven action reads "candidate — verify" and points at `recce p
 - **P1 — model + classifier + `recce act` (guidance-only).** ✅ Shipped. ActionCard,
   the six-archetype classifier, the tier/score ranking, loot aggregation, the
   credential-driven crack/spray/blocked cards, and the grouped CLI output.
-- **P2 — auto-run the read-only links + feedback loop.** Loot the not-yet-looted unauth
-  services, persist yields, auto-regenerate the spray plan, and re-rank (bounded loop),
-  so a looted cred surfaces a Spray card automatically.
+- **P2 — auto-run the read-only links + feedback loop.** ✅ Shipped. `recce act --run`
+  loots the flagged unauth services (read-only wire-protocol loot for DB trust/empty-pw
+  and web `.git`/`.env`/`.aws`), persists new creds, and re-plans in a bounded loop, then
+  (re)generates the lockout-safe spray plan from the accumulated cred set — so a looted
+  cred surfaces a Spray card automatically. Scoped to hosts already carrying the matching
+  loot finding (never a blind re-scan); intrusive actions are still guidance-only.
 - **P3 — deepen guided cards + prove integration.** Per-archetype PoC (exploitplan /
   poc / exploitref), the synthesized AD-path-to-DA route (attackpath), verify labels,
   and ranking polish.
