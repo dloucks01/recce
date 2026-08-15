@@ -132,6 +132,31 @@ def test_mysql_findings_and_fold():
     assert by_ip["10.0.0.6"][0].source == "mysql"
 
 
+def test_version_writeback_replaces_open_ended_nmap_banner(tmp_path):
+    # a deep module's real version read is adopted onto the port when nmap left an
+    # open-ended fingerprint, so the report shows the true build.
+    from recce.cli import _fold_service_findings, _open_paths
+    from recce.store import Store
+    eng = tmp_path / "e"
+    st = Store(_open_paths(str(eng))["db"])
+    try:
+        h = Host(ip="10.0.0.5", up_reason="syn-ack",
+                 ports=[Port(portid=5432, service="postgresql", product="PostgreSQL DB",
+                             version="9.6.0 or later", state="open")])
+        st.upsert_host(h)
+        analysis = {
+            "findings": [{"title": "PostgreSQL trust authentication (no password required)",
+                          "target": "10.0.0.5:5432", "severity": "high", "detail": "trust"}],
+            "probes": {"10.0.0.5:5432": {"version": "18.1 (Debian 18.1-2)", "unauth": True}},
+            "stats": {}}
+        _fold_service_findings(st, [h], analysis, "postgres",
+                               postgres.findings_to_vulns, "PostgreSQL")
+        p = next(x for x in st.get_host("10.0.0.5").ports if x.portid == 5432)
+        assert p.version == "18.1 (Debian 18.1-2)"     # adopted the real version
+    finally:
+        st.close()
+
+
 def test_is_predicates_respect_open_state():
     assert mysql.is_mysql(Port(portid=3306, service="mysql", state="open"))
     assert not mysql.is_mysql(Port(portid=3306, service="mysql", state="closed"))

@@ -4851,10 +4851,19 @@ def _fold_service_findings(store, hosts, analysis, source, to_vulns, label):
     analysis["stats"]["findings"] = len(analysis["findings"])
     by_ip = to_vulns(analysis["findings"])
     host_by_ip = {h.ip: h for h in hosts}
+    # A deep module speaks the real protocol, so it reads the TRUE version. Adopt it
+    # onto the port when nmap left the version empty or OPEN-ENDED ("9.6.0 or later")
+    # - so the report shows the real build (a PostgreSQL 18 reads "18.1", not nmap's
+    # vague fingerprint). Never clobbers a concrete nmap version.
+    probes = analysis.get("probes") or {}
     for ip, vulns in by_ip.items():
         host = host_by_ip.get(ip) or store.get_host(ip)
         if host is None:
             continue
+        for p in host.ports:
+            mv = (probes.get(f"{ip}:{p.portid}") or {}).get("version")
+            if mv and (not p.version or re.search(r"\b(?:or|and)\s+later\b", p.version, re.I)):
+                p.version = mv
         have = {v.key for v in host.vulns if v.source != source}
         host.vulns = [v for v in host.vulns if v.source != source]   # refresh this source
         for v in vulns:
