@@ -1831,7 +1831,7 @@ _UNAUTH_SWEEP = [
     ("elasticsearch", "cmd_elasticsearch"), ("rsync", "cmd_rsync"),
     ("nfs", "cmd_nfs"), ("kerberos", "cmd_kerberos"), ("docker", "cmd_docker"),
     ("kubernetes", "cmd_kubernetes"), ("mssql", "cmd_mssql"),
-    ("mysql", "cmd_mysql"), ("postgres", "cmd_postgres"),
+    ("mysql", "cmd_mysql"), ("postgres", "cmd_postgres"), ("smtp", "cmd_smtp"),
 ]
 # The authenticated pass: the modules that DO something new once you have creds -
 # the netexec/impacket phase plus the authenticated facets of the deep modules. The
@@ -4507,6 +4507,26 @@ def cmd_postgres(args: argparse.Namespace) -> int:
         fmt=_fmt_postgres)
 
 
+def _fmt_smtp(t, active) -> str:
+    flags = []
+    if t.get("open_relay"):
+        flags.append("OPEN RELAY")
+    if t.get("vrfy"):
+        flags.append("VRFY enum")
+    state = ", ".join(flags) if flags else ("probed" if t.get("version") else "reachable")
+    return f"{t['ip']}:{t['port']}  {state}"
+
+
+def cmd_smtp(args: argparse.Namespace) -> int:
+    """Deep SMTP enumeration: EHLO + envelope-only open-relay test (never sends DATA),
+    VRFY user-enum, and STARTTLS posture (stdlib). Read-only - nothing is delivered."""
+    return _run_service_scan(
+        args, module="smtp", source="smtp", label="SMTP", noun="SMTP endpoint(s)",
+        no_targets="[!] No SMTP endpoints in the datastore (no port 25/465/587). Run "
+                   "`enum` against the mail hosts first.",
+        fmt=_fmt_smtp)
+
+
 def cmd_elasticsearch(args: argparse.Namespace) -> int:
     """Deep Elasticsearch enumeration: GET the HTTP API (stdlib), read the version, and
     test whether /_cat/indices works WITHOUT authentication - an exposed cluster is a
@@ -6173,6 +6193,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_io(pgp)
     _add_budget(pgp)
     pgp.set_defaults(func=cmd_postgres)
+
+    # SMTP enumeration.
+    smp = sub.add_parser("smtp", aliases=["mail"],
+                         help="SMTP: EHLO + envelope-only open-relay test (no DATA sent) "
+                              "+ VRFY user-enum + STARTTLS posture (25/465/587)")
+    smp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                          "SMTP hosts in the datastore)")
+    smp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    _add_io(smp)
+    _add_budget(smp)
+    smp.set_defaults(func=cmd_smtp)
 
     # Elasticsearch enumeration.
     ep = sub.add_parser("elasticsearch", aliases=["es", "elastic"],
