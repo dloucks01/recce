@@ -85,6 +85,8 @@ class ActionCard:
     count: int = 1                 # findings/hosts this one card covers (loot aggregates)
     verify_first: bool = False     # action rests on an UNVERIFIED lead -> "candidate"
     tool: str = ""                 # the concrete tool this action uses (msf/impacket/...)
+    attack_id: str = ""            # MITRE ATT&CK technique id, e.g. "T1558.003"
+    attack_name: str = ""          # e.g. "Kerberoasting"
 
     @property
     def score(self) -> float:
@@ -423,8 +425,19 @@ def action_plan(hosts, credentials=None, output_dir: str = "engagement") -> list
     if ad:
         cards.append(ad)
     cards = _dedup_loot(cards)
+    _tag_attack(cards)
     cards.sort(key=_rank_key)
     return cards
+
+
+def _tag_attack(cards: list[ActionCard]) -> None:
+    """Annotate each card with its MITRE ATT&CK technique: the specific one implied by
+    the finding title, else the archetype's default."""
+    from . import attack
+    for c in cards:
+        tech = attack.technique_for_text(c.title) or attack.technique_for_archetype(c.archetype)
+        if tech:
+            c.attack_id, c.attack_name = tech.id, tech.name
 
 
 def _dedup_loot(cards: list[ActionCard]) -> list[ActionCard]:
@@ -583,6 +596,8 @@ def format_plan(cards: list[ActionCard], top: int = 0) -> list[str]:
             flag = "  [candidate — verify first]" if c.verify_first else ""
             lines.append(f"  [{c.archetype}] {c.title}{where}  ->  {c.yields}{tag}{flag}")
             lines.append(f"      $ {c.command}")
+            att = f"  ·  ATT&CK {c.attack_id} {c.attack_name}" if c.attack_id else ""
             lines.append(f"      · {c.why}  ·  score {c.score} "
-                         f"(impact {c.impact} × conf {c.confidence:g} × lev {c.leverage:g})")
+                         f"(impact {c.impact} × conf {c.confidence:g} × lev {c.leverage:g})"
+                         + att)
     return lines

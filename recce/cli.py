@@ -1746,6 +1746,35 @@ def cmd_act(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_attack(args: argparse.Namespace) -> int:
+    """Engagement-wide MITRE ATT&CK coverage: the techniques recce's findings map to,
+    grouped by tactic along the kill chain. For client reports that want ATT&CK, not
+    just CVEs/CWEs."""
+    from . import attack
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No engagement at {args.output_dir}. Run `recce run <targets>` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    cov = attack.coverage(_selected_hosts(store.all_hosts(), args))
+    store.close()
+    print(BANNER)
+    if not cov["by_tactic"]:
+        print("No findings map to an ATT&CK technique yet — enumerate first.")
+        return 0
+    print(f"MITRE ATT&CK coverage — {cov['technique_count']} technique(s) across "
+          f"{cov['tactic_count']} tactic(s):\n")
+    for tactic, techs in cov["by_tactic"].items():
+        print(f"  {tactic}  ({attack.TACTICS.get(tactic, '')})")
+        for t in techs:
+            hosts = ", ".join(t["hosts"][:6]) + (" …" if len(t["hosts"]) > 6 else "")
+            print(f"      {t['id']:<11} {t['name']:<44} {len(t['hosts'])} host(s): {hosts}")
+        print()
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Active verification (verify-don't-infer): confirm or refute version-inference LEADS by
     running the SAFE (Tier-A/B) NSE check each one names, then re-correlating.
@@ -6597,6 +6626,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "flagged unauth services, regenerate the spray plan) and feed "
                             "the yields back; intrusive actions are never auto-run")
     act_p.set_defaults(func=cmd_act)
+
+    atk = sub.add_parser("attack", help="MITRE ATT&CK coverage: findings mapped to "
+                         "techniques, grouped by tactic")
+    _add_io(atk, title=False)
+    atk.add_argument("--host", action="append", metavar="IP",
+                     help="limit to these host(s) (repeatable)")
+    atk.set_defaults(func=cmd_attack)
 
     vf = sub.add_parser("verify", help="confirm/refute version leads by re-running their "
                                        "safe NSE check (dry-run; --run to execute)")
