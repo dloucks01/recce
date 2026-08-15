@@ -356,6 +356,16 @@ def _rank_key(c: ActionCard):
     return (c.tier, -c.score, c.target)
 
 
+def top_moves(cards: list[ActionCard], n: int = 3) -> list[ActionCard]:
+    """The single highest-value things to do RIGHT NOW, by raw score across the doable
+    tiers (AUTO + READY). The grouped plan is organised by 'what recce does vs. what you
+    drive'; this cuts across that so a time-boxed operator sees the instant-DA exploit
+    up top instead of buried under trivial read-only loot. Excludes blocked/lead items
+    (not doable yet / unverified)."""
+    doable = [c for c in cards if c.tier in (AUTO, READY)]
+    return sorted(doable, key=lambda c: (-c.score, c.tier, c.target))[:n]
+
+
 # --- P2: auto-run the read-only / reversible links + the feedback loop -----------
 # These execute ONLY read-only wire-protocol loot (the cheap creds we already extract)
 # and a read-only spray-PLAN generation. Nothing intrusive ever runs here. Each is
