@@ -793,10 +793,10 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIsNotNone(calls[0][1])         # subprocess timeout set
 
     def test_pn_scan_retries_for_completeness_bounded_by_host_timeout(self):
-        # The default sweep must be at least as reliable as a plain `nmap -p-`: never
-        # retry fewer than nmap's own -T4 default (6, not the old too-low 3), and no
-        # --min-rate floor (a floor forces overspeed and drops SYNs to open ports).
-        # Dead IPs stay bounded by --host-timeout.
+        # The default sweep must be at least as gentle+reliable as a manual `nmap -p-`:
+        # NO --min-rate floor (a floor outpaces a firewall's scan detection -> the source
+        # is throttled and ports vanish; PROVEN), and retries at nmap's own -T4 default
+        # (6, never the old too-low 3). Dead IPs stay bounded by --host-timeout.
         import copy
         import recce.scanner as s
         prof = copy.copy(s.PROFILES["standard"])

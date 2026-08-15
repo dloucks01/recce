@@ -120,12 +120,21 @@ PROFILES: dict[str, ScanProfile] = {
     "quick": ScanProfile(name="quick", all_ports=False, top_ports=200,
                          os_detect=False, min_rate=2000, host_timeout=10,
                          version_intensity=6, deep_enum=False),
-    # FULL 65535-port sweep by default, and at least as RELIABLE as a plain `nmap -p-`
-    # (the manual scan recce is measured against). real targets hide services on random
-    # high ports, so a top-N default would silently MISS them. min_rate=0 => no
-    # --min-rate floor (a floor forces overspeed and drops SYNs to open ports); retries
-    # fall back to nmap's own -T default (6 at -T4), never the old too-low 3. Speed is
-    # opt-in: `quick`, `--top-ports`, `--min-rate`, `--fast`.
+    # FULL 65535-port sweep by default (real targets hide services on random high ports,
+    # so a top-N default would silently MISS them). Two reliability rules, both to be at
+    # least as good as the manual `nmap -p-` recce is measured against:
+    #   1. NO --min-rate floor (min_rate=0). A floor forces nmap to send faster than a
+    #      firewall's scan/rate-limit detection tolerates, so the source gets throttled/
+    #      blocked and open ports vanish - REPRODUCED: under an iptables SYN rate-limit,
+    #      `-T4 --min-rate 1500` found 5/10 while `-T4` with no floor found 10/10. This is
+    #      the root cause of the long-running "root -sS -Pn behind a firewall misses ports
+    #      that manual nmap finds" bug. The floor's only benefit (bounding dead-IP time) is
+    #      not worth silently losing real ports; --host-timeout still bounds dead IPs.
+    #   2. retries floored at nmap's own -T default (6 at -T4) - _portscan_cmd - never the
+    #      old too-low 3.
+    # PLUS every live host gets an independent congestion-adaptive UNION re-scan (cli
+    # _enum_worker) - a port dropped in one pass is caught by the other. Speed is opt-in:
+    # `quick`, `--top-ports`, `--min-rate`, `--fast`.
     "standard": ScanProfile(name="standard", min_rate=0),
     "thorough": ScanProfile(name="thorough", min_rate=800, udp_top=100,
                             extra_nse=["banner"], host_timeout=40,

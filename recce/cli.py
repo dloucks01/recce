@@ -115,9 +115,7 @@ _RETRY_HOST_TIMEOUT_CAP_MIN = 30      # minutes
 
 # A fast sweep that returns fewer than this many open ports on a non-reliable pass is
 # treated as possibly under-reported (a lossy firewall silently dropping SYNs) and gets
-# a congestion-adaptive re-scan whose results are UNIONED in. Small so a genuinely
-# sparse host isn't re-scanned needlessly.
-_UNDERREPORT_THRESHOLD = 3
+# a congestion-adaptive re-scan whose results are UNIONED in.
 
 
 def _union_swept(a: list, b: list) -> list:
@@ -713,10 +711,17 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
         #    expensive as the sweep, and a plain 1-2 service host is the COMMON case,
         #    so it only fires when we're already being thorough - under -Pn/assume-up
         #    or --verify-all - never slowing a clean discovery scan of a normal host.
-        few = (0 < len(open_ports) < _UNDERREPORT_THRESHOLD and not profile.reliable)
+        # Completeness safety net: ANY host that showed life (>=1 open port) gets a
+        # SECOND, independent congestion-adaptive full sweep (verify_port_scan: no
+        # --min-rate floor, -T3, --max-retries 6), UNIONed with the first pass. No finite
+        # --max-retries can guarantee an open port is seen on a lossy link, but a port
+        # dropped in one pass is almost always caught by an independent second pass - and
+        # if BOTH miss it, a manual nmap would too. A dead / 0-port host is bounded by the
+        # min-rate floor + --host-timeout and handled by the 0-port branch (not this
+        # second sweep). `reliable` already IS the adaptive pass, so don't double it.
+        alive = len(open_ports) > 0 and not profile.reliable
         do_verify = profile.verify and not truncated and (
-            (not open_ports and (profile.ping_discovery or profile.verify_all))
-            or (few and (profile.assume_up or profile.verify_all)))
+            (not open_ports and (profile.ping_discovery or profile.verify_all)) or alive)
         if do_verify:
             vx = os.path.join(paths["raw"], f"{ip}_verify.xml")
             _, viss = scanner.verify_port_scan(ip, vx, profile)
