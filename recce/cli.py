@@ -1726,7 +1726,17 @@ def cmd_act(args: argparse.Namespace) -> int:
     only = getattr(args, "only", None)
     if only:
         cards = [c for c in cards if c.archetype == only]
-    print("\nAction plan — highest-value, most-actionable first:")
+    # Lead with the single highest-value moves across every tier, so a time-boxed
+    # operator sees the instant-DA exploit up top, not buried under read-only loot.
+    if not only:
+        highlights = act.top_moves(cards, n=3)
+        if highlights:
+            print("\n*** TOP PRIORITIES (highest impact you can act on now) ***")
+            for c in highlights:
+                where = "" if c.target == "engagement" else f" @ {c.target}"
+                print(f"  {c.score:6.1f}  [{c.archetype}] {c.title}{where}  ->  {c.yields}")
+                print(f"          $ {c.command}")
+    print("\nFull action plan — grouped by what recce can run vs. what you drive:")
     for line in act.format_plan(cards, top=getattr(args, "top", 0) or 0):
         print(line)
     print()
