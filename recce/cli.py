@@ -6587,7 +6587,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     act_p.add_argument("--host", action="append", metavar="IP",
                        help="limit the plan to these host(s) (repeatable)")
     act_p.add_argument("--only", metavar="ARCHETYPE",
-                       choices=["loot", "crack", "spray", "exploit", "escalate", "pivot"],
+                       choices=["loot", "crack", "spray", "exploit", "escalate", "pivot",
+                                "ad-path"],
                        help="show only this archetype")
     act_p.add_argument("--top", type=int, default=0, metavar="N",
                        help="cap the plan to the top N cards per tier")

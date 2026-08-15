@@ -45,14 +45,32 @@ class ActEndToEndTest(unittest.TestCase):
         for want in ("loot", "spray", "exploit", "escalate", "crack"):
             self.assertIn(want, kinds, f"missing {want} card")
 
-    # --- the single most valuable move is the DC RCE -> domain compromise ---------
-    def test_top_priority_is_domain_compromise(self):
+    # --- the single most valuable move is the synthesized route to DA (keystone) --
+    def test_top_priority_is_the_route_to_domain_admin(self):
         top = act.top_moves(self.cards, n=1)[0]
-        self.assertEqual(top.yields, "domain compromise")
-        self.assertIn("Zerologon", top.title)
-        # and it out-scores every other doable action
+        self.assertEqual(top.archetype, "ad-path")
+        self.assertEqual(top.yields, "Domain Admin")
         others = [c for c in self.cards if c is not top and c.tier in (act.AUTO, act.READY)]
         self.assertTrue(all(top.score >= c.score for c in others))
+
+    # --- and the top concrete exploit step is the DC RCE -> domain compromise ------
+    def test_top_exploit_is_the_dc_rce(self):
+        exp = sorted(self._by("exploit"), key=lambda c: -c.score)
+        self.assertIn("Zerologon", exp[0].title)
+        self.assertEqual(exp[0].yields, "domain compromise")
+
+    # --- P3: a known-module exploit carries the REAL PoC command, not a writeup ----
+    def test_exploit_cards_carry_a_real_poc_command(self):
+        eb = next(c for c in self._by("exploit") if "EternalBlue" in c.title)
+        self.assertIn("ms17_010", eb.command.lower())     # the actual msf module
+        self.assertFalse(eb.command.startswith("recce writeup"))
+
+    # --- P3: the AD-path keystone summarises a real domain-dominance route --------
+    def test_adpath_keystone_present_and_maxed(self):
+        ad = self._by("ad-path")
+        self.assertEqual(len(ad), 1)
+        self.assertEqual(ad[0].leverage, 2.0)
+        self.assertTrue(ad[0].command.startswith("recce attackpath"))
 
     # --- weight sanity: cred loot beats data loot; spray beats a single cred loot -
     def test_cred_loot_outranks_data_loot(self):

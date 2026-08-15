@@ -73,12 +73,23 @@ def test_dc_rce_is_top_ranked_and_labels_domain_compromise():
     assert exploits[1].yields != "domain compromise"
 
 
-def test_low_qod_exploit_is_a_lead_not_ready():
+def test_low_qod_exploit_is_a_lead_and_flagged_verify_first():
     h = _host("10.0.0.9", [3389],
               vulns=[_vuln("10.0.0.9", 3389, "rdp-vuln", "BlueKeep candidate", "critical",
                            ids=["CVE-2019-0708"], qod=45)])       # version-inference lead
     card = next(c for c in act.action_plan([h]) if c.archetype == "exploit")
-    assert card.tier == act.LEAD
+    assert card.tier == act.LEAD and card.verify_first is True
+
+
+def test_exploit_without_a_known_module_falls_back_to_writeup():
+    # a confirmed high-QoD RCE recce has no msf/tool action for -> guided writeup, and
+    # because it's confirmed it is NOT flagged verify-first.
+    h = _host("10.0.0.8", [8080],
+              vulns=[_vuln("10.0.0.8", 8080, "http-custom-rce",
+                           "Acme appliance unauth RCE", "critical",
+                           ids=["CVE-2099-0001"], qod=98)])
+    card = next(c for c in act.action_plan([h]) if c.archetype == "exploit")
+    assert card.command.startswith("recce writeup") and card.verify_first is False
 
 
 def test_captured_hash_yields_a_crack_card_with_the_right_mode():

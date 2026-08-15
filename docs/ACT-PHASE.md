@@ -80,8 +80,11 @@ commands. An unproven action reads "candidate — verify" and points at `recce p
   (re)generates the lockout-safe spray plan from the accumulated cred set — so a looted
   cred surfaces a Spray card automatically. Scoped to hosts already carrying the matching
   loot finding (never a blind re-scan); intrusive actions are still guidance-only.
-- **P3 — deepen guided cards + prove integration.** Per-archetype PoC (exploitplan /
-  poc / exploitref), the synthesized AD-path-to-DA route (attackpath), verify labels,
-  and ranking polish.
+- **P3 — deepen guided cards + prove integration.** ✅ Shipped. Exploit cards carry the
+  concrete PoC command from `exploitplan` (real msf/impacket line + prereq + the
+  finding's verified flag) instead of a generic writeup; a synthesized **AD-path-to-DA
+  keystone** card (from `attackpath`) leads the plan; unverified leads are flagged
+  "candidate — verify". Also fixed classification precedence: a clear exploit (KEV / RCE
+  hint) wins over a loot marker, so an *unauthenticated RCE* is an exploit, not a read.
 - **P4 — `recce run --act` tail** so a full pipeline ends by auto-looting/spraying and
   printing the guided action plan.

@@ -25,6 +25,7 @@ docs/ACT-PHASE.md. This slice (P1) is guidance-only: it classifies, ranks, and p
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 from . import qod
@@ -82,6 +83,8 @@ class ActionCard:
     prove: str = ""                # how to confirm the outcome
     why: str = ""                  # short rationale (the ranking factors), for trust
     count: int = 1                 # findings/hosts this one card covers (loot aggregates)
+    verify_first: bool = False     # action rests on an UNVERIFIED lead -> "candidate"
+    tool: str = ""                 # the concrete tool this action uses (msf/impacket/...)
 
     @property
     def score(self) -> float:
@@ -109,11 +112,58 @@ def _is_dc(host) -> bool:
 
 # --- per-finding classification --------------------------------------------------
 
-def _classify_vuln(host, v, o: str) -> ActionCard | None:
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _index_exploit_actions(host) -> dict:
+    """Map a normalised finding -> its best concrete exploit action (real msf/tool
+    command, prereq, verified flag) from exploitplan. Post-shell steps are skipped
+    (they come AFTER a foothold, they're not the exploit itself)."""
+    from . import exploitplan
+    idx: dict = {}
+    try:
+        actions = exploitplan.actions_for_host(host)
+    except Exception:  # noqa: BLE001 - the plan must never crash on one odd host
+        return {}
+    for a in actions:
+        if a.get("kind") == "post-shell":
+            continue
+        k = _norm(a.get("finding", ""))
+        if not k:
+            continue
+        # prefer a verified action over an unverified one for the same finding
+        if k not in idx or (a.get("verified") and not idx[k].get("verified")):
+            idx[k] = a
+    return idx
+
+
+def _match_action(v, xp_idx: dict) -> dict | None:
+    if not xp_idx:
+        return None
+    nt = _norm(v.title)
+    if nt in xp_idx:
+        return xp_idx[nt]
+    for k, a in xp_idx.items():                # substring either way (titles vary)
+        if k and (k in nt or nt in k):
+            return a
+    return None
+
+
+def _classify_vuln(host, v, o: str, xp_idx: dict | None = None) -> ActionCard | None:
     """Map one finding to a loot or exploit card, or None if it isn't actionable."""
     text = f"{v.script_id} {v.title}".lower()
     qv = qod.qod_of(v)
     conf = _confidence(qv)
+
+    # A CLEAR exploit (KEV, or an explicit exploit hint like RCE/EternalBlue) wins over
+    # loot even if the title says "unauth" - an unauthenticated RCE is an exploit, not a
+    # read-only read. Ambiguous "unauth service" findings (redis-unauth: data access, no
+    # exploit hint) still fall through to loot below.
+    clear_exploit = v.severity in ("critical", "high") and (
+        v.kev or any(h in text for h in _EXPLOIT_HINTS))
+    if clear_exploit:
+        return _exploit_card(host, v, o, xp_idx, qv, conf, text)
 
     if any(m in text for m in _LOOT_MARKERS):
         yields_cred = any(m in text for m in _CRED_LOOT_MARKERS)
@@ -130,30 +180,46 @@ def _classify_vuln(host, v, o: str) -> ActionCard | None:
             prove=f"recce prove -o {o}",
             why=_why(v, qv, "read-only loot"))
 
-    if v.severity in ("critical", "high") and (
-            v.kev or v.ids or any(h in text for h in _EXPLOIT_HINTS)):
-        impact = _exploit_impact(host, v)
-        # confirmed/likely -> a real ready action; a low-QoD version lead -> verify first.
-        tier = READY if qv >= qod.MIN_QOD_VISIBLE else LEAD
-        ident = (v.ids[0] if v.ids else v.ip)
-        # Yield label is about ACCESS LEVEL (who you become), not the EPSS-inflated
-        # score: a DC RCE = domain compromise; a critical elsewhere likely lands you
-        # SYSTEM/root; otherwise a shell. (KEV/EPSS still raise the ranking score.)
-        if _is_dc(host):
-            yields = "domain compromise"
-        elif v.severity == "critical":
-            yields = "a shell (likely SYSTEM/root)"
-        else:
-            yields = "a shell"
-        return ActionCard(
-            archetype="exploit", title=f"Exploit {v.title}", target=_tgt(v),
-            command=f"recce writeup {ident} -o {o}   # exploit steps + PoC in the "
-                    "Exploitation sheet",
-            safety="intrusive", tier=tier, impact=impact, confidence=conf,
-            leverage=1.5 if _is_dc(host) else 1.0, yields=yields,
-            prove=f"recce prove -o {o}",
-            why=_why(v, qv, "exploit", kev=v.kev, epss=v.epss))
+    if v.severity in ("critical", "high") and v.ids:
+        # has a CVE but no explicit exploit hint (e.g. a version->CVE match)
+        return _exploit_card(host, v, o, xp_idx, qv, conf, text)
     return None
+
+
+def _exploit_card(host, v, o, xp_idx, qv, conf, text) -> ActionCard:
+    impact = _exploit_impact(host, v)
+    ident = (v.ids[0] if v.ids else v.ip)
+    # Yield label is about ACCESS LEVEL (who you become), not the EPSS-inflated score:
+    # a DC RCE = domain compromise; a critical elsewhere likely lands you SYSTEM/root;
+    # otherwise a shell. (KEV/EPSS still raise the ranking score.)
+    if _is_dc(host):
+        yields = "domain compromise"
+    elif v.severity == "critical":
+        yields = "a shell (likely SYSTEM/root)"
+    else:
+        yields = "a shell"
+    # P3: attach the concrete PoC from exploitplan (real msf/tool command + prereq +
+    # whether the underlying finding is QoD-verified) when recce knows one.
+    action = _match_action(v, xp_idx or {})
+    if action:
+        command, tool = action["cmd"], action.get("tool", "")
+        verified = bool(action.get("verified"))
+        preconds = [(action["prereq"], True)] if action.get("prereq") else []
+    else:
+        command = f"recce writeup {ident} -o {o}   # exploit steps + PoC in the " \
+                  "Exploitation sheet"
+        tool, preconds = "", []
+        verified = qv >= qod.MIN_QOD_VERIFIED
+    # A confirmed finding is a ready action; an unverified version-inference lead is a
+    # LEAD (verify before you fire an exploit at it).
+    tier = READY if verified or qv >= qod.MIN_QOD_VISIBLE else LEAD
+    return ActionCard(
+        archetype="exploit", title=f"Exploit {v.title}", target=_tgt(v),
+        command=command, tool=tool, safety="intrusive", tier=tier, impact=impact,
+        confidence=conf, leverage=1.5 if _is_dc(host) else 1.0, yields=yields,
+        preconditions=preconds, verify_first=not verified,
+        prove=f"recce prove -o {o}",
+        why=_why(v, qv, "exploit", kev=v.kev, epss=v.epss))
 
 
 def _exploit_impact(host, v) -> int:
@@ -279,6 +345,36 @@ def _cred_cards(hosts, creds, o: str) -> list[ActionCard]:
     return out
 
 
+def _adpath_card(hosts, o: str) -> ActionCard | None:
+    """The keystone: a synthesized route to Domain Admin from attackpath. This is a
+    CHAIN card (over the atomic exploit/loot/spray steps), the 'here's the whole way to
+    DA' headline. Max leverage - it's the highest-value thing to look at first."""
+    from . import attackpath
+    try:
+        steps = attackpath.build(hosts)
+    except Exception:  # noqa: BLE001
+        return None
+    dom = [s for s in steps if s.get("stage") == "Domain Dominance"]
+    if not dom:
+        return None
+    route = "; ".join(_norm_title(s.get("title", "")) for s in dom[:3])
+    return ActionCard(
+        archetype="ad-path",
+        title=f"Route to Domain Admin ({len(dom)} dominance step(s))",
+        target=dom[0].get("ip", "engagement"),
+        command=f"recce attackpath -o {o}   # full route + graph (network-architecture.svg)",
+        safety="intrusive", tier=READY, impact=_IMPACT["da"], confidence=0.95,
+        leverage=2.0, yields="Domain Admin",
+        preconditions=[("execute the chain step by step (see the route)", True)],
+        prove=f"recce prove -o {o}",
+        why=f"synthesised path to DA across {len(dom)} step(s): {route}")
+
+
+def _norm_title(s: str) -> str:
+    s = re.sub(r"\s+", " ", (s or "").strip())
+    return (s[:39] + "…") if len(s) > 40 else s
+
+
 def _crack_mode(c) -> str:
     # Prefer an explicit "hashcat -m NNN" the loot module already worked out (mysql/pg).
     note = (c.notes or "").lower()
@@ -310,8 +406,9 @@ def action_plan(hosts, credentials=None, output_dir: str = "engagement") -> list
     subnets = {h.subnet for h in hosts if getattr(h, "subnet", "")}
 
     for h in hosts:
+        xp_idx = _index_exploit_actions(h)
         for v in getattr(h, "vulns", []):
-            card = _classify_vuln(h, v, o)
+            card = _classify_vuln(h, v, o, xp_idx)
             if card:
                 cards.append(card)
         if getattr(h, "access_gained", False):
@@ -322,6 +419,9 @@ def action_plan(hosts, credentials=None, output_dir: str = "engagement") -> list
                 cards.append(piv)
 
     cards.extend(_cred_cards(hosts, creds, o))
+    ad = _adpath_card(hosts, o)                    # the synthesized route to DA (keystone)
+    if ad:
+        cards.append(ad)
     cards = _dedup_loot(cards)
     cards.sort(key=_rank_key)
     return cards
@@ -480,7 +580,8 @@ def format_plan(cards: list[ActionCard], top: int = 0) -> list[str]:
             where = "" if c.target == "engagement" else f" @ {c.target}"
             if c.count > 1:
                 where += f" (+{c.count - 1} more host(s))"
-            lines.append(f"  [{c.archetype}] {c.title}{where}  ->  {c.yields}{tag}")
+            flag = "  [candidate — verify first]" if c.verify_first else ""
+            lines.append(f"  [{c.archetype}] {c.title}{where}  ->  {c.yields}{tag}{flag}")
             lines.append(f"      $ {c.command}")
             lines.append(f"      · {c.why}  ·  score {c.score} "
                          f"(impact {c.impact} × conf {c.confidence:g} × lev {c.leverage:g})")
