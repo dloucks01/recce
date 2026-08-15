@@ -4356,8 +4356,19 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
     print(f"[+] {len(tgts)} {noun}:")
     for t in tgts:
         print(f"      {fmt(t, active)}")
+    # Pull out any LOOT credentials the module captured BEFORE _fold serializes the
+    # analysis blob (Credential objects aren't JSON) - persist them to the credential
+    # store so they feed the credentialed spray / attack path.
+    service_creds = analysis.pop("credentials", [])
     by_ip = _fold_service_findings(store, hosts, analysis, source,
                                    mod.findings_to_vulns, label)
+    looted = 0
+    for c in service_creds:
+        if store.add_credential(c):
+            looted += 1
+    if looted:
+        print(f"    [+] captured {looted} credential(s)/hash(es) -> credential store "
+              f"(recce creds -o {args.output_dir} to view; feeds credsweep)")
     if extra:
         extra(store, hosts, tgts, by_ip)
     if active:

