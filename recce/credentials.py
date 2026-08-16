@@ -95,11 +95,13 @@ def spray_targets(hosts: list[Host]) -> dict[str, list[str]]:
 
 
 def _target_expr(ips: list[str]) -> str:
-    """A compact target expression for netexec (one /24 if they share it, else list)."""
-    if not ips:
-        return ""
-    nets = {".".join(ip.split(".")[:3]) + ".0/24" for ip in ips}
-    return nets.pop() if len(nets) == 1 else " ".join(ips)
+    """A target expression for netexec: exactly the enumerated in-scope IPs.
+
+    Never widen to a whole /24. Spraying must only touch hosts recce actually
+    discovered — collapsing to x.y.z.0/24 would fire auth attempts at up to 256
+    addresses, including undiscovered/out-of-scope machines, and can lock out
+    accounts recce never enumerated (defeating the lockout-safe guarantee)."""
+    return " ".join(ips)
 
 
 def write_files(creds: list[Credential], out_dir: str) -> dict[str, str]:
