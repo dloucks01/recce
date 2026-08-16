@@ -314,8 +314,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                     for hh in pr["loot"].get("hashes", []):
                         creds.append(Credential(
                             username=hh["user"] or "", secret=hh["hash"],
-                            kind="nthash" if (hh.get("plugin") or "").startswith("mysql_native")
-                            else "hash", source="mysql-loot", origin_ip=t["ip"],
+                            kind="hash", source="mysql-loot", origin_ip=t["ip"],
                             notes=f"mysql.user hash ({hh.get('plugin')}) from empty-password "
                                   f"MySQL :{t['port']} - hashcat -m 300"))
     fs = findings(hosts, probes)
