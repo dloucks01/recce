@@ -330,6 +330,20 @@ def create_app(eng_dir: str) -> FastAPI:
         return {"ok": res.get("ok", False), "error": res.get("error", ""),
                 "hits": res.get("hits", []), "new": new}
 
+    @app.get("/api/attackpath.svg")
+    def attackpath_svg():
+        """The projected attack-path graph as a standalone SVG, for inline display."""
+        from fastapi.responses import Response
+        from .. import attackpath
+        hs, _ = _hosts()
+        steps = attackpath.build(hs)
+        if not steps:
+            return Response("<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>",
+                            media_type="image/svg+xml")
+        svg = attackpath.svg(hs, steps).replace(
+            "<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+        return Response(svg, media_type="image/svg+xml")
+
     @app.get("/api/attack")
     def attack_coverage():
         """MITRE ATT&CK coverage: techniques the findings map to, by tactic."""
