@@ -32,6 +32,7 @@ paths from your account to Domain Admin.
 | Doc | What it covers |
 | --- | --- |
 | [QUICKSTART.md](QUICKSTART.md) | Zero to a filled-in workbook in five commands |
+| [Web workbench](#web-workbench-recce-serve) | `recce serve` — run the engagement from a browser, whole team on one view |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Fixes for the common engagement snags |
 | [SECURITY.md](SECURITY.md) | Safety model, authorized-use, opt-in intrusive actions |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The QoD / honesty model and the staged design |
@@ -40,9 +41,10 @@ paths from your account to Domain Admin.
 | [docs/](docs/) | Design notes: active verification, proofs/honesty, proxy/pivot, workflow |
 
 Handy commands beyond the scan pipeline: **`recce run`** (the one-command
-discover→enum→vulns→report), **`recce act`** (found things → what to do next, ranked),
-**`recce attack`** (MITRE ATT&CK coverage), **`recce import`** (fold in a manual nmap
-scan), and **`recce verify`** / **`recce next`**.
+discover→enum→vulns→report), **`recce serve`** (the [web workbench](#web-workbench-recce-serve) —
+drive the engagement from a browser, whole team on one view), **`recce act`** (found
+things → what to do next, ranked), **`recce attack`** (MITRE ATT&CK coverage),
+**`recce import`** (fold in a manual nmap scan), and **`recce verify`** / **`recce next`**.
 
 ## Why this over raw nmap / AutoRecon?
 
@@ -124,6 +126,46 @@ tar xzf recce-<version>.tar.gz && cd recce-<version> && ./bin/recce doctor
 ```
 
 No network or pip install needed — recce is stdlib-only at runtime.
+
+The bundle build (`tools/build_bundle.sh`, a self-contained frozen binary) has an
+**offline path**: when PyPI is unreachable it builds from the dependencies already
+on the box (`--system-site-packages`) instead of failing at `pip`, so you can freeze
+the airgap package on a disconnected build host.
+
+## Web workbench (`recce serve`)
+
+Drive the whole engagement from a browser — no terminal needed, and the whole team
+can share one view. One recce instance hosts it; everyone opens the URL over the LAN.
+
+```bash
+recce serve -o acme                 # -> http://<this-box>:8008  (share on the LAN)
+recce serve -o acme --port 9000     # pick the port; --host to change the bind address
+```
+
+It serves the **same datastore** the CLI writes, so anything you scanned from the
+terminal shows up immediately, and anything you do in the UI (ticks, notes, new scans)
+is in the workbook the moment you export. The workbench has:
+
+- **Dashboard** — coverage at a glance plus a **Next moves** panel (the ranked
+  next-best-actions, so the flow starts on the landing page).
+- **Run scan** — kick off `enum` / `vulns` / `run` from the UI with **live progress**
+  streamed over SSE; no need to babysit a terminal.
+- **Hosts** / **Targets** — host-scale views with a **detail drawer** to drill into a
+  single host, and a targets tracker.
+- **Findings** — tiered by confidence (low-confidence leads hidden by default), expand
+  any finding inline for the evidence and the confirm/exploit steps.
+- **Act** — the Act phase as cards: the ranked action plan with an **archetype filter**,
+  the projected **attack-path graph**, and one-click **run** for the read-only/reversible
+  actions (loot, links) — intrusive steps stay guided, never auto-fired.
+- **Loot** — captured credentials, and a **spray** button to test a looted set across a
+  target scope (lockout-safe toggle), folding the validated logins back in.
+- **Export** — one click to the **Excel workbook**, **HTML**, **Markdown**, or
+  **Services CSV** report.
+- Shared **notes** and review **ticks** for multi-tester collaboration; **light mode by
+  default** with a dark toggle.
+
+The web UI needs `fastapi` + `uvicorn` — both are **bundled in the airgap package**.
+For a dev install: `pip install 'recce[bundle]'`.
 
 ## Workflow
 
@@ -1142,6 +1184,7 @@ Every command takes targets as a single IP, several IPs, a range
 | `exploitplan [targets]` | Ready-to-run artifacts (msf `.rc` + tool commands) for **confirmed** findings, params pre-filled | `--lhost`, `--lport`, `--run` |
 | `attackpath [targets]` | Chain confirmed findings into a staged attack path (foothold → priv-esc → creds → lateral → domain) | — |
 | `creds [targets]` | Stack captured credentials + build a netexec/impacket spray plan | `--add`, `--user/--pass/--hash/--domain`, `--plan` |
+| `serve` | Serve the **web workbench** for this engagement (browser UI, multi-tester over the LAN; run scans, Act/Loot, export) | `--host` (bind, default `0.0.0.0`), `--port` (default `8008`) |
 | `report` | Rebuild the workbook/reports from the datastore | — |
 | `status` | Print live coverage + suggested next command | — |
 | `review` | Mark hosts/services/items reviewed from the CLI | `--host`, `--service IP:PORT`, `--key`, `--cascade`, `--note`, `--undo` |
@@ -1203,6 +1246,8 @@ recce/               the package (python -m recce)
   playbook.py        confirmed finding -> exact existing tool + command + validate
   exploitplan.py     confirmed finding -> runnable msf .rc / tool cmd (existing tools)
   attackpath.py      confirmed findings -> staged attack path (the "so what")
+  act.py             the Act phase: findings -> ranked, guided action plan
+  attack.py          MITRE ATT&CK technique mapping + coverage
   credentials.py     stack captured creds -> netexec/impacket spray plan
   report_html.py     self-contained shareable HTML report (stdlib, no assets)
   serviceenum.py     open port -> per-service enum command (bridge to scripts/)
@@ -1214,4 +1259,6 @@ recce/               the package (python -m recce)
   report_markdown.py Markdown + CSV
   sample_scan.xml    bundled sample for `demo`
   local/             on-target read-only enum scripts (recce-enum.sh / .ps1)
+  webui/             the web workbench (`recce serve`): FastAPI app + built React UI
+tools/build_bundle.sh  freeze a self-contained binary (+ web UI); offline-capable
 ```
