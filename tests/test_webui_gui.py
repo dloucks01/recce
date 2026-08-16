@@ -72,6 +72,21 @@ class ApiShape(unittest.TestCase):
         self.assertGreater(cov["technique_count"], 0)
         self.assertTrue(cov["tactics"] and cov["tactics"][0]["techniques"])
 
+    def test_spray_endpoint_is_graceful_without_netexec(self):
+        # the Loot "Spray" button POSTs here; with no netexec it must report cleanly,
+        # not 500 (and not hang - no tool means no network attempts).
+        from recce import credenum
+        orig = credenum.smb_tool
+        credenum.smb_tool = lambda: None
+        try:
+            with _client(self.eng) as c:
+                r = c.post("/api/spray", json={})
+                self.assertEqual(r.status_code, 200)
+                self.assertFalse(r.json()["ok"])
+                self.assertIn("netexec", r.json()["error"])
+        finally:
+            credenum.smb_tool = orig
+
     def test_act_run_button_endpoint_is_safe(self):
         # the "Run read-only loot" button POSTs here; on an empty engagement it must be a
         # fast, clean no-op (the real loot chain is covered by the act unit tests).
@@ -106,7 +121,7 @@ class ShippedSpa(unittest.TestCase):
         js = "".join(p.read_text(errors="replace")
                      for p in (_STATIC / "assets").glob("index-*.js"))
         for marker in ("Top priorities", "Extracted credentials", "MITRE ATT",
-                       "recce creds --plan"):
+                       "Spray these credentials", "Next moves"):
             self.assertIn(marker, js, f"shipped SPA is missing {marker!r} - rebuild it")
 
 
