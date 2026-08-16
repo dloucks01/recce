@@ -118,6 +118,15 @@ export async function postActRun(): Promise<ActRunResult> {
   if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
 }
+export type SprayHit = { proto: string; ip: string; user: string; secret: string; cred: string; admin: boolean };
+export type SprayResult = { ok: boolean; error: string; hits: SprayHit[]; new: number };
+export async function postSpray(targets: string, safe: boolean): Promise<SprayResult> {
+  const r = await fetch("/api/spray", {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify({ targets, safe }),
+  });
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
 
 // weighted risk score for sorting hosts most-dangerous-first
 export function hostScore(f: Record<string, number>): number {

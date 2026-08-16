@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Finding, Host, Overview, VulnDetail, SEVS, SEV_ALL, hostScore, sevTotal, getHost,
   ActPlan, ActCard, Credential, AttackCoverage, getAct, getCredentials, getAttack, postActRun,
+  SprayHit, postSpray,
 } from "./api";
 import { Stat, SevTag, SevBar, NoteCell, Chips, useBounded } from "./ui";
 import { FindingDetail } from "./FindingDetail";
@@ -548,7 +549,23 @@ export function Loot() {
   const [creds, setCreds] = useState<Credential[] | null>(null);
   const [reveal, setReveal] = useState<Set<number>>(new Set());
   const [err, setErr] = useState<string | null>(null);
-  useEffect(() => { getCredentials().then(setCreds).catch((e) => setErr(String(e))); }, []);
+  // spray control
+  const [tgt, setTgt] = useState("");
+  const [safe, setSafe] = useState(true);
+  const [spraying, setSpraying] = useState(false);
+  const [hits, setHits] = useState<SprayHit[] | null>(null);
+  const [sprayMsg, setSprayMsg] = useState<string | null>(null);
+  const load = () => getCredentials().then(setCreds).catch((e) => setErr(String(e)));
+  useEffect(() => { load(); }, []);
+  async function spray() {
+    setSpraying(true); setSprayMsg(null); setHits(null);
+    try {
+      const r = await postSpray(tgt.trim(), safe);
+      if (!r.ok) { setSprayMsg(r.error || "spray failed"); }
+      else { setHits(r.hits); setSprayMsg(r.hits.length ? `${r.hits.length} valid login(s); ${r.new} new credential(s) stored.` : "no valid logins."); await load(); }
+    } catch { setSprayMsg("spray failed"); }
+    finally { setSpraying(false); }
+  }
   if (err) return <div className="err">{err}</div>;
   if (!creds) return <div className="loading">Loading loot…</div>;
   if (creds.length === 0)
@@ -564,9 +581,36 @@ export function Loot() {
         <Stat k="plaintext" v={String(creds.filter((c) => c.kind === "password").length)} />
         <Stat k="hashes" v={String(creds.filter((c) => c.kind === "nthash" || c.kind === "hash").length)} />
       </section>
+      <section className="panel spraybar">
+        <div className="panel-h"><h3>Spray these credentials</h3>
+          <span className="muted">reuse the loot across the login surface (SMB/WinRM/MSSQL/LDAP/SSH)</span></div>
+        <div className="spray-row">
+          <input className="scan-in" placeholder="target scope — blank = all, or 10.0.0.5 / 10.0.0.0/24"
+                 value={tgt} onChange={(e) => setTgt(e.target.value)} disabled={spraying} />
+          <label className="safetog" title="lockout-safe: paired user↔pass, one pass (netexec --no-bruteforce)">
+            <input type="checkbox" checked={safe} onChange={(e) => setSafe(e.target.checked)} disabled={spraying} />
+            lockout-safe
+          </label>
+          <button className="run" onClick={spray} disabled={spraying || creds.length === 0}>
+            {spraying ? "Spraying…" : "💧 Spray"}
+          </button>
+        </div>
+        {!safe && <div className="ranmsg warn-msg">Full user × password — real lockout risk on a domain lockout policy. Rules of engagement only.</div>}
+        {sprayMsg && <div className="ranmsg">{sprayMsg}</div>}
+        {hits && hits.length > 0 && (
+          <table className="loottable"><thead><tr><th>Proto</th><th>Host</th><th>Login</th><th></th></tr></thead>
+            <tbody>{hits.map((h, i) => (
+              <tr key={i}><td className="mono">{h.proto}</td><td className="mono">{h.ip}</td>
+                <td className="mono">{h.cred}</td>
+                <td>{h.admin && <span className="tag warn">ADMIN · Pwn3d!</span>}</td></tr>
+            ))}</tbody>
+          </table>
+        )}
+      </section>
+
       <section className="panel">
         <div className="panel-h"><h3>Extracted credentials</h3>
-          <span className="muted">what recce looted / captured — spray with <code>recce creds --plan</code></span></div>
+          <span className="muted">what recce looted / captured — or <code>recce creds --run</code> to spray</span></div>
         <div className="tablewrap">
           <table className="loottable">
             <thead><tr><th>Account</th><th>Secret</th><th>Kind</th><th>Source</th><th>From</th><th>Notes</th></tr></thead>

@@ -297,6 +297,39 @@ def create_app(eng_dir: str) -> FastAPI:
                 "creds": [{"label": c.label, "source": c.source} for c in summary["looted"]],
                 "spray_files": sorted((spray.get("files") or {}).keys())}
 
+    @app.post("/api/spray")
+    def spray(body: dict = Body(default=None)):
+        """Run a lockout-safe spray of the looted/stacked creds across a target scope
+        (one IP / range / all), fold the validated logins. safe=false = full user x pass."""
+        from .. import credentials as cr
+        from ..cli import ip_matcher
+        from ..models import Credential
+        from ..store import Store
+        body = body or {}
+        st = Store(db_path)
+        try:
+            hosts = st.all_hosts()
+            sel = (body.get("targets") or "").strip()
+            if sel:
+                match = ip_matcher(sel.split())
+                hosts = [h for h in hosts if match(h.ip)]
+            creds = cr.stack(hosts, st.all_credentials())
+            res = cr.run_spray(hosts, creds, eng_dir, safe=body.get("safe", True))
+            new = 0
+            if res.get("ok"):
+                for h in res["hits"]:
+                    if st.add_credential(Credential(
+                            username=h["user"], secret=h["secret"], kind="password",
+                            source="spray-validated", origin_ip=h["ip"],
+                            notes=f"validated over {h['proto']}"
+                                  + (" (local admin)" if h["admin"] else ""))):
+                        new += 1
+        finally:
+            st.close()
+        broker.publish({"type": "spray", "hits": len(res.get("hits", []))})
+        return {"ok": res.get("ok", False), "error": res.get("error", ""),
+                "hits": res.get("hits", []), "new": new}
+
     @app.get("/api/attack")
     def attack_coverage():
         """MITRE ATT&CK coverage: techniques the findings map to, by tactic."""
