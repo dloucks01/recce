@@ -114,10 +114,10 @@ def test_command(service: str, ips: list[str]) -> str:
 
 
 def _target_expr(ips: list[str]) -> str:
-    if not ips:
-        return "<ip>"
-    nets = {".".join(ip.split(".")[:3]) + ".0/24" for ip in ips if ip.count(".") == 3}
-    return nets.pop() if len(nets) == 1 else " ".join(ips)
+    # Only the discovered in-scope IPs - never widen to a whole /24. Collapsing to
+    # x.y.z.0/24 would emit a command that sprays up to 256 addresses, most of them
+    # never enumerated (lockout risk on out-of-scope hosts). Cf. credentials._target_expr.
+    return " ".join(ips) if ips else "<ip>"
 
 
 def as_candidates(port):
