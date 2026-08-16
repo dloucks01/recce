@@ -112,7 +112,7 @@ def test_exploit_without_a_known_module_falls_back_to_writeup():
 
 def test_captured_hash_yields_a_crack_card_with_the_right_mode():
     h = _host("10.0.0.5", [445])
-    creds = [Credential(username="root", secret="*ABC", kind="nthash",
+    creds = [Credential(username="root", secret="*ABC", kind="hash",
                         source="mysql-loot", origin_ip="10.0.0.5",
                         notes="mysql.user hash; hashcat -m 300")]
     crack = next(c for c in act.action_plan([h], creds) if c.archetype == "crack")

@@ -4625,10 +4625,11 @@ class CredentialsTest(unittest.TestCase):
             self.assertIn("passwords.txt", s["files"])
             self.assertIn("nthashes.txt", s["files"])
             cmds = "\n".join(s["commands"])
-            self.assertIn("netexec smb 10.0.10.0/24", cmds)
-            self.assertIn("-H nthashes.txt", cmds)     # pass-the-hash line
-            self.assertIn("netexec ssh 10.0.20.0/24", cmds)
-            self.assertNotIn("netexec ssh 10.0.20.0/24 -u users.txt -H", cmds)  # no PtH over ssh
+            self.assertIn("netexec smb 10.0.10.5", cmds)   # the discovered IP, not the /24
+            self.assertNotIn("/24", cmds)                  # never widen the spray to a subnet
+            self.assertIn("-H nthashes.txt", cmds)         # pass-the-hash line
+            self.assertIn("netexec ssh 10.0.20.9", cmds)
+            self.assertNotIn("netexec ssh 10.0.20.9 -u users.txt -H", cmds)  # no PtH over ssh
 
     def test_harvest_from_accounts(self):
         from recce import credentials as cr

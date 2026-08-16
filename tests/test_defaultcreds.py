@@ -31,8 +31,14 @@ def test_test_command_shapes():
     assert "unauth" in defaultcreds.test_command("redis", ["10.0.0.7"])
     # http -> hydra fallback (nxc has no http module)
     assert "hydra" in defaultcreds.test_command("http", ["10.0.0.8"])
-    # a shared /24 collapses to a CIDR
-    assert "10.0.0.0/24" in defaultcreds.test_command("ssh", ["10.0.0.5", "10.0.0.6"])
+    # targets are the discovered in-scope IPs only - never widened to a /24
+    cmd = defaultcreds.test_command("ssh", ["10.0.0.5", "10.0.0.6"])
+    assert "10.0.0.5 10.0.0.6" in cmd
+    assert "/24" not in cmd
+    # default pairs are aligned positionally for --no-bruteforce (root/root, pi/raspberry)
+    assert "--no-bruteforce" in cmd
+    assert "-u root root admin pi ubnt vagrant admin" in cmd
+    assert "-p root toor admin raspberry ubnt vagrant password" in cmd
 
 
 def test_act_emits_aggregated_default_cred_cards_tagged_t1078():
