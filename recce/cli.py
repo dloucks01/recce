@@ -1535,11 +1535,13 @@ def _phase_credenum(store, paths, args) -> None:
     admin_creds = _admin_creds_of(args)
     ssh_creds = _ssh_creds_of(args)
     aggressive = getattr(args, "aggressive", False)
-    if not creds and not ssh_creds and not admin_creds:
+    want_set = (getattr(args, "all_creds", False) or getattr(args, "user_list", None)
+                or getattr(args, "pass_list", None))
+    if not creds and not ssh_creds and not admin_creds and not want_set:
         print("\n" + "!" * 64)
         print("[x] credenum needs credentials but none were given.")
-        print("    Provide --username/--password (+--domain) for SMB/AD, and/or "
-              "--ssh-user for Linux hosts.")
+        print("    Provide --username/--password (+--domain) for SMB/AD, --ssh-user for "
+              "Linux hosts, or --all-creds/--user-list/--pass-list to spray a set.")
         print("!" * 64)
         return
     tools = credenum.available_tools()
@@ -1562,6 +1564,32 @@ def _phase_credenum(store, paths, args) -> None:
     if not targets:
         print("[!] No hosts in scope.")
         return
+    # --all-creds / --user-list / --pass-list: spray the credential SET first (lockout-
+    # safe) to find the working cred PER HOST, then enum each host with its own cred.
+    per_host_creds: dict[str, dict] = {}
+    if want_set:
+        from . import credentials as cr
+        from .models import Credential
+        stacked = cr.stack(targets, store.all_credentials()) if getattr(args, "all_creds", False) else []
+        cred_set = _spray_cred_set(args, stacked)
+        if cred_set:
+            safe = not getattr(args, "spray", False)
+            print(f"[*] Discovering working creds: spraying {len(cred_set)} credential(s) "
+                  f"{'(lockout-safe)' if safe else '(FULL user x pass)'} across "
+                  f"{len(targets)} host(s) ...")
+            res = cr.run_spray(targets, cred_set, args.output_dir, safe=safe)
+            if not res.get("ok"):
+                print(f"[!] spray: {res.get('error')}")
+            for h in res.get("hits", []):
+                if h["ip"] not in per_host_creds:
+                    u, dom = _split_userdomain(h["user"], None)
+                    per_host_creds[h["ip"]] = {"username": u, "password": h["secret"], "domain": dom}
+                    store.add_credential(Credential(
+                        username=u, secret=h["secret"], kind="password", domain=dom,
+                        source="spray-validated", origin_ip=h["ip"],
+                        notes=f"validated over {h['proto']}" + (" (local admin)" if h["admin"] else "")))
+            print(f"[+] {len(per_host_creds)} host(s) have a working credential"
+                  + (" - enumerating with it." if per_host_creds else "; nothing to enum credentialed."))
     accts = []
     if creds:
         accts.append(f"user '{creds['username']}'")
@@ -1578,8 +1606,8 @@ def _phase_credenum(store, paths, args) -> None:
     errs: list[tuple[str, str]] = []
     auth_rows: list[tuple[str, dict]] = []   # (ip, auth) for the success/fail table
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
-        futures = {ex.submit(_credenum_worker, h, creds, ssh_creds, aggressive,
-                             admin_creds): h.ip
+        futures = {ex.submit(_credenum_worker, h, per_host_creds.get(h.ip, creds),
+                             ssh_creds, aggressive, admin_creds): h.ip
                    for h in targets}
         for fut in as_completed(futures):
             ip = futures[fut]
@@ -5990,6 +6018,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cep.add_argument("--ssh-key", help="SSH private-key path for local checks")
     cep.add_argument("--aggressive", action="store_true",
                      help="also dump hashes with secretsdump (needs admin/DA)")
+    cep.add_argument("--all-creds", action="store_true",
+                     help="spray every stacked/looted credential (lockout-safe) to find "
+                          "the working cred per host, then enum each host with ITS cred")
+    cep.add_argument("--user-list", metavar="FILE", help="usernames to spray (one per line)")
+    cep.add_argument("--pass-list", metavar="FILE", help="passwords to spray (one per line)")
+    cep.add_argument("--spray", action="store_true",
+                     help="full user x password when discovering creds (drops "
+                          "--no-bruteforce). REAL lockout risk - opt-in.")
     cep.set_defaults(func=cmd_credenum)
 
     # deploy: push + run the read-only local-enum / priv-esc scripts across every
