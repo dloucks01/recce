@@ -267,7 +267,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     targets = postgres_targets(hosts)
     probes: dict = {}
     state: dict = {}
-    creds: list = []
+    looted: list = []
     if active:
         from .models import Credential
         for t, pr in svcprobe.iter_probe(
@@ -281,7 +281,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 if pr.get("unauth"):
                     pr["loot"] = loot(t["ip"], t["port"])
                     for hh in pr["loot"].get("hashes", []):
-                        creds.append(Credential(
+                        looted.append(Credential(
                             username=hh["user"], secret=hh["hash"], kind="hash",
                             source="postgres-loot", origin_ip=t["ip"],
                             notes=f"pg_shadow hash from trust-auth PostgreSQL :{t['port']}"))
@@ -290,7 +290,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
                 for t in targets]
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
-            "credentials": creds,
+            "credentials": looted,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
             "stats": {"targets": len(targets), "findings": len(fs),
-                      "credentials": len(creds), "stopped": state.get("stopped")}}
+                      "credentials": len(looted), "stopped": state.get("stopped")}}
