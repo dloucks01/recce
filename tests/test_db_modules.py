@@ -424,6 +424,7 @@ def test_mysql_analyze_captures_credentials_end_to_end():
         srv.shutdown()
     creds = {c.username: c for c in analysis["credentials"]}
     assert set(creds) == {"root", "app"}
-    # native-password hash is hashcat -m 300 (nthash-style tag), sha2 stays generic hash
-    assert creds["root"].kind == "nthash" and creds["root"].source == "mysql-loot"
+    # a mysql_native_password value is a SHA1 (hashcat -m 300), NOT an NT hash: it must
+    # be kind "hash" so it never lands in nthashes.txt / netexec -H pass-the-hash.
+    assert creds["root"].kind == "hash" and creds["root"].source == "mysql-loot"
     assert creds["app"].kind == "hash"
