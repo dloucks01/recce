@@ -516,6 +516,15 @@ export function Act({ nav }: { nav: Nav }) {
           </section>
         );
       })}
+      {(plan.top.some((c) => c.archetype === "ad-path" || c.archetype === "exploit")) && (
+        <section className="panel">
+          <div className="panel-h"><h3>Attack path <span className="tag">projected</span></h3>
+            <span className="muted">route to Domain Admin, grounded in confirmed findings — not executed</span></div>
+          <div className="apath-wrap">
+            <img className="apath" src="/api/attackpath.svg" alt="Attack path" />
+          </div>
+        </section>
+      )}
       {atk && atk.tactics.length > 0 && (
         <section className="panel">
           <div className="panel-h"><h3>MITRE ATT&CK coverage</h3>

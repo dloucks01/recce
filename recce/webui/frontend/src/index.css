@@ -326,3 +326,7 @@ main { padding: 18px 20px 40px; max-width: 1100px; }
 .safetog { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .spraybar .loottable { margin-top: 10px; }
 .ranmsg.warn-msg { background: color-mix(in srgb, var(--high) 12%, var(--surface2)); border-color: color-mix(in srgb, var(--high) 40%, var(--line)); }
+
+/* ---- Attack-path graph ---- */
+.apath-wrap { overflow: auto; margin-top: 8px; background: var(--ground); border: 1px solid var(--line); border-radius: 9px; padding: 8px; }
+.apath { max-width: 100%; height: auto; display: block; }
