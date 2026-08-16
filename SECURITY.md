@@ -50,11 +50,18 @@ test. The following are enforced in the code, not just recommended:
   - **Open redirect / SSTI / XSS** send a benign canary and inspect the response.
   - **Form fuzzing skips destructive forms** (actions matching
     delete/remove/logout/…) and never fuzzes password or anti-CSRF fields.
-- **Reversible proofs.** Any write-impact proof is opt-in and self-undoing — e.g. the
-  SMB/FTP writable-share proof drops a marker file, lists it, then **deletes it**, and
-  reports whether cleanup succeeded.
+- **Reversible proofs.** Any write-impact proof is self-undoing. The opt-in SMB/FTP
+  writable-share proof (`--prove-write`) drops a marker file, lists it, then **deletes
+  it**, and reports whether cleanup succeeded. Credentialed **SMB share enumeration**
+  also classifies each accessible share READ vs WRITE by briefly creating and deleting
+  a marker directory (`recce_wprobe`); it **retries the cleanup and flags any share
+  where the marker could not be removed**, so a write-probe never silently leaves an
+  artifact behind.
 - **Bounded and lockout-aware.** Default-credential probes try a tiny documented list,
   capped per endpoint to stay under lockout thresholds. Injection sweeps are budgeted.
+  Credential **spraying** (`creds --run`) targets only the enumerated in-scope hosts
+  that actually expose each protocol — **never a whole subnet** — so it can't fire
+  authentication attempts at hosts recce never discovered.
 - **Airgapped & offline.** Standard library only — no runtime pip dependencies, no
   outbound calls except the tools you explicitly invoke. Runs on a stock Kali with no
   internet.

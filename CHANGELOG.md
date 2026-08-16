@@ -80,6 +80,12 @@ All notable changes to recce are documented here. Dates are UTC.
   `tests/test_qod.py`.
 
 ### Fixed
+- **Credential-spray + looted-hash correctness (review sweep).** Fixes from a branch review of the spray/credential path:
+  - **Spraying targets only the enumerated in-scope hosts, never a whole /24.** `credentials._target_expr` collapsed any set of same-/24 hosts (even a single IP) to `x.y.z.0/24`, so `creds --run` / the Loot-tab spray fired authentication attempts at up to 256 addresses — including undiscovered / out-of-scope hosts — defeating the lockout-safe guarantee. It now sprays exactly the IPs recce discovered. The same /24 widening in `defaultcreds` (the suggested `nxc` command) is fixed too.
+  - **Default-credential commands test the right pairs.** `defaultcreds.test_command` comma-joined `-u`/`-p` values and sorted the user/password sets independently, so under `--no-bruteforce` netexec (which pairs the lists positionally and never splits on commas) tested mismatched pairs — the real defaults (`root/root`, `pi/raspberry`, …) were never tried. Pairs are now aligned, space-separated, shell-quoted and deduped.
+  - **Looted MySQL hashes are no longer mislabeled as NT hashes.** A `mysql_native_password` value is a SHA1 (hashcat `-m 300`), not an NT hash; it was tagged `kind="nthash"`, landing it in `nthashes.txt` and netexec `-H` pass-the-hash spraying (every attempt malformed). It is now `kind="hash"`.
+  - **Credentialed SMB share-enum never leaves its write-probe behind.** The reversible READ/WRITE probe created `recce_wprobe` then deleted it, but a single `try/except` swallowed a failed delete, leaving the marker on the share. Cleanup is now retried and, if it still can't remove the marker, flagged per-share instead of silently left.
+  - **`mysql`/`postgres` `analyze()` no longer discards a caller's `creds` argument** (it immediately rebound the parameter to an empty list; the local accumulator is renamed).
 - **False-positive sweep across the finding/verdict pipeline.** A codebase audit found
   several detections that asserted a finding from *presence* or a *loose substring*
   rather than a confirmed positive; all are now tightened, with regression tests in
