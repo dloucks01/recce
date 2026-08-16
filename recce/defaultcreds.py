@@ -11,6 +11,8 @@ pairs for each discovered service. It never sprays them unattended.
 """
 from __future__ import annotations
 
+import shlex
+
 # service key -> list of (user, password, note). "" password = blank; a "" user for
 # snmp means a community string. Kept deliberately short - the *most common* defaults,
 # not a brute-force wordlist (that's what SecLists + --user-list are for).
@@ -91,10 +93,19 @@ def test_command(service: str, ips: list[str]) -> str:
         return (f"nxc {service} {tgt}    # unauth check (no credentials); "
                 f"redis-cli -h <ip> PING / mongosh --host <ip>")
     if proto:
-        us = ",".join(sorted({u for u, _p, _n in pairs if u}))
-        ps = ",".join(sorted({p for _u, p, _n in pairs}))
-        u_expr = us or "''"
-        return (f"nxc {proto} {tgt} -u {u_expr} -p '{ps}' "
+        # `--no-bruteforce` pairs the -u and -p lists POSITIONALLY (i-th user with
+        # i-th password), so the two lists must stay aligned and be passed as separate,
+        # space-separated args. netexec does NOT split comma-joined values, and sorting
+        # the user/password sets independently would test the wrong pairs entirely.
+        seen: set[tuple[str, str]] = set()
+        uniq: list[tuple[str, str]] = []
+        for u, p, _n in pairs:
+            if (u, p) not in seen:
+                seen.add((u, p))
+                uniq.append((u, p))
+        us = " ".join(shlex.quote(u) for u, _p in uniq) or "''"
+        ps = " ".join(shlex.quote(p) for _u, p in uniq) or "''"
+        return (f"nxc {proto} {tgt} -u {us} -p {ps} "
                 "--continue-on-success --no-bruteforce")
     # hydra fallback (http and anything nxc doesn't cover)
     pair_list = " ".join(f"{u}:{p}" for u, p, _n in pairs)
