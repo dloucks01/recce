@@ -448,13 +448,24 @@ airgapped, none need internet):
    password/anti-CSRF fields are never touched. Every response's **cookies** are
    graded too — missing HttpOnly/Secure/SameSite, `SameSite=None` without Secure,
    a session cookie over cleartext HTTP, a missing `__Host-`/`__Secure-` prefix,
-   or an over-broad parent `Domain`.
+   or an over-broad parent `Domain`. A **confirmed** SQLi isn't handed a
+   reimplemented exploiter — recce **bridges to a pre-filled `sqlmap` command**
+   (in the Act plan and the exploit plan) so you weaponise it with the purpose-built
+   tool, within your ROE.
 4. **`searchsploit` (Exploit-DB, offline)** maps every service's product+version
    to known public exploits on a dedicated **Exploits** sheet (EDB-ID, type,
    title, CVEs, local path).
 
 Every finding also carries **CWE** references (in a dedicated column) alongside
 its CVEs, so you can group and report weaknesses by class.
+
+Findings are ranked **fix-first**, not just by severity. Each CVE is checked against
+**CISA KEV** (Known Exploited Vulnerabilities) and carries its **EPSS** 30-day
+exploitation probability. A KEV finding is flagged **🔥 KEV** and sorts to the **top**
+— above raw CVSS — because confirmed exploited-in-the-wild is the strongest "fix this
+first" signal; **EPSS** then orders what's most likely to be attacked next, and
+severity × QoD breaks the remaining ties. Both KEV and EPSS ship as **offline
+snapshots** (refreshed at package build), so prioritisation works airgapped.
 
 > **Airgapped tip:** run with `--offline` to drop the internet-dependent
 > `vulners` script; you still get the local `vuln` category, all weak-config
