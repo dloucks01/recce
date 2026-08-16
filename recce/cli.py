@@ -5323,8 +5323,9 @@ def _service_module_coverage(store, hosts) -> list[dict]:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     """Serve the web workbench for this engagement. One recce instance hosts it; the
-    team opens http://<this-box>:<port> in a browser over the LAN. Read-only today;
-    live scans + progress ticks + collaboration build on this."""
+    team opens http://<this-box>:<port> in a browser over the LAN. Run scans from the
+    UI with live progress (SSE), work the Findings/Act/Loot tabs, export reports, and
+    collaborate via shared notes + review ticks."""
     _open_paths(args.output_dir)          # ensure the engagement dir exists (scan from UI)
     try:
         import uvicorn
