@@ -321,19 +321,36 @@ def _impacket_smb(ip: str, creds: dict) -> dict | None:
         for s in conn.listShares():
             name = str(s["shi1_netname"]).rstrip("\x00")
             perms = ""
+            note = ""
             try:
                 tid = conn.connectTree(name)
                 perms = "READ"
+                created = False
                 try:                                   # reversible write probe
                     conn.createDirectory(name, "recce_wprobe")
-                    conn.deleteDirectory(name, "recce_wprobe")
-                    perms = "READ,WRITE"
+                    created = True
                 except Exception:
-                    pass
+                    pass                               # not writable -> READ only
+                if created:
+                    perms = "READ,WRITE"
+                    # We just created a marker dir; it MUST be removed (the enum is
+                    # meant to be reversible). Retry once, and if it still can't be
+                    # deleted, flag it rather than silently leaving it on the share.
+                    for _ in range(2):
+                        try:
+                            conn.deleteDirectory(name, "recce_wprobe")
+                            note = ""
+                            break
+                        except Exception:
+                            note = ("left recce_wprobe\\ on the share "
+                                    "(auto-cleanup failed - delete it manually)")
                 conn.disconnectTree(tid)
             except Exception:
                 pass
-            res["shares"].append({"name": name, "perms": perms})
+            share = {"name": name, "perms": perms}
+            if note:
+                share["note"] = note
+            res["shares"].append(share)
     except Exception:
         pass
     for adm in ("C$", "ADMIN$"):                        # local-admin reach (Pwn3d)
