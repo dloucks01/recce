@@ -37,12 +37,21 @@ else
   echo "[!] Node/npm or the frontend not found - the web workbench UI won't be bundled"
 fi
 
-# --- 1. throwaway build venv with recce + its deps + pyinstaller ----------------
+# --- 1. build venv with recce + its deps + pyinstaller --------------------------
+# --system-site-packages so an OFFLINE build (no PyPI reachable) can reuse deps that
+# are already installed on the box (impacket/ldap3/openpyxl/fastapi/uvicorn/pyinstaller)
+# instead of failing at pip. Online, the '.[bundle]' install still pulls anything missing.
 echo "[*] Creating build venv + installing recce (+ deps) + PyInstaller ..."
-python3 -m venv "$VENV"
-"$VENV/bin/pip" install --quiet --upgrade pip
-"$VENV/bin/pip" install --quiet '.[bundle]'  # recce + the bundled libraries (impacket/ldap3/openpyxl)
-"$VENV/bin/pip" install --quiet pyinstaller
+python3 -m venv --system-site-packages "$VENV"
+"$VENV/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
+if "$VENV/bin/pip" install --quiet '.[bundle]' pyinstaller 2>/dev/null; then
+  echo "[+] installed recce + deps from PyPI"
+else
+  echo "[!] PyPI unreachable - building OFFLINE from the deps already on this box"
+fi
+# Verify the deps needed to freeze are importable (from the venv or system-site).
+"$VENV/bin/python" -c "import PyInstaller, fastapi, uvicorn" \
+  || { echo "[x] missing build deps (need PyInstaller + fastapi + uvicorn). Install them and retry."; exit 1; }
 
 # --- 2. freeze the recce app (onedir) -------------------------------------------
 echo "[*] Freezing the recce app with PyInstaller ..."
@@ -53,7 +62,11 @@ if __name__ == "__main__":
 PY
 # --collect-all for the bundled libs: recce imports them conditionally (find_spec),
 # which PyInstaller's static analysis would otherwise miss.
-"$VENV/bin/pyinstaller" --onedir --name recce --noconfirm \
+# --paths "$HERE": find the recce package in the repo even when it wasn't pip-installed
+# (the offline path). python -m PyInstaller works whether pyinstaller is in the venv or
+# the system site-packages the venv can see.
+"$VENV/bin/python" -m PyInstaller --onedir --name recce --noconfirm \
+  --paths "$HERE" \
   --collect-submodules recce --collect-data recce \
   --collect-all impacket --collect-all ldap3 --collect-all openpyxl \
   --collect-all fastapi --collect-all uvicorn \
