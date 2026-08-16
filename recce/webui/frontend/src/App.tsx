@@ -72,6 +72,13 @@ export default function App() {
   const [tgQ, setTgQ] = useState(""); const [tgFilter, setTgFilter] = useState<TgFilter>("all");
   const [drawerIp, setDrawerIp] = useState<string | null>(null);
 
+  // theme: light is the default; dark is opt-in (persisted).
+  const [theme, setTheme] = useState(() => localStorage.getItem("recce.theme") || "light");
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
+    localStorage.setItem("recce.theme", theme);
+  }, [theme]);
+
   // tester identity
   const [who, setWho] = useState(() => localStorage.getItem("recce.tester") || "");
   const [nameInput, setNameInput] = useState("");
@@ -191,6 +198,10 @@ export default function App() {
             <button key={t} className={"tab" + (tab === t ? " sel" : "")} onClick={() => setTab(t)}>{label}</button>
           ))}
         </nav>
+        <button className="theme-tog" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+                title="toggle light / dark" aria-label="toggle theme">
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
         {who ? (
           <button className="whoami" onClick={() => setWho("")} title="click to change">{tester}</button>
         ) : (

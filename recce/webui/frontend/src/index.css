@@ -1,10 +1,19 @@
+/* Light is the DEFAULT theme. Dark is opt-in via the header toggle
+   (data-theme="dark" on the root). Everything below styles through these tokens, so
+   flipping the token block flips the whole app. */
 :root {
+  --ground: #f4f6fa; --surface: #ffffff; --surface2: #eef1f7; --line: #d9e0ea;
+  --text: #16202e; --muted: #5a6b82; --faint: #93a1b5; --accent: #2563eb;
+  --crit: #dc2626; --high: #d9720a; --med: #b0810a; --low: #64748b;
+  --ok: #059669; --kev: #b021c9;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+:root[data-theme="dark"] {
   --ground: #0f1622; --surface: #161d2b; --surface2: #1b2333; --line: #28324a;
   --text: #e6edf6; --muted: #8b98ac; --faint: #5f6c82; --accent: #5b9bff;
   --crit: #fb5871; --high: #fb923c; --med: #f5c04e; --low: #7c8aa0;
   --ok: #34d399; --kev: #e879f9;
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-  --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--ground); color: var(--text); font-family: var(--sans); font-size: 14px; }
@@ -13,7 +22,7 @@ body { margin: 0; background: var(--ground); color: var(--text); font-family: va
 .err { color: var(--crit); }
 
 .top { display: flex; align-items: center; padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
-.whoami { margin-left: auto; font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 20px; padding: 5px 13px; cursor: pointer; }
+.whoami { margin-left: 8px; font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 20px; padding: 5px 13px; cursor: pointer; }
 .whoami:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .namegate { margin-left: auto; display: flex; gap: 6px; }
 .namegate input { font-family: var(--mono); font-size: 12px; padding: 5px 10px; width: 130px; border: 1px solid var(--line); border-radius: 20px; background: var(--surface2); color: var(--text); }
@@ -330,3 +339,9 @@ main { padding: 18px 20px 40px; max-width: 1100px; }
 /* ---- Attack-path graph ---- */
 .apath-wrap { overflow: auto; margin-top: 8px; background: var(--ground); border: 1px solid var(--line); border-radius: 9px; padding: 8px; }
 .apath { max-width: 100%; height: auto; display: block; }
+
+/* ---- light/dark theme toggle ---- */
+.theme-tog { margin-left: auto; background: var(--surface2); border: 1px solid var(--line); color: var(--muted); font-size: 15px; line-height: 1; width: 32px; height: 30px; border-radius: 8px; cursor: pointer; display: grid; place-items: center; }
+.theme-tog:hover { border-color: var(--accent); color: var(--text); }
+/* the app composites over the host page; paint an explicit ground so light/dark both hold */
+body { background: var(--ground); color: var(--text); }
