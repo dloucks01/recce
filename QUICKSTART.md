@@ -129,6 +129,12 @@ Open **`eng/enumeration.xlsx`** in Excel or LibreOffice. Read the **Start Here**
 (it explains every other tab), then do your tracking on the **Checklist** tab — one
 row per computer, a checkbox per step.
 
+> [!TIP]
+> **Prefer a browser?** `./bin/recce serve -o eng` starts the **web workbench** at
+> `http://<this-box>:8008` — the same engagement in a browser, shareable with the
+> team over the LAN. Run scans from it, work the Findings / Act / Loot tabs, and
+> export the report in one click. (See the README's *Web workbench* section.)
+
 ### ③ Vuln-scan — check the open services for known weaknesses
 ```bash
 sudo ./bin/recce vulns -o eng
