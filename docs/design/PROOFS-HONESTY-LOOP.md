@@ -1,7 +1,7 @@
 # The Evaluation & Honesty Loop (proofs re-plan)
 
 > Spec for replacing recce's verdict engine. Prioritized ahead of the scan-speed stage.
-> Read `docs/ARCHITECTURE.md` first for the QoD model and the north star.
+> Read `docs/design/ARCHITECTURE.md` first for the QoD model and the north star.
 
 ## The two failure modes (both make recce useless)
 

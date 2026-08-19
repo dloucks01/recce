@@ -6,7 +6,7 @@
 > make itself **proxy-safe** and **proxy-honest**: never scan from the operator's real IP by
 > accident (an OPSEC failure), and never report a misleading clean result for traffic that
 > silently couldn't traverse the proxy (a false negative — the top principle). Read
-> `docs/ARCHITECTURE.md` first.
+> `docs/design/ARCHITECTURE.md` first.
 
 ---
 

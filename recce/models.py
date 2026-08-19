@@ -28,7 +28,7 @@ class Evidence:
     output: `kind` says how it was observed and `positive` says whether it supports or
     refutes the finding. A negative observation (a patched banner, an NSE 'NOT
     VULNERABLE', an auth-required response) is a first-class refutation, not a special
-    string-grep case. See docs/ARCHITECTURE.md §3.2.
+    string-grep case. See docs/design/ARCHITECTURE.md §3.2.
     """
 
     kind: str            # nse | live-probe | version-range | on-target | config-observed
@@ -104,7 +104,7 @@ class Vuln:
     confidence: str = ""     # confirmed | likely | potential
     # Quality of Detection (0-100): how RELIABLE the detection method is, orthogonal
     # to severity (which is how bad it is if real). Set once, from the detection
-    # method, by recce.qod.annotate(). See docs/ARCHITECTURE.md §3.1. 0 = not yet
+    # method, by recce.qod.annotate(). See docs/design/ARCHITECTURE.md §3.1. 0 = not yet
     # scored (older store / not annotated).
     qod: int = 0
     qod_type: str = ""       # the named tier, e.g. remote_banner / active_vuln

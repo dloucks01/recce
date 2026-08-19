@@ -3,7 +3,7 @@
 QoD is a 0-100 number describing how RELIABLE a finding's detection method is. It is
 deliberately ORTHOGONAL to severity: severity says how bad the issue is if real, QoD
 says how likely it is actually there. Modelled on OpenVAS/Greenbone's QoD (see
-docs/ARCHITECTURE.md §2.1/§3.1).
+docs/design/ARCHITECTURE.md §2.1/§3.1).
 
 The whole point: confidence is computed ONCE here, from the detection method, and every
 consumer reads the stored `Vuln.qod` instead of re-deriving "is this real?" from raw
@@ -33,7 +33,7 @@ _SERVICE_SOURCES = frozenset({
     "elasticsearch", "ftp", "nfs", "rsync", "snmp", "api", "web", "adcs",
 })
 
-# The tier table (docs/ARCHITECTURE.md §3.1), for reference and reverse lookup.
+# The tier table (docs/design/ARCHITECTURE.md §3.1), for reference and reverse lookup.
 TIERS: dict[str, int] = {
     "exploit": 100,             # recce actively exploited / got an unauth read
     "active_vuln": 99,          # NSE state:VULNERABLE, or recce negotiated the weak protocol

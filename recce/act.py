@@ -20,7 +20,7 @@ Ranking is two-level for explainability: a coarse TIER (readiness x safety x
 confidence) then score = impact x confidence x leverage within the tier. Read-only /
 reversible actions are auto-eligible (executed by the `act` command in a later slice);
 intrusive ones are guided (exact command printed, never auto-fired). See the design in
-docs/ACT-PHASE.md. This slice (P1) is guidance-only: it classifies, ranks, and prints.
+docs/design/ACT-PHASE.md. This slice (P1) is guidance-only: it classifies, ranks, and prints.
 """
 from __future__ import annotations
 

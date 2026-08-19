@@ -1823,7 +1823,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     the results fold into the store and the normal pipeline promotes a confirmed lead
     (NSE VULNERABLE -> CONFIRMED) or refutes a disproved one (NOT VULNERABLE, hidden by
     default). Only Tier-A/B (read-only / non-intrusive detection) - never a weaponizing PoC.
-    See docs/ACTIVE-VERIFICATION.md."""
+    See docs/design/ACTIVE-VERIFICATION.md."""
     from . import verify, qod
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -5915,7 +5915,7 @@ def _add_vuln_opts(pp) -> None:
     g.add_argument("--rules", metavar="FILE",
                    help="load extra detection rules from a JSON file (data-driven "
                         "detection: add/override version->CVE signatures without code; "
-                        "see docs/DETECTION-RULES.md)")
+                        "see docs/reference/detection-rules.md)")
     g.add_argument("--aggressive", action="store_true",
                    help="run the full intrusive NSE 'vuln' category (can crash "
                         "fragile services); default is deep safe detection")
@@ -6864,7 +6864,7 @@ def _setup_proxy(args) -> int | None:
     Explicit --proxy: verify proxychains + the tunnel, then re-exec recce under
     proxychains so its whole process tree is proxied (unless already wrapped). A run that
     is already under proxychains (our re-exec, or the operator's own wrap) just switches
-    on safe/honest mode. See docs/PROXY-PIVOT.md."""
+    on safe/honest mode. See docs/design/PROXY-PIVOT.md."""
     from . import proxy
     url = getattr(args, "proxy", None)
     if not url and not proxy.already_proxied():
