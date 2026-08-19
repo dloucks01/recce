@@ -108,6 +108,37 @@ class ApiShape(unittest.TestCase):
             # an undetectable blob is rejected with guidance, not silently swallowed
             self.assertEqual(c.post("/api/import", json={"content": "hello world", "kind": "auto"}).status_code, 422)
 
+    def test_collab_endpoints_track_team_state(self):
+        """The multi-tester layer: claim/assign, triage labels, per-port status,
+        dismiss, manual add (finding/cred/host/access), presence, activity feed."""
+        H = {"X-Tester": "alice"}
+        with _client(self.eng) as c:
+            ip = c.get("/api/hosts").json()[0]["ip"]
+            self.assertEqual(c.post("/api/assign", json={"ip": ip, "tester": "alice"}, headers=H).json(), {"ok": True})
+            c.post("/api/label", json={"ip": ip, "label": "interesting", "on": True}, headers=H)
+            c.post("/api/port_status", json={"ip": ip, "port": 445, "status": "wip"}, headers=H)
+            c.post("/api/add/finding", json={"ip": ip, "port": 3389, "title": "Manual RDP finding",
+                                             "severity": "high", "cve": "CVE-2019-0708"}, headers=H)
+            self.assertTrue(c.post("/api/add/credential",
+                            json={"username": "svc", "secret": "s3cret", "origin_ip": ip}, headers=H).json()["added"])
+            self.assertEqual(c.post("/api/add/host", json={"targets": "10.77.0.9"}, headers=H).json()["added"], 1)
+            c.post("/api/add/access", json={"ip": ip, "note": "SYSTEM via manual"}, headers=H)
+            c.post("/api/presence", headers={"X-Tester": "bob"})
+            state = c.get("/api/collab").json()
+            self.assertEqual(state["assignments"].get(ip), "alice")
+            self.assertIn("interesting", state["labels"].get(ip, []))
+            self.assertEqual(state["port_status"].get(f"{ip}:445"), "wip")
+            self.assertIn("bob", state["online"])
+            self.assertTrue(state["activity"], "activity feed is empty")
+            # manual finding folded + KEV-annotated; manual host + access landed
+            self.assertTrue(any(f["title"] == "Manual RDP finding" and f["kev"]
+                                for f in c.get("/api/findings").json()))
+            hs = {h["ip"]: h for h in c.get("/api/hosts").json()}
+            self.assertIn("10.77.0.9", hs)
+            self.assertTrue(hs[ip]["access"])
+            # bad input is rejected
+            self.assertEqual(c.post("/api/label", json={"ip": ip, "label": "bogus"}, headers=H).status_code, 400)
+
     def test_attack_endpoint_feeds_the_coverage_panel(self):
         with _client(self.eng) as c:
             cov = c.get("/api/attack").json()
