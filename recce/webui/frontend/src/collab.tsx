@@ -63,6 +63,43 @@ export function PresenceBar() {
   );
 }
 
+/* ---------------------------- team coverage ------------------------------ */
+// Dashboard panel: who owns how much of the scope, and how much is still unclaimed.
+export function TeamCoverage({ hostsUp, onOpen }: { hostsUp: number; onOpen: () => void }) {
+  const { c, me } = useCollab();
+  const counts: Record<string, number> = {};
+  for (const t of Object.values(c.assignments)) counts[t] = (counts[t] || 0) + 1;
+  const assigned = Object.keys(c.assignments).length;
+  const unclaimed = Math.max(0, hostsUp - assigned);
+  const testers = [...new Set([...c.online, ...Object.keys(counts)])]
+    .sort((a, b) => (counts[b] || 0) - (counts[a] || 0) || a.localeCompare(b));
+  if (testers.length <= 1 && assigned === 0) return null;      // solo run: nothing to show
+  const max = Math.max(1, unclaimed, ...Object.values(counts));
+  return (
+    <section className="panel teampanel">
+      <div className="panel-h"><h3>Team coverage</h3>
+        <button className="link" onClick={onOpen}>hosts →</button></div>
+      <ul className="teamlist">
+        {testers.map((t) => (
+          <li key={t} onClick={onOpen}>
+            <span className="avatar sm" style={{ background: `hsl(${hue(t)} 55% 45%)` }}>{initials(t)}</span>
+            <span className="tm-name">{t === me ? `${t} (you)` : t}
+              {c.online.includes(t) && <span className="tm-dot" title="online" />}</span>
+            <div className="tm-track"><div className="tm-fill" style={{ width: `${(100 * (counts[t] || 0)) / max}%` }} /></div>
+            <span className="tm-n mono">{counts[t] || 0}</span>
+          </li>
+        ))}
+        <li className="tm-unclaimed" onClick={onOpen}>
+          <span className="avatar sm more">?</span>
+          <span className="tm-name">unclaimed</span>
+          <div className="tm-track"><div className="tm-fill unc" style={{ width: `${(100 * unclaimed) / max}%` }} /></div>
+          <span className="tm-n mono">{unclaimed}</span>
+        </li>
+      </ul>
+    </section>
+  );
+}
+
 /* ---------------------------- activity drawer ---------------------------- */
 const KIND_ICON: Record<string, string> = {
   assign: "👤", add: "＋", access: "🔓", dismiss: "🚫", tick: "✓", note: "✎",

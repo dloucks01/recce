@@ -446,3 +446,15 @@ body { background: var(--ground); color: var(--text); }
   font-weight: 700; padding: 2px 8px; border-radius: 6px; cursor: pointer; }
 .dismiss-btn:hover { border-color: var(--crit); color: var(--crit); }
 .dismiss-btn.on { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 40%, var(--line)); }
+
+/* team-coverage panel (Dashboard) */
+.teamlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.teamlist li { display: flex; align-items: center; gap: 10px; padding: 7px 4px; border-radius: 7px; cursor: pointer; }
+.teamlist li:hover { background: var(--surface2); }
+.tm-name { flex: none; width: 150px; font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok) 25%, transparent); }
+.tm-track { flex: 1; height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; }
+.tm-fill { height: 100%; background: var(--accent); border-radius: 4px; }
+.tm-fill.unc { background: var(--faint); }
+.tm-n { flex: none; width: 26px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.tm-unclaimed .tm-name { color: var(--muted); }
