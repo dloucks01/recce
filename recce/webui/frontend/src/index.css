@@ -460,3 +460,10 @@ body { background: var(--ground); color: var(--text); }
 .tm-unclaimed .tm-name { color: var(--muted); }
 .avatar.clk { cursor: pointer; }
 .avatar.clk:hover { filter: brightness(1.12); transform: translateY(-1px); }
+
+/* team-coverage: two-tone bar (claimed vs done) + clickable activity rows */
+.tm-fill { background: color-mix(in srgb, var(--accent) 28%, var(--surface2)); overflow: hidden; }
+.tm-done { height: 100%; background: var(--accent); border-radius: 4px; }
+.tm-n { width: 40px; }
+.actfeed li.clk { cursor: pointer; margin: 0 -4px; padding-left: 4px; padding-right: 4px; border-radius: 7px; }
+.actfeed li.clk:hover { background: var(--surface2); }

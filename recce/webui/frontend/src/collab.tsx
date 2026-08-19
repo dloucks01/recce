@@ -66,30 +66,45 @@ export function PresenceBar({ onPick }: { onPick?: (name: string) => void }) {
 
 /* ---------------------------- team coverage ------------------------------ */
 // Dashboard panel: who owns how much of the scope, and how much is still unclaimed.
-export function TeamCoverage({ hostsUp, onOpen }: { hostsUp: number; onOpen: (owner: string) => void }) {
+export function TeamCoverage(
+  { hostsUp, reviewedByIp, onOpen }:
+  { hostsUp: number; reviewedByIp: Record<string, boolean>; onOpen: (owner: string) => void }
+) {
   const { c, me } = useCollab();
-  const counts: Record<string, number> = {};
-  for (const t of Object.values(c.assignments)) counts[t] = (counts[t] || 0) + 1;
+  // per tester: total claimed hosts + how many are marked done (reviewed)
+  const stat: Record<string, { total: number; done: number }> = {};
+  for (const [ip, t] of Object.entries(c.assignments)) {
+    const s = stat[t] || (stat[t] = { total: 0, done: 0 });
+    s.total++; if (reviewedByIp[ip]) s.done++;
+  }
   const assigned = Object.keys(c.assignments).length;
   const unclaimed = Math.max(0, hostsUp - assigned);
-  const testers = [...new Set([...c.online, ...Object.keys(counts)])]
-    .sort((a, b) => (counts[b] || 0) - (counts[a] || 0) || a.localeCompare(b));
+  const testers = [...new Set([...c.online, ...Object.keys(stat)])]
+    .sort((a, b) => (stat[b]?.total || 0) - (stat[a]?.total || 0) || a.localeCompare(b));
   if (testers.length <= 1 && assigned === 0) return null;      // solo run: nothing to show
-  const max = Math.max(1, unclaimed, ...Object.values(counts));
+  const max = Math.max(1, unclaimed, ...Object.values(stat).map((s) => s.total));
   return (
     <section className="panel teampanel">
       <div className="panel-h"><h3>Team coverage</h3>
+        <span className="panel-sub">hosts claimed · done — click a row to drill in</span>
         <button className="link" onClick={() => onOpen("all")}>hosts →</button></div>
       <ul className="teamlist">
-        {testers.map((t) => (
-          <li key={t} onClick={() => onOpen(t)} title={`show ${t}'s hosts`}>
-            <span className="avatar sm" style={{ background: `hsl(${hue(t)} 55% 45%)` }}>{initials(t)}</span>
-            <span className="tm-name">{t === me ? `${t} (you)` : t}
-              {c.online.includes(t) && <span className="tm-dot" title="online" />}</span>
-            <div className="tm-track"><div className="tm-fill" style={{ width: `${(100 * (counts[t] || 0)) / max}%` }} /></div>
-            <span className="tm-n mono">{counts[t] || 0}</span>
-          </li>
-        ))}
+        {testers.map((t) => {
+          const s = stat[t] || { total: 0, done: 0 };
+          return (
+            <li key={t} onClick={() => onOpen(t)} title={`show ${t}'s hosts`}>
+              <span className="avatar sm" style={{ background: `hsl(${hue(t)} 55% 45%)` }}>{initials(t)}</span>
+              <span className="tm-name">{t === me ? `${t} (you)` : t}
+                {c.online.includes(t) && <span className="tm-dot" title="online" />}</span>
+              <div className="tm-track">
+                <div className="tm-fill" style={{ width: `${(100 * s.total) / max}%` }}>
+                  <div className="tm-done" style={{ width: s.total ? `${(100 * s.done) / s.total}%` : "0" }} />
+                </div>
+              </div>
+              <span className="tm-n mono">{s.done}/{s.total}</span>
+            </li>
+          );
+        })}
         <li className="tm-unclaimed" onClick={() => onOpen("unclaimed")} title="show unclaimed hosts">
           <span className="avatar sm more">?</span>
           <span className="tm-name">unclaimed</span>
@@ -105,7 +120,8 @@ export function TeamCoverage({ hostsUp, onOpen }: { hostsUp: number; onOpen: (ow
 const KIND_ICON: Record<string, string> = {
   assign: "👤", add: "＋", access: "🔓", dismiss: "🚫", tick: "✓", note: "✎",
 };
-export function ActivityButton() {
+const IP_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/;
+export function ActivityButton({ onOpenHost }: { onOpenHost?: (ip: string) => void }) {
   const { c } = useCollab();
   const [open, setOpen] = useState(false);
   return (
@@ -121,13 +137,17 @@ export function ActivityButton() {
               <div className="dh-name">{c.online.length} online · newest first</div></div>
             <ul className="actfeed">
               {c.activity.length === 0 && <li className="muted">No activity yet.</li>}
-              {c.activity.map((a, i) => (
-                <li key={i}>
-                  <span className="af-i">{KIND_ICON[a.kind] || "•"}</span>
-                  <span className="af-t">{a.text}</span>
-                  <span className="af-when">{when(a.ts)}</span>
-                </li>
-              ))}
+              {c.activity.map((a, i) => {
+                const ip = onOpenHost ? (IP_RE.exec(a.text)?.[0] || "") : "";
+                return (
+                  <li key={i} className={ip ? "clk" : ""} title={ip ? `open ${ip}` : ""}
+                      onClick={ip ? () => { onOpenHost!(ip); setOpen(false); } : undefined}>
+                    <span className="af-i">{KIND_ICON[a.kind] || "•"}</span>
+                    <span className="af-t">{a.text}</span>
+                    <span className="af-when">{when(a.ts)}</span>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         </>

@@ -22,8 +22,9 @@ export type Nav = {
 /* ------------------------------- Dashboard ------------------------------- */
 
 export function Dashboard(
-  { ov, nav }: { ov: Overview; nav: Nav }
+  { ov, hosts, nav }: { ov: Overview; hosts: Host[]; nav: Nav }
 ) {
+  const reviewedByIp = useMemo(() => Object.fromEntries(hosts.map((h) => [h.ip, h.reviewed])), [hosts]);
   const reviewPct = ov.findings_total ? Math.round((100 * ov.reviewed) / ov.findings_total) : 0;
   const enumPct = ov.hosts_up ? Math.round((100 * ov.enumerated) / ov.hosts_up) : 0;
   return (
@@ -102,7 +103,7 @@ export function Dashboard(
         </section>
       </div>
 
-      <TeamCoverage hostsUp={ov.hosts_up} onOpen={(owner) => nav.toHosts({ owner })} />
+      <TeamCoverage hostsUp={ov.hosts_up} reviewedByIp={reviewedByIp} onOpen={(owner) => nav.toHosts({ owner })} />
 
       <section className="panel">
         <div className="panel-h"><h3>Coverage</h3>

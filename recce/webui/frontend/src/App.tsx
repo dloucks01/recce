@@ -319,7 +319,7 @@ export default function App() {
           ))}
         </nav>
         <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
-        <ActivityButton />
+        <ActivityButton onOpenHost={(ip) => nav.openHost(ip)} />
         <button className="theme-tog" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
                 title="toggle light / dark" aria-label="toggle theme">
           {theme === "dark" ? "☀" : "☾"}
@@ -362,7 +362,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === "dashboard" && <Dashboard ov={ov} nav={nav} />}
+        {tab === "dashboard" && <Dashboard ov={ov} hosts={hosts} nav={nav} />}
         {tab === "findings" && (
           <Findings findings={findings} f={ff} setF={(o) => setFf((p) => ({ ...p, ...o }))}
                     nav={nav} onTick={onTick} onNote={onNote} />
