@@ -2,12 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Finding, Host, Overview, fetchAll, postTick, postNote, postScan, postImport,
 } from "./api";
-import { Dashboard, Findings, Hosts, Targets, Act, Loot, Nav, FindingFilters } from "./views";
+import { Dashboard, Findings, Hosts, Act, Loot, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, AddMenu, MyQueue, useCollab } from "./collab";
 
-type Tab = "dashboard" | "findings" | "act" | "loot" | "hosts" | "targets";
-type TgFilter = "all" | "todo" | "enumerated" | "access" | "reviewed";
+type Tab = "dashboard" | "hosts" | "findings" | "act" | "loot";
 const POLL_MS = 20000; // constantly-updating analysis: re-pull on a slow heartbeat
 
 // One-click export. Regenerates the deliverables server-side (same builder as
@@ -171,9 +170,8 @@ export default function App() {
 
   // cross-tab filter state (lifted so the dashboard can drill into a filtered view)
   const [ff, setFf] = useState<FindingFilters>({ sev: "all", host: "", kev: false, unreviewed: false, leads: false, q: "" });
-  const [hostQ, setHostQ] = useState(""); const [hostSev, setHostSev] = useState("all");
-  const [hostWho, setHostWho] = useState("all");   // all | unclaimed | tester name
-  const [tgQ, setTgQ] = useState(""); const [tgFilter, setTgFilter] = useState<TgFilter>("all");
+  const [hostQ, setHostQ] = useState(""); const [hostCov, setHostCov] = useState("all");
+  const [hostWho, setHostWho] = useState("all");   // all | unclaimed | queue | tester name
   const [drawerIp, setDrawerIp] = useState<string | null>(null);
 
   // theme: light is the default; dark is opt-in (persisted).
@@ -200,6 +198,7 @@ export default function App() {
   const logRef = useRef<HTMLDivElement>(null);
 
   const [showImport, setShowImport] = useState(false);
+  const [scanOpen, setScanOpen] = useState(false);
   const [flash, setFlash] = useState<string | null>(null);
   const flashTimer = useRef<number | undefined>(undefined);
   const note = useCallback((msg: string) => {
@@ -274,8 +273,7 @@ export default function App() {
       setFf({ sev: "all", host: "", kev: false, unreviewed: false, leads: false, q: "", ...o });
       setTab("findings");
     },
-    toHosts: (o) => { setHostQ(o?.q ?? ""); setHostSev(o?.sev ?? "all"); setHostWho(o?.owner ?? "all"); setTab("hosts"); },
-    toTargets: () => setTab("targets"),
+    toHosts: (o) => { setHostQ(o?.q ?? ""); setHostWho(o?.owner ?? "all"); setHostCov("all"); setTab("hosts"); },
     toAct: () => setTab("act"),
     openHost: (ip) => setDrawerIp(ip),
   };
@@ -303,10 +301,11 @@ export default function App() {
   if (!ov) return <div className="loading">Loading engagement…</div>;
 
   // Ordered to follow the operator's path: overview -> what's wrong -> what to DO ->
-  // what we EXTRACTED -> host/target detail.
+  // Ordered to narrow the operator's focus: overview -> inventory -> what's wrong ->
+  // what to DO -> what we EXTRACTED.
   const TABS: [Tab, string][] = [
-    ["dashboard", "Dashboard"], ["findings", "Findings"], ["act", "Act"],
-    ["loot", "Credentials"], ["hosts", "Hosts"], ["targets", "Targets"],
+    ["dashboard", "Dashboard"], ["hosts", "Hosts"], ["findings", "Findings"],
+    ["act", "Act"], ["loot", "Credentials"],
   ];
 
   return (
@@ -338,20 +337,32 @@ export default function App() {
       {flash && <div className="flash">{flash}</div>}
 
       <main>
-        <section className="scanbar">
-          <input className="scan-in" placeholder="targets to scan — 10.0.0.0/24, host.corp.local …"
-                 value={targets} onChange={(e) => setTargets(e.target.value)}
-                 onKeyDown={(e) => e.key === "Enter" && runScan()} disabled={running} />
-          <select value={profile} onChange={(e) => setProfile(e.target.value)} disabled={running}>
-            <option value="quick">quick</option><option value="standard">standard</option><option value="thorough">thorough</option>
-          </select>
-          <button className="run" onClick={runScan} disabled={running || !targets.trim()}>
-            {running ? "Scanning…" : "Run scan"}
-          </button>
-          <button className="import-btn" onClick={() => setShowImport(true)}
-                  title="import output from nmap / netexec / impacket / on-target loot">
-            ⭱ Import
-          </button>
+        <section className="actionbar">
+          <div className="scanctl">
+            <button className={"btn scanbtn" + (running ? " busy" : "")}
+                    onClick={() => (running ? undefined : setScanOpen((v) => !v))} disabled={running}
+                    title="run enum / vulns / full scan">
+              {running ? "Scanning…" : "▶ Scan"}
+            </button>
+            {scanOpen && !running && (
+              <>
+                <div className="exp-backdrop" onClick={() => setScanOpen(false)} />
+                <div className="scanpop">
+                  <input className="scan-in" autoFocus placeholder="targets — 10.0.0.0/24, host.corp.local …"
+                         value={targets} onChange={(e) => setTargets(e.target.value)}
+                         onKeyDown={(e) => { if (e.key === "Enter" && targets.trim()) { runScan(); setScanOpen(false); } }} />
+                  <div className="scanpop-row">
+                    <select value={profile} onChange={(e) => setProfile(e.target.value)}>
+                      <option value="quick">quick</option><option value="standard">standard</option><option value="thorough">thorough</option>
+                    </select>
+                    <button className="btn primary" onClick={() => { runScan(); setScanOpen(false); }} disabled={!targets.trim()}>Run</button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+          <button className="btn" onClick={() => setShowImport(true)}
+                  title="import output from nmap / netexec / impacket / on-target loot">⭱ Import</button>
           <AddMenu onDone={(m) => note(m)} />
           <Export onError={(m) => note(m)} />
         </section>
@@ -371,12 +382,9 @@ export default function App() {
         {tab === "act" && <Act nav={nav} />}
         {tab === "loot" && <Loot />}
         {tab === "hosts" && (
-          <Hosts hosts={hosts} q={hostQ} sev={hostSev} who={hostWho} setQ={setHostQ} setSev={setHostSev}
-                 setWho={setHostWho} nav={nav} onTick={onTick} onNote={onNote} />
-        )}
-        {tab === "targets" && (
-          <Targets hosts={hosts} ov={ov} q={tgQ} filter={tgFilter} setQ={setTgQ} setFilter={setTgFilter}
-                   nav={nav} onTick={onTick} onNote={onNote} />
+          <Hosts hosts={hosts} ov={ov} q={hostQ} who={hostWho} cov={hostCov}
+                 setQ={setHostQ} setWho={setHostWho} setCov={setHostCov}
+                 nav={nav} onTick={onTick} onNote={onNote} />
         )}
       </main>
 

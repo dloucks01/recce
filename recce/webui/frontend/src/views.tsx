@@ -13,8 +13,7 @@ export type FindingFilters = {
 };
 export type Nav = {
   toFindings: (o?: Partial<FindingFilters>) => void;
-  toHosts: (o?: { q?: string; sev?: string; owner?: string }) => void;
-  toTargets: () => void;
+  toHosts: (o?: { q?: string; owner?: string }) => void;
   toAct: () => void;
   openHost: (ip: string) => void;
 };
@@ -107,7 +106,7 @@ export function Dashboard(
 
       <section className="panel">
         <div className="panel-h"><h3>Coverage</h3>
-          <button className="link" onClick={() => nav.toTargets()}>targets →</button></div>
+          <button className="link" onClick={() => nav.toHosts()}>hosts →</button></div>
         <div className="coverage">
           <Meter label="Scope discovered" now={ov.hosts_up}
                  total={Math.max(ov.scope_size, ov.hosts_up)} unit="hosts" />
@@ -285,34 +284,68 @@ export function Findings(
 }
 
 /* --------------------------------- Hosts --------------------------------- */
+// Merged host inventory: scope + coverage progress + findings + ownership/triage.
 
 export function Hosts(
-  { hosts, q, sev, who, setQ, setSev, setWho, nav, onTick, onNote }:
-  { hosts: Host[]; q: string; sev: string; who: string;
-    setQ: (v: string) => void; setSev: (v: string) => void; setWho: (v: string) => void;
+  { hosts, ov, q, who, cov, setQ, setWho, setCov, nav, onTick, onNote }:
+  { hosts: Host[]; ov: Overview; q: string; who: string; cov: string;
+    setQ: (v: string) => void; setWho: (v: string) => void; setCov: (v: string) => void;
     nav: Nav; onTick: (k: string, r: boolean) => void; onNote: (k: string, t: string) => void }
 ) {
   const { c, me } = useCollab();
-  // who: "all" | "unclaimed" | a tester name ("mine" resolves to my own name)
+  const stats = useMemo(
+    () => ownerStats(c.assignments, Object.fromEntries(hosts.map((h) => [h.ip, h.reviewed]))),
+    [c.assignments, hosts]);
   const rows = useMemo(() => {
     const n = q.toLowerCase();
     return hosts
       .filter((h) => !n || `${h.ip} ${h.hostname} ${h.os} ${h.roles.join(" ")}`.toLowerCase().includes(n))
-      .filter((h) => sev === "all" || (h.findings[sev] || 0) > 0)
+      .filter((h) =>
+        cov === "all" ? true :
+        cov === "todo" ? !h.enumerated :
+        cov === "enumerated" ? h.enumerated :
+        cov === "access" ? h.access :
+        /* reviewed */ h.reviewed)
       .filter((h) =>
         who === "all" ? true :
         who === "unclaimed" ? !c.assignments[h.ip] :
         who === "queue" ? (c.assignments[h.ip] === me && !h.reviewed) :
         c.assignments[h.ip] === who)
-      .slice().sort((a, b) => hostScore(b.findings) - hostScore(a.findings) || a.ip.localeCompare(b.ip, undefined, { numeric: true }));
-  }, [hosts, q, sev, who, c.assignments, me]);
-  const { shown, limit, total, sentinel } = useBounded(rows, 120, [q, sev, who]);
+      .slice().sort((a, b) => hostScore(b.findings) - hostScore(a.findings)
+        || a.ip.localeCompare(b.ip, undefined, { numeric: true }));
+  }, [hosts, q, cov, who, c.assignments, me]);
+  const { shown, limit, total, sentinel } = useBounded(rows, 120, [q, cov, who]);
+
+  const enumPct = ov.hosts_up ? Math.round((100 * ov.enumerated) / ov.hosts_up) : 0;
+  const revHosts = hosts.filter((h) => h.reviewed).length;
+  const COV: [string, string, number][] = [
+    ["all", "All", hosts.length],
+    ["todo", "To-do", hosts.filter((h) => !h.enumerated).length],
+    ["enumerated", "Enumerated", hosts.filter((h) => h.enumerated).length],
+    ["access", "Access", hosts.filter((h) => h.access).length],
+    ["reviewed", "Reviewed", revHosts],
+  ];
 
   return (
     <>
+      <section className="stats">
+        <Stat k="Scope" v={`${ov.scope_size || ov.hosts_up}`} sub={`${ov.scope_subnets} subnets`} />
+        <Stat k="Discovered" v={`${ov.hosts_up}`} sub="up" />
+        <Stat k="Enumerated" v={`${enumPct}%`} sub={`${ov.enumerated}/${ov.hosts_up}`} />
+        <Stat k="Access" v={`${ov.accessed}`} cls="ok" sub="hosts" />
+        <Stat k="Reviewed" v={`${revHosts}`} sub={`/ ${ov.hosts_up}`} />
+      </section>
+
       <div className="controls">
-        <div className="host-filter">
-          <button className={"chip" + (who === "all" ? " sel" : "")} onClick={() => setWho("all")}>all</button>
+        <div className="chips">
+          {COV.map(([k, label, n]) => (
+            <button key={k} className={"chip" + (cov === k ? " sel" : "")} onClick={() => setCov(k)}>
+              {label} <span className="ct">{n}</span>
+            </button>
+          ))}
+        </div>
+        <div className="host-filter" title="ownership">
+          <button className={"chip" + (who === "all" ? " sel" : "")} onClick={() => setWho("all")}>everyone</button>
           <button className={"chip" + (who === me ? " sel" : "")} onClick={() => setWho(me)}>mine</button>
           <button className={"chip" + (who === "unclaimed" ? " sel" : "")} onClick={() => setWho("unclaimed")}>unclaimed</button>
           {who === "queue" && (
@@ -322,26 +355,33 @@ export function Hosts(
             <button className="chip sel" onClick={() => setWho("all")} title="clear owner filter">{who} ✕</button>
           )}
         </div>
-        <Chips value={sev} onChange={setSev} options={["all", ...SEVS]} />
         <input className="search" placeholder="filter: ip, host, os…" value={q}
                onChange={(e) => setQ(e.target.value)} spellCheck={false} />
       </div>
+
       <div className="tablewrap">
         <table className="tbl hosts">
-          <thead><tr><th className="tick-col">✓</th><th>Host</th><th>OS</th><th className="num">Svcs</th><th>Findings</th><th>Owner / triage</th><th>Note</th></tr></thead>
+          <thead><tr><th className="tick-col">✓</th><th>Host</th><th>OS</th><th>Progress</th><th>Findings</th><th>Owner / triage</th><th>Note</th></tr></thead>
           <tbody>
             {shown.map((h) => (
               <tr key={h.ip} className={h.reviewed ? "done" : ""}>
-                <td className="tick-col"><input type="checkbox" checked={h.reviewed} onChange={() => onTick(h.key, !h.reviewed)} /></td>
+                <td className="tick-col"><input type="checkbox" checked={h.reviewed} onChange={() => onTick(h.key, !h.reviewed)} title="mark host reviewed" /></td>
                 <td className="host-link" onClick={() => nav.openHost(h.ip)}>
                   <div className="t mono">{h.ip}</div>
                   {h.hostname && <div className="m">{h.hostname}</div>}
                   {h.roles.length > 0 && <div className="badges">{h.roles.slice(0, 3).map((r) => <span key={r} className="badge role">{r}</span>)}</div>}
                 </td>
                 <td className="os">{h.os || "—"}</td>
-                <td className="num mono">{h.ports.length}</td>
+                <td>
+                  <div className="steps">
+                    <Step on={h.ports.length > 0} label="scan" />
+                    <Step on={h.enumerated} label="enum" />
+                    <Step on={h.vuln_scanned} label="vuln" />
+                    <Step on={h.access} label="access" cls="ok" />
+                  </div>
+                </td>
                 <td><SevBar findings={h.findings} /></td>
-                <td><div className="host-collab"><AssignControl ip={h.ip} /><LabelChips ip={h.ip} /></div></td>
+                <td><div className="host-collab"><AssignControl ip={h.ip} /><OwnerProgress ip={h.ip} stats={stats} /><LabelChips ip={h.ip} /></div></td>
                 <td className="note-col"><NoteCell value={h.notes} onSave={(t) => onNote(h.key, t)} /></td>
               </tr>
             ))}
@@ -355,106 +395,6 @@ export function Hosts(
   );
 }
 
-/* -------------------------------- Targets -------------------------------- */
-
-type TgFilter = "all" | "todo" | "enumerated" | "access" | "reviewed";
-
-export function Targets(
-  { hosts, ov, q, filter, setQ, setFilter, nav, onTick, onNote }:
-  { hosts: Host[]; ov: Overview; q: string; filter: TgFilter;
-    setQ: (v: string) => void; setFilter: (v: TgFilter) => void;
-    nav: Nav; onTick: (k: string, r: boolean) => void; onNote: (k: string, t: string) => void }
-) {
-  const { c } = useCollab();
-  const stats = useMemo(
-    () => ownerStats(c.assignments, Object.fromEntries(hosts.map((h) => [h.ip, h.reviewed]))),
-    [c.assignments, hosts]);
-  const rows = useMemo(() => {
-    const n = q.toLowerCase();
-    return hosts
-      .filter((h) => !n || `${h.ip} ${h.hostname} ${h.os}`.toLowerCase().includes(n))
-      .filter((h) =>
-        filter === "all" ? true :
-        filter === "todo" ? !h.enumerated :
-        filter === "enumerated" ? h.enumerated :
-        filter === "access" ? h.access :
-        /* reviewed */ h.reviewed)
-      .slice().sort((a, b) => {
-        // incomplete first, then by risk
-        const ac = (a.enumerated ? 1 : 0) + (a.access ? 1 : 0);
-        const bc = (b.enumerated ? 1 : 0) + (b.access ? 1 : 0);
-        return ac - bc || hostScore(b.findings) - hostScore(a.findings);
-      });
-  }, [hosts, q, filter]);
-  const { shown, limit, total, sentinel } = useBounded(rows, 120, [q, filter]);
-
-  const enumPct = ov.hosts_up ? Math.round((100 * ov.enumerated) / ov.hosts_up) : 0;
-  const revHosts = hosts.filter((h) => h.reviewed).length;
-
-  const FILTERS: [TgFilter, string, number][] = [
-    ["all", "All", hosts.length],
-    ["todo", "Not enumerated", hosts.filter((h) => !h.enumerated).length],
-    ["enumerated", "Enumerated", hosts.filter((h) => h.enumerated).length],
-    ["access", "Access", hosts.filter((h) => h.access).length],
-    ["reviewed", "Reviewed", revHosts],
-  ];
-
-  return (
-    <>
-      <section className="stats">
-        <Stat k="Scope" v={`${ov.scope_size || ov.hosts_up}`} sub={`${ov.scope_subnets} subnets`} />
-        <Stat k="Discovered" v={`${ov.hosts_up}`} sub="up" />
-        <Stat k="Enumerated" v={`${enumPct}%`} sub={`${ov.enumerated}/${ov.hosts_up}`} />
-        <Stat k="Access" v={`${ov.accessed}`} cls="ok" sub="hosts" />
-        <Stat k="Hosts done" v={`${revHosts}`} sub={`/ ${ov.hosts_up}`} />
-      </section>
-
-      <div className="controls">
-        <div className="chips">
-          {FILTERS.map(([k, label, n]) => (
-            <button key={k} className={"chip" + (filter === k ? " sel" : "")} onClick={() => setFilter(k)}>
-              {label} <span className="ct">{n}</span>
-            </button>
-          ))}
-        </div>
-        <input className="search" placeholder="filter: ip, host, os…" value={q}
-               onChange={(e) => setQ(e.target.value)} spellCheck={false} />
-      </div>
-
-      <div className="tablewrap">
-        <table className="tbl targets">
-          <thead><tr><th className="tick-col">done</th><th>Host</th><th>OS</th><th>Progress</th><th>Owner</th><th>Findings</th><th>Note</th></tr></thead>
-          <tbody>
-            {shown.map((h) => (
-              <tr key={h.ip} className={h.reviewed ? "done" : ""}>
-                <td className="tick-col"><input type="checkbox" checked={h.reviewed} onChange={() => onTick(h.key, !h.reviewed)} title="mark this host done" /></td>
-                <td className="host-link" onClick={() => nav.openHost(h.ip)}>
-                  <div className="t mono">{h.ip}</div>
-                  {h.hostname && <div className="m">{h.hostname}</div>}
-                </td>
-                <td className="os">{h.os || "—"}</td>
-                <td>
-                  <div className="steps">
-                    <Step on={h.ports.length > 0} label="scan" />
-                    <Step on={h.enumerated} label="enum" />
-                    <Step on={h.vuln_scanned} label="vuln" />
-                    <Step on={h.access} label="access" cls="ok" />
-                  </div>
-                </td>
-                <td><div className="host-collab"><AssignControl ip={h.ip} /><OwnerProgress ip={h.ip} stats={stats} /></div></td>
-                <td><SevBar findings={h.findings} /></td>
-                <td className="note-col"><NoteCell value={h.notes} onSave={(t) => onNote(h.key, t)} /></td>
-              </tr>
-            ))}
-            {rows.length === 0 && <tr><td colSpan={7} className="empty">no targets match this filter</td></tr>}
-          </tbody>
-        </table>
-      </div>
-      {sentinel}
-      {total > 0 && <div className="rowcount">showing {limit.toLocaleString()} of {total.toLocaleString()} targets</div>}
-    </>
-  );
-}
 
 function Step({ on, label, cls }: { on: boolean; label: string; cls?: string }) {
   return <span className={"step" + (on ? " on" : "") + (on && cls ? " " + cls : "")} title={on ? `${label} done` : `${label} pending`}>{label}</span>;

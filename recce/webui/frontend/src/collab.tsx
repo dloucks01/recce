@@ -250,7 +250,7 @@ export function AddMenu({ onDone }: { onDone: (msg: string) => void }) {
   const { refresh } = useCollab();
   return (
     <>
-      <button className="import-btn add-btn" onClick={() => setOpen((v) => !v)}
+      <button className="btn add-btn" onClick={() => setOpen((v) => !v)}
               title="add a finding / credential / host / access by hand">＋ Add ▾</button>
       {open && (
         <>
