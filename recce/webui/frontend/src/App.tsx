@@ -67,7 +67,9 @@ const IMPORT_TOOLS: [string, string][] = [
   ["kerberoast", "impacket GetUserSPNs  (Kerberoast)"],
   ["asrep", "impacket GetNPUsers  (AS-REP)"],
   ["secretsdump", "impacket secretsdump  (NTLM hashes)"],
+  ["creds", "Credential list  (user:password per line)"],
   ["loot", "recce on-target enum  (recce-enum.sh/.ps1)"],
+  ["fieldkit", "fieldkit findings  (findings.json)"],
 ];
 
 // Import panel: drop a file or paste output from any supported tool; the server
