@@ -497,3 +497,27 @@ body { background: var(--ground); color: var(--text); }
 .scanpop-row select { flex: 1; font-family: var(--sans); font-size: 13px; font-weight: 600; padding: 8px 10px;
   border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface2); color: var(--text); }
 .scanpop-row .btn { flex: none; }
+
+/* ---- compact triage tag control + OS truncation (Hosts density) ---- */
+.tagctl { display: inline-flex; align-items: center; gap: 4px; position: relative; }
+.ltag { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 20px; cursor: pointer; color: #fff; white-space: nowrap; }
+.ltag.l-interesting { background: var(--accent); }
+.ltag.l-needs-review { background: var(--high); }
+.ltag.l-out-of-scope { background: var(--low); }
+.ltag:hover { opacity: .82; }
+.tagbtn { border: 1px dashed var(--line); background: none; color: var(--faint); font-size: 12px; line-height: 1; padding: 3px 6px; border-radius: 7px; cursor: pointer; }
+.tagbtn:hover, .tagbtn.has { border-style: solid; color: var(--muted); }
+.tagpop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 31; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 6px; display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
+.tagpop .lchip { text-align: left; width: 100%; }
+.tbl td.os { max-width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- compact density (opt-in via the header toggle) ---- */
+:root[data-density="compact"] .tbl tbody td { padding: 6px 12px; }
+:root[data-density="compact"] .tbl thead th { padding: 6px 12px; }
+:root[data-density="compact"] .stats { gap: 10px; margin-bottom: 14px; }
+:root[data-density="compact"] .stat { padding: 10px 14px; }
+:root[data-density="compact"] .stat .v { font-size: 22px; }
+:root[data-density="compact"] .panel { padding: 12px 15px; }
+:root[data-density="compact"] main { padding-top: 14px; }
+:root[data-density="compact"] .host-collab { gap: 6px; }
+:root[data-density="compact"] .stripe { height: 22px; }

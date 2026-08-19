@@ -213,15 +213,35 @@ export function AssignControl({ ip }: { ip: string }) {
   );
 }
 
+const LABEL_SHORT: Record<string, string> = { interesting: "interesting", "needs-review": "review", "out-of-scope": "OOS" };
+// Compact triage control: shows only the ACTIVE labels as chips, plus a 🏷 button
+// that opens a small picker — so an untagged host is just a quiet tag icon.
 export function LabelChips({ ip }: { ip: string }) {
   const { c, label } = useCollab();
-  const on = new Set(c.labels[ip] || []);
+  const on = c.labels[ip] || [];
+  const [open, setOpen] = useState(false);
   return (
-    <span className="labelchips" onClick={(e) => e.stopPropagation()}>
-      {TRIAGE_LABELS.map((l) => (
-        <button key={l} className={"lchip l-" + l + (on.has(l) ? " on" : "")}
-                onClick={() => label(ip, l, !on.has(l))} title={l}>{l}</button>
+    <span className="tagctl" onClick={(e) => e.stopPropagation()}>
+      {on.map((l) => (
+        <span key={l} className={"ltag l-" + l} title={`${l} — click to remove`}
+              onClick={() => label(ip, l, false)}>{LABEL_SHORT[l] || l}</span>
       ))}
+      <button className={"tagbtn" + (on.length ? " has" : "")} onClick={() => setOpen((v) => !v)}
+              title="triage labels" aria-label="triage labels">🏷</button>
+      {open && (
+        <>
+          <div className="exp-backdrop" onClick={() => setOpen(false)} />
+          <div className="tagpop">
+            {TRIAGE_LABELS.map((l) => {
+              const active = on.includes(l);
+              return (
+                <button key={l} className={"lchip l-" + l + (active ? " on" : "")}
+                        onClick={() => label(ip, l, !active)}>{active ? "✓ " : ""}{l}</button>
+              );
+            })}
+          </div>
+        </>
+      )}
     </span>
   );
 }

@@ -181,6 +181,13 @@ export default function App() {
     localStorage.setItem("recce.theme", theme);
   }, [theme]);
 
+  // row density: comfortable (default) or compact, for scanning large host lists
+  const [density, setDensity] = useState(() => localStorage.getItem("recce.density") || "comfortable");
+  useEffect(() => {
+    document.documentElement.dataset.density = density;
+    localStorage.setItem("recce.density", density);
+  }, [density]);
+
   // tester identity
   const [who, setWho] = useState(() => localStorage.getItem("recce.tester") || "");
   const [nameInput, setNameInput] = useState("");
@@ -320,6 +327,10 @@ export default function App() {
         <MyQueue hosts={hosts} onOpen={() => nav.toHosts({ owner: "queue" })} />
         <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
         <ActivityButton onOpenHost={(ip) => nav.openHost(ip)} />
+        <button className="theme-tog" onClick={() => setDensity((d) => (d === "compact" ? "comfortable" : "compact"))}
+                title={density === "compact" ? "comfortable rows" : "compact rows"} aria-label="toggle density">
+          {density === "compact" ? "☰" : "≡"}
+        </button>
         <button className="theme-tog" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
                 title="toggle light / dark" aria-label="toggle theme">
           {theme === "dark" ? "☀" : "☾"}
