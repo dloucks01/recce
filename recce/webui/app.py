@@ -114,6 +114,37 @@ class _Broker:
         self._loop.call_soon_threadsafe(_emit)
 
 
+_IMPORT_TOOLS = ("nmap", "nxc", "kerberoast", "asrep", "secretsdump", "loot")
+
+
+def _detect_import_kind(content: str, filename: str = "") -> str:
+    """Best-effort format sniffing so a teammate can drop ANY tool's output and have
+    it routed to the right recce parser. Order matters: the most specific signatures
+    (Kerberos hashes, secretsdump rows) are checked before the looser ones."""
+    import re
+    head = content.lstrip()[:400]
+    low = content.lower()
+    fn = filename.lower()
+    if head.startswith("<?xml") or "<nmaprun" in head:                 # nmap/masscan XML
+        return "nmap"
+    if "$krb5tgs$" in content:
+        return "kerberoast"
+    if "$krb5asrep$" in content:
+        return "asrep"
+    if re.search(r"^[^:\s]+:\d+:[0-9a-f]{32}:[0-9a-f]{32}:::", content, re.I | re.M):
+        return "secretsdump"                                           # user:rid:lm:nt:::
+    if re.search(r"^\s*SMB\s+\S+\s+\d+\s+\S+\s", content, re.M):        # netexec/cme SMB
+        return "nxc"
+    if ("nmap scan report for" in low                                  # nmap -oN
+            or re.search(r"^Host:\s+\S+.*\bPorts:", content, re.M)      # nmap -oG
+            or fn.endswith((".gnmap", ".nmap", ".xml"))):
+        return "nmap"
+    if ("recce-enum" in low or "recce-service" in low or "net-iface" in low
+            or re.search(r"^===[A-Z]", content, re.M) or "[!]" in content):
+        return "loot"                                                  # on-target sweep
+    return "unknown"
+
+
 def create_app(eng_dir: str) -> FastAPI:
     from .. import __version__
     from ..cli import _open_paths
@@ -329,6 +360,95 @@ def create_app(eng_dir: str) -> FastAPI:
         broker.publish({"type": "spray", "hits": len(res.get("hits", []))})
         return {"ok": res.get("ok", False), "error": res.get("error", ""),
                 "hits": res.get("hits", []), "new": new}
+
+    @app.post("/api/import")
+    def import_output(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        """Fold external tool output into the live engagement so the whole team sees it.
+        Auto-detects the format (or takes an explicit `kind`) and routes to the same
+        parsers the CLI uses: nmap/masscan -> `import`, on-target loot -> `ingest`, and
+        netexec / GetUserSPNs / GetNPUsers / secretsdump -> credenum's parsers."""
+        import tempfile
+        content = str(body.get("content", ""))
+        filename = str(body.get("filename", ""))
+        kind = str(body.get("kind", "auto")).lower()
+        if not content.strip():
+            raise HTTPException(400, "no content to import")
+        if kind in ("", "auto"):
+            kind = _detect_import_kind(content, filename)
+        if kind == "unknown":
+            raise HTTPException(422, "could not detect the format — pick the tool from "
+                                "the dropdown. Supported: nmap/masscan, netexec (nxc smb), "
+                                "impacket GetUserSPNs / GetNPUsers / secretsdump, and recce "
+                                "on-target loot.")
+        # nmap + on-target loot have a real CLI pipeline (host resolution, merge, enrich):
+        # run it as a job so the browser streams progress exactly like a scan.
+        if kind in ("nmap", "loot"):
+            suffix = (".xml" if content.lstrip().startswith("<") else ".gnmap") \
+                if kind == "nmap" else ".txt"
+            fd, tmp = tempfile.mkstemp(prefix="recce-import-", suffix=suffix)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(content)
+            cmd = "import" if kind == "nmap" else "ingest"
+            label = f"{cmd} {filename or kind}"
+
+            def _done(job):
+                broker.publish({"type": "scan", "status": job.status,
+                                "tester": x_tester, "targets": label})
+            job = jobs.start(recce_argv(cmd, tmp, "-o", eng_dir), on_done=_done)
+            broker.publish({"type": "scan_started", "tester": x_tester, "targets": label})
+            return {"mode": "job", "id": job.id, "kind": kind}
+
+        # Credential-tool output: no CLI import exists, so parse + fold directly.
+        from .. import credenum as ce
+        from ..models import Credential, Host
+        from ..store import Store
+        st = Store(db_path)
+        added = 0
+        summary = ""
+        try:
+            if kind == "nxc":
+                groups: dict[str, list[str]] = {}
+                for raw in content.splitlines():
+                    m = ce._NXC_LINE.match(raw)
+                    if m and m.group(1).upper() == "SMB":
+                        groups.setdefault(m.group(2), []).append(raw)
+                for ip, lines in groups.items():
+                    data = ce.parse_nxc_smb("\n".join(lines))
+                    if not (data["auth"] or data["admin"] or data["shares"] or data["users"]):
+                        continue
+                    host = st.get_host(ip) or Host(ip=ip)
+                    host.state = "up"
+                    ce._fold_nxc(host, data, label="imported nxc")
+                    st.upsert_host(host, merge=True)
+                    added += 1
+                summary = f"folded netexec SMB results for {added} host(s)"
+            elif kind == "kerberoast":
+                for r in ce.parse_getuserspns(content):
+                    if r.get("hash") and st.add_credential(Credential(
+                            username=r["name"], secret=r["hash"], kind="hash",
+                            source="kerberoast", notes=("SPN " + r.get("spn", "")).strip())):
+                        added += 1
+                summary = f"stored {added} Kerberoast hash(es)"
+            elif kind == "asrep":
+                for r in ce.parse_getnpusers(content):
+                    if r.get("hash") and st.add_credential(Credential(
+                            username=r["name"], secret=r["hash"], kind="hash",
+                            source="asrep", notes="AS-REP roastable")):
+                        added += 1
+                summary = f"stored {added} AS-REP hash(es)"
+            elif kind == "secretsdump":
+                for r in ce.parse_secretsdump(content):
+                    if st.add_credential(Credential(
+                            username=r["name"], secret=r["nt"], kind="nthash",
+                            source="secretsdump", notes=("rid " + r.get("rid", "")).strip())):
+                        added += 1
+                summary = f"stored {added} NTLM hash(es)"
+            else:
+                raise HTTPException(422, f"unsupported import kind {kind!r}")
+        finally:
+            st.close()
+        broker.publish({"type": "import", "kind": kind, "added": added, "tester": x_tester})
+        return {"mode": "done", "kind": kind, "added": added, "summary": summary}
 
     @app.get("/api/attackpath.svg")
     def attackpath_svg():

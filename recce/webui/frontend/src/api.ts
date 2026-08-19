@@ -92,6 +92,21 @@ export async function postScan(targets: string, profile: string): Promise<{ id: 
   return r.json();
 }
 
+export type ImportResult =
+  | { mode: "job"; id: string; kind: string }
+  | { mode: "done"; kind: string; added: number; summary: string };
+
+// Fold external tool output (nmap, netexec, GetUserSPNs/GetNPUsers/secretsdump,
+// on-target loot) into the live engagement. kind "auto" lets the server sniff it.
+export async function postImport(content: string, filename: string, kind: string): Promise<ImportResult> {
+  const r = await fetch("/api/import", {
+    method: "POST", headers: jsonHeaders(),
+    body: JSON.stringify({ content, filename, kind }),
+  });
+  if (!r.ok) throw new Error((await r.json()).detail ?? r.statusText);
+  return r.json();
+}
+
 // --- Act phase / Loot / ATT&CK ------------------------------------------------
 export type ActCard = {
   archetype: string; title: string; target: string; command: string; yields: string;

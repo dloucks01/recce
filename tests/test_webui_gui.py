@@ -66,6 +66,35 @@ class ApiShape(unittest.TestCase):
         # the loot we build must be represented, not just AD captures
         self.assertTrue({"web-loot", "postgres-loot", "mysql-loot"} & {c["source"] for c in creds})
 
+    def test_import_endpoint_folds_external_tool_output(self):
+        """The Import panel must accept output from a number of tools and fold it in:
+        netexec SMB (host access), and impacket Kerberoast / AS-REP / secretsdump
+        (credentials). Auto-detection routes each to the right parser."""
+        from recce.webui.app import _detect_import_kind
+        NXC = ("SMB  10.9.9.9  445  BOX  [*] Windows 10 Build 19041 x64 (name:BOX) (domain:corp.local)\n"
+               "SMB  10.9.9.9  445  BOX  [+] corp.local\\eve:Winter2024! (Pwn3d!)\n")
+        KRB = "$krb5tgs$23$*svc_web$CORP.LOCAL$HTTP/web*$deadbeefcafe"
+        ASREP = "$krb5asrep$23$noauth@CORP.LOCAL:00112233445566"
+        SECRETS = "sql_svc:1104:aad3b435b51404eeaad3b435b51404ee:cafebabecafebabecafebabecafebabe:::"
+        # detection is unambiguous per format
+        self.assertEqual(_detect_import_kind(NXC), "nxc")
+        self.assertEqual(_detect_import_kind(KRB), "kerberoast")
+        self.assertEqual(_detect_import_kind(ASREP), "asrep")
+        self.assertEqual(_detect_import_kind(SECRETS), "secretsdump")
+        with _client(self.eng) as c:
+            before = len(c.get("/api/credentials").json())
+            r = c.post("/api/import", json={"content": NXC, "filename": "nxc.txt", "kind": "auto"})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["kind"], "nxc")
+            self.assertTrue(any(h["ip"] == "10.9.9.9" for h in c.get("/api/hosts").json()))
+            for txt in (KRB, ASREP, SECRETS):
+                self.assertEqual(c.post("/api/import", json={"content": txt, "kind": "auto"}).status_code, 200)
+            after = c.get("/api/credentials").json()
+            self.assertEqual(len(after) - before, 3, "kerberoast + asrep + secretsdump each add a credential")
+            self.assertTrue({"kerberoast", "asrep", "secretsdump"} <= {c["source"] for c in after})
+            # an undetectable blob is rejected with guidance, not silently swallowed
+            self.assertEqual(c.post("/api/import", json={"content": "hello world", "kind": "auto"}).status_code, 422)
+
     def test_attack_endpoint_feeds_the_coverage_panel(self):
         with _client(self.eng) as c:
             cov = c.get("/api/attack").json()
@@ -120,8 +149,8 @@ class ShippedSpa(unittest.TestCase):
     def test_bundle_contains_the_act_and_loot_views(self):
         js = "".join(p.read_text(errors="replace")
                      for p in (_STATIC / "assets").glob("index-*.js"))
-        for marker in ("Top priorities", "Extracted credentials", "MITRE ATT",
-                       "Spray these credentials", "Next moves"):
+        for marker in ("Top priorities", "Collected credentials", "MITRE ATT",
+                       "Spray these credentials", "Next moves", "Import tool output"):
             self.assertIn(marker, js, f"shipped SPA is missing {marker!r} - rebuild it")
 
 

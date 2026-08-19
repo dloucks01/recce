@@ -354,3 +354,24 @@ main { padding: 22px 22px 56px; max-width: 1180px; margin: 0 auto; }
 .theme-tog:hover { border-color: var(--accent); color: var(--text); }
 /* the app composites over the host page; paint an explicit ground so light/dark both hold */
 body { background: var(--ground); color: var(--text); }
+
+/* ---- Import (button + modal) ---- */
+.import-btn { font-family: var(--sans); font-weight: 700; font-size: 13px; padding: 9px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface2); color: var(--text); cursor: pointer; white-space: nowrap; }
+.import-btn:hover { border-color: var(--accent); color: var(--accent-ink); }
+.modal-backdrop { position: fixed; inset: 0; background: rgba(6,10,18,.55); z-index: 50; animation: fade .12s ease; }
+.modal { position: fixed; z-index: 51; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(560px, 94vw); max-height: 88vh; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-pop); padding: 20px 22px; animation: pop .14s ease; }
+@keyframes pop { from { transform: translate(-50%, -48%); opacity: .6; } }
+@media (prefers-reduced-motion: reduce) { .modal { animation: none; } }
+.modal-h { display: flex; align-items: center; justify-content: space-between; }
+.modal-h h3 { margin: 0; font-size: 16px; font-weight: 800; letter-spacing: -.01em; }
+.modal-h .drawer-x { position: static; }
+.modal-sub { color: var(--muted); font-size: 12.5px; margin: 6px 0 16px; line-height: 1.55; }
+.imp-field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 12px; }
+.imp-field select { font-family: var(--sans); font-size: 13px; font-weight: 600; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface2); color: var(--text); }
+.dropzone { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; justify-content: center; border: 1.5px dashed var(--line); border-radius: var(--radius-sm); padding: 16px; color: var(--muted); font-size: 13px; background: var(--ground); transition: border-color .12s, background .12s; }
+.dropzone.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--ground)); color: var(--text); }
+.filepick { color: var(--accent); font-weight: 700; cursor: pointer; text-decoration: underline; }
+.imp-fn { font-family: var(--mono); font-size: 12px; color: var(--text); }
+.imp-paste { width: 100%; height: 140px; resize: vertical; margin-top: 12px; font-family: var(--mono); font-size: 12px; line-height: 1.5; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--ground); color: var(--text); }
+.imp-paste::placeholder { color: var(--faint); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
