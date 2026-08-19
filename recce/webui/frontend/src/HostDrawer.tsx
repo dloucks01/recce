@@ -93,7 +93,7 @@ export function HostDrawer(
                         </div>
                       </div>
                       <div className="dv-badges">
-                        {v.kev && <span className="badge kev">🔥</span>}
+                        {v.kev && <span className="badge kev" title="CISA Known Exploited Vulnerability — confirmed exploited in the wild; fix first">🔥</span>}
                         <span className={"tier " + v.tier}>{v.tier}</span>
                         <span className="caret">{openV === v.key ? "▾" : "▸"}</span>
                       </div>
