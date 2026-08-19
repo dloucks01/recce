@@ -458,3 +458,5 @@ body { background: var(--ground); color: var(--text); }
 .tm-fill.unc { background: var(--faint); }
 .tm-n { flex: none; width: 26px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
 .tm-unclaimed .tm-name { color: var(--muted); }
+.avatar.clk { cursor: pointer; }
+.avatar.clk:hover { filter: brightness(1.12); transform: translateY(-1px); }
