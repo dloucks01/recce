@@ -6,7 +6,7 @@ import {
 } from "./api";
 import { Stat, SevTag, SevBar, NoteCell, Chips, useBounded } from "./ui";
 import { FindingDetail } from "./FindingDetail";
-import { AssignControl, LabelChips, useCollab } from "./collab";
+import { AssignControl, LabelChips, TeamCoverage, useCollab } from "./collab";
 
 export type FindingFilters = {
   sev: string; host: string; kev: boolean; unreviewed: boolean; leads: boolean; q: string;
@@ -101,6 +101,8 @@ export function Dashboard(
           </ul>
         </section>
       </div>
+
+      <TeamCoverage hostsUp={ov.hosts_up} onOpen={() => nav.toHosts()} />
 
       <section className="panel">
         <div className="panel-h"><h3>Coverage</h3>
@@ -405,7 +407,7 @@ export function Targets(
 
       <div className="tablewrap">
         <table className="tbl targets">
-          <thead><tr><th className="tick-col">done</th><th>Host</th><th>OS</th><th>Progress</th><th>Findings</th><th>Note</th></tr></thead>
+          <thead><tr><th className="tick-col">done</th><th>Host</th><th>OS</th><th>Progress</th><th>Owner</th><th>Findings</th><th>Note</th></tr></thead>
           <tbody>
             {shown.map((h) => (
               <tr key={h.ip} className={h.reviewed ? "done" : ""}>
@@ -423,11 +425,12 @@ export function Targets(
                     <Step on={h.access} label="access" cls="ok" />
                   </div>
                 </td>
+                <td><AssignControl ip={h.ip} /></td>
                 <td><SevBar findings={h.findings} /></td>
                 <td className="note-col"><NoteCell value={h.notes} onSave={(t) => onNote(h.key, t)} /></td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={6} className="empty">no targets match this filter</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={7} className="empty">no targets match this filter</td></tr>}
           </tbody>
         </table>
       </div>
