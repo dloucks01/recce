@@ -122,6 +122,10 @@ def _detect_import_kind(content: str, filename: str = "") -> str:
     it routed to the right recce parser. Order matters: the most specific signatures
     (Kerberos hashes, secretsdump rows) are checked before the looser ones."""
     import re
+    from ..importers import detect_scanner
+    scanner = detect_scanner(content)                                  # nessus/openvas/nuclei/testssl
+    if scanner:
+        return scanner
     head = content.lstrip()[:400]
     low = content.lower()
     fn = filename.lower()
@@ -380,6 +384,30 @@ def create_app(eng_dir: str) -> FastAPI:
                                 "the dropdown. Supported: nmap/masscan, netexec (nxc smb), "
                                 "impacket GetUserSPNs / GetNPUsers / secretsdump, and recce "
                                 "on-target loot.")
+        # BloodHound (.zip, binary) + Certipy (.json): the SharpHound collection is a
+        # zip, so accept a base64 payload, decode, and run it through the `recce ad`
+        # engine (works with no creds — findings + graph, just no owned-account paths).
+        if kind == "bloodhound":
+            import base64
+            enc = str(body.get("encoding", ""))
+            try:
+                raw = base64.b64decode(content) if enc == "base64" else content.encode()
+            except Exception:
+                raise HTTPException(400, "could not decode the uploaded file")
+            is_zip = raw[:2] == b"PK" or filename.lower().endswith(".zip")
+            fd, tmp = tempfile.mkstemp(prefix="recce-import-",
+                                       suffix=".zip" if is_zip else ".json")
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+            label = f"ad {filename or kind}"
+
+            def _done_ad(job):
+                broker.publish({"type": "scan", "status": job.status,
+                                "tester": x_tester, "targets": label})
+            job = jobs.start(recce_argv("ad", tmp, "-o", eng_dir), on_done=_done_ad)
+            broker.publish({"type": "scan_started", "tester": x_tester, "targets": label})
+            return {"mode": "job", "id": job.id, "kind": kind}
+
         # nmap + on-target loot + fieldkit have a real CLI pipeline (host resolution,
         # merge, enrich): run it as a job so the browser streams progress like a scan.
         if kind in ("nmap", "loot", "fieldkit"):
@@ -409,11 +437,14 @@ def create_app(eng_dir: str) -> FastAPI:
         summary = ""
         try:
             if kind == "nxc":
+                import re
+                # SMB gets the full fold (access, shares, users, local-admin finding).
                 groups: dict[str, list[str]] = {}
                 for raw in content.splitlines():
                     m = ce._NXC_LINE.match(raw)
                     if m and m.group(1).upper() == "SMB":
                         groups.setdefault(m.group(2), []).append(raw)
+                hosts_folded = 0
                 for ip, lines in groups.items():
                     data = ce.parse_nxc_smb("\n".join(lines))
                     if not (data["auth"] or data["admin"] or data["shares"] or data["users"]):
@@ -422,8 +453,40 @@ def create_app(eng_dir: str) -> FastAPI:
                     host.state = "up"
                     ce._fold_nxc(host, data, label="imported nxc")
                     st.upsert_host(host, merge=True)
-                    added += 1
-                summary = f"folded netexec SMB results for {added} host(s)"
+                    hosts_folded += 1
+                # ANY protocol (smb/ldap/mssql/winrm/ssh/...): a "[+] dom\\user:secret
+                # (Pwn3d!)" line is a validated credential — capture it for spraying.
+                creds_added = 0
+                access: dict[str, str] = {}       # ip -> foothold detail
+                cred_re = re.compile(r"\[\+\]\s+(?:([^\\\s]+)\\)?([^\s:]+):(\S+?)(?:\s+\((Pwn3d!)\))?\s*$")
+                for raw in content.splitlines():
+                    m = ce._NXC_LINE.match(raw)
+                    if not m:
+                        continue
+                    proto, ip, msg = m.group(1).upper(), m.group(2), m.group(5)
+                    cm = cred_re.search(msg)
+                    if not cm:
+                        continue
+                    dom, user, secret, pwn = cm.group(1) or "", cm.group(2), cm.group(3), cm.group(4)
+                    if st.add_credential(Credential(
+                            username=user, secret=secret, domain=dom,
+                            kind="nthash" if re.fullmatch(r"[0-9a-fA-F]{32}", secret) else "password",
+                            origin_ip=ip, source="nxc-validated",
+                            notes=f"validated over {proto}" + (" (local admin)" if pwn else ""))):
+                        creds_added += 1
+                    # a validated login IS a foothold — record it so Access auto-ticks
+                    access.setdefault(ip, f"{proto} login "
+                                       f"({'local admin' if pwn else 'valid creds'}) - imported nxc")
+                for ip, detail in access.items():
+                    host = st.get_host(ip) or Host(ip=ip)
+                    host.state = "up"
+                    if not getattr(host, "access_gained", False):
+                        host.access_gained = True
+                        host.access_detail = detail
+                    st.upsert_host(host, merge=True)
+                added = hosts_folded + creds_added
+                summary = (f"folded netexec results: {hosts_folded} SMB host(s), "
+                           f"{creds_added} validated credential(s)")
             elif kind == "kerberoast":
                 for r in ce.parse_getuserspns(content):
                     if r.get("hash") and st.add_credential(Credential(
@@ -464,6 +527,22 @@ def create_app(eng_dir: str) -> FastAPI:
                             source="imported", notes="imported credential list")):
                         added += 1
                 summary = f"stored {added} credential(s)"
+            elif kind in ("nessus", "openvas", "nuclei", "testssl"):
+                from .. import epss, kev
+                from ..importers import SCANNER_PARSERS
+                vulns = SCANNER_PARSERS[kind](content)
+                by_ip: dict[str, list] = {}
+                for v in vulns:
+                    by_ip.setdefault(v.ip, []).append(v)
+                for ip, vs in by_ip.items():
+                    host = st.get_host(ip) or Host(ip=ip)
+                    host.state = "up"
+                    host.vulns.extend(vs)
+                    kev.annotate(host)                 # fix-first flags (KEV / EPSS) so
+                    epss.annotate(host)                # imported CVEs rank with the rest
+                    st.upsert_host(host, merge=True)   # union-merge dedups on re-import
+                    added += len(vs)
+                summary = f"folded {added} {kind} finding(s) across {len(by_ip)} host(s)"
             else:
                 raise HTTPException(422, f"unsupported import kind {kind!r}")
         finally:
