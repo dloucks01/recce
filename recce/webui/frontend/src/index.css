@@ -531,3 +531,19 @@ body { background: var(--ground); color: var(--text); }
 @media (prefers-reduced-motion: reduce) { .boot-bar span { animation: none; width: 100%; } }
 .boot-msg { font-family: var(--mono); font-size: 13px; color: var(--muted); max-width: 520px; word-break: break-word; }
 .boot-err { font-weight: 700; color: var(--crit); font-size: 15px; }
+
+/* ---- accessibility: consistent keyboard focus rings ---- */
+:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }
+:focus:not(:focus-visible) { outline: none; }
+.tbl tbody input[type="checkbox"]:focus-visible { outline-offset: 3px; }
+
+/* ---- Findings: reveal the dismiss action on row hover (declutter the list) ---- */
+.tbl tbody tr .dismiss-btn { opacity: 0; transition: opacity .12s; margin-left: 6px; vertical-align: middle; }
+.tbl tbody tr:hover .dismiss-btn, .tbl tbody tr.dismissed .dismiss-btn, .dismiss-btn:focus-visible { opacity: 1; }
+
+/* ---- subtle custom scrollbar for the internal table scroll ---- */
+.tablewrap { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.tablewrap::-webkit-scrollbar { width: 11px; height: 11px; }
+.tablewrap::-webkit-scrollbar-thumb { background: var(--line); border-radius: 7px; border: 3px solid var(--surface); }
+.tablewrap::-webkit-scrollbar-thumb:hover { background: var(--faint); }
+.tablewrap::-webkit-scrollbar-track { background: transparent; }
