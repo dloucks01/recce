@@ -320,8 +320,20 @@ export default function App() {
     catch (e) { setLog([`error: ${e}`]); }
   }
 
-  if (err) return <div className="err">Could not reach the recce API: {err}</div>;
-  if (!ov) return <div className="loading">Loading engagement…</div>;
+  if (err) return (
+    <div className="boot">
+      <div className="boot-brand"><span className="dot" />recce</div>
+      <div className="boot-err">Could not reach the recce API</div>
+      <div className="boot-msg">{err}</div>
+    </div>
+  );
+  if (!ov) return (
+    <div className="boot">
+      <div className="boot-brand"><span className="dot" />recce</div>
+      <div className="boot-bar"><span /></div>
+      <div className="boot-msg">Loading engagement…</div>
+    </div>
+  );
 
   // Ordered to follow the operator's path: overview -> what's wrong -> what to DO ->
   // Ordered to narrow the operator's focus: overview -> inventory -> what's wrong ->
