@@ -11,8 +11,16 @@
 # venv). The resulting folder is what goes on the USB stick. Build on the same
 # OS/arch as the target (Kali x86-64 -> Kali x86-64).
 #
-#   ./tools/build_bundle.sh                 # build for the current version
-#   RECCE_WITH_MASSCAN=0 ./tools/build_bundle.sh   # skip masscan
+#   ./tools/build_bundle.sh                 # build the lean self-contained bundle
+#
+# Bundled by default: the frozen recce app (Python + all deps), nmap, masscan,
+# and ldapsearch. Opt in to the heavy extras (each logged; off by default):
+#   RECCE_WITH_SEARCHSPLOIT=1   bundle searchsploit + the ~292MB offline exploit-db
+#   RECCE_WITH_SMBCLIENT=1      bundle smbclient (pulls ~120 Samba shared libs)
+#   RECCE_WITH_MASSCAN=0        skip masscan
+#   RECCE_WITH_LDAPSEARCH=0     skip ldapsearch
+# netexec (credenum) is NOT frozen in - install it on the target if you need it
+# (`pipx install netexec`); recce degrades cleanly and logs when it is absent.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -98,11 +106,42 @@ bundle_tool() {
   echo "[+] bundled $name ($(du -sh "$lx" | cut -f1))"
 }
 
+# bundle_searchsploit: ship the searchsploit script + the offline exploit-db as data,
+# with a wrapper that points searchsploit at the bundled DB via a bundle-local rc.
+bundle_searchsploit() {
+  local ss db lx
+  ss="$(command -v searchsploit || true)"
+  db=""; for d in /usr/share/exploitdb /opt/exploitdb; do [ -d "$d" ] && { db="$d"; break; }; done
+  [ -x "$ss" ] && [ -n "$db" ] || { echo "[!] searchsploit/exploit-db not found - skipping"; return; }
+  lx="$OUT/tools/libexec/searchsploit"
+  mkdir -p "$lx"
+  cp -L "$ss" "$lx/searchsploit.bin"
+  cp -a "$db" "$lx/exploitdb"
+  # rc template resolved to the bundle path at runtime by the wrapper
+  printf 'DEFAULT_PATH="%s"\nPAPERS_PATH="%s"\n' '$D/exploitdb' '$D/exploitdb' > "$lx/searchsploit_rc.tmpl"
+  {
+    echo '#!/bin/sh'
+    echo 'D="$(cd "$(dirname "$(readlink -f "$0")")/../libexec/searchsploit" && pwd)"'
+    echo 'H="$(mktemp -d)"; trap '"'"'rm -rf "$H"'"'"' EXIT'
+    echo 'sed "s#[$]D#$D#g" "$D/searchsploit_rc.tmpl" > "$H/.searchsploit_rc"'
+    echo 'HOME="$H" exec sh "$D/searchsploit.bin" "$@"'
+  } > "$OUT/tools/bin/searchsploit"
+  chmod +x "$OUT/tools/bin/searchsploit"
+  echo "[+] bundled searchsploit + exploit-db ($(du -sh "$lx" | cut -f1))"
+}
+
 echo "[*] Bundling external tools ..."
 # nmap: /usr/bin/nmap is a privilege wrapper; the real ELF is /usr/lib/nmap/nmap.
 NMAP_BIN="/usr/lib/nmap/nmap"; [ -x "$NMAP_BIN" ] || NMAP_BIN="$(command -v nmap || true)"
 bundle_tool nmap "$NMAP_BIN" /usr/share/nmap NMAPDIR
 [ "${RECCE_WITH_MASSCAN:-1}" = "1" ] && bundle_tool masscan "$(readlink -f "$(command -v masscan || true)")"
+# ldapsearch (OpenLDAP client): tiny ELF; hardens credentialed LDAP beyond the
+# baked-in ldap3 fallback. On by default when present.
+[ "${RECCE_WITH_LDAPSEARCH:-1}" = "1" ] && bundle_tool ldapsearch "$(readlink -f "$(command -v ldapsearch || true)")"
+# smbclient (Samba client): OPT-IN - pulls ~120 shared libs, so it is off by default.
+[ "${RECCE_WITH_SMBCLIENT:-0}" = "1" ] && bundle_tool smbclient "$(readlink -f "$(command -v smbclient || true)")"
+# searchsploit + offline exploit-db (~292MB): OPT-IN.
+[ "${RECCE_WITH_SEARCHSPLOIT:-0}" = "1" ] && bundle_searchsploit
 
 # --- 4. launcher ----------------------------------------------------------------
 cat > "$OUT/recce" <<'SH'
@@ -113,6 +152,33 @@ export PATH="$DIR/tools/bin:$PATH"
 exec "$DIR/app/recce" "$@"
 SH
 chmod +x "$OUT/recce"
+
+# --- 4b. MANIFEST (ships inside the bundle) -------------------------------------
+echo "[*] Writing MANIFEST ..."
+{
+  echo "recce airgap bundle - $NAME"
+  echo "built: $(date -u '+%Y-%m-%d %H:%M UTC') on $(uname -srm)"
+  echo
+  echo "RUN (nothing to install - no Python, no pip, no nmap):"
+  echo "  tar xzf $NAME.tar.gz && cd $NAME && ./recce doctor"
+  echo "  ./recce enum <targets> -o eng     # then vulns / sweep / report (see QUICKSTART)"
+  echo
+  echo "SELF-CONTAINED - baked into app/ (PyInstaller):"
+  echo "  - Python runtime + the recce app"
+  echo "  - Python deps: impacket, ldap3, openpyxl, fastapi, uvicorn"
+  echo "    (AD/Kerberos/SMB, the web workbench, richer xlsx; stdlib fallback otherwise)"
+  echo "  - offline intel snapshots: version->CVE/CWE DB, CISA KEV, EPSS"
+  echo
+  echo "BUNDLED EXTERNAL TOOLS (tools/bin, on PATH via the launcher):"
+  for t in "$OUT"/tools/bin/*; do [ -e "$t" ] && echo "  - $(basename "$t")"; done
+  echo
+  echo "NOT bundled (recce logs + degrades cleanly; add on the target if you need it):"
+  echo "  - netexec / nxc   credentialed SMB/AD spray (credenum)   ->  pipx install netexec"
+  [ -e "$OUT/tools/bin/searchsploit" ] || echo "  - searchsploit    offline exploit mapping   ->  rebuild with RECCE_WITH_SEARCHSPLOIT=1"
+  echo "  - chromium/firefox   auto web screenshots in write-ups"
+  echo
+  echo "Verify this transfer:  sha256sum -c $NAME.tar.gz.sha256"
+} > "$OUT/MANIFEST.txt"
 
 # --- 5. package + checksum ------------------------------------------------------
 echo "[*] Packaging ..."
@@ -129,6 +195,6 @@ fi
 
 rm -rf "$BUILD"
 echo
-echo "[+] Done: dist/$NAME/  (run: dist/$NAME/recce doctor)"
-echo "    tarball: dist/$NAME.tar.gz  ($(du -sh "$HERE/dist/$NAME.tar.gz" | cut -f1))"
-echo "    total unpacked: $(du -sh "$OUT" | cut -f1)"
+echo "[+] Done: dist/$NAME/   (run: dist/$NAME/recce doctor)"
+echo "    tarball:  dist/$NAME.tar.gz  ($(du -sh "$HERE/dist/$NAME.tar.gz" | cut -f1))"
+echo "    unpacked: $(du -sh "$OUT" | cut -f1)   -   contents listed in $NAME/MANIFEST.txt"

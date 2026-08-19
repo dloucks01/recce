@@ -129,31 +129,36 @@ to a TCP connect scan otherwise.
 > have `openpyxl` on a connected box, the files are fully compatible — but it is
 > never required.
 
-### Build the burn package (transfer / airgap)
+### Build a package to carry it over (transfer / airgap)
 
-recce ships as a **plain drop-in tarball** — a single `recce-<version>/` directory
-you extract and run, no pip and no wheel. Build one with `make_package.sh`:
+Build **once on a connected box**, copy the artifact to the target, run it offline.
+There are two packages — pick by what the *target* already has:
 
-```bash
-./make_package.sh              # -> dist/recce-<version>.tar.gz (+ .zip) + SHA256SUMS
-./make_package.sh --verify     # run the test suite first
-```
-
-It stages the tool (`recce/` incl. the `local/` and `scripts/` suites), `bin/`,
-the tests, and the docs — scrubbing caches, VCS, and any scan/engagement output —
-into a single `recce-<version>/` directory, archives it, and writes `SHA256SUMS`
-for verifying the transfer. On the target:
+| Package | Build with | Target needs | Size |
+| --- | --- | --- | --- |
+| **Source burn package** | `./make_package.sh` | Python 3.9+ and `nmap` | ~1 MB |
+| **Self-contained airgap bundle** | `./tools/build_bundle.sh` | **nothing** — no Python, pip, or nmap | ~45 MB |
 
 ```bash
+# Target already a stock Kali? The tiny source package is enough:
+./make_package.sh                     # -> dist/recce-<version>.tar.gz (+ .zip) + SHA256SUMS
+#   on the target:
 tar xzf recce-<version>.tar.gz && cd recce-<version> && ./bin/recce doctor
+
+# Truly dark box (or you want one artifact that just runs)? Freeze everything:
+./tools/build_bundle.sh               # -> dist/recce-airgap-<version>/  (+ .tar.gz)
+#   on the target — nothing to install:
+tar xzf recce-airgap-<version>.tar.gz && cd recce-airgap-<version> && ./recce doctor
 ```
 
-No network or pip install needed — recce is stdlib-only at runtime.
+The **airgap bundle** freezes the Python runtime + every dependency (impacket,
+ldap3, openpyxl, fastapi/uvicorn — so `recce serve` works too) with PyInstaller,
+and ships nmap + masscan + ldapsearch as bundled binaries. It builds offline
+(reusing on-box deps when PyPI is unreachable), carries a `MANIFEST.txt` of exactly
+what's inside, and takes opt-in flags for the heavy extras (`RECCE_WITH_SEARCHSPLOIT=1`
+for the 292 MB exploit-db, `RECCE_WITH_SMBCLIENT=1`).
 
-The bundle build (`tools/build_bundle.sh`, a self-contained frozen binary) has an
-**offline path**: when PyPI is unreachable it builds from the dependencies already
-on the box (`--system-site-packages`) instead of failing at `pip`, so you can freeze
-the airgap package on a disconnected build host.
+**Full detail, flags and what's in/out: [docs/reference/packaging.md](docs/reference/packaging.md).**
 
 ## Web workbench (`recce serve`)
 

@@ -69,8 +69,9 @@ mkdir -p "$STAGE"
 
 # What ships in the bundle. Everything needed to run + verify offline; nothing
 # client- or scan-specific.
-INCLUDE="recce bin tests README.md QUICKSTART.md CHEATSHEET.html TROUBLESHOOTING.md \
-         INTEGRATION.md CHANGELOG.md LICENSE pyproject.toml requirements.txt make_package.sh"
+INCLUDE="recce bin tests docs README.md QUICKSTART.md CHEATSHEET.html TROUBLESHOOTING.md \
+         SECURITY.md INTEGRATION.md CHANGELOG.md LICENSE pyproject.toml requirements.txt \
+         make_package.sh tools"
 for item in $INCLUDE; do
   [ -e "$item" ] && cp -r "$item" "$STAGE/" || echo "  (skip missing: $item)"
 done
@@ -88,7 +89,7 @@ rm -rf "$STAGE/recce/webui/frontend" 2>/dev/null || true
 # Ensure the shell tools stay executable after copy.
 chmod +x "$STAGE/bin/recce" "$STAGE/recce/local/"*.sh \
          "$STAGE/recce/scripts/"*.sh "$STAGE/recce/scripts/services/"*.sh \
-         "$STAGE/make_package.sh" 2>/dev/null || true
+         "$STAGE/make_package.sh" "$STAGE/tools/"*.sh 2>/dev/null || true
 
 echo "[*] Archiving ..."
 cd "$DIST"
