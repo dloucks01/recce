@@ -3,7 +3,7 @@
 > Make the *journey* through recce as good as the results. The accuracy work (QoD /
 > dedup / verification) makes findings trustworthy; this makes the tool feel like **one
 > smooth thing** instead of 44 subcommands you have to sequence by hand. Read
-> `docs/ARCHITECTURE.md` (north star) first.
+> `docs/design/ARCHITECTURE.md` (north star) first.
 
 ## The problem (from the operator-experience review)
 

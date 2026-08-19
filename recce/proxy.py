@@ -18,7 +18,7 @@ Two ways recce becomes proxy-aware:
   2. auto-detect — if recce is already running under proxychains (LD_PRELOAD), it turns on
      safe/honest mode with no re-exec, so `proxychains4 recce snmp` can't misfire either.
 
-See docs/PROXY-PIVOT.md. Stdlib only.
+See docs/design/PROXY-PIVOT.md. Stdlib only.
 """
 
 from __future__ import annotations

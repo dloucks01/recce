@@ -1,4 +1,4 @@
-"""Operator workflow — the guidance layer (docs/WORKFLOW.md).
+"""Operator workflow — the guidance layer (docs/design/WORKFLOW.md).
 
 W1: the next-best-action engine. A pure function over the datastore's existing state
 (per-host progress flags + open ports + captured creds) that returns the ranked, most

@@ -11,7 +11,7 @@ to 1, and records a negative `Evidence`. Refuted findings are hidden by default 
 (the one place a hard gate is correct — a check actively disproved it) but are NEVER deleted:
 the raw row stays in the datastore and `report --show-refuted` surfaces them.
 
-See docs/ACTIVE-VERIFICATION.md. Later slices (3b/3c) add the registry + opt-in re-checks.
+See docs/design/ACTIVE-VERIFICATION.md. Later slices (3b/3c) add the registry + opt-in re-checks.
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ report unusable. This collapses TRUE duplicates into one finding (keeping the hi
 confidence one, unioning refs/CWEs/evidence/sources, and never downgrading severity), while
 **never merging two DISTINCT findings**.
 
-Guarantees, in order of importance (see docs/ARCHITECTURE.md north star):
+Guarantees, in order of importance (see docs/design/ARCHITECTURE.md north star):
   * NEVER drop a distinct finding — only fold exact/CVE-identical duplicates.
   * Corroboration RAISES confidence: a version-db lead (QoD 80) + an NSE VULNERABLE
     (QoD 99) for the same CVE merge into one CONFIRMED finding at QoD 99, citing both.

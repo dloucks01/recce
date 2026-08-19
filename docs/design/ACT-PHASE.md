@@ -1,7 +1,7 @@
 # The Act phase — "I found things, what do I DO?"
 
 > Design + implementation plan. recce enumerates ("find"); the Act phase turns findings
-> into a ranked, guided action plan. Read `docs/ARCHITECTURE.md` (QoD / honesty model)
+> into a ranked, guided action plan. Read `docs/design/ARCHITECTURE.md` (QoD / honesty model)
 > first — Act reuses its confidence tiers and the prove/verify loop.
 
 ## The idea: "found" is a loop, not a step

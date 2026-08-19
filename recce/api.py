@@ -7,7 +7,7 @@ introspection POST; it reuses web.py's HTTP layer and folds findings through the
 deep-service path (svccommon -> Vulns -> QoD/dedup/KEV/tiering).
 
 Built on the data-driven detection idea: the path lists below are data; a future slice can
-load extra API paths from a rules file (see docs/DETECTION-RULES.md).
+load extra API paths from a rules file (see docs/reference/detection-rules.md).
 """
 
 from __future__ import annotations

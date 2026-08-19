@@ -1,7 +1,7 @@
 # Active Verification — verify, don't infer (SOTA roadmap Stage 3)
 
 > The capability that most improves accuracy and plays to recce's offline edge. Read
-> `docs/ARCHITECTURE.md` (QoD model) and `docs/PROOFS-HONESTY-LOOP.md` first.
+> `docs/design/ARCHITECTURE.md` (QoD model) and `docs/design/PROOFS-HONESTY-LOOP.md` first.
 
 ## Why this is the core capability
 

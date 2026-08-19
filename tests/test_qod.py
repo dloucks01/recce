@@ -1,6 +1,6 @@
 """Stage 1 — Quality-of-Detection scoring is the single confidence authority.
 
-Pins the tier table (docs/ARCHITECTURE.md §3.1): confidence is derived ONCE from the
+Pins the tier table (docs/design/ARCHITECTURE.md §3.1): confidence is derived ONCE from the
 detection method, orthogonal to severity. These tests are the contract the rest of the
 pipeline reads instead of re-deriving "is this real?" from strings.
 """

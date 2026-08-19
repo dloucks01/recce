@@ -6,7 +6,7 @@ a later slice) uses to prove it. Data, not code — Nuclei-template style — so
 by adding a dict, and the same table drives refutation (3a), the honesty loop's `to_confirm`,
 and the opt-in re-check (3c).
 
-Tier is A/B only (see docs/ACTIVE-VERIFICATION.md): read-only / non-intrusive detection.
+Tier is A/B only (see docs/design/ACTIVE-VERIFICATION.md): read-only / non-intrusive detection.
 Weaponizing PoCs are NOT here — they stay operator-gated.
 """
 
