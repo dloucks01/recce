@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { HostDetail, VulnDetail, getHost } from "./api";
 import { SevTag, NoteCell } from "./ui";
 import { FindingDetail } from "./FindingDetail";
+import { PortStatus } from "./collab";
 
 // Slide-in panel with everything about one host: posture, services, full findings
 // (each expandable to raw output + remediation + QoD), AD accounts, and a note.
@@ -111,6 +112,7 @@ export function HostDrawer(
                 <tbody>
                   {d.ports.map((p) => (
                     <tr key={`${p.proto}/${p.port}`}>
+                      <td><PortStatus ip={d.ip} port={p.port} /></td>
                       <td className="mono">{p.port}/{p.proto}</td>
                       <td>{p.service}</td>
                       <td className="muted">{[p.product, p.version].filter(Boolean).join(" ") || p.banner}</td>
