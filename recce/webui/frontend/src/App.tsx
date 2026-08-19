@@ -4,7 +4,7 @@ import {
 } from "./api";
 import { Dashboard, Findings, Hosts, Targets, Act, Loot, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
-import { PresenceBar, ActivityButton, AddMenu, useCollab } from "./collab";
+import { PresenceBar, ActivityButton, AddMenu, MyQueue, useCollab } from "./collab";
 
 type Tab = "dashboard" | "findings" | "act" | "loot" | "hosts" | "targets";
 type TgFilter = "all" | "todo" | "enumerated" | "access" | "reviewed";
@@ -318,6 +318,7 @@ export default function App() {
             <button key={t} className={"tab" + (tab === t ? " sel" : "")} onClick={() => setTab(t)}>{label}</button>
           ))}
         </nav>
+        <MyQueue hosts={hosts} onOpen={() => nav.toHosts({ owner: "queue" })} />
         <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
         <ActivityButton onOpenHost={(ip) => nav.openHost(ip)} />
         <button className="theme-tog" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}

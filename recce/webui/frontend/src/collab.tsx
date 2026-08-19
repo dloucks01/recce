@@ -64,6 +64,42 @@ export function PresenceBar({ onPick }: { onPick?: (name: string) => void }) {
   );
 }
 
+/* ---------------------------- owner progress ----------------------------- */
+export type OwnerStat = { total: number; done: number };
+export function ownerStats(assignments: Record<string, string>, reviewedByIp: Record<string, boolean>) {
+  const m: Record<string, OwnerStat> = {};
+  for (const [ip, t] of Object.entries(assignments)) {
+    const s = m[t] || (m[t] = { total: 0, done: 0 });
+    s.total++; if (reviewedByIp[ip]) s.done++;
+  }
+  return m;
+}
+
+// A tiny "done/total" badge for a host's owner — surfaces per-tester progress inline.
+export function OwnerProgress({ ip, stats }: { ip: string; stats: Record<string, OwnerStat> }) {
+  const { c } = useCollab();
+  const owner = c.assignments[ip];
+  const s = owner && stats[owner];
+  if (!s) return null;
+  return <span className={"ownerprog mono" + (s.done === s.total ? " full" : "")}
+               title={`${owner}: ${s.done}/${s.total} hosts done`}>{s.done}/{s.total}</span>;
+}
+
+// One-click personal focus: my claimed hosts that aren't reviewed yet.
+export function MyQueue({ hosts, onOpen }:
+  { hosts: { ip: string; reviewed: boolean }[]; onOpen: () => void }) {
+  const { c, me } = useCollab();
+  const mine = hosts.filter((h) => c.assignments[h.ip] === me);
+  if (mine.length === 0) return null;                       // nothing claimed → hide
+  const left = mine.filter((h) => !h.reviewed).length;
+  return (
+    <button className={"myqueue" + (left === 0 ? " clear" : "")} onClick={onOpen}
+            title="my claimed hosts that still need review">
+      ★ My queue {left === 0 ? "✓" : <span className="mq-n">{left}</span>}
+    </button>
+  );
+}
+
 /* ---------------------------- team coverage ------------------------------ */
 // Dashboard panel: who owns how much of the scope, and how much is still unclaimed.
 export function TeamCoverage(
@@ -71,12 +107,7 @@ export function TeamCoverage(
   { hostsUp: number; reviewedByIp: Record<string, boolean>; onOpen: (owner: string) => void }
 ) {
   const { c, me } = useCollab();
-  // per tester: total claimed hosts + how many are marked done (reviewed)
-  const stat: Record<string, { total: number; done: number }> = {};
-  for (const [ip, t] of Object.entries(c.assignments)) {
-    const s = stat[t] || (stat[t] = { total: 0, done: 0 });
-    s.total++; if (reviewedByIp[ip]) s.done++;
-  }
+  const stat = ownerStats(c.assignments, reviewedByIp);      // per tester: total + done
   const assigned = Object.keys(c.assignments).length;
   const unclaimed = Math.max(0, hostsUp - assigned);
   const testers = [...new Set([...c.online, ...Object.keys(stat)])]

@@ -6,7 +6,7 @@ import {
 } from "./api";
 import { Stat, SevTag, SevBar, NoteCell, Chips, useBounded } from "./ui";
 import { FindingDetail } from "./FindingDetail";
-import { AssignControl, LabelChips, TeamCoverage, useCollab } from "./collab";
+import { AssignControl, LabelChips, TeamCoverage, OwnerProgress, ownerStats, useCollab } from "./collab";
 
 export type FindingFilters = {
   sev: string; host: string; kev: boolean; unreviewed: boolean; leads: boolean; q: string;
@@ -299,9 +299,13 @@ export function Hosts(
     return hosts
       .filter((h) => !n || `${h.ip} ${h.hostname} ${h.os} ${h.roles.join(" ")}`.toLowerCase().includes(n))
       .filter((h) => sev === "all" || (h.findings[sev] || 0) > 0)
-      .filter((h) => who === "all" ? true : who === "unclaimed" ? !c.assignments[h.ip] : c.assignments[h.ip] === who)
+      .filter((h) =>
+        who === "all" ? true :
+        who === "unclaimed" ? !c.assignments[h.ip] :
+        who === "queue" ? (c.assignments[h.ip] === me && !h.reviewed) :
+        c.assignments[h.ip] === who)
       .slice().sort((a, b) => hostScore(b.findings) - hostScore(a.findings) || a.ip.localeCompare(b.ip, undefined, { numeric: true }));
-  }, [hosts, q, sev, who, c.assignments]);
+  }, [hosts, q, sev, who, c.assignments, me]);
   const { shown, limit, total, sentinel } = useBounded(rows, 120, [q, sev, who]);
 
   return (
@@ -311,7 +315,10 @@ export function Hosts(
           <button className={"chip" + (who === "all" ? " sel" : "")} onClick={() => setWho("all")}>all</button>
           <button className={"chip" + (who === me ? " sel" : "")} onClick={() => setWho(me)}>mine</button>
           <button className={"chip" + (who === "unclaimed" ? " sel" : "")} onClick={() => setWho("unclaimed")}>unclaimed</button>
-          {who !== "all" && who !== "unclaimed" && who !== me && (
+          {who === "queue" && (
+            <button className="chip sel queue-chip" onClick={() => setWho("all")} title="my claimed, not-yet-reviewed hosts">★ my queue ✕</button>
+          )}
+          {who !== "all" && who !== "unclaimed" && who !== "queue" && who !== me && (
             <button className="chip sel" onClick={() => setWho("all")} title="clear owner filter">{who} ✕</button>
           )}
         </div>
@@ -358,6 +365,10 @@ export function Targets(
     setQ: (v: string) => void; setFilter: (v: TgFilter) => void;
     nav: Nav; onTick: (k: string, r: boolean) => void; onNote: (k: string, t: string) => void }
 ) {
+  const { c } = useCollab();
+  const stats = useMemo(
+    () => ownerStats(c.assignments, Object.fromEntries(hosts.map((h) => [h.ip, h.reviewed]))),
+    [c.assignments, hosts]);
   const rows = useMemo(() => {
     const n = q.toLowerCase();
     return hosts
@@ -430,7 +441,7 @@ export function Targets(
                     <Step on={h.access} label="access" cls="ok" />
                   </div>
                 </td>
-                <td><AssignControl ip={h.ip} /></td>
+                <td><div className="host-collab"><AssignControl ip={h.ip} /><OwnerProgress ip={h.ip} stats={stats} /></div></td>
                 <td><SevBar findings={h.findings} /></td>
                 <td className="note-col"><NoteCell value={h.notes} onSave={(t) => onNote(h.key, t)} /></td>
               </tr>
