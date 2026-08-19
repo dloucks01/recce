@@ -380,15 +380,17 @@ def create_app(eng_dir: str) -> FastAPI:
                                 "the dropdown. Supported: nmap/masscan, netexec (nxc smb), "
                                 "impacket GetUserSPNs / GetNPUsers / secretsdump, and recce "
                                 "on-target loot.")
-        # nmap + on-target loot have a real CLI pipeline (host resolution, merge, enrich):
-        # run it as a job so the browser streams progress exactly like a scan.
-        if kind in ("nmap", "loot"):
-            suffix = (".xml" if content.lstrip().startswith("<") else ".gnmap") \
-                if kind == "nmap" else ".txt"
+        # nmap + on-target loot + fieldkit have a real CLI pipeline (host resolution,
+        # merge, enrich): run it as a job so the browser streams progress like a scan.
+        if kind in ("nmap", "loot", "fieldkit"):
+            cmd, suffix = {
+                "nmap": ("import", ".xml" if content.lstrip().startswith("<") else ".gnmap"),
+                "loot": ("ingest", ".txt"),
+                "fieldkit": ("fieldkit-import", ".json"),
+            }[kind]
             fd, tmp = tempfile.mkstemp(prefix="recce-import-", suffix=suffix)
             with os.fdopen(fd, "w") as fh:
                 fh.write(content)
-            cmd = "import" if kind == "nmap" else "ingest"
             label = f"{cmd} {filename or kind}"
 
             def _done(job):
@@ -443,6 +445,25 @@ def create_app(eng_dir: str) -> FastAPI:
                             source="secretsdump", notes=("rid " + r.get("rid", "")).strip())):
                         added += 1
                 summary = f"stored {added} NTLM hash(es)"
+            elif kind == "creds":
+                # a plain credential list to stack + spray: [domain\]user:secret per line
+                # (hashcat/john --show, a cracked list, or a hand-built spray list).
+                import re
+                for raw in content.splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith("#") or line.count(":") != 1:
+                        continue
+                    left, secret = line.split(":", 1)
+                    if not left or not secret:
+                        continue
+                    dom, user = (left.split("\\", 1) if "\\" in left else ("", left))
+                    is_hash = bool(re.fullmatch(r"[0-9a-fA-F]{32}", secret))
+                    if st.add_credential(Credential(
+                            username=user, secret=secret, domain=dom,
+                            kind="nthash" if is_hash else "password",
+                            source="imported", notes="imported credential list")):
+                        added += 1
+                summary = f"stored {added} credential(s)"
             else:
                 raise HTTPException(422, f"unsupported import kind {kind!r}")
         finally:
