@@ -23,6 +23,7 @@ when you want the full detail on a phase.
 | [reference/reporting.md](reference/reporting.md) | Per-finding write-ups, the fieldkit round-trip, and every output file |
 | [reference/commands.md](reference/commands.md) | Every subcommand and its notable options |
 | [reference/detection-rules.md](reference/detection-rules.md) | The `--rules` JSON format for custom version→CVE detections |
+| [reference/packaging.md](reference/packaging.md) | Building the source burn package vs. the self-contained airgap bundle, and transferring offline |
 
 ## Design & internals
 

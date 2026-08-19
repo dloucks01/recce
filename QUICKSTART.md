@@ -52,6 +52,13 @@ it (`sudo apt install nmap`) and re-run.
 > Windows and see *"bad interpreter"* / *"Permission denied"*, run
 > `python3 -m recce …` (identical) or `chmod +x bin/recce`.
 
+> [!NOTE]
+> **Airgapped / dark target?** Build a package on a connected box and carry it over.
+> If the target already has Python 3.9+ and nmap, `./make_package.sh` gives a ~1 MB
+> tarball. For a box with **nothing installed**, `./tools/build_bundle.sh` freezes
+> the Python runtime, all deps, and nmap into one ~45 MB folder that runs on its
+> own (`./recce doctor`). Details: [docs/reference/packaging.md](docs/reference/packaging.md).
+
 ---
 
 ## 2 · The engagement at a glance

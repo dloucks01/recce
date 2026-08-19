@@ -17,3 +17,7 @@
 #                               (or point RECCE_BROWSER at any Chrome/Chromium)
 #
 # Run `recce doctor` on the laptop to confirm which capabilities are available.
+#
+# Fully self-contained option: `./tools/build_bundle.sh` freezes the Python runtime,
+# all deps (impacket/ldap3/openpyxl/fastapi/uvicorn) AND nmap+masscan+ldapsearch into
+# one ~45MB folder that runs on a box with NOTHING installed. See docs/reference/packaging.md.
