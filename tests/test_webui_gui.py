@@ -90,8 +90,21 @@ class ApiShape(unittest.TestCase):
             for txt in (KRB, ASREP, SECRETS):
                 self.assertEqual(c.post("/api/import", json={"content": txt, "kind": "auto"}).status_code, 200)
             after = c.get("/api/credentials").json()
-            self.assertEqual(len(after) - before, 3, "kerberoast + asrep + secretsdump each add a credential")
-            self.assertTrue({"kerberoast", "asrep", "secretsdump"} <= {c["source"] for c in after})
+            # nxc captures the validated login (eve), plus kerberoast + asrep + secretsdump
+            self.assertEqual(len(after) - before, 4)
+            self.assertTrue({"nxc-validated", "kerberoast", "asrep", "secretsdump"}
+                            <= {c["source"] for c in after})
+            # a scanner export folds findings onto the right host
+            NESSUS = ('<?xml version="1.0"?><NessusClientData_v2><Report name="s">'
+                      '<ReportHost name="10.9.9.20"><HostProperties>'
+                      '<tag name="host-ip">10.9.9.20</tag></HostProperties>'
+                      '<ReportItem port="445" protocol="tcp" severity="4" pluginID="1" '
+                      'pluginName="EternalBlue"><cve>CVE-2017-0143</cve>'
+                      '<synopsis>rce</synopsis></ReportItem></ReportHost></Report></NessusClientData_v2>')
+            self.assertEqual(_detect_import_kind(NESSUS), "nessus")
+            self.assertEqual(c.post("/api/import", json={"content": NESSUS, "kind": "auto"}).status_code, 200)
+            self.assertTrue(any(f["title"] == "EternalBlue" and f["kev"]
+                                for f in c.get("/api/findings").json()))
             # an undetectable blob is rejected with guidance, not silently swallowed
             self.assertEqual(c.post("/api/import", json={"content": "hello world", "kind": "auto"}).status_code, 422)
 

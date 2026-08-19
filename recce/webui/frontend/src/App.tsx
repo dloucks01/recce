@@ -63,14 +63,22 @@ function Export({ onError }: { onError: (m: string) => void }) {
 const IMPORT_TOOLS: [string, string][] = [
   ["auto", "Auto-detect"],
   ["nmap", "nmap / masscan  (.xml / .gnmap / .nmap)"],
-  ["nxc", "netexec / crackmapexec  (nxc smb)"],
+  ["nessus", "Nessus  (.nessus export)"],
+  ["openvas", "OpenVAS / Greenbone  (GVM XML)"],
+  ["nuclei", "nuclei  (JSON / JSONL)"],
+  ["testssl", "testssl.sh  (JSON)"],
+  ["nxc", "netexec / crackmapexec  (smb / ldap / mssql / winrm)"],
   ["kerberoast", "impacket GetUserSPNs  (Kerberoast)"],
   ["asrep", "impacket GetNPUsers  (AS-REP)"],
   ["secretsdump", "impacket secretsdump  (NTLM hashes)"],
   ["creds", "Credential list  (user:password per line)"],
+  ["bloodhound", "BloodHound / Certipy  (.zip / certipy .json)"],
   ["loot", "recce on-target enum  (recce-enum.sh/.ps1)"],
   ["fieldkit", "fieldkit findings  (findings.json)"],
 ];
+
+// SharpHound collections are binary zips — read them as base64 so they survive JSON.
+const isBinaryFile = (name: string) => /\.zip$/i.test(name);
 
 // Import panel: drop a file or paste output from any supported tool; the server
 // folds it into the live engagement and every browser updates.
@@ -81,20 +89,32 @@ function ImportModal(
   const [kind, setKind] = useState("auto");
   const [text, setText] = useState("");
   const [filename, setFilename] = useState("");
+  const [encoding, setEncoding] = useState("");   // "base64" for binary (zip) uploads
   const [busy, setBusy] = useState(false);
   const [drag, setDrag] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   function readFile(file: File) {
     const r = new FileReader();
-    r.onload = () => { setText(String(r.result || "")); setFilename(file.name); };
-    r.readAsText(file);
+    setFilename(file.name);
+    if (isBinaryFile(file.name)) {
+      r.onload = () => {
+        const url = String(r.result || "");
+        setText(url.slice(url.indexOf(",") + 1));   // strip the data: URL prefix -> base64
+        setEncoding("base64");
+      };
+      r.readAsDataURL(file);
+      if (kind === "auto") setKind("bloodhound");
+    } else {
+      r.onload = () => { setText(String(r.result || "")); setEncoding(""); };
+      r.readAsText(file);
+    }
   }
   async function go() {
     if (!text.trim() || busy) return;
     setBusy(true); setErr(null);
     try {
-      const res = await postImport(text, filename, kind);
+      const res = await postImport(text, filename, kind, encoding);
       if (res.mode === "job") { onJob(res.id); onClose(); }
       else { onDone(res.summary || `imported ${res.added} item(s)`); onClose(); }
     } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
