@@ -49,14 +49,15 @@ export function CollabProvider({ children }: { children: React.ReactNode }) {
 const initials = (n: string) => n.trim().slice(0, 2).toUpperCase() || "?";
 const hue = (n: string) => { let h = 0; for (const ch of n) h = (h * 31 + ch.charCodeAt(0)) % 360; return h; };
 
-export function PresenceBar() {
+export function PresenceBar({ onPick }: { onPick?: (name: string) => void }) {
   const { c, me } = useCollab();
   if (!c.online.length) return null;
   return (
     <div className="presence" title={`online: ${c.online.join(", ")}`}>
       {c.online.slice(0, 6).map((n) => (
-        <span key={n} className={"avatar" + (n === me ? " me" : "")}
-              style={{ background: `hsl(${hue(n)} 55% 45%)` }} title={n}>{initials(n)}</span>
+        <span key={n} className={"avatar" + (n === me ? " me" : "") + (onPick ? " clk" : "")}
+              style={{ background: `hsl(${hue(n)} 55% 45%)` }} title={onPick ? `${n} — show their hosts` : n}
+              onClick={onPick ? () => onPick(n) : undefined}>{initials(n)}</span>
       ))}
       {c.online.length > 6 && <span className="avatar more">+{c.online.length - 6}</span>}
     </div>
@@ -65,7 +66,7 @@ export function PresenceBar() {
 
 /* ---------------------------- team coverage ------------------------------ */
 // Dashboard panel: who owns how much of the scope, and how much is still unclaimed.
-export function TeamCoverage({ hostsUp, onOpen }: { hostsUp: number; onOpen: () => void }) {
+export function TeamCoverage({ hostsUp, onOpen }: { hostsUp: number; onOpen: (owner: string) => void }) {
   const { c, me } = useCollab();
   const counts: Record<string, number> = {};
   for (const t of Object.values(c.assignments)) counts[t] = (counts[t] || 0) + 1;
@@ -78,10 +79,10 @@ export function TeamCoverage({ hostsUp, onOpen }: { hostsUp: number; onOpen: () 
   return (
     <section className="panel teampanel">
       <div className="panel-h"><h3>Team coverage</h3>
-        <button className="link" onClick={onOpen}>hosts →</button></div>
+        <button className="link" onClick={() => onOpen("all")}>hosts →</button></div>
       <ul className="teamlist">
         {testers.map((t) => (
-          <li key={t} onClick={onOpen}>
+          <li key={t} onClick={() => onOpen(t)} title={`show ${t}'s hosts`}>
             <span className="avatar sm" style={{ background: `hsl(${hue(t)} 55% 45%)` }}>{initials(t)}</span>
             <span className="tm-name">{t === me ? `${t} (you)` : t}
               {c.online.includes(t) && <span className="tm-dot" title="online" />}</span>
@@ -89,7 +90,7 @@ export function TeamCoverage({ hostsUp, onOpen }: { hostsUp: number; onOpen: () 
             <span className="tm-n mono">{counts[t] || 0}</span>
           </li>
         ))}
-        <li className="tm-unclaimed" onClick={onOpen}>
+        <li className="tm-unclaimed" onClick={() => onOpen("unclaimed")} title="show unclaimed hosts">
           <span className="avatar sm more">?</span>
           <span className="tm-name">unclaimed</span>
           <div className="tm-track"><div className="tm-fill unc" style={{ width: `${(100 * unclaimed) / max}%` }} /></div>

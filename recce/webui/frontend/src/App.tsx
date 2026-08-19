@@ -172,6 +172,7 @@ export default function App() {
   // cross-tab filter state (lifted so the dashboard can drill into a filtered view)
   const [ff, setFf] = useState<FindingFilters>({ sev: "all", host: "", kev: false, unreviewed: false, leads: false, q: "" });
   const [hostQ, setHostQ] = useState(""); const [hostSev, setHostSev] = useState("all");
+  const [hostWho, setHostWho] = useState("all");   // all | unclaimed | tester name
   const [tgQ, setTgQ] = useState(""); const [tgFilter, setTgFilter] = useState<TgFilter>("all");
   const [drawerIp, setDrawerIp] = useState<string | null>(null);
 
@@ -273,7 +274,7 @@ export default function App() {
       setFf({ sev: "all", host: "", kev: false, unreviewed: false, leads: false, q: "", ...o });
       setTab("findings");
     },
-    toHosts: (o) => { setHostQ(o?.q ?? ""); setHostSev(o?.sev ?? "all"); setTab("hosts"); },
+    toHosts: (o) => { setHostQ(o?.q ?? ""); setHostSev(o?.sev ?? "all"); setHostWho(o?.owner ?? "all"); setTab("hosts"); },
     toTargets: () => setTab("targets"),
     toAct: () => setTab("act"),
     openHost: (ip) => setDrawerIp(ip),
@@ -317,7 +318,7 @@ export default function App() {
             <button key={t} className={"tab" + (tab === t ? " sel" : "")} onClick={() => setTab(t)}>{label}</button>
           ))}
         </nav>
-        <PresenceBar />
+        <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
         <ActivityButton />
         <button className="theme-tog" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
                 title="toggle light / dark" aria-label="toggle theme">
@@ -369,8 +370,8 @@ export default function App() {
         {tab === "act" && <Act nav={nav} />}
         {tab === "loot" && <Loot />}
         {tab === "hosts" && (
-          <Hosts hosts={hosts} q={hostQ} sev={hostSev} setQ={setHostQ} setSev={setHostSev}
-                 nav={nav} onTick={onTick} onNote={onNote} />
+          <Hosts hosts={hosts} q={hostQ} sev={hostSev} who={hostWho} setQ={setHostQ} setSev={setHostSev}
+                 setWho={setHostWho} nav={nav} onTick={onTick} onNote={onNote} />
         )}
         {tab === "targets" && (
           <Targets hosts={hosts} ov={ov} q={tgQ} filter={tgFilter} setQ={setTgQ} setFilter={setTgFilter}

@@ -13,7 +13,7 @@ export type FindingFilters = {
 };
 export type Nav = {
   toFindings: (o?: Partial<FindingFilters>) => void;
-  toHosts: (o?: { q?: string; sev?: string }) => void;
+  toHosts: (o?: { q?: string; sev?: string; owner?: string }) => void;
   toTargets: () => void;
   toAct: () => void;
   openHost: (ip: string) => void;
@@ -102,7 +102,7 @@ export function Dashboard(
         </section>
       </div>
 
-      <TeamCoverage hostsUp={ov.hosts_up} onOpen={() => nav.toHosts()} />
+      <TeamCoverage hostsUp={ov.hosts_up} onOpen={(owner) => nav.toHosts({ owner })} />
 
       <section className="panel">
         <div className="panel-h"><h3>Coverage</h3>
@@ -286,29 +286,33 @@ export function Findings(
 /* --------------------------------- Hosts --------------------------------- */
 
 export function Hosts(
-  { hosts, q, sev, setQ, setSev, nav, onTick, onNote }:
-  { hosts: Host[]; q: string; sev: string; setQ: (v: string) => void; setSev: (v: string) => void;
+  { hosts, q, sev, who, setQ, setSev, setWho, nav, onTick, onNote }:
+  { hosts: Host[]; q: string; sev: string; who: string;
+    setQ: (v: string) => void; setSev: (v: string) => void; setWho: (v: string) => void;
     nav: Nav; onTick: (k: string, r: boolean) => void; onNote: (k: string, t: string) => void }
 ) {
   const { c, me } = useCollab();
-  const [who, setWho] = useState("all");   // all | mine | unclaimed
+  // who: "all" | "unclaimed" | a tester name ("mine" resolves to my own name)
   const rows = useMemo(() => {
     const n = q.toLowerCase();
     return hosts
       .filter((h) => !n || `${h.ip} ${h.hostname} ${h.os} ${h.roles.join(" ")}`.toLowerCase().includes(n))
       .filter((h) => sev === "all" || (h.findings[sev] || 0) > 0)
-      .filter((h) => who === "all" || (who === "mine" ? c.assignments[h.ip] === me : !c.assignments[h.ip]))
+      .filter((h) => who === "all" ? true : who === "unclaimed" ? !c.assignments[h.ip] : c.assignments[h.ip] === who)
       .slice().sort((a, b) => hostScore(b.findings) - hostScore(a.findings) || a.ip.localeCompare(b.ip, undefined, { numeric: true }));
-  }, [hosts, q, sev, who, c.assignments, me]);
+  }, [hosts, q, sev, who, c.assignments]);
   const { shown, limit, total, sentinel } = useBounded(rows, 120, [q, sev, who]);
 
   return (
     <>
       <div className="controls">
         <div className="host-filter">
-          {["all", "mine", "unclaimed"].map((w) => (
-            <button key={w} className={"chip" + (who === w ? " sel" : "")} onClick={() => setWho(w)}>{w}</button>
-          ))}
+          <button className={"chip" + (who === "all" ? " sel" : "")} onClick={() => setWho("all")}>all</button>
+          <button className={"chip" + (who === me ? " sel" : "")} onClick={() => setWho(me)}>mine</button>
+          <button className={"chip" + (who === "unclaimed" ? " sel" : "")} onClick={() => setWho("unclaimed")}>unclaimed</button>
+          {who !== "all" && who !== "unclaimed" && who !== me && (
+            <button className="chip sel" onClick={() => setWho("all")} title="clear owner filter">{who} ✕</button>
+          )}
         </div>
         <Chips value={sev} onChange={setSev} options={["all", ...SEVS]} />
         <input className="search" placeholder="filter: ip, host, os…" value={q}
