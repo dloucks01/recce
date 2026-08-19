@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Finding, Host, Overview, fetchAll, postTick, postNote, postScan,
+  Finding, Host, Overview, fetchAll, postTick, postNote, postScan, postImport,
 } from "./api";
 import { Dashboard, Findings, Hosts, Targets, Act, Loot, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
@@ -59,6 +59,86 @@ function Export({ onError }: { onError: (m: string) => void }) {
   );
 }
 
+// Tools a teammate can drop output from. "auto" lets the server sniff the format.
+const IMPORT_TOOLS: [string, string][] = [
+  ["auto", "Auto-detect"],
+  ["nmap", "nmap / masscan  (.xml / .gnmap / .nmap)"],
+  ["nxc", "netexec / crackmapexec  (nxc smb)"],
+  ["kerberoast", "impacket GetUserSPNs  (Kerberoast)"],
+  ["asrep", "impacket GetNPUsers  (AS-REP)"],
+  ["secretsdump", "impacket secretsdump  (NTLM hashes)"],
+  ["loot", "recce on-target enum  (recce-enum.sh/.ps1)"],
+];
+
+// Import panel: drop a file or paste output from any supported tool; the server
+// folds it into the live engagement and every browser updates.
+function ImportModal(
+  { onClose, onJob, onDone }:
+  { onClose: () => void; onJob: (id: string) => void; onDone: (msg: string) => void }
+) {
+  const [kind, setKind] = useState("auto");
+  const [text, setText] = useState("");
+  const [filename, setFilename] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [drag, setDrag] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  function readFile(file: File) {
+    const r = new FileReader();
+    r.onload = () => { setText(String(r.result || "")); setFilename(file.name); };
+    r.readAsText(file);
+  }
+  async function go() {
+    if (!text.trim() || busy) return;
+    setBusy(true); setErr(null);
+    try {
+      const res = await postImport(text, filename, kind);
+      if (res.mode === "job") { onJob(res.id); onClose(); }
+      else { onDone(res.summary || `imported ${res.added} item(s)`); onClose(); }
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+  return (
+    <>
+      <div className="modal-backdrop" onClick={onClose} />
+      <div className="modal" role="dialog" aria-label="Import tool output">
+        <div className="modal-h">
+          <h3>Import tool output</h3>
+          <button className="drawer-x" onClick={onClose} aria-label="close">✕</button>
+        </div>
+        <p className="modal-sub">
+          Drop a file or paste output from any supported tool. recce folds it into this
+          engagement and every open browser updates — no terminal needed.
+        </p>
+        <label className="imp-field">Tool
+          <select value={kind} onChange={(e) => setKind(e.target.value)} disabled={busy}>
+            {IMPORT_TOOLS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+          </select>
+        </label>
+        <div className={"dropzone" + (drag ? " over" : "")}
+             onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+             onDragLeave={() => setDrag(false)}
+             onDrop={(e) => { e.preventDefault(); setDrag(false); const f = e.dataTransfer.files[0]; if (f) readFile(f); }}>
+          <span>⭱ Drop a file here, or </span>
+          <label className="filepick">browse
+            <input type="file" onChange={(e) => { const f = e.target.files?.[0]; if (f) readFile(f); }} hidden />
+          </label>
+          {filename && <span className="imp-fn">· {filename}</span>}
+        </div>
+        <textarea className="imp-paste" placeholder="…or paste the tool output here"
+                  value={text} onChange={(e) => setText(e.target.value)} disabled={busy} />
+        {err && <div className="ranmsg warn-msg">{err}</div>}
+        <div className="modal-actions">
+          <button className="toggle" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="run" onClick={go} disabled={busy || !text.trim()}>
+            {busy ? "Importing…" : "Import"}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function App() {
   const [ov, setOv] = useState<Overview | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
@@ -95,6 +175,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
 
+  const [showImport, setShowImport] = useState(false);
   const [flash, setFlash] = useState<string | null>(null);
   const flashTimer = useRef<number | undefined>(undefined);
   const note = useCallback((msg: string) => {
@@ -135,6 +216,9 @@ export default function App() {
       } else if (d.type === "scan") {
         note(`${d.tester}'s scan ${d.status}`);
         refresh().catch(() => {});
+      } else if (d.type === "import") {
+        if (d.tester !== tester) note(`${d.tester} imported ${d.kind} output`);
+        refresh().catch(() => {});
       }
     };
     return () => es.close();
@@ -164,12 +248,10 @@ export default function App() {
     openHost: (ip) => setDrawerIp(ip),
   };
 
-  async function runScan() {
-    if (!targets.trim() || running) return;
+  // Stream a background job's output into the live console. Shared by scans and
+  // file-backed imports (nmap / on-target loot) so both show the same progress.
+  const streamJob = useCallback((id: string) => {
     setLog([]); setRunning(true);
-    let id: string;
-    try { ({ id } = await postScan(targets, profile)); }
-    catch (e) { setLog([`error: ${e}`]); setRunning(false); return; }
     const es = new EventSource(`/api/jobs/${id}/events`);
     es.onmessage = (m) => {
       const d = JSON.parse(m.data);
@@ -177,6 +259,12 @@ export default function App() {
       if (d.done) { es.close(); setRunning(false); refresh().catch(() => {}); }
     };
     es.onerror = () => { es.close(); setRunning(false); };
+  }, [refresh]);
+
+  async function runScan() {
+    if (!targets.trim() || running) return;
+    try { const { id } = await postScan(targets, profile); streamJob(id); }
+    catch (e) { setLog([`error: ${e}`]); }
   }
 
   if (err) return <div className="err">Could not reach the recce API: {err}</div>;
@@ -225,6 +313,10 @@ export default function App() {
           <button className="run" onClick={runScan} disabled={running || !targets.trim()}>
             {running ? "Scanning…" : "Run scan"}
           </button>
+          <button className="import-btn" onClick={() => setShowImport(true)}
+                  title="import output from nmap / netexec / impacket / on-target loot">
+            ⭱ Import
+          </button>
           <Export onError={(m) => note(m)} />
         </section>
 
@@ -251,6 +343,14 @@ export default function App() {
                    nav={nav} onTick={onTick} onNote={onNote} />
         )}
       </main>
+
+      {showImport && (
+        <ImportModal
+          onClose={() => setShowImport(false)}
+          onJob={(id) => streamJob(id)}
+          onDone={(msg) => { note(msg); refresh().catch(() => {}); }}
+        />
+      )}
 
       <HostDrawer ip={drawerIp} onClose={() => setDrawerIp(null)} onTick={onTick} onNote={onNote} />
     </div>
