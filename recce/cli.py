@@ -6831,6 +6831,13 @@ Then, any time (the core loop):
   recce status -o eng            coverage + what's left   (open eng/enumeration.xlsx)
   recce report -o eng            regenerate the workbook / write-ups
 
+Prefer a browser, or working as a team?
+
+  recce serve  -o eng            the web workbench at http://<this-box>:8008 - run
+                                 scans, triage findings, spray looted creds, export
+                                 the report; the whole team shares one live view
+                                 over the LAN. (--host/--port to change the bind.)
+
 Interrupted? Re-run the command (add --resume to skip finished hosts) or `recce next`
 - nothing dead-ends.
 
