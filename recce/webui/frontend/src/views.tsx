@@ -6,6 +6,7 @@ import {
 } from "./api";
 import { Stat, SevTag, SevBar, NoteCell, Chips, useBounded } from "./ui";
 import { FindingDetail } from "./FindingDetail";
+import { AssignControl, LabelChips, useCollab } from "./collab";
 
 export type FindingFilters = {
   sev: string; host: string; kev: boolean; unreviewed: boolean; leads: boolean; q: string;
@@ -193,6 +194,7 @@ export function Findings(
     }
   }
   const detailFor = (x: Finding) => cache[x.ip]?.find((v) => v.key === x.key);
+  const { c: cst, dismiss } = useCollab();
 
   return (
     <>
@@ -220,7 +222,7 @@ export function Findings(
               const open = openKey === x.key;
               const detail = open ? detailFor(x) : undefined;
               return [
-              <tr key={x.key} className={(x.reviewed ? "done" : "") + (open ? " open" : "")}>
+              <tr key={x.key} className={(x.reviewed ? "done" : "") + (open ? " open" : "") + (cst.dismissed[x.key] ? " dismissed" : "")}>
                 <td className="tick-col">
                   <input type="checkbox" checked={x.reviewed} onChange={() => onTick(x.key, !x.reviewed)} />
                 </td>
@@ -237,7 +239,14 @@ export function Findings(
                   {x.ip}{x.port ? `:${x.port}` : ""}
                 </td>
                 <td><span className={"tier " + x.tier}>{x.tier === "lead" ? "lead · verify" : x.tier}</span></td>
-                <td className="note-col"><NoteCell value={x.notes} onSave={(t) => onNote(x.key, t)} /></td>
+                <td className="note-col">
+                  <NoteCell value={x.notes} onSave={(t) => onNote(x.key, t)} />
+                  <button className={"dismiss-btn" + (cst.dismissed[x.key] ? " on" : "")}
+                          title={cst.dismissed[x.key] ? "restore this finding" : "mark not a finding (false positive)"}
+                          onClick={() => dismiss(x.key, !cst.dismissed[x.key])}>
+                    {cst.dismissed[x.key] ? "restore" : "dismiss"}
+                  </button>
+                </td>
               </tr>,
               open && (
                 <tr key={x.key + ":d"} className="detail-row">
@@ -279,25 +288,33 @@ export function Hosts(
   { hosts: Host[]; q: string; sev: string; setQ: (v: string) => void; setSev: (v: string) => void;
     nav: Nav; onTick: (k: string, r: boolean) => void; onNote: (k: string, t: string) => void }
 ) {
+  const { c, me } = useCollab();
+  const [who, setWho] = useState("all");   // all | mine | unclaimed
   const rows = useMemo(() => {
     const n = q.toLowerCase();
     return hosts
       .filter((h) => !n || `${h.ip} ${h.hostname} ${h.os} ${h.roles.join(" ")}`.toLowerCase().includes(n))
       .filter((h) => sev === "all" || (h.findings[sev] || 0) > 0)
+      .filter((h) => who === "all" || (who === "mine" ? c.assignments[h.ip] === me : !c.assignments[h.ip]))
       .slice().sort((a, b) => hostScore(b.findings) - hostScore(a.findings) || a.ip.localeCompare(b.ip, undefined, { numeric: true }));
-  }, [hosts, q, sev]);
-  const { shown, limit, total, sentinel } = useBounded(rows, 120, [q, sev]);
+  }, [hosts, q, sev, who, c.assignments, me]);
+  const { shown, limit, total, sentinel } = useBounded(rows, 120, [q, sev, who]);
 
   return (
     <>
       <div className="controls">
+        <div className="host-filter">
+          {["all", "mine", "unclaimed"].map((w) => (
+            <button key={w} className={"chip" + (who === w ? " sel" : "")} onClick={() => setWho(w)}>{w}</button>
+          ))}
+        </div>
         <Chips value={sev} onChange={setSev} options={["all", ...SEVS]} />
         <input className="search" placeholder="filter: ip, host, os…" value={q}
                onChange={(e) => setQ(e.target.value)} spellCheck={false} />
       </div>
       <div className="tablewrap">
         <table className="tbl hosts">
-          <thead><tr><th className="tick-col">✓</th><th>Host</th><th>OS</th><th className="num">Svcs</th><th>Findings</th><th>Note</th></tr></thead>
+          <thead><tr><th className="tick-col">✓</th><th>Host</th><th>OS</th><th className="num">Svcs</th><th>Findings</th><th>Owner / triage</th><th>Note</th></tr></thead>
           <tbody>
             {shown.map((h) => (
               <tr key={h.ip} className={h.reviewed ? "done" : ""}>
@@ -310,10 +327,11 @@ export function Hosts(
                 <td className="os">{h.os || "—"}</td>
                 <td className="num mono">{h.ports.length}</td>
                 <td><SevBar findings={h.findings} /></td>
+                <td><div className="host-collab"><AssignControl ip={h.ip} /><LabelChips ip={h.ip} /></div></td>
                 <td className="note-col"><NoteCell value={h.notes} onSave={(t) => onNote(h.key, t)} /></td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={6} className="empty">no hosts match this filter</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={7} className="empty">no hosts match this filter</td></tr>}
           </tbody>
         </table>
       </div>

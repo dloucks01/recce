@@ -151,3 +151,33 @@ export function hostScore(f: Record<string, number>): number {
 export function sevTotal(f: Record<string, number>): number {
   return SEVS.reduce((n, s) => n + (f[s] || 0), 0);
 }
+
+// --- multi-tester collaboration -----------------------------------------------
+export type Activity = { ts: number; tester: string; kind: string; text: string };
+export type Collab = {
+  assignments: Record<string, string>;      // ip -> tester
+  labels: Record<string, string[]>;         // ip -> labels
+  port_status: Record<string, string>;      // "ip:port" -> todo|wip|done
+  dismissed: Record<string, string>;        // finding key -> tester
+  activity: Activity[];
+  online: string[];
+};
+export const TRIAGE_LABELS = ["interesting", "needs-review", "out-of-scope"];
+
+export async function getCollab(): Promise<Collab> { return getJSON<Collab>("/api/collab"); }
+
+async function post(url: string, body?: unknown) {
+  const r = await fetch(url, { method: "POST", headers: jsonHeaders(),
+    body: body === undefined ? undefined : JSON.stringify(body) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? r.statusText);
+  return r.json();
+}
+export const postAssign = (ip: string, tester: string) => post("/api/assign", { ip, tester });
+export const postLabel = (ip: string, label: string, on: boolean) => post("/api/label", { ip, label, on });
+export const postPortStatus = (ip: string, port: number, status: string) => post("/api/port_status", { ip, port, status });
+export const postDismiss = (key: string, on: boolean) => post("/api/dismiss", { key, on });
+export const pingPresence = () => post("/api/presence").catch(() => {});
+export const addFinding = (b: { ip: string; port?: string; title: string; severity: string; cve?: string; output?: string }) => post("/api/add/finding", b);
+export const addCredential = (b: { username: string; secret: string; kind: string; domain?: string; origin_ip?: string; notes?: string }) => post("/api/add/credential", b);
+export const addHostScope = (targets: string) => post("/api/add/host", { targets });
+export const addAccess = (ip: string, note: string) => post("/api/add/access", { ip, note });

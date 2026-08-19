@@ -4,6 +4,7 @@ import {
 } from "./api";
 import { Dashboard, Findings, Hosts, Targets, Act, Loot, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
+import { PresenceBar, ActivityButton, AddMenu, useCollab } from "./collab";
 
 type Tab = "dashboard" | "findings" | "act" | "loot" | "hosts" | "targets";
 type TgFilter = "all" | "todo" | "enumerated" | "access" | "reviewed";
@@ -206,6 +207,7 @@ export default function App() {
     flashTimer.current = window.setTimeout(() => setFlash(null), 4000);
   }, []);
 
+  const collab = useCollab();
   const refresh = useCallback(async () => {
     const [o, f, h] = await fetchAll();
     setOv(o); setFindings(f); setHosts(h);
@@ -241,6 +243,13 @@ export default function App() {
       } else if (d.type === "import") {
         if (d.tester !== tester) note(`${d.tester} imported ${d.kind} output`);
         refresh().catch(() => {});
+      } else if (["assign", "label", "port_status", "dismiss", "add"].includes(d.type)) {
+        collab.refresh();
+        if (d.type === "add") refresh().catch(() => {});
+        if (d.by && d.by !== tester) {
+          if (d.type === "assign") note(`${d.by} ${d.tester ? "claimed" : "released"} ${d.ip}`);
+          else if (d.type === "add") note(`${d.by} added a ${d.what}`);
+        }
       }
     };
     return () => es.close();
@@ -308,6 +317,8 @@ export default function App() {
             <button key={t} className={"tab" + (tab === t ? " sel" : "")} onClick={() => setTab(t)}>{label}</button>
           ))}
         </nav>
+        <PresenceBar />
+        <ActivityButton />
         <button className="theme-tog" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
                 title="toggle light / dark" aria-label="toggle theme">
           {theme === "dark" ? "☀" : "☾"}
@@ -339,6 +350,7 @@ export default function App() {
                   title="import output from nmap / netexec / impacket / on-target loot">
             ⭱ Import
           </button>
+          <AddMenu onDone={(m) => note(m)} />
           <Export onError={(m) => note(m)} />
         </section>
 
