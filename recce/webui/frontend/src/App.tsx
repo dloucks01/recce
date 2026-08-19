@@ -5,6 +5,7 @@ import {
 import { Dashboard, Findings, Hosts, Act, Loot, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, AddMenu, MyQueue, useCollab } from "./collab";
+import { useEscape } from "./ui";
 
 type Tab = "dashboard" | "hosts" | "findings" | "act" | "loot";
 const POLL_MS = 20000; // constantly-updating analysis: re-pull on a slow heartbeat
@@ -93,6 +94,7 @@ function ImportModal(
   const [busy, setBusy] = useState(false);
   const [drag, setDrag] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  useEscape(onClose, !busy);
 
   function readFile(file: File) {
     const r = new FileReader();
@@ -188,6 +190,19 @@ export default function App() {
     localStorage.setItem("recce.density", density);
   }, [density]);
 
+  // "/" focuses the current view's search box (unless you're already typing)
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName || "";
+      if (e.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) {
+        const s = document.querySelector<HTMLInputElement>(".search");
+        if (s) { e.preventDefault(); s.focus(); }
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+
   // tester identity
   const [who, setWho] = useState(() => localStorage.getItem("recce.tester") || "");
   const [nameInput, setNameInput] = useState("");
@@ -206,6 +221,7 @@ export default function App() {
 
   const [showImport, setShowImport] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
+  useEscape(() => setScanOpen(false), scanOpen);
   const [flash, setFlash] = useState<string | null>(null);
   const flashTimer = useRef<number | undefined>(undefined);
   const note = useCallback((msg: string) => {

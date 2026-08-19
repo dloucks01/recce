@@ -1,6 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { SEVS } from "./api";
 
+// Close an overlay on Escape. `active` gates it so a closed overlay doesn't listen.
+export function useEscape(onEsc: () => void, active = true) {
+  useEffect(() => {
+    if (!active) return;
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onEsc(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onEsc, active]);
+}
+
 export function Stat(
   { k, v, sub, cls, onClick, title }:
   { k: string; v: string; sub?: string; cls?: string; onClick?: () => void; title?: string }
