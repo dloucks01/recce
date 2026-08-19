@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import time
 
 from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -159,6 +161,8 @@ def create_app(eng_dir: str) -> FastAPI:
                        allow_headers=["*"])
     jobs = JobManager()
     broker = _Broker()
+    from . import collab
+    presence = collab.Presence()
 
     @app.on_event("startup")
     async def _bind():
@@ -660,6 +664,192 @@ def create_app(eng_dir: str) -> FastAPI:
             st.close()
         broker.publish({"type": "tick", "key": key, "reviewed": reviewed,
                         "tester": x_tester})
+        return {"ok": True}
+
+    # --- multi-tester collaboration ------------------------------------------------
+
+    @app.get("/api/collab")
+    def collab_state():
+        """Everything the UI overlays on hosts/findings: who owns what, triage labels,
+        per-port status, dismissed findings, the activity feed, and who's online."""
+        from ..store import Store
+        st = Store(db_path)
+        try:
+            return {"assignments": collab.get_assignments(st),
+                    "labels": collab.get_labels(st),
+                    "port_status": collab.get_port_status(st),
+                    "dismissed": collab.get_dismissed(st),
+                    "activity": collab.get_activity(st, 100),
+                    "online": presence.roster()}
+        finally:
+            st.close()
+
+    @app.post("/api/presence")
+    def ping_presence(body: dict = Body(default=None), x_tester: str = Header(default="")):
+        presence.ping(x_tester or (body or {}).get("tester", ""))
+        return {"online": presence.roster()}
+
+    def _mutate(fn, event: dict, activity: tuple | None = None,
+                x_tester: str = "someone"):
+        """Open the store, run fn(st), persist an activity line, broadcast, close."""
+        from ..store import Store
+        st = Store(db_path)
+        try:
+            result = fn(st)
+            if activity:
+                collab.add_activity(st, x_tester, activity[0], activity[1])
+        finally:
+            st.close()
+        broker.publish(event)
+        return result
+
+    @app.post("/api/assign")
+    def assign(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        ip = str(body.get("ip", ""))
+        who = str(body.get("tester", ""))          # "" releases the claim
+        if not ip:
+            raise HTTPException(400, "no ip")
+        verb = ("claimed" if who == x_tester else f"assigned to {who}") if who else "released"
+        _mutate(lambda st: collab.set_assignment(st, ip, who),
+                {"type": "assign", "ip": ip, "tester": who, "by": x_tester},
+                ("assign", f"{x_tester} {verb} {ip}"), x_tester)
+        return {"ok": True}
+
+    @app.post("/api/label")
+    def label(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        ip, lab = str(body.get("ip", "")), str(body.get("label", ""))
+        on = bool(body.get("on", True))
+        if not ip or lab not in collab.LABELS:
+            raise HTTPException(400, f"ip + label required (label in {collab.LABELS})")
+        _mutate(lambda st: collab.set_label(st, ip, lab, on),
+                {"type": "label", "ip": ip, "label": lab, "on": on, "by": x_tester},
+                None, x_tester)
+        return {"ok": True}
+
+    @app.post("/api/port_status")
+    def port_status(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        ip, port = str(body.get("ip", "")), body.get("port")
+        status = str(body.get("status", ""))
+        if not ip or port is None:
+            raise HTTPException(400, "ip + port required")
+        _mutate(lambda st: collab.set_port_status(st, ip, port, status),
+                {"type": "port_status", "ip": ip, "port": port, "status": status,
+                 "by": x_tester}, None, x_tester)
+        return {"ok": True}
+
+    @app.post("/api/dismiss")
+    def dismiss(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        key = str(body.get("key", ""))
+        on = bool(body.get("on", True))
+        if not key:
+            raise HTTPException(400, "no key")
+        _mutate(lambda st: collab.set_dismissed(st, key, x_tester, on),
+                {"type": "dismiss", "key": key, "on": on, "by": x_tester},
+                ("dismiss", f"{x_tester} {'dismissed' if on else 'restored'} a finding"),
+                x_tester)
+        return {"ok": True}
+
+    @app.post("/api/add/finding")
+    def add_finding(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        from .. import epss, kev
+        from ..models import Host, Vuln
+        from ..store import Store
+        ip = str(body.get("ip", "")).strip()
+        if not ip:
+            raise HTTPException(400, "a host IP is required")
+        title = str(body.get("title", "")).strip() or "Manual finding"
+        sev = str(body.get("severity", "medium")).lower()
+        if sev not in ("critical", "high", "medium", "low", "info"):
+            sev = "medium"
+        port = body.get("port")
+        cves = [c.strip().upper() for c in re.findall(r"CVE-\d{4}-\d+",
+                str(body.get("cve", "")), re.I)]
+        v = Vuln(ip=ip, port=int(port) if str(port).isdigit() else None, protocol="tcp",
+                 script_id=f"manual-{int(time.time())}", state="finding", title=title,
+                 severity=sev, ids=cves, output=str(body.get("output", ""))[:4000],
+                 source="manual", confidence="confirmed")
+        st = Store(db_path)
+        try:
+            host = st.get_host(ip) or Host(ip=ip)
+            host.state = "up"
+            host.vulns.append(v)
+            kev.annotate(host)
+            epss.annotate(host)
+            st.upsert_host(host, merge=True)
+            collab.add_activity(st, x_tester, "add", f"{x_tester} added finding “{title}” on {ip}")
+        finally:
+            st.close()
+        broker.publish({"type": "add", "what": "finding", "ip": ip, "by": x_tester})
+        return {"ok": True}
+
+    @app.post("/api/add/credential")
+    def add_credential(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        from ..models import Credential
+        from ..store import Store
+        user = str(body.get("username", "")).strip()
+        secret = str(body.get("secret", "")).strip()
+        if not user and not secret:
+            raise HTTPException(400, "a username or secret is required")
+        kind = str(body.get("kind", "password"))
+        if kind not in ("password", "nthash", "hash", "blank"):
+            kind = "password"
+        st = Store(db_path)
+        try:
+            added = st.add_credential(Credential(
+                username=user, secret=secret, kind=kind,
+                domain=str(body.get("domain", "")), origin_ip=str(body.get("origin_ip", "")),
+                source="manual", notes=str(body.get("notes", "")) or "added by hand"))
+            collab.add_activity(st, x_tester, "add", f"{x_tester} added a credential for {user or '(secret)'}")
+        finally:
+            st.close()
+        broker.publish({"type": "add", "what": "credential", "by": x_tester})
+        return {"ok": True, "added": added}
+
+    @app.post("/api/add/host")
+    def add_host(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        from ..models import Host
+        from ..store import Store
+        from ..targets import load_targets
+        tokens = str(body.get("targets", "")).split()
+        if not tokens:
+            raise HTTPException(400, "give one or more IPs / ranges / CIDRs")
+        ips, hostnames, subnets = load_targets(tokens)
+        ips = ips[:512]                                       # sanity cap on a big CIDR
+        st = Store(db_path)
+        try:
+            for ip in ips:
+                host = st.get_host(ip) or Host(ip=ip)
+                host.state = "up"
+                host.up_reason = host.up_reason or "manual"
+                host.subnet = host.subnet or subnets.get(ip, "")
+                if hostnames.get(ip) and hostnames[ip] not in host.hostnames:
+                    host.hostnames.append(hostnames[ip])
+                st.upsert_host(host, merge=True)
+            collab.add_activity(st, x_tester, "add", f"{x_tester} added {len(ips)} host(s) to scope")
+        finally:
+            st.close()
+        broker.publish({"type": "add", "what": "host", "count": len(ips), "by": x_tester})
+        return {"ok": True, "added": len(ips)}
+
+    @app.post("/api/add/access")
+    def add_access(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        from ..models import Host
+        from ..store import Store
+        ip = str(body.get("ip", "")).strip()
+        if not ip:
+            raise HTTPException(400, "a host IP is required")
+        note = str(body.get("note", "")).strip() or "foothold recorded by hand"
+        st = Store(db_path)
+        try:
+            host = st.get_host(ip) or Host(ip=ip)
+            host.state = "up"
+            host.access_gained = True
+            host.access_detail = note
+            st.upsert_host(host, merge=True)
+            collab.add_activity(st, x_tester, "access", f"{x_tester} recorded access on {ip}: {note}")
+        finally:
+            st.close()
+        broker.publish({"type": "add", "what": "access", "ip": ip, "by": x_tester})
         return {"ok": True}
 
     @app.get("/api/report/{kind}")
