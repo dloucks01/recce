@@ -467,3 +467,15 @@ body { background: var(--ground); color: var(--text); }
 .tm-n { width: 40px; }
 .actfeed li.clk { cursor: pointer; margin: 0 -4px; padding-left: 4px; padding-right: 4px; border-radius: 7px; }
 .actfeed li.clk:hover { background: var(--surface2); }
+
+/* my-queue button (header) + owner-progress badge (Targets) + queue chip */
+.myqueue { display: inline-flex; align-items: center; gap: 6px; font-family: var(--sans); font-weight: 700;
+  font-size: 12px; padding: 6px 12px; border-radius: 20px; cursor: pointer; white-space: nowrap;
+  color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 12%, var(--surface2));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.myqueue:hover { background: color-mix(in srgb, var(--accent) 20%, var(--surface2)); }
+.myqueue.clear { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); background: color-mix(in srgb, var(--ok) 10%, var(--surface2)); }
+.mq-n { min-width: 18px; height: 18px; padding: 0 5px; display: inline-grid; place-items: center; border-radius: 10px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 800; }
+.ownerprog { font-size: 11px; font-weight: 700; color: var(--muted); background: var(--surface2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; }
+.ownerprog.full { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+.queue-chip { background: var(--accent); border-color: var(--accent); }
