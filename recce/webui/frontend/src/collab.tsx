@@ -3,6 +3,7 @@ import {
   Collab, TRIAGE_LABELS, getCollab, pingPresence, postAssign, postLabel, postPortStatus,
   postDismiss, addFinding, addCredential, addHostScope, addAccess,
 } from "./api";
+import { useEscape } from "./ui";
 
 const EMPTY: Collab = { assignments: {}, labels: {}, port_status: {}, dismissed: {}, activity: [], online: [] };
 
@@ -155,6 +156,7 @@ const IP_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/;
 export function ActivityButton({ onOpenHost }: { onOpenHost?: (ip: string) => void }) {
   const { c } = useCollab();
   const [open, setOpen] = useState(false);
+  useEscape(() => setOpen(false), open);
   return (
     <>
       <button className="theme-tog activity-btn" onClick={() => setOpen(true)}
@@ -295,6 +297,7 @@ function AddModal({ kind, onClose, onDone }:
   const [f, setF] = useState<Record<string, string>>({ severity: "medium", kind: "password" });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  useEscape(onClose, !busy);
   const set = (k: string) => (e: { target: { value: string } }) => setF((p) => ({ ...p, [k]: e.target.value }));
   async function go() {
     setBusy(true); setErr(null);

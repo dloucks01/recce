@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { HostDetail, VulnDetail, getHost } from "./api";
-import { SevTag, NoteCell } from "./ui";
+import { SevTag, NoteCell, useEscape } from "./ui";
 import { FindingDetail } from "./FindingDetail";
 import { PortStatus } from "./collab";
 
@@ -21,12 +21,7 @@ export function HostDrawer(
     getHost(ip).then(setD).catch((e) => setErr(String(e)));
   }, [ip]);
 
-  useEffect(() => {
-    if (!ip) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [ip, onClose]);
+  useEscape(onClose, ip != null);
 
   if (!ip) return null;
 
