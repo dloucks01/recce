@@ -32,7 +32,8 @@ export function Dashboard(
         <Stat k="Services" v={`${ov.services}`} />
         <Stat k="Critical" v={`${ov.by_severity.critical ?? 0}`} cls="crit"
               onClick={() => nav.toFindings({ sev: "critical", leads: true })} />
-        <Stat k="🔥 KEV" v={`${ov.kev_total}`} cls="kev"
+        <Stat k="🔥 Known-exploited" v={`${ov.kev_total}`} cls="kev"
+              title="CISA KEV (Known Exploited Vulnerabilities) — CVEs confirmed exploited in the wild. Fix these first."
               onClick={() => nav.toFindings({ kev: true })} />
         <Stat k="Reviewed" v={`${reviewPct}%`} sub={`${ov.reviewed}/${ov.findings_total}`}
               onClick={() => nav.toFindings({ unreviewed: true })} />
@@ -78,8 +79,12 @@ export function Dashboard(
         </section>
 
         <section className="panel">
-          <div className="panel-h"><h3>🔥 Known-exploited</h3>
-            <button className="link" onClick={() => nav.toFindings({ kev: true })}>all KEV →</button></div>
+          <div className="panel-h">
+            <div>
+              <h3>🔥 Known-exploited (CISA KEV)</h3>
+              <span className="panel-sub">CVEs confirmed exploited in the wild — fix these first</span>
+            </div>
+            <button className="link" onClick={() => nav.toFindings({ kev: true })}>view all →</button></div>
           <ul className="kevlist">
             {ov.kev_findings.length === 0 && <li className="muted">no KEV findings</li>}
             {ov.kev_findings.map((f) => (
@@ -89,7 +94,7 @@ export function Dashboard(
                   <div className="t">{f.title}</div>
                   <div className="m mono">{f.ip}{f.port ? `:${f.port}` : ""} {f.cve && `· ${f.cve}`}</div>
                 </div>
-                {f.epss > 0 && <span className="badge epss">EPSS {f.epss}%</span>}
+                {f.epss > 0 && <span className="badge epss" title="EPSS — 30-day probability this CVE is exploited (FIRST.org)">EPSS {f.epss}%</span>}
               </li>
             ))}
           </ul>
@@ -141,7 +146,7 @@ function NextMoves({ nav }: { nav: Nav }) {
                 {c.target && c.target !== "engagement" && <span className="mono nm-tgt"> {c.target}</span>}</div>
               <div className="nm-y muted">→ {c.yields}</div>
             </div>
-            <span className="badge nm-arch">{c.archetype}</span>
+            <span className="badge nm-arch">{archLabel(c.archetype)}</span>
           </li>
         ))}
       </ul>
@@ -224,8 +229,8 @@ export function Findings(
                   <div className="t"><span className="caret">{open ? "▾" : "▸"}</span> {x.title}</div>
                   <div className="m">{x.cve && <span>{x.cve} · </span>}{x.source}</div>
                   <div className="badges">
-                    {x.kev && <span className="badge kev">🔥 KEV</span>}
-                    {x.epss > 0 && <span className="badge epss">EPSS {x.epss}%</span>}
+                    {x.kev && <span className="badge kev" title="CISA Known Exploited Vulnerability — confirmed exploited in the wild; fix first">🔥 KEV</span>}
+                    {x.epss > 0 && <span className="badge epss" title="EPSS — 30-day probability this CVE is exploited (FIRST.org)">EPSS {x.epss}%</span>}
                   </div>
                 </td>
                 <td className="mono host-link" onClick={() => nav.openHost(x.ip)} title="host detail">
@@ -426,6 +431,10 @@ const ARCH_ICON: Record<string, string> = {
   loot: "🔓", crack: "🔑", spray: "💧", exploit: "💥", escalate: "⬆️",
   pivot: "↪️", "ad-path": "👑", "default-cred": "🔐",
 };
+// Display labels — keep the internal archetype keys, but present them professionally
+// (e.g. "loot" reads as "collect" in the UI).
+const ARCH_LABEL: Record<string, string> = { loot: "collect" };
+const archLabel = (a: string) => ARCH_LABEL[a] || a;
 
 function ActCardRow({ c, nav }: { c: ActCard; nav: Nav }) {
   const [copied, setCopied] = useState(false);
@@ -436,7 +445,7 @@ function ActCardRow({ c, nav }: { c: ActCard; nav: Nav }) {
   return (
     <div className={"actcard tier-" + c.tier}>
       <div className="actcard-h">
-        <span className="arch">{ARCH_ICON[c.archetype] || "•"} {c.archetype}</span>
+        <span className="arch">{ARCH_ICON[c.archetype] || "•"} {archLabel(c.archetype)}</span>
         <span className="acttitle">{c.title}{c.count > 1 ? ` ·+${c.count - 1}` : ""}</span>
         {host && <span className="mono host-link" onClick={() => nav.openHost(host)} title="host detail">{c.target}</span>}
         <span className="actscore" title="impact × confidence × leverage">{c.score}</span>
@@ -475,8 +484,8 @@ export function Act({ nav }: { nav: Nav }) {
     try {
       const r = await postActRun();
       setRanMsg(r.looted > 0
-        ? `Looted ${r.looted} new credential(s) — see the Loot tab. Spray plan refreshed.`
-        : "No new credentials to loot (already captured, or hosts unreachable).");
+        ? `Collected ${r.looted} new credential(s) — see the Credentials tab. Spray plan refreshed.`
+        : "No new credentials collected (already captured, or hosts unreachable).");
       await load();
     } catch { setRanMsg("run failed — is the engagement reachable?"); }
     finally { setRunning(false); }
@@ -493,12 +502,12 @@ export function Act({ nav }: { nav: Nav }) {
         <div className="chips">
           <button className={"chip" + (arch === "all" ? " sel" : "")} onClick={() => setArch("all")}>all</button>
           {ARCHETYPES.map((a) => (
-            <button key={a} className={"chip" + (arch === a ? " sel" : "")} onClick={() => setArch(a)}>{a}</button>
+            <button key={a} className={"chip" + (arch === a ? " sel" : "")} onClick={() => setArch(a)}>{archLabel(a)}</button>
           ))}
         </div>
         <button className="run auto-loot" onClick={runAuto} disabled={running}
-                title="loot the read-only unauth services + refresh the spray plan (intrusive actions are never auto-run)">
-          {running ? "Looting…" : "⚡ Run read-only loot"}
+                title="collect credentials from the read-only unauth services + refresh the spray plan (intrusive actions are never auto-run)">
+          {running ? "Collecting…" : "⚡ Collect credentials (read-only)"}
         </button>
       </div>
       {ranMsg && <div className="ranmsg">{ranMsg}</div>}
@@ -576,9 +585,9 @@ export function Loot() {
     finally { setSpraying(false); }
   }
   if (err) return <div className="err">{err}</div>;
-  if (!creds) return <div className="loading">Loading loot…</div>;
+  if (!creds) return <div className="loading">Loading credentials…</div>;
   if (creds.length === 0)
-    return <div className="empty">No credentials extracted yet. Loot lands here after the loot-bearing modules run — web .git/.env, DB trust/empty-password, SMB shares, kerberoast, GPP.</div>;
+    return <div className="empty">No credentials collected yet. They appear here once the credential-bearing modules run — web <code>.git</code>/<code>.env</code>, database trust / empty-password, SMB shares, Kerberoasting, GPP.</div>;
   const bySource: Record<string, number> = {};
   creds.forEach((c) => { bySource[c.source] = (bySource[c.source] || 0) + 1; });
   const toggle = (i: number) => setReveal((s) => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n; });
@@ -592,7 +601,7 @@ export function Loot() {
       </section>
       <section className="panel spraybar">
         <div className="panel-h"><h3>Spray these credentials</h3>
-          <span className="muted">reuse the loot across the login surface (SMB/WinRM/MSSQL/LDAP/SSH)</span></div>
+          <span className="muted">reuse the collected credentials across the login surface (SMB/WinRM/MSSQL/LDAP/SSH)</span></div>
         <div className="spray-row">
           <input className="scan-in" placeholder="target scope — blank = all, or 10.0.0.5 / 10.0.0.0/24"
                  value={tgt} onChange={(e) => setTgt(e.target.value)} disabled={spraying} />
@@ -618,8 +627,8 @@ export function Loot() {
       </section>
 
       <section className="panel">
-        <div className="panel-h"><h3>Extracted credentials</h3>
-          <span className="muted">what recce looted / captured — or <code>recce creds --run</code> to spray</span></div>
+        <div className="panel-h"><h3>Collected credentials</h3>
+          <span className="muted">what recce collected / captured — or <code>recce creds --run</code> to spray</span></div>
         <div className="tablewrap">
           <table className="loottable">
             <thead><tr><th>Account</th><th>Secret</th><th>Kind</th><th>Source</th><th>From</th><th>Notes</th></tr></thead>

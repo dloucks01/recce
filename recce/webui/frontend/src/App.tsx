@@ -186,7 +186,7 @@ export default function App() {
   // what we EXTRACTED -> host/target detail.
   const TABS: [Tab, string][] = [
     ["dashboard", "Dashboard"], ["findings", "Findings"], ["act", "Act"],
-    ["loot", "Loot"], ["hosts", "Hosts"], ["targets", "Targets"],
+    ["loot", "Credentials"], ["hosts", "Hosts"], ["targets", "Targets"],
   ];
 
   return (

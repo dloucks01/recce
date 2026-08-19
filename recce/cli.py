@@ -2968,6 +2968,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         for n in degraded:
             if n in _install:
                 print(f"      - {n}: {_install[n]}")
+        print("\nNext")
+        print("  Solo, in the terminal:   recce run <targets> -o eng   (or: enum -> vulns -> sweep)")
+        print("  Prefer a browser / working as a TEAM:")
+        print("      recce serve -o eng      -> the web workbench at http://<this-box>:8008")
+        print("      run scans, triage findings, collect + spray credentials, export the report;")
+        print("      the whole team shares one live view over the LAN.")
         verdict = 0
     return verdict
 

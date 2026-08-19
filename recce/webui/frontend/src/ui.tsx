@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { SEVS } from "./api";
 
 export function Stat(
-  { k, v, sub, cls, onClick }:
-  { k: string; v: string; sub?: string; cls?: string; onClick?: () => void }
+  { k, v, sub, cls, onClick, title }:
+  { k: string; v: string; sub?: string; cls?: string; onClick?: () => void; title?: string }
 ) {
   return (
-    <div className={"stat" + (cls ? " " + cls : "") + (onClick ? " click" : "")} onClick={onClick}>
+    <div className={"stat" + (cls ? " " + cls : "") + (onClick ? " click" : "")} onClick={onClick} title={title}>
       <div className="k">{k}</div>
       <div className="v">{v} {sub && <small>{sub}</small>}</div>
     </div>
