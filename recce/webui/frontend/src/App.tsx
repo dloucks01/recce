@@ -4,7 +4,7 @@ import {
 } from "./api";
 import { Dashboard, Findings, Hosts, Act, Loot, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
-import { PresenceBar, ActivityButton, AddMenu, MyQueue, useCollab } from "./collab";
+import { PresenceBar, ActivityButton, ChatButton, AddMenu, MyQueue, useCollab } from "./collab";
 import { useEscape } from "./ui";
 
 type Tab = "dashboard" | "hosts" | "findings" | "act" | "loot";
@@ -273,6 +273,9 @@ export default function App() {
           if (d.type === "assign") note(`${d.by} ${d.tester ? "claimed" : "released"} ${d.ip}`);
           else if (d.type === "add") note(`${d.by} added a ${d.what}`);
         }
+      } else if (d.type === "chat" && d.msg) {
+        collab.pushChat(d.msg);
+        if (d.msg.tester !== tester) note(`💬 ${d.msg.tester}: ${d.msg.text || "sent an image"}`.slice(0, 80));
       }
     };
     return () => es.close();
@@ -354,6 +357,7 @@ export default function App() {
         </nav>
         <MyQueue hosts={hosts} onOpen={() => nav.toHosts({ owner: "queue" })} />
         <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
+        <ChatButton />
         <ActivityButton onOpenHost={(ip) => nav.openHost(ip)} />
         <button className="theme-tog" onClick={() => setDensity((d) => (d === "compact" ? "comfortable" : "compact"))}
                 title={density === "compact" ? "comfortable rows" : "compact rows"} aria-label="toggle density">

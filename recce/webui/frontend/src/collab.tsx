@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
-  Collab, TRIAGE_LABELS, getCollab, pingPresence, postAssign, postLabel, postPortStatus,
-  postDismiss, addFinding, addCredential, addHostScope, addAccess,
+  Collab, ChatMsg, TRIAGE_LABELS, getCollab, getChat, postChat, pingPresence, postAssign,
+  postLabel, postPortStatus, postDismiss, addFinding, addCredential, addHostScope, addAccess,
 } from "./api";
 import { useEscape } from "./ui";
 
@@ -15,6 +15,11 @@ type Ctx = {
   label: (ip: string, label: string, on: boolean) => void;
   portStatus: (ip: string, port: number, status: string) => void;
   dismiss: (key: string, on: boolean) => void;
+  chat: ChatMsg[];
+  unread: number;
+  sendChat: (text: string, image: string) => Promise<void>;
+  pushChat: (m: ChatMsg) => void;
+  markChatRead: () => void;
 };
 const CollabCtx = createContext<Ctx | null>(null);
 export const useCollab = () => useContext(CollabCtx)!;
@@ -31,6 +36,20 @@ export function CollabProvider({ children }: { children: React.ReactNode }) {
     return () => { window.clearInterval(poll); window.clearInterval(beat); };
   }, [refresh]);
 
+  // chat: history loaded once; live messages arrive via SSE (pushChat, called by App)
+  const [chat, setChat] = useState<ChatMsg[]>([]);
+  const [unread, setUnread] = useState(0);
+  useEffect(() => { getChat().then(setChat).catch(() => {}); }, []);
+  const pushChat = useCallback((m: ChatMsg) => {
+    setChat((cs) => (cs.some((x) => x.id === m.id) ? cs : [...cs, m]));
+    if (m.tester !== me()) setUnread((u) => u + 1);
+  }, []);
+  const markChatRead = useCallback(() => setUnread(0), []);
+  const sendChat = useCallback(async (text: string, image: string) => {
+    const m = await postChat(text, image);       // server broadcasts; SSE echoes to everyone
+    pushChat(m);                                  // reflect our own message immediately
+  }, [pushChat]);
+
   // optimistic local update, then reconcile from the server broadcast
   const opt = (fn: (d: Collab) => Collab, call: Promise<unknown>) => {
     setC((d) => fn(structuredClone(d)));
@@ -42,6 +61,7 @@ export function CollabProvider({ children }: { children: React.ReactNode }) {
     label: (ip, l, on) => opt((d) => { const s = new Set(d.labels[ip] || []); on ? s.add(l) : s.delete(l); d.labels[ip] = [...s]; return d; }, postLabel(ip, l, on)),
     portStatus: (ip, port, status) => opt((d) => { const k = `${ip}:${port}`; if (status) d.port_status[k] = status; else delete d.port_status[k]; return d; }, postPortStatus(ip, port, status)),
     dismiss: (key, on) => opt((d) => { if (on) d.dismissed[key] = me(); else delete d.dismissed[key]; return d; }, postDismiss(key, on)),
+    chat, unread, sendChat, pushChat, markChatRead,
   };
   return <CollabCtx.Provider value={value}>{children}</CollabCtx.Provider>;
 }
@@ -194,6 +214,85 @@ function when(ts: number) {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
+}
+
+/* ------------------------------ team chat -------------------------------- */
+export function ChatButton() {
+  const { chat, unread, sendChat, markChatRead, me } = useCollab();
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [img, setImg] = useState("");           // full data: URL of a pasted image
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const endRef = useRef<HTMLDivElement>(null);
+  useEscape(() => setOpen(false), open);
+  useEffect(() => { if (open) markChatRead(); }, [open, chat.length, markChatRead]);
+  useEffect(() => { if (open) endRef.current?.scrollIntoView({ block: "end" }); }, [open, chat.length]);
+
+  function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/"));
+    if (item) {
+      const file = item.getAsFile();
+      if (file) { const r = new FileReader(); r.onload = () => setImg(String(r.result || "")); r.readAsDataURL(file); }
+      e.preventDefault();
+    }
+  }
+  async function send() {
+    if ((!text.trim() && !img) || busy) return;
+    setBusy(true); setErr("");
+    try { await sendChat(text.trim(), img ? img.split(",")[1] || "" : ""); setText(""); setImg(""); }
+    catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+  return (
+    <>
+      <button className="theme-tog chat-btn" onClick={() => setOpen(true)} title="team chat" aria-label="team chat">
+        💬{unread > 0 && <span className="chat-badge">{unread > 9 ? "9+" : unread}</span>}
+      </button>
+      {open && (
+        <>
+          <div className="drawer-backdrop" onClick={() => setOpen(false)} />
+          <div className="drawer chat-drawer">
+            <button className="drawer-x" onClick={() => setOpen(false)}>✕</button>
+            <div className="dh"><div className="dh-ip">Team chat</div>
+              <div className="dh-name">shared with everyone on this engagement</div></div>
+            <div className="chatlog">
+              {chat.length === 0 && <div className="chat-empty">No messages yet — say hi 👋</div>}
+              {chat.map((m) => (
+                <div key={m.id} className={"chatmsg" + (m.tester === me ? " mine" : "")}>
+                  <span className="avatar sm" style={{ background: `hsl(${hue(m.tester)} 55% 45%)` }}>{initials(m.tester)}</span>
+                  <div className="cm-body">
+                    <div className="cm-head"><b>{m.tester === me ? "you" : m.tester}</b>
+                      <span className="cm-when">{when(m.ts)}</span></div>
+                    {m.text && <div className="cm-text">{m.text}</div>}
+                    {m.image && (
+                      <a href={`/api/chat/media/${m.image}`} target="_blank" rel="noopener">
+                        <img className="cm-img" src={`/api/chat/media/${m.image}`} alt="shared" loading="lazy" />
+                      </a>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <div ref={endRef} />
+            </div>
+            {img && (
+              <div className="chat-preview">
+                <img src={img} alt="pending attachment" />
+                <button className="tagbtn" onClick={() => setImg("")}>remove</button>
+              </div>
+            )}
+            {err && <div className="ranmsg warn-msg">{err}</div>}
+            <div className="chat-input">
+              <textarea placeholder="Message the team… (paste a screenshot to attach)" value={text}
+                        onChange={(e) => setText(e.target.value)} onPaste={onPaste}
+                        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
+              <button className="btn primary" onClick={send} disabled={busy || (!text.trim() && !img)}>Send</button>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
 }
 
 /* -------------------------- assignment + labels -------------------------- */

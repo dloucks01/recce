@@ -181,3 +181,9 @@ export const addFinding = (b: { ip: string; port?: string; title: string; severi
 export const addCredential = (b: { username: string; secret: string; kind: string; domain?: string; origin_ip?: string; notes?: string }) => post("/api/add/credential", b);
 export const addHostScope = (targets: string) => post("/api/add/host", { targets });
 export const addAccess = (ip: string, note: string) => post("/api/add/access", { ip, note });
+
+// --- team chat ----------------------------------------------------------------
+export type ChatMsg = { id: string; ts: number; tester: string; text: string; image: string };
+export async function getChat(): Promise<ChatMsg[]> { return getJSON<ChatMsg[]>("/api/chat"); }
+// image = base64 (no data: prefix) or "" for text-only
+export const postChat = (text: string, image: string): Promise<ChatMsg> => post("/api/chat", { text, image });
