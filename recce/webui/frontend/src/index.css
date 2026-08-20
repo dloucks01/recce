@@ -576,3 +576,8 @@ body { background: var(--ground); color: var(--text); }
 .chat-input { display: flex; gap: 8px; align-items: flex-end; margin-top: 10px; border-top: 1px solid var(--line); padding-top: 12px; }
 .chat-input textarea { flex: 1; height: 44px; max-height: 130px; resize: vertical; font-family: var(--sans); font-size: 13.5px; line-height: 1.45; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--ground); color: var(--text); }
 .chat-input textarea::placeholder { color: var(--faint); }
+
+/* ---- draggable drawer resize handle (chat) ---- */
+.drawer-resize { position: absolute; left: 0; top: 0; width: 8px; height: 100%; cursor: ew-resize; z-index: 43; }
+.drawer-resize::after { content: ""; position: absolute; left: 2px; top: 50%; transform: translateY(-50%); width: 3px; height: 44px; border-radius: 3px; background: var(--line); transition: background .12s; }
+.drawer-resize:hover::after, .drawer-resize:active::after { background: var(--accent); height: 64px; }
