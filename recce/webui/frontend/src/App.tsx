@@ -378,8 +378,10 @@ export default function App() {
           ))}
         </nav>
         {pb?.next && (
-          <button className="nextchip" onClick={() => setTab("playbook")} title={pb.next.cmd || "open the playbook"}>
-            <span className="nc-lab">▶ next</span>{pb.next.label}
+          <button className="nextchip" onClick={() => setTab("playbook")}
+                  title={`${pb.next.label}${pb.next.cmd ? ` — ${pb.next.cmd}` : ""}`}>
+            <span className="nc-lab">▶ next</span>
+            <span className="nc-txt">{pb.next.label}</span>
           </button>
         )}
         <MyQueue hosts={hosts} onOpen={() => nav.toHosts({ owner: "queue" })} />
