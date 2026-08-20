@@ -5330,8 +5330,9 @@ def _service_module_coverage(store, hosts) -> list[dict]:
 def cmd_serve(args: argparse.Namespace) -> int:
     """Serve the web workbench for this engagement. One recce instance hosts it; the
     team opens http://<this-box>:<port> in a browser over the LAN. Run scans from the
-    UI with live progress (SSE), work the Findings/Act/Loot tabs, export reports, and
-    collaborate via shared notes + review ticks."""
+    UI, work the Hosts/Findings/Act/Credentials tabs, import tool output, collaborate
+    (claim/assign, presence, activity, chat), and export reports. Unauthenticated -
+    run only on a trusted engagement network (see SECURITY.md)."""
     _open_paths(args.output_dir)          # ensure the engagement dir exists (scan from UI)
     try:
         import uvicorn
@@ -5343,6 +5344,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     app = create_app(args.output_dir)
     print(f"[+] recce workbench -> http://{args.host}:{args.port}   "
           f"(engagement: {args.output_dir})")
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print("    ⚠ UNAUTHENTICATED and reachable on this network: anyone who can reach "
+              "the URL gets\n      full access (findings, credentials, scans). Run only on a "
+              "TRUSTED engagement\n      network - or use --host 127.0.0.1 to keep it local. "
+              "See SECURITY.md §7.")
     print("    Open it in a browser; share the URL with your team on the LAN. Ctrl-C to stop.")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

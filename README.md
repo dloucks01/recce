@@ -171,10 +171,25 @@ recce serve -o acme --port 9000     # pick the port; --host to change the bind a
 ```
 
 It serves the **same datastore** the CLI writes, so terminal and browser stay in
-sync. Run `enum`/`vulns`/`run` from the UI with live progress, work the
-**Dashboard** (with a *Next moves* panel), **Hosts**, **Findings** (tiered by
-confidence), **Act** (ranked action cards + attack-path graph) and **Loot**
-(captured creds + a lockout-safe spray) tabs, and export the report in one click.
+sync. Run `enum`/`vulns`/`run` from the UI with live progress and work the
+**Dashboard** (*Next moves* + team coverage), **Hosts** (coverage/ownership filters,
+per-host progress), **Findings** (tiered by confidence), **Act** (ranked action cards +
+attack-path graph) and **Credentials** (captured creds + a lockout-safe spray) tabs,
+then export the report in one click.
+
+Built for a **team on one engagement**, live over SSE:
+
+- **Coordinate** — claim/assign hosts, triage labels, a presence roster, an activity
+  feed, per-tester progress, and a **My queue** of your unreviewed hosts.
+- **Import from anywhere** — drop or paste output from ~14 tools (nmap/masscan, Nessus,
+  OpenVAS, nuclei, testssl, netexec, impacket roast/secretsdump, BloodHound+Certipy,
+  on-target loot, fieldkit…) straight into the live engagement.
+- **Add by hand** — a finding, credential, host, or access record — and **chat** with
+  the team (text + pasted screenshots).
+
+> ⚠️ **The workbench is unauthenticated and binds to `0.0.0.0` by default** — anyone who
+> can reach the URL has full access to the engagement (findings, credentials, scans).
+> Run it only on a trusted engagement network; see **[SECURITY.md](SECURITY.md) §7**.
 
 The web UI needs `fastapi` + `uvicorn` — both are **bundled in the airgap package**.
 For a dev install: `pip install 'recce[bundle]'`.
