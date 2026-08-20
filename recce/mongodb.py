@@ -10,8 +10,7 @@ hand-rolled on a raw socket - no pymongo. Airgapped, stdlib only.
     enforced (recce reports it reachable-but-locked, not a finding).
 
 Positive findings fold into the severity totals, the Vulnerabilities sheet, the
-write-ups, a dedicated **MongoDB** tab, and the prove engine. Safety posture: see
-SECURITY.md.
+write-ups, a dedicated **MongoDB** tab, and the prove engine.
 """
 from __future__ import annotations
 
@@ -237,10 +236,6 @@ _NARRATIVE = {
         "pre-2.6 defaults exposed the HTTP/REST interfaces and pre-3.0 shipped with no "
         "authentication out of the box - confirm the running config and upgrade."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

@@ -14,7 +14,7 @@ binary. Airgapped, stdlib only, read-only.
     line and stops - it never transfers a file.
 
 Positive findings fold into the severity totals, the Vulnerabilities sheet, the
-write-ups, a dedicated **rsync** tab, and the prove engine. Safety posture: SECURITY.md.
+write-ups, a dedicated **rsync** tab, and the prove engine.
 """
 from __future__ import annotations
 
@@ -186,10 +186,6 @@ _NARRATIVE = {
         "source code, credentials. Require 'auth users' + a secrets file, set 'read "
         "only = true', and restrict with hosts allow / a firewall immediately."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

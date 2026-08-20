@@ -154,12 +154,6 @@ def technique_for_archetype(archetype: str) -> Technique | None:
     return _ARCHETYPE.get(archetype)
 
 
-def stage_tactic(stage: str) -> tuple[str, str]:
-    """(tactic name, tactic id) for an attackpath stage."""
-    name = _STAGE_TACTIC.get(stage, stage)
-    return name, TACTICS.get(name, "")
-
-
 def coverage(hosts) -> dict:
     """Engagement-wide ATT&CK coverage: techniques observed, grouped by tactic, with the
     hosts each was seen on. For the report's ATT&CK section."""

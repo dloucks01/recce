@@ -16,7 +16,7 @@ redis-py. Airgapped, stdlib only.
 
 Positive findings fold into the severity totals, the Vulnerabilities sheet, the
 write-ups, a dedicated **Redis** tab, and the prove engine. Read-only: recce never
-writes a key, rewrites the config, or calls SAVE. Safety posture: see SECURITY.md.
+writes a key, rewrites the config, or calls SAVE.
 """
 from __future__ import annotations
 
@@ -249,10 +249,6 @@ _NARRATIVE = {
         "several Lua-sandbox-escape and module-load RCE issues affect older lines - "
         "confirm the running version and upgrade."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

@@ -293,25 +293,29 @@ class Store:
             rows = cur.execute("SELECT data FROM hosts ORDER BY ip").fetchall()
         return [Host.from_json(json.loads(r[0])) for r in rows]
 
-    def scanned_ips(self) -> set[str]:
-        with closing(self.conn.cursor()) as cur:
-            rows = cur.execute("SELECT ip FROM hosts").fetchall()
-        return {r[0] for r in rows}
-
     # --- domains ----------------------------------------------------------------
 
     def upsert_domain(self, domain: Domain) -> None:
+        """Atomic like upsert_host: merge_domain is a union merge (accumulates
+        dc_ips/trusts/sources), so two concurrent writers must not both read the same
+        record and clobber each other. BEGIN IMMEDIATE takes the write lock before the
+        read."""
         from .ad import merge_domain
-        existing = self.get_domain(domain.name)
-        if existing:
-            domain = merge_domain(existing, domain)
-        with closing(self.conn.cursor()) as cur:
-            cur.execute(
-                "INSERT INTO domains(name, data) VALUES(?,?) "
-                "ON CONFLICT(name) DO UPDATE SET data=excluded.data",
-                (domain.name.lower(), json.dumps(domain.to_json())),
-            )
-        self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.get_domain(domain.name)
+            if existing:
+                domain = merge_domain(existing, domain)
+            with closing(self.conn.cursor()) as cur:
+                cur.execute(
+                    "INSERT INTO domains(name, data) VALUES(?,?) "
+                    "ON CONFLICT(name) DO UPDATE SET data=excluded.data",
+                    (domain.name.lower(), json.dumps(domain.to_json())),
+                )
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
 
     def get_domain(self, name: str) -> Domain | None:
         with closing(self.conn.cursor()) as cur:
@@ -345,16 +349,24 @@ class Store:
 
     def set_reviewed(self, key: str, reviewed: bool, notes: str | None = None,
                      when: str = "") -> None:
-        with closing(self.conn.cursor()) as cur:
-            row = cur.execute("SELECT notes FROM tracking WHERE key=?", (key,)).fetchone()
-            keep_notes = row[0] if (row and notes is None) else (notes or "")
-            cur.execute(
-                "INSERT INTO tracking(key, reviewed, notes, updated) VALUES(?,?,?,?) "
-                "ON CONFLICT(key) DO UPDATE SET reviewed=excluded.reviewed, "
-                "notes=excluded.notes, updated=excluded.updated",
-                (key, 1 if reviewed else 0, keep_notes, when),
-            )
-        self.conn.commit()
+        # Atomic read-modify-write: the SELECT preserves an existing note when the
+        # caller passes notes=None, so a concurrent writer between read and write
+        # must not slip in. BEGIN IMMEDIATE takes the write lock before the read.
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            with closing(self.conn.cursor()) as cur:
+                row = cur.execute("SELECT notes FROM tracking WHERE key=?", (key,)).fetchone()
+                keep_notes = row[0] if (row and notes is None) else (notes or "")
+                cur.execute(
+                    "INSERT INTO tracking(key, reviewed, notes, updated) VALUES(?,?,?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET reviewed=excluded.reviewed, "
+                    "notes=excluded.notes, updated=excluded.updated",
+                    (key, 1 if reviewed else 0, keep_notes, when),
+                )
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
 
     def bulk_set_tracking(self, items: dict[str, tuple], when: str = "") -> int:
         """items: {key: (reviewed_bool, notes)}. Returns number of rows written."""

@@ -27,7 +27,6 @@ holds and text a fieldkit operator brings back.
 from __future__ import annotations
 
 import ipaddress
-import json
 import re
 from typing import Any
 

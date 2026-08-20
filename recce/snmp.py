@@ -10,7 +10,7 @@ pysnmp. Airgapped, stdlib only.
 
 Every positive folds into the severity totals, the Vulnerabilities sheet, the
 write-ups, a dedicated **SNMP** tab, and the enumerated Windows users become Account
-objects that populate Users & Accounts. Safety posture: see SECURITY.md.
+objects that populate Users & Accounts.
 """
 from __future__ import annotations
 
@@ -332,10 +332,6 @@ _NARRATIVE = {
         "reveals the security stack (AV/EDR), unpatched or vulnerable software, and "
         "juicy targets - all pre-authentication reconnaissance."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

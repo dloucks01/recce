@@ -13,7 +13,7 @@ client library. Airgapped, stdlib only.
 
 Positive findings fold into the severity totals, the Vulnerabilities sheet, the
 write-ups, a dedicated **Elasticsearch** tab, and the prove engine. Read-only: recce
-only issues GETs - it never indexes, updates, or deletes. Safety posture: SECURITY.md.
+only issues GETs - it never indexes, updates, or deletes.
 """
 from __future__ import annotations
 
@@ -152,10 +152,6 @@ _NARRATIVE = {
         "execution (e.g. CVE-2015-1427, CVE-2014-3120) and predate the free built-in "
         "security - confirm the running version and upgrade."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

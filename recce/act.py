@@ -24,7 +24,6 @@ docs/design/ACT-PHASE.md. This slice (P1) is guidance-only: it classifies, ranks
 """
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
 

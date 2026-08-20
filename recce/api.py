@@ -28,10 +28,6 @@ _GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/v1/graphql", "/query"]
 _INTROSPECT = '{"query":"query{__schema{queryType{name}}}"}'
 
 
-def is_api_candidate(port) -> bool:
-    return web.is_web(port)
-
-
 def _base(ip: str, port) -> str:
     return f"{'https' if probes._is_tls(port) else 'http'}://{ip}:{port.portid}"
 

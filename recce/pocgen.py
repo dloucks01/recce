@@ -14,7 +14,7 @@ It writes a Markdown dossier and a runnable Python *harness skeleton* per CVE.
 recce REFERENCES published exploits and SCAFFOLDS a harness; it does not author
 weaponized exploit code. The harness pins the target, runs a safe check, points at the
 published exploit, and marks the single [TESTER] line where the operator runs the
-ROE-approved action. Authorized-testing use only - see SECURITY.md.
+ROE-approved action. Authorized-testing use only.
 """
 from __future__ import annotations
 
@@ -26,11 +26,18 @@ import subprocess
 
 from . import epss, exploitref, kev, poc, vulndb
 
-_CVE_RE = re.compile(r"CVE-\d{4}-\d{3,7}", re.I)
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
 
 
 def valid_cve(s: str) -> bool:
     return bool(_CVE_RE.fullmatch(s.strip()))
+
+
+def _harness_safe(s: str) -> str:
+    """Neutralize scan-derived free-text (finding titles, Exploit-DB paths) for embedding
+    inside the generated harness's triple-quoted docstring/comments, so a title containing
+    `\"\"\"`, a backslash or a newline can't produce invalid Python."""
+    return (s or "").replace("\\", "/").replace('"""', "'''").replace("\r", " ").replace("\n", " ")
 
 
 def sig_for_cve(cve: str) -> dict | None:
@@ -171,10 +178,11 @@ def render_harness(d: dict) -> str:
         refs.append(d["msf"])
     for e in d["edb"][:5]:
         refs.append(f"EDB-{e['edb_id']}: {e['path']}")
-    ref_block = "\n".join(f"#   - {r}" for r in refs) or "#   - (none mapped offline)"
+    ref_block = "\n".join(f"#   - {_harness_safe(r)}" for r in refs) or "#   - (none mapped offline)"
     all_targets = [f'("{x["ip"]}", {x["port"] or 0})' for x in d["affected"]] or [f'("{target}", {port})']
+    title = _harness_safe(d["title"])
     return f'''#!/usr/bin/env python3
-"""PoC harness scaffold for {cve} — {d["title"]}.
+"""PoC harness scaffold for {cve} — {title}.
 
 AUTHORIZED TESTING ONLY. This is a scaffold, not a weaponized exploit: it pins the
 target, runs a SAFE check, and points at the PUBLISHED exploit. Implement the
@@ -240,14 +248,22 @@ def generate(cves: list[str], hosts: list, out_dir: str,
             fh.write(render_harness(d))
         copied = 0
         if with_exploits:
+            used: set[str] = set()
             for e in d["edb"]:
                 src = e.get("path", "")
-                if src and os.path.isfile(src):
-                    try:
-                        shutil.copy2(src, os.path.join(cdir, os.path.basename(src)))
-                        copied += 1
-                    except OSError:
-                        pass
+                if not (src and os.path.isfile(src)):
+                    continue
+                name = os.path.basename(src)
+                if name in used:                       # two EDB entries can share a
+                    name = f"{e.get('edb_id') or 'edb'}-{name}"   # basename - keep both
+                if name in used:
+                    continue
+                try:
+                    shutil.copy2(src, os.path.join(cdir, name))
+                    used.add(name)
+                    copied += 1
+                except OSError:
+                    pass
         results.append({"cve": cve, "affected": len(d["affected"]), "kev": d["kev"],
                         "epss": d["epss"], "edb": len(d["edb"]), "msf": bool(d["msf"]),
                         "recipe": d["recipe_key"], "exploits_copied": copied, "dir": cdir})

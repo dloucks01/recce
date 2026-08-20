@@ -6,8 +6,7 @@ can create a container that bind-mounts the host root and runs as root, i.e. ins
 root-level RCE on the Docker host. recce reads the API unauthenticated - /version,
 /info, /containers/json, /images/json - and, if it answers, reports a CONFIRMED
 critical finding (the successful unauthenticated read IS the proof). Everything folds
-into the main totals and a dedicated Docker tab. Airgapped, stdlib only. Safety
-posture: see SECURITY.md.
+into the main totals and a dedicated Docker tab. Airgapped, stdlib only.
 """
 from __future__ import annotations
 
@@ -151,10 +150,6 @@ _NARRATIVE = {
         "database passwords, API keys and cloud credentials - reconnaissance that "
         "feeds the next hop even before the container-escape is used."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

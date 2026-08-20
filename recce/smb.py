@@ -17,8 +17,7 @@ Everything positive becomes a finding that folds into the main severity totals,
 the Vulnerabilities sheet, the write-ups, and a dedicated **SMB** workbook tab -
 and each finding carries the exact existing-tool command to prove or abuse it.
 Airgapped, stdlib only for the probe; the live layer shells out to the same
-tools `credenum` already uses and degrades cleanly when they're absent. Safety
-posture: see SECURITY.md.
+tools `credenum` already uses and degrades cleanly when they're absent.
 """
 from __future__ import annotations
 
@@ -235,10 +234,6 @@ _NARRATIVE = {
         "real by dropping a harmless marker, listing it, and immediately deleting it "
         "again (fully reversible)."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [
