@@ -215,6 +215,89 @@ class EncodingAndDetection(unittest.TestCase):
             self.assertEqual(_detect_import_kind(sample), want, f"auto-detect for {want}")
 
 
+class Deduplication(unittest.TestCase):
+    """Re-importing the same output (a common accident when several testers share) must
+    never double-count, and overlapping/cross-format imports must merge onto one host."""
+
+    def _counts(self, d):
+        st = Store(os.path.join(d, "results.sqlite"))
+        try:
+            hs = st.all_hosts()
+            return {"hosts": len(hs),
+                    "vulns": sum(len(h.vulns) for h in hs),
+                    "ports": sum(len(h.ports) for h in hs),
+                    "creds": len(st.all_credentials())}
+        finally:
+            st.close()
+
+    def test_direct_parse_formats_dedup_on_reimport(self):
+        for name, sample, kind in [
+            ("nessus", NESSUS, "auto"), ("openvas", OPENVAS, "auto"),
+            ("nuclei", NUCLEI_JSONL, "auto"), ("testssl", TESTSSL_PRETTY, "auto"),
+            ("nxc", NXC_SMB, "auto"), ("kerberoast", KERBEROAST, "auto"),
+            ("asrep", ASREP_IMPACKET, "auto"), ("secretsdump", SECRETSDUMP, "auto"),
+            ("creds", "corp\\alice:Passw0rd!\nbob:hunter2\n", "creds"),
+        ]:
+            c, d = _client()
+            _post(c, sample, kind)
+            after1 = self._counts(d)
+            _post(c, sample, kind)                        # exact same input again
+            after2 = self._counts(d)
+            self.assertEqual(after1, after2, f"{name}: re-import changed counts {after1} -> {after2}")
+
+    def test_job_formats_dedup_on_reimport(self):
+        for sample, fname in [(NMAP_XML, "s.xml"), ("open tcp 22 10.0.0.5 1\n", "m.list")]:
+            c, d = _client()
+            _post(c, sample, filename=fname)
+            _wait_hosts(d, 1)
+            a = self._counts(d)
+            _post(c, sample, filename=fname)
+            _wait_hosts(d, 1)
+            # give the 2nd async fold a moment, then confirm no growth
+            time.sleep(0.5)
+            b = self._counts(d)
+            self.assertEqual(a["hosts"], b["hosts"], f"{fname}: host count grew")
+            self.assertEqual(a["ports"], b["ports"], f"{fname}: port count grew")
+
+    def test_cross_format_merges_onto_one_host(self):
+        # an nmap scan and a Nessus finding for the SAME ip -> ONE host, not two
+        c, d = _client()
+        _post(c, NMAP_XML, filename="s.xml")
+        _wait_hosts(d, 1)
+        _post(c, NESSUS)                                  # nessus finding on 10.0.0.5 too
+        st = Store(os.path.join(d, "results.sqlite"))
+        try:
+            hs = st.all_hosts()
+        finally:
+            st.close()
+        self.assertEqual([h.ip for h in hs], ["10.0.0.5"])          # merged, not forked
+        h = hs[0]
+        self.assertEqual({p.portid for p in h.open_ports}, {22, 80})
+        self.assertTrue(any("CVE-2017-0143" in v.ids for v in h.vulns))
+
+    def test_credential_dedup_across_sources(self):
+        c, d = _client()
+        _post(c, "corp\\alice:S3cret!\n", kind="creds")
+        _post(c, "corp\\alice:S3cret!\n", kind="creds")             # same cred again
+        self.assertEqual(self._counts(d)["creds"], 1)
+
+    def test_overlapping_nmap_scans_union_ports(self):
+        c, d = _client()
+        _post(c, NMAP_XML, filename="a.xml")                        # 22, 80 on 10.0.0.5
+        _wait_hosts(d, 1)
+        second = NMAP_XML.replace('portid="80"', 'portid="443"')    # 22, 443 (80 -> 443)
+        _post(c, second, filename="b.xml")
+        _wait_hosts(d, 1)
+        time.sleep(0.5)
+        st = Store(os.path.join(d, "results.sqlite"))
+        try:
+            hs = st.all_hosts()
+        finally:
+            st.close()
+        self.assertEqual(len(hs), 1)                                # one host
+        self.assertEqual({p.portid for p in hs[0].open_ports}, {22, 80, 443})   # union, no dup
+
+
 class EdgeCases(unittest.TestCase):
     def test_reimport_is_idempotent(self):
         c, d = _client()
