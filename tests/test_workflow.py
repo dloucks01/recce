@@ -1368,10 +1368,14 @@ class UsabilityAndDiscoveryTest(unittest.TestCase):
             return out, None
 
         saved = (s.check_environment, s.discover_hosts, s.full_port_scan, s.enum_scan,
-                 s.udp_basic_scan)
+                 s.udp_basic_scan, s.verify_port_scan)
         s.check_environment = lambda p: []
         s.discover_hosts, s.full_port_scan, s.enum_scan = empty_disc, fps, enum
         s.udp_basic_scan = empty_udp
+        # The zero-discovery fallback forces verify_all=True, so every live host gets an
+        # independent congestion-adaptive re-sweep. Stub it (same as full_port_scan) or
+        # the test shells out to a real `nmap -p- --host-timeout 20m` against dead lab IPs.
+        s.verify_port_scan = fps
         try:
             with tempfile.TemporaryDirectory() as d:
                 buf = io.StringIO()
@@ -1385,8 +1389,8 @@ class UsabilityAndDiscoveryTest(unittest.TestCase):
                 self.assertEqual(len(hosts), 2)
                 self.assertTrue(all(h.open_ports for h in hosts))
         finally:
-            (s.check_environment, s.discover_hosts,
-             s.full_port_scan, s.enum_scan, s.udp_basic_scan) = saved
+            (s.check_environment, s.discover_hosts, s.full_port_scan, s.enum_scan,
+             s.udp_basic_scan, s.verify_port_scan) = saved
 
 
 class PhaseIdempotencyTest(unittest.TestCase):
