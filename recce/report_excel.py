@@ -1798,6 +1798,12 @@ def _build_ad_findings(wb, analysis: dict) -> None:
     sh.write([""])
     headers = ["Severity", "Category", "Finding", "Principal", "Target", "Detail",
                "Tool", "Prove / abuse command", "Remediation"]
+    # This sheet is a single findings table after a short preamble — freeze + filter the
+    # header (at its actual row, past the title/counts) so it stays put on a long AD graph.
+    sh.header_row = sh.nrows + 1
+    sh.freeze_header = True
+    sh.autofilter_cols = len(headers)
+    sh.header_height = 22
     sh.write([(h, "bold") for h in headers])
     for f in findings:
         style = _SEV_STYLE.get(f["severity"])
