@@ -3202,6 +3202,26 @@ class HtmlReportTest(unittest.TestCase):
         self.assertIn("not</b> been walked end-to-end", html)
         self.assertIn("recce does not exploit", html)
 
+    def test_print_css_keeps_findings_whole_and_unclips_evidence(self):
+        """The report is routinely delivered as PDF: a finding card must not split
+        across a page break, and evidence must print in full (not clip at the on-screen
+        max-height). Locks the print-quality contract against a CSS refactor."""
+        import re
+        from recce import report_html
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.html")
+            report_html.build_html(self._hosts(), p, title="Print")
+            html = open(p, encoding="utf-8").read()
+        m = re.search(r"@media print\{.*?\n\}", html, re.S)
+        self.assertIsNotNone(m, "no @media print block")
+        block = m.group(0)
+        # A finding card, an attack-path step, and the diagram stay whole; rows never split.
+        for cls in (".fcard", ".step", ".stage", ".netmap", "tr"):
+            self.assertIn(cls, block, f"{cls} not protected from a page break in print")
+        self.assertIn("break-inside:avoid", block)
+        self.assertIn("max-height:none", block)           # evidence not clipped in a PDF
+        self.assertIn(".netmap svg{max-width:100%", block)  # wide map fits the page
+
     def test_detailed_findings_section(self):
         from recce import report_html
         from recce.models import Vuln

@@ -117,7 +117,17 @@ table.cov th:first-child,table.cov td:first-child{text-align:left}
   font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.4;margin:8px 0 0;max-height:230px}
 .tag{font-size:11px;color:var(--mut);border:1px solid var(--line);border-radius:5px;padding:0 5px;margin-left:6px}
 footer{color:var(--mut);font-size:12px;margin-top:40px;text-align:center}
-@media print{body{background:#fff}header{background:var(--tl2)!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}.tile,table,.bars,.narr,.panel,.dash{break-inside:avoid}}
+@media print{
+  body{background:#fff}
+  header{background:var(--tl2)!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  /* Keep a finding, an attack-path step, a diagram, and small blocks whole across
+     page breaks; never split a table row. */
+  .tile,table,tr,.bars,.narr,.panel,.dash,.fcard,.stage,.step,.netmap{break-inside:avoid}
+  /* A PDF can't scroll: show the full evidence instead of clipping at max-height. */
+  .fcard pre{max-height:none}
+  /* Fit a wide network map to the page rather than letting it run off the edge. */
+  .netmap svg{max-width:100%;height:auto}
+}
 """
 
 
