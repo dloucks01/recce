@@ -259,18 +259,29 @@ class Store:
         vulns/accounts/exploits by key, so re-scans accumulate). Pass merge=False
         to overwrite the stored record wholesale - used when the caller has already
         loaded the full host and intentionally removed items (e.g. `--replace-ad`),
-        which the union-merge would otherwise re-introduce."""
-        existing = self.get_host(host.ip)
-        if existing and merge:
-            host = self._merge(existing, host)
-        with closing(self.conn.cursor()) as cur:
-            cur.execute(
-                "INSERT INTO hosts(ip, subnet, data, updated) VALUES(?,?,?,?) "
-                "ON CONFLICT(ip) DO UPDATE SET subnet=excluded.subnet, "
-                "data=excluded.data, updated=excluded.updated",
-                (host.ip, host.subnet, json.dumps(host.to_json()), host.last_scanned),
-            )
-        self.conn.commit()
+        which the union-merge would otherwise re-introduce.
+
+        Atomic: the read-merge-write runs under a single `BEGIN IMMEDIATE` transaction,
+        so two writers upserting the SAME host can't clobber each other's merge - the
+        write lock is taken before the read, so the second writer sees the first's
+        committed record instead of a stale one (fixes a lost-update race under the
+        concurrent web workbench / multi-worker scans)."""
+        self.conn.execute("BEGIN IMMEDIATE")          # take the write lock before reading
+        try:
+            existing = self.get_host(host.ip)
+            if existing and merge:
+                host = self._merge(existing, host)
+            with closing(self.conn.cursor()) as cur:
+                cur.execute(
+                    "INSERT INTO hosts(ip, subnet, data, updated) VALUES(?,?,?,?) "
+                    "ON CONFLICT(ip) DO UPDATE SET subnet=excluded.subnet, "
+                    "data=excluded.data, updated=excluded.updated",
+                    (host.ip, host.subnet, json.dumps(host.to_json()), host.last_scanned),
+                )
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
 
     def get_host(self, ip: str) -> Host | None:
         with closing(self.conn.cursor()) as cur:
