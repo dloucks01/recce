@@ -50,8 +50,8 @@ h1{margin:0;font-size:26px;letter-spacing:.2px}
 .xlink:visited{color:#fff}
 h2{font-size:18px;margin:34px 0 12px;padding-bottom:6px;border-bottom:2px solid var(--line)}
 h3{font-size:15px;margin:20px 0 8px;color:var(--tl2)}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:18px 0}
-.tile{background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.tiles{display:flex;flex-wrap:wrap;justify-content:center;gap:12px;margin:18px 0}
+.tile{flex:0 1 155px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 16px}
 .tile .n{font-size:26px;font-weight:700;line-height:1}
 .tile .l{font-size:12px;color:var(--mut);margin-top:6px;text-transform:uppercase;letter-spacing:.4px}
 .tile.alert .n{color:#C00000}
