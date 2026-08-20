@@ -97,11 +97,20 @@ def _dc(ip, hostname, domain, realm) -> Host:
              smb_signing="required", enumerated=True, cred_enumerated=True,
              access_gained=True, access_detail="kerberoast → cracked svc_sql, DA via Zerologon",
              defenses=["Microsoft Defender AV"])
+    # A real smb-os-discovery NSE probe reports the NetBIOS short name alongside the
+    # DNS domain; derive_domains() reads it from here (h.ntlm), not from an Account.
+    h.ntlm = {"netbios_domain": realm.split(".")[0], "dns_domain": domain}
     # attrs use recce's canonical shapes: "; "-joined strings for memberof/spn/members,
     # "1"/"yes"/"no" strings for flags (see recce/ad.py). Kerberoastable is *derived*
     # from an spn being present (not a flag), matching ad.kerberoastable().
     h.accounts = [
-        Account(ip=ip, source="ldap", kind="domain", name=realm, detail="functionalLevel: 2016"),
+        # ad.derive_domains() keys off .domain (matching the real smb-os-discovery
+        # parser's Account(kind="domain", domain=...) shape) - without it the DC
+        # never resolves to a Domain record, silently dropping the "Domain contoso.
+        # local" line from the markdown report and the whole Key information section
+        # from assets.html.
+        Account(ip=ip, source="ldap", kind="domain", domain=domain, name=realm,
+                detail="functionalLevel: 2016"),
         Account(ip=ip, source="ldap", kind="user", name="Administrator", domain=domain,
                 rid="500", attrs={"enabled": "yes", "admincount": "1", "memberof": "Domain Admins"}),
         Account(ip=ip, source="ldap", kind="user", name="svc_sql", domain=domain, rid="1104",
