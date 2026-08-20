@@ -141,14 +141,16 @@ def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration R
             banner = f" - {p.service_banner}" if p.service_banner else ""
             lines.append(f"    - [ ] {p.portid}/{p.protocol} {p.service}{banner}")
 
-    with open(out_path, "w") as fh:
+    with open(out_path, "w", encoding="utf-8") as fh:      # explicit UTF-8, not platform default
         fh.write("\n".join(lines) + "\n")
     return out_path
 
 
 def build_csv(hosts: list[Host], out_path: str) -> str:
     """Flat services CSV - easy to import anywhere / pivot in any tool."""
-    with open(out_path, "w", newline="") as fh:
+    # Explicit UTF-8 (not the platform default): nmap service banners / extrainfo can carry
+    # non-ASCII bytes, and recce is UTF-8 everywhere else.
+    with open(out_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(["reviewed", "ip", "hostname", "subnet", "os", "port",
                     "proto", "state", "service", "product", "version",
