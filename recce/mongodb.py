@@ -18,6 +18,7 @@ import socket
 import struct
 
 from .models import Host, Port
+from .svccommon import finding_builder, recvn as _recvn
 
 _PORTS = (27017, 27018, 27019)
 _DEFAULT_PORT = 27017
@@ -130,14 +131,6 @@ def op_msg(request_id: int, doc: bytes) -> bytes:
     return header + body
 
 
-def _recvn(sock, n: int) -> bytes:
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            break
-        buf += chunk
-    return buf
 
 
 def command(sock, doc: bytes, request_id: int, timeout: float) -> dict | None:
@@ -255,10 +248,7 @@ TESTING_NARRATIVE = [
 ]
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "mongodb", "severity": sev, "title": title, "target": target,
-            "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("mongodb", _NARRATIVE)
 
 
 def _old_version(ver: str) -> bool:

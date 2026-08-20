@@ -17,6 +17,7 @@ from __future__ import annotations
 import socket
 
 from .models import Account, Host, Port
+from .svccommon import finding_builder
 
 _DEFAULT_PORT = 161
 _TIMEOUT = 1.5
@@ -351,10 +352,7 @@ TESTING_NARRATIVE = [
 ]
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "snmp", "severity": sev, "title": title, "target": target,
-            "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("snmp", _NARRATIVE)
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:

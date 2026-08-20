@@ -27,6 +27,7 @@ import socket
 import struct
 
 from .models import Host, Port
+from .svccommon import finding_builder
 
 _SMB_PORTS = (445, 139)
 _DEFAULT_PORT = 445
@@ -264,10 +265,7 @@ TESTING_NARRATIVE = [
 
 # --- findings -------------------------------------------------------------------
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "smb", "severity": sev, "title": title, "target": target,
-            "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("smb", _NARRATIVE)
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:

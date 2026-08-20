@@ -28,6 +28,7 @@ import socket
 import struct
 
 from .models import Host, Port
+from .svccommon import finding_builder, recvn as _recvn
 
 _DEFAULT_PORT = 389
 _LDAPS = 636
@@ -288,14 +289,6 @@ def parse_search_entry(msg: bytes) -> tuple[str, dict]:
 
 # --- socket I/O -----------------------------------------------------------------
 
-def _recvn(sock, n: int) -> bytes:
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            break
-        buf += chunk
-    return buf
 
 
 def _read_message(sock, timeout: float) -> bytes | None:
@@ -926,10 +919,7 @@ TESTING_NARRATIVE = [
 
 # --- findings -------------------------------------------------------------------
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "ldap", "severity": sev, "title": title, "target": target,
-            "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("ldap", _NARRATIVE)
 
 
 def _rootdse_summary(pr: dict) -> str:

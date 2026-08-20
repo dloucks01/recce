@@ -23,6 +23,7 @@ import socket
 import struct
 
 from .models import Host, Port
+from .svccommon import finding_builder, recvn as _recvn
 
 _PORTS = (2049, 111)
 _DEFAULT_PORT = 2049
@@ -99,18 +100,6 @@ def _recv_record(sock: socket.socket, timeout: float) -> bytes | None:
     return None                                        # too many fragments -> give up
 
 
-def _recvn(sock: socket.socket, n: int, timeout: float) -> bytes | None:
-    sock.settimeout(timeout)
-    buf = b""
-    while len(buf) < n:
-        try:
-            chunk = sock.recv(min(65536, n - len(buf)))
-        except (socket.timeout, OSError):
-            return None
-        if not chunk:
-            return None
-        buf += chunk
-    return buf
 
 
 def _parse_reply(data: bytes, want_xid: int):
@@ -355,10 +344,7 @@ TESTING_NARRATIVE = [
 ]
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "nfs", "severity": sev, "title": title, "target": target,
-            "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("nfs", _NARRATIVE)
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:

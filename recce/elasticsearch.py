@@ -22,6 +22,7 @@ import json
 import ssl
 
 from .models import Host, Port
+from .svccommon import finding_builder
 
 _PORTS = (9200, 9201)
 _DEFAULT_PORT = 9200
@@ -173,11 +174,7 @@ TESTING_NARRATIVE = [
 ]
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "elasticsearch", "severity": sev, "title": title,
-            "target": target, "detail": detail, "tool": tool, "command": cmd,
-            "remediation": rem, "cwes": list(cwes), "kind": kind,
-            "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("elasticsearch", _NARRATIVE)
 
 
 def _old_version(ver: str) -> bool:

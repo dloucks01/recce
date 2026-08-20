@@ -22,6 +22,7 @@ import shlex
 import socket
 
 from .models import Host, Port
+from .svccommon import finding_builder
 
 _PORTS = (873,)
 _DEFAULT_PORT = 873
@@ -206,10 +207,7 @@ TESTING_NARRATIVE = [
 ]
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "rsync", "severity": sev, "title": title, "target": target,
-            "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("rsync", _NARRATIVE)
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:

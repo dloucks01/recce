@@ -29,6 +29,7 @@ import struct
 import time
 
 from .models import Host, Port
+from .svccommon import finding_builder, recvn as _recvn
 from .ntlm import normalize_nt_hash, nt_hash, rc4k
 
 _PORT = 88
@@ -248,18 +249,6 @@ def _send_recv(dc_ip: str, payload: bytes, timeout: float) -> bytes | None:
             pass
 
 
-def _recvn(sock, n: int, timeout: float):
-    sock.settimeout(timeout)
-    buf = b""
-    while len(buf) < n:
-        try:
-            chunk = sock.recv(min(65536, n - len(buf)))
-        except (socket.timeout, OSError):
-            return None
-        if not chunk:
-            return None
-        buf += chunk
-    return buf
 
 
 def roast_user(dc_ip: str, realm: str, user: str,
@@ -605,10 +594,7 @@ TESTING_NARRATIVE = [
 ]
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "kerberos", "severity": sev, "title": title, "target": target,
-            "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("kerberos", _NARRATIVE)
 
 
 def findings(dc_ip: str, realm: str, results: list[dict],

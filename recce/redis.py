@@ -23,6 +23,7 @@ from __future__ import annotations
 import socket
 
 from .models import Host, Port
+from .svccommon import finding_builder
 
 _PORTS = (6379, 6380, 16379)
 _DEFAULT_PORT = 6379
@@ -269,10 +270,7 @@ TESTING_NARRATIVE = [
 ]
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "redis", "severity": sev, "title": title, "target": target,
-            "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("redis", _NARRATIVE)
 
 
 def _old_version(ver: str) -> bool:
