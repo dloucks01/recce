@@ -329,11 +329,16 @@ export function Hosts(
   return (
     <>
       <section className="stats">
-        <Stat k="Scope" v={`${ov.scope_size || ov.hosts_up}`} sub={`${ov.scope_subnets} subnets`} />
-        <Stat k="Discovered" v={`${ov.hosts_up}`} sub="up" />
-        <Stat k="Enumerated" v={`${enumPct}%`} sub={`${ov.enumerated}/${ov.hosts_up}`} />
-        <Stat k="Access" v={`${ov.accessed}`} cls="ok" sub="hosts" />
-        <Stat k="Reviewed" v={`${revHosts}`} sub={`/ ${ov.hosts_up}`} />
+        <Stat k="Scope" v={`${ov.scope_size || ov.hosts_up}`} sub={`${ov.scope_subnets} subnets`}
+              title="show all hosts" onClick={() => setCov("all")} />
+        <Stat k="Discovered" v={`${ov.hosts_up}`} sub="up"
+              title="show all discovered hosts" onClick={() => setCov("all")} />
+        <Stat k="Enumerated" v={`${enumPct}%`} sub={`${ov.enumerated}/${ov.hosts_up}`}
+              title="filter to enumerated hosts" onClick={() => setCov("enumerated")} />
+        <Stat k="Access" v={`${ov.accessed}`} cls="ok" sub="hosts"
+              title="filter to hosts with access" onClick={() => setCov("access")} />
+        <Stat k="Reviewed" v={`${revHosts}`} sub={`/ ${ov.hosts_up}`}
+              title="filter to reviewed hosts" onClick={() => setCov("reviewed")} />
       </section>
 
       <div className="controls">
