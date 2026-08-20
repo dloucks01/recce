@@ -108,9 +108,15 @@ class CredenumCliIntegrationTest(_FakeToolMixin):
         # on PATH (recce's one hard dependency); skip cleanly where it's absent. The
         # nxc subprocess/parse/fold path itself is covered by NxcSubprocessTest above,
         # which needs no nmap.
-        # Scope to the DC only, so no ssh/other tools fire against non-routable IPs.
-        rc = cli.main(["credenum", "10.0.10.10", "-u", "alice", "-p", "Passw0rd!",
-                       "-d", "corp.local", "-o", self.dir])
+        # The target is DC-classified, so credenum also roasts it - a stdlib Kerberos
+        # socket (run_kerberoast) and a real impacket GetNPUsers subprocess (run_asrep),
+        # both against the non-routable 10.0.10.10. Stub those two (orthogonal to the
+        # SMB access this test asserts) or each blocks up to the 180s tool timeout.
+        from unittest import mock
+        with mock.patch.object(credenum, "run_kerberoast", return_value=([], None)), \
+             mock.patch.object(credenum, "run_asrep", return_value=([], None)):
+            rc = cli.main(["credenum", "10.0.10.10", "-u", "alice", "-p", "Passw0rd!",
+                           "-d", "corp.local", "-o", self.dir])
         self.assertEqual(rc, 0)
         store = Store(os.path.join(self.dir, "results.sqlite"))
         try:
