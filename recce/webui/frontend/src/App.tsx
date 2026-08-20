@@ -94,11 +94,13 @@ function ImportModal(
   const [busy, setBusy] = useState(false);
   const [drag, setDrag] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [prev, setPrev] = useState<
+    { kind: string; count: number; detail: string; sample: string[]; warning: string } | null>(null);
   useEscape(onClose, !busy);
 
   function readFile(file: File) {
     const r = new FileReader();
-    setFilename(file.name);
+    setFilename(file.name); setPrev(null); setErr(null);
     // Always read as base64 so a UTF-16 (the default of a Windows PowerShell redirect),
     // BOM'd, or binary file reaches the server intact; the server decodes with detection.
     r.onload = () => {
@@ -109,13 +111,22 @@ function ImportModal(
     r.readAsDataURL(file);
     if (isBinaryFile(file.name) && kind === "auto") setKind("bloodhound");
   }
+  async function doPreview() {
+    if (!text.trim() || busy) return;
+    setBusy(true); setErr(null); setPrev(null);
+    try {
+      const res = await postImport(text, filename, kind, encoding, true);
+      if (res.mode === "preview") setPrev(res);
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
   async function go() {
     if (!text.trim() || busy) return;
     setBusy(true); setErr(null);
     try {
       const res = await postImport(text, filename, kind, encoding);
       if (res.mode === "job") { onJob(res.id); onClose(); }
-      else { onDone(res.summary || `imported ${res.added} item(s)`); onClose(); }
+      else if (res.mode === "done") { onDone(res.summary || `imported ${res.added} item(s)`); onClose(); }
     } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
     finally { setBusy(false); }
   }
@@ -132,7 +143,7 @@ function ImportModal(
           engagement and every open browser updates — no terminal needed.
         </p>
         <label className="imp-field">Tool
-          <select value={kind} onChange={(e) => setKind(e.target.value)} disabled={busy}>
+          <select value={kind} onChange={(e) => { setKind(e.target.value); setPrev(null); }} disabled={busy}>
             {IMPORT_TOOLS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
           </select>
         </label>
@@ -147,11 +158,21 @@ function ImportModal(
           {filename && <span className="imp-fn">· {filename}</span>}
         </div>
         <textarea className="imp-paste" placeholder="…or paste the tool output here"
-                  value={text} onChange={(e) => { setText(e.target.value); setEncoding(""); }}
+                  value={text} onChange={(e) => { setText(e.target.value); setEncoding(""); setPrev(null); }}
                   disabled={busy} />
+        {prev && (
+          <div className={"imp-preview" + (prev.warning ? " warn" : "")}>
+            <div><b>{prev.kind}</b>{prev.detail ? ` · ${prev.detail}` : ` · ${prev.count} item(s)`}</div>
+            {prev.sample?.length > 0 && (
+              <ul>{prev.sample.map((s, i) => <li key={i}>{s}</li>)}</ul>
+            )}
+            {prev.warning && <div className="warn-msg">{prev.warning}</div>}
+          </div>
+        )}
         {err && <div className="ranmsg warn-msg">{err}</div>}
         <div className="modal-actions">
           <button className="toggle" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="toggle" onClick={doPreview} disabled={busy || !text.trim()}>Preview</button>
           <button className="run" onClick={go} disabled={busy || !text.trim()}>
             {busy ? "Importing…" : "Import"}
           </button>
