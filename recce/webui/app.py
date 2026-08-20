@@ -729,6 +729,80 @@ def create_app(eng_dir: str) -> FastAPI:
         broker.publish({"type": "import", "kind": kind, "added": added, "tester": x_tester})
         return {"mode": "done", "kind": kind, "added": added, "summary": summary}
 
+    # Deep-service module source labels — a finding with one of these means `sweep` ran.
+    _DEEP_SOURCES = {"smb", "ftp", "mssql", "mysql", "postgres", "mongodb", "redis",
+                     "elasticsearch", "rsync", "nfs", "kerberos", "snmp", "docker",
+                     "kubernetes", "ldap", "web", "api", "dns", "smtp"}
+
+    @app.get("/api/playbook")
+    def playbook():
+        """The shared engagement playbook: the phase track (where are we), the live
+        branches (what's next, from the next-action engine), and the attack-path narrative
+        (the chain we're building). All derived from the datastore, so it's the same for
+        every tester and updates the instant anyone folds in a result."""
+        from .. import attackpath, workflow
+        from ..store import Store
+        st = Store(db_path)
+        try:
+            hosts = st.all_hosts()
+            creds = st.all_credentials()
+        finally:
+            st.close()
+        up = [h for h in hosts if h.is_up]
+        findings = sum(len(h.vulns) for h in up)
+        kev = sum(1 for h in up for v in h.vulns if getattr(v, "kev", False))
+        enum_done = any(getattr(h, "enumerated", False) for h in up)
+        vulns_done = findings > 0 or any(p.vuln_scanned for h in up for p in h.open_ports)
+        swept = (any(getattr(h, "db_scanned", False) for h in up)
+                 or any(v.source in _DEEP_SOURCES for h in up for v in h.vulns))
+        access = [h for h in up if getattr(h, "access_gained", False)]
+        o = eng_dir
+
+        def _p(key, label, state, detail, cmd=""):
+            return {"key": key, "label": label, "state": state, "detail": detail, "cmd": cmd}
+
+        # Linear spine (enum -> vulns -> sweep -> act -> report); the first not-done of
+        # enum/vulns/sweep is the "current" credential-free move.
+        phases = [
+            _p("enum", "Enumerate", "done" if enum_done else "todo",
+               f"{len(up)} host(s) up", f"recce enum <targets> -o {o}"),
+            _p("vulns", "Vuln-scan", "done" if vulns_done else "todo",
+               f"{findings} finding(s), {kev} KEV", f"recce vulns -o {o}"),
+            _p("sweep", "Deep sweep", "done" if swept else "todo",
+               "confirm exposures across every service", f"recce sweep -o {o}"),
+            _p("act", "Act / prioritise", "ready" if vulns_done else "locked",
+               f"{findings} finding(s) to action", f"recce act -o {o}"),
+            _p("creds", "Credentials", "active" if creds else "locked",
+               f"{len(creds)} captured — spray them" if creds
+               else "unlocks when a login validates",
+               f"recce credsweep -u USER -p PASS -o {o}" if creds else ""),
+            _p("foothold", "Foothold", "active" if access else "locked",
+               f"{len(access)} host(s) owned — priv-esc" if access
+               else "unlocks on first access",
+               f"recce privesc -o {o}" if access else ""),
+            _p("report", "Report", "ready" if findings else "locked",
+               f"{findings} finding(s)", f"recce report -o {o}"),
+        ]
+        current = None
+        for s in phases:
+            if s["key"] in ("enum", "vulns", "sweep") and s["state"] == "todo":
+                s["state"] = "current"
+                current = s
+                break
+
+        acts = workflow.next_actions(hosts, creds, o)
+        branches = [{"label": a.label, "cmd": a.command, "why": a.why} for a in acts]
+        # The header chip's single next move: the current spine step, else the top branch.
+        if current:
+            next_move = {"label": current["label"], "cmd": current["cmd"]}
+        elif branches:
+            next_move = {"label": branches[0]["label"], "cmd": branches[0]["cmd"]}
+        else:
+            next_move = None
+        return {"phases": phases, "current": current["key"] if current else None,
+                "next": next_move, "branches": branches,
+                "path": attackpath.narrative(up)}
+
     @app.get("/api/attackpath.svg")
     def attackpath_svg():
         """The projected attack-path graph as a standalone SVG, for inline display."""

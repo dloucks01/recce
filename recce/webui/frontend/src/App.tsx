@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Finding, Host, Overview, fetchAll, postTick, postNote, postScan, postImport,
+  fetchPlaybook, Playbook as PlaybookData,
 } from "./api";
-import { Dashboard, Findings, Hosts, Act, Loot, Nav, FindingFilters } from "./views";
+import { Dashboard, Findings, Hosts, Act, Loot, Playbook, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, MyQueue, useCollab } from "./collab";
 import { useEscape } from "./ui";
 
-type Tab = "dashboard" | "hosts" | "findings" | "act" | "loot";
+type Tab = "dashboard" | "playbook" | "hosts" | "findings" | "act" | "loot";
 const POLL_MS = 20000; // constantly-updating analysis: re-pull on a slow heartbeat
 
 // One-click export. Regenerates the deliverables server-side (same builder as
@@ -186,6 +187,7 @@ export default function App() {
   const [ov, setOv] = useState<Overview | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [hosts, setHosts] = useState<Host[]>([]);
+  const [pb, setPb] = useState<PlaybookData | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("dashboard");
 
@@ -253,6 +255,7 @@ export default function App() {
   const refresh = useCallback(async () => {
     const [o, f, h] = await fetchAll();
     setOv(o); setFindings(f); setHosts(h);
+    fetchPlaybook().then(setPb).catch(() => {});
   }, []);
 
   useEffect(() => { refresh().catch((e) => setErr(String(e))); }, [refresh]);
@@ -361,7 +364,7 @@ export default function App() {
   // Ordered to narrow the operator's focus: overview -> inventory -> what's wrong ->
   // what to DO -> what we EXTRACTED.
   const TABS: [Tab, string][] = [
-    ["dashboard", "Dashboard"], ["hosts", "Hosts"], ["findings", "Findings"],
+    ["dashboard", "Dashboard"], ["playbook", "Playbook"], ["hosts", "Hosts"], ["findings", "Findings"],
     ["act", "Act"], ["loot", "Credentials"],
   ];
 
@@ -374,6 +377,11 @@ export default function App() {
             <button key={t} className={"tab" + (tab === t ? " sel" : "")} onClick={() => setTab(t)}>{label}</button>
           ))}
         </nav>
+        {pb?.next && (
+          <button className="nextchip" onClick={() => setTab("playbook")} title={pb.next.cmd || "open the playbook"}>
+            <span className="nc-lab">▶ next</span>{pb.next.label}
+          </button>
+        )}
         <MyQueue hosts={hosts} onOpen={() => nav.toHosts({ owner: "queue" })} />
         <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
         <ChatButton />
@@ -437,6 +445,7 @@ export default function App() {
         )}
 
         {tab === "dashboard" && <Dashboard ov={ov} hosts={hosts} nav={nav} />}
+        {tab === "playbook" && <Playbook pb={pb} nav={nav} />}
         {tab === "findings" && (
           <Findings findings={findings} f={ff} setF={(o) => setFf((p) => ({ ...p, ...o }))}
                     nav={nav} onTick={onTick} onNote={onNote} />
