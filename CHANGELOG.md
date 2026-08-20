@@ -16,8 +16,9 @@ All notable changes to recce are documented here. Dates are UTC.
     default (IP Host) is reported as a distinct virtual host.
   - **Broader default UDP.** The always-on enum-phase curated UDP set grew 17→35 ports
     (rpcbind, CLDAP, SLP, IPP, OpenVPN, RADIUS, L2TP, NFS, STUN, LLMNR, CoAP, memcached,
-    VxWorks, BACnet, …), and the **standard** profile now runs a bounded top-N UDP sweep
-    by default (`udp_top=30`; `quick` stays 0, `thorough` 100). `--no-udp` disables both.
+    VxWorks, BACnet, …) — the default UDP coverage. A broader top-N UDP sweep in the
+    vulns phase stays opt-in via `--udp-top N` (`thorough` runs 100); `--no-udp` skips
+    all UDP.
   - **Offline signature DB.** 11 new version→CVE signatures (108 total): older nginx
     chunked/range-filter overflows, OpenSMTPD RCE, Adminer SSRF, Roundcube RCE, and
     advisory product-only entries for Struts, MOVEit, PaperCut, MinIO, HAProxy, Superset.
