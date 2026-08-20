@@ -5,6 +5,22 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Deeper enumeration + vuln coverage.**
+  - **Web content / directory discovery.** The active web scan now probes a curated,
+    bounded wordlist (admin panels, API/Swagger, dev/debug, dumps, listings). Exposed
+    files become their own findings; other hits (incl. 401/403 protected resources) roll
+    up into one finding. A 200-everything SPA/catch-all is detected and suppressed so it
+    never floods false positives.
+  - **Virtual-host enumeration.** Candidate names from the TLS cert SAN/CN, reverse DNS
+    and the nmap hostname are probed via Host-header; a response that differs from the
+    default (IP Host) is reported as a distinct virtual host.
+  - **Broader default UDP.** The always-on enum-phase curated UDP set grew 17→35 ports
+    (rpcbind, CLDAP, SLP, IPP, OpenVPN, RADIUS, L2TP, NFS, STUN, LLMNR, CoAP, memcached,
+    VxWorks, BACnet, …), and the **standard** profile now runs a bounded top-N UDP sweep
+    by default (`udp_top=30`; `quick` stays 0, `thorough` 100). `--no-udp` disables both.
+  - **Offline signature DB.** 11 new version→CVE signatures (108 total): older nginx
+    chunked/range-filter overflows, OpenSMTPD RCE, Adminer SSRF, Roundcube RCE, and
+    advisory product-only entries for Struts, MOVEit, PaperCut, MinIO, HAProxy, Superset.
 - **Per-CVE PoC dossiers (`recce poc`).** Assembles everything recce knows about a CVE
   offline — the version→CVE signature, KEV / EPSS priority, the local **Exploit-DB**
   entries that reference it (`searchsploit`, by path; `--with-exploits` copies the

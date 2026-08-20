@@ -64,11 +64,12 @@ adds the layer engagements actually need:
 One command set takes you from a scope list to a client-ready report. Each phase
 is separate, resumable, and safe-by-default; follow the links for the full detail.
 
-- **Scan & enumerate** — full TCP sweeps, service/version + OS detection, and a
-  deep service-aware NSE set across many subnets, normalized into a resumable
-  SQLite datastore. → [workflow](docs/reference/workflow.md)
+- **Scan & enumerate** — full TCP sweeps, a curated + top-N **UDP** sweep,
+  service/version + OS detection, and a deep service-aware NSE set across many
+  subnets, normalized into a resumable SQLite datastore. → [workflow](docs/reference/workflow.md)
 - **Identify vulnerabilities (airgapped)** — a curated detection NSE set, an
-  offline version→CVE/CWE engine, stdlib HTTP/TLS probes, and searchsploit
+  offline version→CVE/CWE engine (108 signatures), stdlib HTTP/TLS probes,
+  **web content/directory discovery + virtual-host enumeration**, and searchsploit
   mapping — ranked **fix-first** with CISA KEV + EPSS. → [scanning](docs/reference/scanning.md)
 - **Deep per-service modules** — databases, SMB, FTP, Docker, Kubernetes, SNMP,
   MongoDB and MSSQL, each self-proving and airgapped. Run one, or all at once with
