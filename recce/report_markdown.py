@@ -114,7 +114,8 @@ def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration R
                 # airgap-safe and self-contained (mirrors the HTML report).
                 lines.append(f"| {tac} | **{t['id']}** {t['name']} "
                              f"| {len(t['hosts'])} |")
-                tac = ""      # only label the tactic on its first row
+                # (repeat the tactic each row — markdown has no rowspan, so a blank cell
+                #  reads as missing data rather than a group)
         lines.append("")
 
     # CWE weakness coverage - the weakness classes the findings map to.
@@ -126,7 +127,8 @@ def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration R
                   "| CWE | Weakness | Hosts |", "| --- | --- | --- |"]
         for w in wcov["weaknesses"]:
             nm = w["name"] or "—"
-            lines.append(f"| [{w['id']}]({w['url']}) | {nm} | {len(w['hosts'])} |")
+            # Plain-text CWE reference, not an external cwe.mitre.org link (airgap-safe).
+            lines.append(f"| **{w['id']}** | {nm} | {len(w['hosts'])} |")
         lines.append("")
 
     # Per-host checklist.
