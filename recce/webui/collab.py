@@ -7,9 +7,26 @@ who's online right now), tracked per running server.
 """
 from __future__ import annotations
 
+import functools
 import json
+import threading
 import time
 import uuid
+
+# All collab state is stored as read-modify-write JSON in the meta table, and the sync
+# API endpoints run in a threadpool — so concurrent writers (two people chatting/claiming
+# at once) could clobber each other's update. `recce serve` is single-process, so one
+# process-wide lock around every load-modify-save fully serialises them (fast, low-volume).
+_WLOCK = threading.RLock()
+
+
+def _serialized(fn):
+    """Serialise a load-modify-save mutation so concurrent writers can't clobber."""
+    @functools.wraps(fn)
+    def wrap(*a, **k):
+        with _WLOCK:
+            return fn(*a, **k)
+    return wrap
 
 # meta keys (namespaced so they never collide with engagement metadata)
 _ASSIGN = "collab.assignments"      # {ip: tester}
@@ -42,6 +59,7 @@ def get_assignments(st) -> dict:
     return _load(st, _ASSIGN, {})
 
 
+@_serialized
 def set_assignment(st, ip: str, tester: str) -> dict:
     a = get_assignments(st)
     if tester:
@@ -57,6 +75,7 @@ def get_labels(st) -> dict:
     return _load(st, _LABELS, {})
 
 
+@_serialized
 def set_label(st, ip: str, label: str, on: bool) -> dict:
     lab = get_labels(st)
     cur = set(lab.get(ip, []))
@@ -74,6 +93,7 @@ def get_port_status(st) -> dict:
     return _load(st, _PORTS, {})
 
 
+@_serialized
 def set_port_status(st, ip: str, port, status: str) -> dict:
     ps = get_port_status(st)
     key = f"{ip}:{port}"
@@ -90,6 +110,7 @@ def get_dismissed(st) -> dict:
     return _load(st, _DISMISS, {})
 
 
+@_serialized
 def set_dismissed(st, key: str, tester: str, on: bool) -> dict:
     d = get_dismissed(st)
     if on:
@@ -101,6 +122,7 @@ def set_dismissed(st, key: str, tester: str, on: bool) -> dict:
 
 
 # --- activity log -------------------------------------------------------------
+@_serialized
 def add_activity(st, tester: str, kind: str, text: str) -> dict:
     log = _load(st, _ACTIVITY, [])
     entry = {"ts": time.time(), "tester": tester or "someone", "kind": kind, "text": text}
@@ -114,6 +136,7 @@ def get_activity(st, limit: int = 100) -> list:
 
 
 # --- team chat ----------------------------------------------------------------
+@_serialized
 def add_chat(st, tester: str, text: str, image: str = "") -> dict:
     """Append a chat message. `image` is a stored media filename (or "" for text-only).
     Message metadata lives in meta; the image bytes live on disk (see the app layer)."""

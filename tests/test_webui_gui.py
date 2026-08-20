@@ -160,6 +160,37 @@ class ApiShape(unittest.TestCase):
             self.assertEqual(c.post("/api/chat", json={"text": ""}).status_code, 400)
             self.assertEqual(c.get("/api/chat/media/nope.png").status_code, 404)
 
+    def test_collab_writes_survive_concurrency(self):
+        """Concurrent chat/assignment writes (threadpool + per-request connection) must
+        not clobber each other — the load-modify-save is serialised by a process lock."""
+        import tempfile, threading
+        from recce.cli import _open_paths
+        from recce.store import Store
+        from recce.webui import collab
+        eng = tempfile.mkdtemp()
+        db = _open_paths(eng)["db"]
+        Store(db).close()
+        N = 40
+
+        def post(i):
+            st = Store(db)                       # each thread its own connection, like a request
+            try:
+                collab.add_chat(st, f"u{i % 4}", f"msg {i}")
+                collab.set_assignment(st, f"10.0.0.{i}", f"u{i % 4}")
+            finally:
+                st.close()
+        threads = [threading.Thread(target=post, args=(i,)) for i in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        st = Store(db)
+        try:
+            self.assertEqual(len(collab.get_chat(st, 1000)), N, "concurrent chat lost a message")
+            self.assertEqual(len(collab.get_assignments(st)), N, "concurrent assignment lost an entry")
+        finally:
+            st.close()
+
     def test_attack_endpoint_feeds_the_coverage_panel(self):
         with _client(self.eng) as c:
             cov = c.get("/api/attack").json()

@@ -146,7 +146,41 @@ recce is a power tool; you own the outcomes:
 
 ---
 
-## 7. Reporting a vulnerability in recce itself
+## 7. Web workbench (`recce serve`) — exposure & safe use
+
+`recce serve` starts a local web app so a whole team can drive one engagement from a
+browser. It is built for a **trusted engagement network**, and you must treat it that way:
+
+- **No authentication.** There is no login. **Anyone who can reach the URL has full
+  access** — they can read every finding, host and **credential** (looted, sprayed, or
+  added by hand), run scans, run a credential **spray**, import tool output, upload
+  images to the team chat, and act as **any tester name** (identity is just a name they
+  type). Presence, chat and activity are collaboration aids, not an access control.
+- **It binds to all interfaces by default** (`--host 0.0.0.0`, port 8008) so teammates
+  can reach it over the LAN. That also means anything else routable to your box can.
+- **Sensitive data is in the UI and on disk** — the *Credentials* tab shows captured
+  secrets (masked, click-to-reveal), and pasted chat screenshots are stored unencrypted
+  under `<engagement>/chat-media/`.
+
+Operator responsibilities for the workbench:
+
+- **Run it only on a network you trust** for the engagement, for the duration you need it.
+- **Limit exposure** — bind to loopback (`recce serve --host 127.0.0.1 …`) and reach it
+  over SSH port-forwarding, or firewall the port to your team, rather than leaving it on
+  `0.0.0.0` on an untrusted segment.
+- **Don't run it on a shared/compromised pivot** or anywhere out-of-scope hosts can reach
+  it — it is an unauthenticated console over your engagement data.
+- **Treat the engagement folder** (datastore, `chat-media/`, exports) per the engagement's
+  data-handling rules; wipe it when you're done.
+
+The workbench never changes recce's safety model: the same intrusive actions are still
+flag-gated (§3), a spray from the UI is still the lockout-safe default unless you opt out,
+and every "run" is a read-only/reversible action or a pre-filled command — not new exploit
+code (§4).
+
+---
+
+## 8. Reporting a vulnerability in recce itself
 
 If you find a security issue in recce (not in a target), open an issue describing the
 problem and reproduction, or contact the maintainer directly for anything sensitive.
