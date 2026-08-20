@@ -17,6 +17,7 @@ import difflib
 import http.client
 import json
 import re
+import socket
 import ssl
 import time
 from urllib.parse import quote, urlencode, urljoin, urlparse
@@ -1330,8 +1331,172 @@ def scan_crawl(host: Host, auth: dict | None = None, sqli: bool = True,
     return pages, added
 
 
+# --- content / directory discovery ---------------------------------------------
+# A curated, bounded wordlist of high-signal paths NOT already covered by _PATHS /
+# _BACKUPS / the actuator+wordpress deep-dives. Kept small (fast + airgap-embeddable);
+# the goal is to surface attack surface (admin panels, API docs, dev/debug, listings),
+# not to be a megalist brute-forcer.
+_CONTENT_WORDS = [
+    # admin / auth surfaces
+    "admin", "administrator", "admin/login", "login", "wp-login.php", "user/login",
+    "auth", "signin", "portal", "dashboard", "console", "cpanel", "pma", "adminer.php",
+    "webadmin", "management", "admin.php", "phpMyAdmin",
+    # api / docs
+    "api", "api/v1", "api/v2", "swagger", "swagger-ui.html", "swagger.json",
+    "openapi.json", "v2/api-docs", "v3/api-docs", "api-docs", "graphiql", "wsdl",
+    # dev / debug / info
+    "phpinfo.php", "info.php", "test.php", "debug", "trace.axd", "elmah.axd",
+    "actuator/env", "metrics", "status", "server-info", "web.config", "config.php",
+    "configuration.php", "settings.py", "application.properties",
+    # source / vcs / ci / manifests
+    ".hg", ".bzr", ".DS_Store", "composer.json", "package.json", "Dockerfile",
+    "docker-compose.yml", ".gitlab-ci.yml", "Jenkinsfile", "yarn.lock",
+    # storage / listings / dumps
+    "backup", "backups", "old", "dev", "test", "tmp", "uploads", "files", "data",
+    "db", "sql", "dump.sql", "database.sql", "logs", "backup.zip", "backup.tar.gz",
+    # common panels
+    "solr", "jenkins", "grafana", "kibana", "prometheus", "nagios", "rabbitmq",
+    "gitlab", "gitea", "sonarqube", "nexus", "phpmyadmin",
+    # misc info
+    "robots.txt", "sitemap.xml", ".well-known/security.txt", "crossdomain.xml",
+]
+# Paths that, if they return 200, are a finding in their own right (not just surface).
+_CONTENT_HIGH = {
+    "phpinfo.php": ("high", "phpinfo() exposed"), "info.php": ("high", "phpinfo() exposed"),
+    "test.php": ("medium", "PHP test script exposed"),
+    "actuator/env": ("high", "Spring Actuator /env exposed (secrets)"),
+    "web.config": ("high", "IIS web.config exposed"), "config.php": ("high", "config.php exposed"),
+    "configuration.php": ("high", "configuration.php exposed"),
+    "settings.py": ("high", "Django settings.py exposed"),
+    "application.properties": ("high", "Spring application.properties exposed"),
+    ".DS_Store": ("medium", ".DS_Store directory metadata exposed"),
+    "swagger.json": ("medium", "OpenAPI/Swagger spec exposed"),
+    "openapi.json": ("medium", "OpenAPI/Swagger spec exposed"),
+    "swagger-ui.html": ("medium", "Swagger UI exposed"),
+    "dump.sql": ("high", "SQL dump exposed"), "database.sql": ("high", "SQL dump exposed"),
+    "backup.zip": ("high", "Backup archive exposed"), "backup.tar.gz": ("high", "Backup archive exposed"),
+    ".gitlab-ci.yml": ("medium", "CI config exposed"),
+}
+
+
+def _baseline_404(ip: str, port: Port, auth: dict | None):
+    """Learn the server's 'not found' shape from random nonexistent paths, so content
+    discovery can tell a real hit from a 200-everything SPA/catch-all."""
+    shapes = []
+    for rp in ("recce-nope-4f9a2c71", "does-not-exist-8b31d0/x.html"):
+        r = _fetch(ip, port, "/" + rp, auth=auth)
+        if r:
+            shapes.append((r[0], len(r[2])))
+    return shapes
+
+
+def _is_baseline(status, body, baseline) -> bool:
+    return any(status == bs and abs(len(body) - bl) < 64 for bs, bl in baseline)
+
+
+def _content_discovery(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
+    """Probe the curated wordlist; report exposed files individually and roll the rest
+    (admin panels, API surfaces, protected 401/403 resources) into one discovery finding."""
+    baseline = _baseline_404(ip, port, auth)
+    # 200-everything catch-all (SPA): status-based discovery is meaningless -> skip.
+    if len(baseline) >= 2 and all(s == 200 for s, _ in baseline):
+        return []
+    findings: list[Vuln] = []
+    surface: list[tuple[str, int]] = []
+    for word in _CONTENT_WORDS:
+        r = _fetch(ip, port, "/" + word, auth=auth)
+        if not r:
+            continue
+        st, _hd, bd = r
+        if st not in (200, 301, 302, 307, 308, 401, 403):
+            continue
+        if _is_baseline(st, bd, baseline):
+            continue
+        if word in _CONTENT_HIGH and st == 200:
+            sev, title = _CONTENT_HIGH[word]
+            findings.append(_mk(ip, port, "web-content", sev, f"{title} (/{word})", ["CWE-200"],
+                                f"GET {base}/{word} -> HTTP {st}.",
+                                "Remove or restrict access to this path."))
+        else:
+            surface.append((word, st))
+    if surface:
+        listing = ", ".join(f"/{p} [{s}]" for p, s in surface[:40])
+        exposed = any(s == 200 for _, s in surface)
+        findings.append(_mk(ip, port, "web-content-map", "medium" if exposed else "low",
+                            f"Content discovery: {len(surface)} notable path(s)", ["CWE-200"],
+                            f"A curated wordlist against {base} surfaced: {listing}."
+                            + ("" if len(surface) <= 40 else f" (+{len(surface) - 40} more)"),
+                            "Review each surface; a 401/403 marks a real (protected) resource, "
+                            "a 200 an exposed one. Remove what shouldn't be reachable."))
+    return findings
+
+
+# --- virtual-host enumeration ---------------------------------------------------
+def _cert_names(ip: str, port: Port) -> set[str]:
+    """dNSName SANs + CN from the served TLS cert (when the chain validates)."""
+    names: set[str] = set()
+    if not probes._is_tls(port):
+        return names
+    try:
+        cert, _proto, _err = probes._peer_cert(ip, port)
+    except Exception:  # noqa: BLE001
+        return names
+    if not cert:
+        return names
+    for typ, val in cert.get("subjectAltName", []):
+        if typ.lower() == "dns":
+            names.add(val.lower())
+    for rdn in cert.get("subject", []):
+        for k, v in rdn:
+            if k == "commonName":
+                names.add(v.lower())
+    return names
+
+
+def _page_shape(r) -> tuple:
+    if not r:
+        return (None, "", 0)
+    st, _hd, bd = r
+    m = _TITLE.search(bd)
+    return (st, (m.group(1).strip()[:60] if m else ""), len(bd))
+
+
+def _discover_vhosts(ip: str, port: Port, base: str, host_hint: str,
+                     auth: dict | None) -> tuple[list[Vuln], list[str]]:
+    """Host-header probing: candidate names from the TLS cert (SAN/CN), reverse DNS and
+    the nmap hostname are requested against the IP; a response that differs from the
+    default (IP Host) is a distinct virtual host worth scanning on its own."""
+    cands = _cert_names(ip, port)
+    if host_hint:
+        cands.add(host_hint.lower())
+    try:
+        cands.add(socket.gethostbyaddr(ip)[0].lower())
+    except (OSError, socket.herror):
+        pass
+    cands = {c for c in cands if c and c != ip and "." in c and "*" not in c}
+    if not cands:
+        return [], []
+    default = _page_shape(_fetch(ip, port, "/", auth={**(auth or {}), "Host": ip}) or _fetch(ip, port, "/", auth=auth))
+    found: list[tuple[str, int, str]] = []
+    for name in sorted(cands)[:20]:
+        st, title, blen = _page_shape(_fetch(ip, port, "/", auth={**(auth or {}), "Host": name}))
+        if st is None:
+            continue
+        if st != default[0] or title != default[1] or abs(blen - default[2]) > 256:
+            found.append((name, st, title))
+    if not found:
+        return [], []
+    listing = "; ".join(f"{n} [{s}] {t}".strip() for n, s, t in found)
+    f = _mk(ip, port, "web-vhost", "info", f"Virtual host(s) discovered: {len(found)}", ["CWE-200"],
+            f"Host-header probing on {base} surfaced distinct site(s) vs. the default response: "
+            f"{listing}. These serve different content and should be enumerated by name.",
+            "Confirm each virtual host is intended to be reachable here; scan the named sites explicitly.")
+    return [f], [n for n, _, _ in found]
+
+
 def scan_endpoint(ip: str, port: Port, active: bool = True,
-                  auth: dict | None = None, creds: bool = False) -> tuple[dict, list[Vuln]]:
+                  auth: dict | None = None, creds: bool = False,
+                  host_hint: str = "") -> tuple[dict, list[Vuln]]:
     """Deep, non-intrusive scan of one web endpoint. Returns (profile, [Vuln]).
     `auth` (Cookie/Authorization headers) runs the scan as an authenticated user;
     `creds` opts into a tiny, lockout-aware default-credential probe."""
@@ -1471,6 +1636,12 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                                              ["/", "/manager/html", "/admin", "/console",
                                               "/api/whoami", "/api/overview"]))
         findings.extend(_form_login_defaults(ip, port, base, fp["tech"]))
+    # Content/directory discovery + virtual-host enumeration (active pass).
+    findings.extend(_content_discovery(ip, port, base, auth))
+    vh_findings, vhosts = _discover_vhosts(ip, port, base, host_hint, auth)
+    findings.extend(vh_findings)
+    if vhosts:
+        profile["vhosts"] = vhosts
     profile["findings"] = len(findings)
     profile["credentials"] = looted_creds
     return profile, findings
@@ -1485,7 +1656,8 @@ def scan_host(host: Host, active: bool = True, auth: dict | None = None,
     for port in host.open_ports:
         if not is_web(port):
             continue
-        profile, findings = scan_endpoint(host.ip, port, active=active, auth=auth, creds=creds)
+        profile, findings = scan_endpoint(host.ip, port, active=active, auth=auth, creds=creds,
+                                          host_hint=host.hostname or "")
         for v in findings:
             if v.key in existing:
                 continue
