@@ -614,10 +614,53 @@ def parse_normal(path: str) -> list[Host]:
     return hosts
 
 
+_MASSCAN_LIST = re.compile(r"^(open|closed)\s+(tcp|udp)\s+(\d+)\s+([0-9a-fA-F:.]+)", re.M)
+
+
+def parse_masscan_list(path: str) -> list[Host]:
+    """masscan -oL: `open tcp 80 1.2.3.4 <timestamp>` lines -> hosts with open ports."""
+    hosts: dict[str, Host] = {}
+    try:
+        with open(path, "r", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    for state, proto, port, ip in _MASSCAN_LIST.findall(text):
+        if state != "open":
+            continue
+        h = hosts.setdefault(ip, Host(ip=ip, state="up", up_reason="masscan"))
+        if not any(p.portid == int(port) and p.protocol == proto for p in h.ports):
+            h.ports.append(Port(portid=int(port), protocol=proto, state="open"))
+    return list(hosts.values())
+
+
+def parse_masscan_json(path: str) -> list[Host]:
+    """masscan -oJ: [{"ip":"1.2.3.4","ports":[{"port":80,"proto":"tcp","status":"open"}]}]."""
+    import json
+    try:
+        with open(path, "r", errors="replace") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    hosts: dict[str, Host] = {}
+    for rec in (data if isinstance(data, list) else []):
+        ip = (rec or {}).get("ip", "")
+        if not ip:
+            continue
+        h = hosts.setdefault(ip, Host(ip=ip, state="up", up_reason="masscan"))
+        for p in rec.get("ports", []):
+            if p.get("status", "open") != "open" or "port" not in p:
+                continue
+            proto = p.get("proto", "tcp")
+            if not any(x.portid == int(p["port"]) and x.protocol == proto for x in h.ports):
+                h.ports.append(Port(portid=int(p["port"]), protocol=proto, state="open"))
+    return list(hosts.values())
+
+
 def parse_nmap_file(path: str) -> list[Host]:
     """Parse an already-completed nmap scan, auto-detecting the format: XML (-oX),
-    grepable (-oG), or normal text (-oN). Also handles masscan/other tools that
-    emit nmap-compatible XML. Sniffs content when the extension is ambiguous."""
+    grepable (-oG), or normal text (-oN). Also handles masscan XML (nmap-compatible) and
+    masscan -oL / -oJ. Sniffs content when the extension is ambiguous."""
     low = path.lower()
     if low.endswith(".xml"):
         return parse_nmap_xml(path)
@@ -636,4 +679,9 @@ def parse_nmap_file(path: str) -> list[Host]:
         return parse_gnmap(path)
     if "Nmap scan report for" in head:
         return parse_normal(path)
+    if _MASSCAN_LIST.search(head):                      # masscan -oL
+        return parse_masscan_list(path)
+    hs = head.lstrip()
+    if hs[:1] == "[" and '"ports"' in head and ('"status"' in head or '"proto"' in head):
+        return parse_masscan_json(path)                 # masscan -oJ
     return []
