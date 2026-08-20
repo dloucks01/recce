@@ -595,9 +595,10 @@ body { background: var(--ground); color: var(--text); }
 .cm-text mark { background: color-mix(in srgb, var(--accent) 35%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }
 
 /* --- Playbook tab + header next-chip --- */
-.nextchip { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; padding: 4px 10px; border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 45%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--accent, #3b82f6) 12%, var(--surface2)); color: var(--text); font-size: 12px; cursor: pointer; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nextchip { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 4px 11px; border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 45%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--accent, #3b82f6) 12%, var(--surface2)); color: var(--text); font-size: 12px; cursor: pointer; max-width: 230px; }
 .nextchip:hover { background: color-mix(in srgb, var(--accent, #3b82f6) 22%, var(--surface2)); }
-.nextchip .nc-lab { font-weight: 600; color: var(--accent, #3b82f6); }
+.nextchip .nc-lab { font-weight: 600; color: var(--accent, #3b82f6); white-space: nowrap; flex: 0 0 auto; }
+.nextchip .nc-txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--muted); }
 .playbook { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
 @media (max-width: 900px) { .playbook { grid-template-columns: 1fr; } }
 .pb-col h3 { margin: 0 0 12px; font-size: 14px; }
