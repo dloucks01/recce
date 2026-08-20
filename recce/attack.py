@@ -41,11 +41,6 @@ class Technique:
     def tactic_id(self) -> str:
         return TACTICS.get(self.tactic, "")
 
-    @property
-    def url(self) -> str:
-        base = self.id.replace(".", "/")
-        return f"https://attack.mitre.org/techniques/{base}/"
-
     def label(self) -> str:
         return f"{self.id} {self.name} ({self.tactic})"
 
@@ -169,7 +164,7 @@ def coverage(hosts) -> dict:
     for rec in seen.values():
         tech = rec["technique"]
         by_tactic.setdefault(tech.tactic, []).append(
-            {"id": tech.id, "name": tech.name, "url": tech.url,
+            {"id": tech.id, "name": tech.name,
              "hosts": sorted(rec["hosts"])})
     # order tactics along the kill chain
     order = list(TACTICS)

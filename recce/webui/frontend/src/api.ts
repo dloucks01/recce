@@ -122,7 +122,7 @@ export type Credential = {
   username: string; secret: string; kind: string; domain: string;
   source: string; origin_ip: string; notes: string; label: string;
 };
-export type AttackTech = { id: string; name: string; url: string; hosts: string[] };
+export type AttackTech = { id: string; name: string; hosts: string[] };
 export type AttackCoverage = {
   technique_count: number; tactic_count: number;
   tactics: { tactic: string; tactic_id: string; techniques: AttackTech[] }[];

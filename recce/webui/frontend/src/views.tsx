@@ -450,8 +450,8 @@ function ActCardRow({ c, nav }: { c: ActCard; nav: Nav }) {
         <button className="copy" onClick={copy}>{copied ? "✓ copied" : "copy"}</button>
       </div>
       <div className="acttags">
-        {c.attack_id && <a className="tag atk" target="_blank" rel="noopener"
-          href={`https://attack.mitre.org/techniques/${c.attack_id.replace(".", "/")}/`}>ATT&CK {c.attack_id}</a>}
+        {c.attack_id && <span className="tag atk"
+          title={`${c.attack_name || "MITRE ATT&CK technique"} — reference (airgap-safe; no external link)`}>ATT&CK {c.attack_id}</span>}
         {c.cwe && <span className="tag">{c.cwe}</span>}
         <span className={"tag safety " + c.safety.replace(/[^a-z]/g, "")}>{c.safety}</span>
       </div>
@@ -535,8 +535,8 @@ export function Act({ nav }: { nav: Nav }) {
               <div className="atktac" key={tac.tactic}>
                 <div className="atktac-h">{tac.tactic} <span className="muted">{tac.tactic_id}</span></div>
                 {tac.techniques.map((te) => (
-                  <a className="atktech" key={te.id} href={te.url} target="_blank" rel="noopener"
-                     title={`${te.hosts.length} host(s)`}>{te.id} {te.name} <span className="muted">×{te.hosts.length}</span></a>
+                  <span className="atktech" key={te.id}
+                     title={`${te.hosts.length} host(s) · MITRE ATT&CK technique (reference)`}>{te.id} {te.name} <span className="muted">×{te.hosts.length}</span></span>
                 ))}
               </div>
             ))}

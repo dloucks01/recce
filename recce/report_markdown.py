@@ -110,7 +110,9 @@ def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration R
         for tactic, techs in cov["by_tactic"].items():
             tac = f"{tactic} ({attack.TACTICS.get(tactic, '')})"
             for t in techs:
-                lines.append(f"| {tac} | [{t['id']} {t['name']}]({t['url']}) "
+                # Plain-text T-code reference, not an external link — the report is
+                # airgap-safe and self-contained (mirrors the HTML report).
+                lines.append(f"| {tac} | **{t['id']}** {t['name']} "
                              f"| {len(t['hosts'])} |")
                 tac = ""      # only label the tactic on its first row
         lines.append("")
