@@ -2,12 +2,12 @@
 
 Per-feature report tests check one widget at a time. This drives a realistic multi-host
 engagement (a DC, a web server, a database host - with findings at every severity, an
-account, AD roles, a domain) through all three report builders at once and asserts the
+account, AD roles, a domain) through all four report builders at once and asserts the
 completeness contract of each:
 
   * NO host is ever dropped from any format.
-  * The COMPLETE formats (HTML detail + the xlsx Vulnerabilities sheet) carry EVERY
-    finding, at every severity.
+  * The COMPLETE formats (HTML detail, the xlsx Vulnerabilities sheet, and the combined
+    .docx write-up) carry EVERY finding, at every severity.
   * The summary format (markdown) surfaces the high/critical findings.
   * Engagement data (accounts, AD roles) reaches the workbook.
   * Nothing crashes; every format is non-empty and lists the same set of hosts.
@@ -21,7 +21,7 @@ import unittest
 
 import openpyxl
 
-from recce import qod, report_excel, report_html, report_markdown
+from recce import qod, report_docx, report_excel, report_html, report_markdown
 from recce.models import Account, Host, Port, Vuln
 
 
@@ -66,6 +66,19 @@ def _xlsx_text(path):
     return " ".join(parts).lower()
 
 
+def _docx_text(path):
+    """All visible text from a .docx (every part first asserted well-formed)."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(path) as z:
+        for n in z.namelist():
+            if n.endswith((".xml", ".rels")):
+                ET.fromstring(z.read(n))          # malformed part -> raises here
+        root = ET.fromstring(z.read("word/document.xml"))
+    return " ".join(t.text or "" for t in root.iter(f"{W}t")).lower()
+
+
 class ReportContentFidelityTest(unittest.TestCase):
 
     HOSTS_IPS = ("10.0.0.1", "10.0.0.10", "10.0.0.20")
@@ -80,15 +93,18 @@ class ReportContentFidelityTest(unittest.TestCase):
         cls.md_path = os.path.join(cls.dir, "report.md")
         cls.html_path = os.path.join(cls.dir, "report.html")
         cls.xlsx_path = os.path.join(cls.dir, "report.xlsx")
+        cls.docx_path = os.path.join(cls.dir, "findings_report.docx")
         report_markdown.build_markdown(cls.hosts, cls.md_path, title="Engagement")
         report_html.build_html(cls.hosts, cls.html_path, title="Engagement")
         report_excel.build_workbook(cls.hosts, cls.xlsx_path)
+        report_docx.build_combined(cls.hosts, cls.docx_path, title="Engagement")
         cls.md = open(cls.md_path).read().lower()
         cls.html = open(cls.html_path).read().lower()
         cls.xlsx = _xlsx_text(cls.xlsx_path)
+        cls.docx = _docx_text(cls.docx_path)
 
     def test_every_format_is_non_empty(self):
-        for path in (self.md_path, self.html_path, self.xlsx_path):
+        for path in (self.md_path, self.html_path, self.xlsx_path, self.docx_path):
             self.assertGreater(os.path.getsize(path), 0, path)
 
     def test_no_host_is_dropped_from_any_format(self):
@@ -96,13 +112,18 @@ class ReportContentFidelityTest(unittest.TestCase):
             self.assertIn(ip, self.md, f"{ip} missing from markdown")
             self.assertIn(ip, self.html, f"{ip} missing from HTML")
             self.assertIn(ip, self.xlsx, f"{ip} missing from the workbook")
+            self.assertIn(ip, self.docx, f"{ip} missing from the combined write-up")
 
     def test_complete_formats_carry_every_finding(self):
-        # HTML detail + the xlsx Vulnerabilities sheet must show EVERY finding, at every
-        # severity (including the medium one summary formats may omit).
+        # HTML detail, the xlsx Vulnerabilities sheet, and the combined .docx must show
+        # EVERY finding, at every severity (including the medium one summary formats may
+        # omit). The engagement's findings are all real (confirmed/likely) and >= low,
+        # so the combined write-up's real-only, low+ filter keeps all of them.
         for title in self.all_findings:
             self.assertIn(title, self.html, f"finding missing from HTML: {title!r}")
             self.assertIn(title, self.xlsx, f"finding missing from the workbook: {title!r}")
+            self.assertIn(title, self.docx,
+                          f"finding missing from the combined write-up: {title!r}")
 
     def test_markdown_surfaces_high_and_critical_findings(self):
         for title in self.notable:
@@ -115,7 +136,8 @@ class ReportContentFidelityTest(unittest.TestCase):
 
     def test_all_formats_list_the_same_hosts(self):
         # Cross-format consistency: the set of engagement host IPs is identical.
-        for blob, name in ((self.md, "markdown"), (self.html, "HTML"), (self.xlsx, "xlsx")):
+        for blob, name in ((self.md, "markdown"), (self.html, "HTML"),
+                           (self.xlsx, "xlsx"), (self.docx, "docx")):
             present = {ip for ip in self.HOSTS_IPS if ip in blob}
             self.assertEqual(present, set(self.HOSTS_IPS),
                              f"{name} host set mismatch: {present}")
