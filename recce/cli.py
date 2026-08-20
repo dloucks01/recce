@@ -568,10 +568,11 @@ def _apply_profile_overrides(profile, args) -> None:
         profile.udp_fallback = False
     if g("reliable"):
         profile.reliable = True
-    if g("udp_top"):
+    if g("udp_top") is not None:     # explicit --udp-top wins, including 0 (disable)
         profile.udp_top = args.udp_top
     if g("no_udp"):
         profile.udp_basic = False
+        profile.udp_top = 0          # --no-udp skips BOTH the basic sweep and the top-N pass
     if g("masscan") or g("fast"):
         profile.scanner = "masscan"
     if g("offline"):
@@ -6007,10 +6008,13 @@ def _add_vuln_opts(pp) -> None:
                    help="skip the active stdlib probes (HTTP-header / TLS "
                         "enrichment + the service-detection banner grabs); the free "
                         "passive naming (servicefp mining + curated port map) stays on")
-    g.add_argument("--udp-top", type=int, help="also scan top-N UDP ports (vulns phase)")
+    g.add_argument("--udp-top", type=int,
+                   help="scan top-N UDP ports in the vulns phase (default 30 on the "
+                        "standard profile, 100 on thorough; 0 disables)")
     g.add_argument("--no-udp", action="store_true",
-                   help="skip the enum-phase basic-UDP sweep (DNS/SNMP/NTP/IKE/TFTP/"
-                        "NetBIOS/...). The sweep needs root; it auto-skips otherwise.")
+                   help="skip ALL UDP scanning - both the enum-phase curated sweep "
+                        "(DNS/SNMP/NTP/IKE/TFTP/NetBIOS/CLDAP/RADIUS/NFS/...) and the "
+                        "vulns-phase top-N. UDP needs root; it auto-skips otherwise.")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
