@@ -116,15 +116,21 @@ bundle_searchsploit() {
   lx="$OUT/tools/libexec/searchsploit"
   mkdir -p "$lx"
   cp -L "$ss" "$lx/searchsploit.bin"
+  chmod +x "$lx/searchsploit.bin"
   cp -a "$db" "$lx/exploitdb"
-  # rc template resolved to the bundle path at runtime by the wrapper
-  printf 'DEFAULT_PATH="%s"\nPAPERS_PATH="%s"\n' '$D/exploitdb' '$D/exploitdb' > "$lx/searchsploit_rc.tmpl"
+  # rc template resolved to the bundle path at runtime by the wrapper. Current
+  # searchsploit sources arrays (files_array/path_array/name_array), NOT DEFAULT_PATH.
+  {
+    printf 'files_array+=("files_exploits.csv")\npath_array+=("%s/exploitdb")\nname_array+=("Exploit")\n' '$D'
+    printf 'files_array+=("files_shellcodes.csv")\npath_array+=("%s/exploitdb")\nname_array+=("Shellcode")\n' '$D'
+  } > "$lx/searchsploit_rc.tmpl"
   {
     echo '#!/bin/sh'
     echo 'D="$(cd "$(dirname "$(readlink -f "$0")")/../libexec/searchsploit" && pwd)"'
     echo 'H="$(mktemp -d)"; trap '"'"'rm -rf "$H"'"'"' EXIT'
     echo 'sed "s#[$]D#$D#g" "$D/searchsploit_rc.tmpl" > "$H/.searchsploit_rc"'
-    echo 'HOME="$H" exec sh "$D/searchsploit.bin" "$@"'
+    # searchsploit is a bash script (bash syntax) - run it with bash, not sh/dash.
+    echo 'HOME="$H" exec bash "$D/searchsploit.bin" "$@"'
   } > "$OUT/tools/bin/searchsploit"
   chmod +x "$OUT/tools/bin/searchsploit"
   echo "[+] bundled searchsploit + exploit-db ($(du -sh "$lx" | cut -f1))"
