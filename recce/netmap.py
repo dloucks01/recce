@@ -1203,7 +1203,12 @@ def _arch_logical(up, segs, doms):
     m, segGap, PER, chain = 26, 28, 4, 48
     ncol = min(PER, len(segs))
     nrow = -(-len(segs) // ncol)
-    W = m * 2 + ncol * _SEG_W + (ncol - 1) * segGap
+    contentW = ncol * _SEG_W + (ncol - 1) * segGap
+    # Min width so the centered "Routed core — all N host(s) reachable…" title and the
+    # footer note fit; when the diagram is narrower than that (e.g. a single segment), the
+    # segment chain is centered in the box instead of left-aligned with dead space.
+    W = max(m * 2 + contentW, 486)
+    xoff = (W - (m * 2 + contentW)) / 2
     els = ['<text x="26" y="24" font-size="16" font-weight="700" fill="#0f766e">'
            'Network architecture <tspan font-size="11" font-weight="400" fill="#5f6f6e">'
            '· logical — infrastructure &amp; segments</tspan></text>']
@@ -1222,7 +1227,7 @@ def _arch_logical(up, segs, doms):
     gy0 = coreY + coreH
     for i, z in enumerate(segs):
         r, c = divmod(i, ncol)
-        zx = m + c * (_SEG_W + segGap)
+        zx = m + xoff + c * (_SEG_W + segGap)
         chainTop = gy0 + r * (chain + _ZONE_H + 26)
         cx = zx + _SEG_W / 2
         zy = chainTop + chain
@@ -1239,9 +1244,8 @@ def _arch_logical(up, segs, doms):
         els += _draw_zone(zx, zy, z)
     H = gy0 + nrow * (chain + _ZONE_H + 26) + 40
     els.append(f'<text x="{m}" y="{H - 14:.0f}" font-size="9.5" fill="#8a9997">'
-               'Logical view: a switch = one L2 segment; gateways are shown per segment '
-               '(feed an on-target enum\'s routes via `ingest` for real gateway IPs and '
-               'inter-segment links). Every segment was reachable from the assessment host.'
+               'Logical view: a switch = one L2 segment; ingest on-target routes for '
+               'real gateway IPs.'
                '</text>')
     return _svg_wrap(W, H, els)
 
