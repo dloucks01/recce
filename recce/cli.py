@@ -2537,6 +2537,72 @@ def cmd_services(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cves_from_findings(hosts, confirmed_only: bool = False) -> list[str]:
+    cves: set[str] = set()
+    for h in hosts:
+        for v in getattr(h, "vulns", []):
+            if confirmed_only and (v.confidence or "").lower() != "confirmed":
+                continue
+            for c in (v.ids or []):
+                if c.upper().startswith("CVE-"):
+                    cves.add(c.upper())
+    return sorted(cves)
+
+
+def cmd_poc(args: argparse.Namespace) -> int:
+    """Assemble a per-CVE PoC dossier + Python harness skeleton from recce's OFFLINE
+    intel (vulndb + KEV/EPSS + the local Exploit-DB + msf refs + build recipes), for the
+    hosts affected in this engagement. With CVE args it targets exactly those; otherwise
+    it uses the CVEs from the engagement's findings (`--confirmed` to gate to confirmed
+    ones only). recce references published exploits and scaffolds a harness; it does not
+    author weaponized exploit code."""
+    from . import pocgen
+    paths = _open_paths(args.output_dir)
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    hosts = store.all_hosts()
+    if args.cves:
+        cves, bad = [], []
+        for c in args.cves:
+            (cves if pocgen.valid_cve(c) else bad).append(c.upper())
+        for b in bad:
+            print(f"[!] skipping {b!r} - not a CVE id (expected CVE-YYYY-NNNN)")
+    else:
+        cves = _cves_from_findings(hosts, confirmed_only=args.confirmed)
+    cves = sorted(set(cves))
+    if not cves:
+        print("[x] No CVEs to build. Pass CVE ids (recce poc CVE-2021-44228 …) or run "
+              "enum/vulns first so findings carry CVEs" +
+              (" (none are CONFIRMED - drop --confirmed to include all)." if args.confirmed else "."))
+        return 1
+    if not exploits.available():
+        print("[!] searchsploit not found - dossiers will omit Exploit-DB references "
+              "(install exploitdb, or build the airgap bundle with RECCE_WITH_SEARCHSPLOIT=1).")
+    results = pocgen.generate(cves, hosts, args.output_dir, with_exploits=args.with_exploits)
+    outdir = os.path.join(args.output_dir, "poc")
+    print(f"[+] Wrote {len(results)} PoC dossier(s) -> {outdir}/")
+    for r in results:
+        tags = []
+        if r["kev"]:
+            tags.append("🔥KEV")
+        if r["epss"]:
+            tags.append(f"EPSS {round(r['epss'] * 100)}%")
+        if r["edb"]:
+            tags.append(f"{r['edb']} EDB")
+        if r["msf"]:
+            tags.append("msf")
+        if r["recipe"]:
+            tags.append(f"recipe:{r['recipe']}")
+        if r["exploits_copied"]:
+            tags.append(f"+{r['exploits_copied']} exploit file(s)")
+        aff = f"{r['affected']} host(s)" if r["affected"] else "not seen here"
+        print(f"    {r['cve']:<18} {aff:<14} {'  '.join(tags)}")
+    print("    Each dir has <CVE>.md (the dossier) + poc.py (the harness scaffold). "
+          "Authorized testing only.")
+    return 0
+
+
 def cmd_exploitplan(args: argparse.Namespace) -> int:
     """Generate a per-finding exploitation PLAN: ready-to-run artifacts that drive
     EXISTING published tools/modules with the discovered parameters filled in.
@@ -6173,6 +6239,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="arm the Metasploit launch lines (default: check-only, safe). "
                          "Use ONLY within your rules of engagement.")
     ep.set_defaults(func=cmd_exploitplan)
+
+    pc = sub.add_parser("poc",
+                        help="assemble a per-CVE PoC dossier + Python harness skeleton "
+                             "from offline intel (vulndb/KEV/EPSS/Exploit-DB/msf); "
+                             "authorized testing only")
+    pc.add_argument("cves", nargs="*",
+                    help="CVE ids to build (e.g. CVE-2021-44228); default: the CVEs from "
+                         "the engagement's findings")
+    _add_io(pc, title=False)
+    pc.add_argument("--confirmed", action="store_true",
+                    help="only CVEs from CONFIRMED findings (default: all findings' CVEs)")
+    pc.add_argument("--with-exploits", action="store_true",
+                    help="also copy the matching Exploit-DB PoC files into each CVE dir "
+                         "(needs searchsploit/exploitdb)")
+    pc.set_defaults(func=cmd_poc)
 
     # Proof / verification: is a flagged finding real or a false positive?
     pv = sub.add_parser("prove",
