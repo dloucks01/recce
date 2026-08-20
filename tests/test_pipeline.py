@@ -6664,9 +6664,16 @@ class BloodHoundTest(unittest.TestCase):
         # own target platform), instead of assuming an impacket-free CI runner.
         from unittest import mock
         from recce import bloodhound as bh
+        from recce import credenum
         creds = {"domain": "CORP.LOCAL", "user": "bob", "secret": "Pw",
                  "is_hash": False, "dc_ip": "10.0.0.1"}
-        with mock.patch.object(bh, "_kerb_tool", return_value=None):
+        # _kerb_tool=None disables bloodhound's impacket fallbacks, but live_kerberoast
+        # tries a NATIVE path first (credenum.run_kerberoast), which itself reaches for
+        # impacket-GetUserSPNs against the DC - a real subprocess to the non-routable
+        # 10.0.0.1 that blocks up to the 180s tool timeout. Stub the native roast to
+        # empty so the runner cleanly falls through to the "not installed" fallback.
+        with mock.patch.object(bh, "_kerb_tool", return_value=None), \
+             mock.patch.object(credenum, "run_kerberoast", return_value=([], None)):
             res = bh.live_kerberos(creds, None, do_roast=True, do_asrep=True,
                                    do_dcsync=True)
         self.assertEqual(res["findings"], [])
