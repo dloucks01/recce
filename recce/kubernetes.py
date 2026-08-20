@@ -24,6 +24,7 @@ import re
 import ssl
 
 from .models import Host, Port
+from .svccommon import finding_builder
 
 _TIMEOUT = 6.0
 _KUBELET = 10250
@@ -289,10 +290,7 @@ TESTING_NARRATIVE = [
 
 # --- findings -------------------------------------------------------------------
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "kubernetes", "severity": sev, "title": title, "target": target,
-            "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("kubernetes", _NARRATIVE)
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:

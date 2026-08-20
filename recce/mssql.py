@@ -27,6 +27,7 @@ import socket
 import struct
 
 from .models import Host, Port
+from .svccommon import finding_builder
 
 SQLBROWSER_PORT = 1434
 _DEFAULT_PORT = 1433
@@ -453,10 +454,7 @@ TESTING_NARRATIVE = [
 ]
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
-    return {"category": "mssql", "severity": sev, "title": title, "target": target,
-            "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
+_finding = finding_builder("mssql", _NARRATIVE)
 
 
 def _port_scripts(host: Host, portid: int) -> dict:

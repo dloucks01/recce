@@ -6,7 +6,44 @@ so that one conversion lives here instead of in five near-identical copies.
 
 from __future__ import annotations
 
+import socket
+
 from .models import Evidence, Vuln
+
+
+def recvn(sock, n: int, timeout: float | None = None):
+    """Read exactly `n` bytes off `sock`. Two modes the deep-service modules both need:
+
+    - timeout is None (mongodb/ldap style): the caller manages the socket's timeout; a
+      short read at EOF returns the partial buffer, and a socket error propagates.
+    - timeout set (nfs/kerberos style): applies `sock.settimeout(timeout)` and returns
+      None on EOF, timeout, or any socket error — a definite 'incomplete frame' signal.
+    """
+    if timeout is not None:
+        sock.settimeout(timeout)
+    buf = b""
+    while len(buf) < n:
+        try:
+            chunk = sock.recv(min(65536, n - len(buf)))
+        except (socket.timeout, OSError):
+            if timeout is None:
+                raise
+            return None
+        if not chunk:
+            return None if timeout is not None else buf
+        buf += chunk
+    return buf
+
+
+def finding_builder(category: str, narrative: dict):
+    """Return a deep-service module's `_finding(...)` builder. Every module built a
+    byte-identical copy differing only in the `category` label; this owns the one shape.
+    `narrative` is the module's `_NARRATIVE` map (kind -> the 'what this enables' blurb)."""
+    def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+        return {"category": category, "severity": sev, "title": title, "target": target,
+                "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
+                "cwes": list(cwes), "kind": kind, "narrative": narrative.get(kind, "")}
+    return _finding
 
 
 def findings_to_vulns(fs: list[dict], source: str, default_port: int,
