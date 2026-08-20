@@ -90,6 +90,7 @@ it (`sudo apt install nmap`) and re-run.
 | **On-target loot** | `./bin/recce ingest loot.txt -o eng` | fold `recce-enum.sh/.ps1` findings in |
 | **Mass local-enum** | `./bin/recce deploy -u U -p P -o eng` | run the local-enum + priv-esc scan on every host you have creds for (SSH/WinRM/SMB) |
 | **Exploit plan** | `./bin/recce exploitplan -o eng --lhost <ip>` | runnable msf `.rc` + tool commands |
+| **PoC dossiers** | `./bin/recce poc -o eng` | per-CVE dossier + Python harness scaffold (offline: vulndb/KEV/EPSS/Exploit-DB/msf) |
 | **Attack path** | `./bin/recce attackpath -o eng` | chains findings → domain compromise |
 | **Credentials** | `./bin/recce creds --add 'dom\u:p' -o eng` | stack creds → spray plan (`--plan`) |
 | **Write-ups** | `./bin/recce writeups -o eng` | one Word doc per real finding |
@@ -139,8 +140,8 @@ row per computer, a checkbox per step.
 > [!TIP]
 > **Prefer a browser?** `./bin/recce serve -o eng` starts the **web workbench** at
 > `http://<this-box>:8008` — the same engagement in a browser, shareable with the
-> team over the LAN. Run scans from it, work the Findings / Act / Loot tabs, and
-> export the report in one click. (See the README's *Web workbench* section.)
+> team over the LAN. Run scans from it, work the Findings / Act / Credentials tabs,
+> and export the report in one click. (See the README's *Web workbench* section.)
 
 ### ③ Vuln-scan — check the open services for known weaknesses
 ```bash
@@ -185,6 +186,7 @@ Run the authenticated pass too:
 #   --dry-run previews the per-host transport plan.
 
 ./bin/recce exploitplan -o eng --lhost 10.10.14.7   # runnable msf .rc (--run to arm)
+./bin/recce poc         -o eng                        # per-CVE PoC dossier + harness scaffold
 ./bin/recce attackpath  -o eng                       # foothold → priv-esc → … → domain
 ./bin/recce creds --add 'CORP\alice:Pw!' -o eng      # then: creds --plan  (spray plan)
 ```

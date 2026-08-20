@@ -22,11 +22,6 @@ paths from your account to Domain Admin.
 > `python3 -m recce`, and a **Start Here** tab inside every workbook that
 > explains each sheet.
 
-> ⚖️ **Authorized use only.** recce is for security work you have written
-> permission to perform. Its safety controls, the intrusive actions that are
-> opt-in/flag-gated, and your responsibilities as an operator are all documented
-> in **[SECURITY.md](SECURITY.md)** — read it before your first engagement.
-
 ## Documentation
 
 New here, start at the top and work down:
@@ -37,7 +32,6 @@ New here, start at the top and work down:
 | [CHEATSHEET.html](CHEATSHEET.html) | Printable one-page field reference (open in a browser) |
 | [docs/](docs/README.md) | The full reference: per-phase deep dives, the command reference, and design notes |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Symptom → cause → fix, per phase |
-| [SECURITY.md](SECURITY.md) | Safety model, authorized-use, and the opt-in intrusive actions |
 | [INTEGRATION.md](INTEGRATION.md) | The fieldkit round-trip (enumerate here, exploit there, fold findings back) |
 
 Every workbook also has a **Start Here** tab explaining each sheet, and a
@@ -83,8 +77,9 @@ is separate, resumable, and safe-by-default; follow the links for the full detai
   enumeration, and offline **BloodHound + Certipy** import that maps the shortest
   paths to Domain Admin. → [active-directory](docs/reference/active-directory.md)
 - **Privilege escalation & exploitation** — a per-host playbook, on-target
-  read-only enum you fold back in with `ingest`, and runnable msf/tool artifacts
-  for **confirmed** findings. → [privesc](docs/reference/privesc.md)
+  read-only enum you fold back in with `ingest`, runnable msf/tool artifacts
+  for **confirmed** findings, and per-CVE PoC dossiers + harness scaffolds
+  (`recce poc`, offline — vulndb/KEV/EPSS/Exploit-DB/msf). → [privesc](docs/reference/privesc.md)
 - **Track & report** — one filterable **Excel workbook** with persistent
   `Reviewed`/`Checked` columns, self-contained HTML reports, network diagrams, and
   per-finding Word write-ups. → [reporting](docs/reference/reporting.md)
@@ -187,10 +182,6 @@ Built for a **team on one engagement**, live over SSE:
 - **Add by hand** — a finding, credential, host, or access record — and **chat** with
   the team (text + pasted screenshots).
 
-> ⚠️ **The workbench is unauthenticated and binds to `0.0.0.0` by default** — anyone who
-> can reach the URL has full access to the engagement (findings, credentials, scans).
-> Run it only on a trusted engagement network; see **[SECURITY.md](SECURITY.md) §7**.
-
 The web UI needs `fastapi` + `uvicorn` — both are **bundled in the airgap package**.
 For a dev install: `pip install 'recce[bundle]'`.
 
@@ -233,10 +224,5 @@ tools/build_bundle.sh  freeze a self-contained binary (+ web UI); offline-capabl
 ```
 
 ---
-
-> ⚖️ **Authorized use only.** recce is for security work you have written
-> permission to perform. Its safety controls, the opt-in/flag-gated intrusive
-> actions, and your responsibilities as an operator are documented in
-> **[SECURITY.md](SECURITY.md)** — read it before your first engagement.
 
 Licensed under the [MIT License](LICENSE).

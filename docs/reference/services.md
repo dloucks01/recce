@@ -112,8 +112,7 @@ python -m recce k8s -o eng          # probe kubelet / apiserver / etcd, CONFIRM 
 
 A hand-rolled SNMP **v2c** client on a raw UDP socket (BER/ASN.1 with OID base-128
 encoding and GETNEXT walking — no pysnmp), so it runs on a stock airgapped Kali. A
-read-write community is flagged by *name* (private/write/manager/secret). Safety
-posture: see [SECURITY.md](../../SECURITY.md).
+read-write community is flagged by *name* (private/write/manager/secret).
 
 - **Community guessing** — GET `sysDescr` with a list of common community strings
   (public/private/community/…); the first that answers is a readable community.
