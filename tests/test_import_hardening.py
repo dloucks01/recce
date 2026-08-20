@@ -177,6 +177,14 @@ class ParserVariants(unittest.TestCase):
         self.assertEqual(len(v), 1)
         self.assertEqual(v[0].severity, "medium")
 
+    def test_namespaced_xml_still_parses(self):
+        ns = ('<NessusClientData_v2 xmlns="http://x"><Report><ReportHost name="1.2.3.4">'
+              '<HostProperties><tag name="host-ip">1.2.3.4</tag></HostProperties>'
+              '<ReportItem severity="4" pluginID="9" pluginName="RCE" port="443">'
+              '<cve>CVE-2021-1</cve></ReportItem></ReportHost></Report></NessusClientData_v2>')
+        v = im.parse_nessus(ns)                          # a default xmlns must not blank it
+        self.assertEqual((v[0].ip, v[0].severity, v[0].ids), ("1.2.3.4", "critical", ["CVE-2021-1"]))
+
     def test_masscan_list_and_json(self):
         from recce import parser
         import tempfile

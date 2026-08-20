@@ -121,9 +121,15 @@ def _safe_fromstring(text: str):
     if re.search(r"<!(?:DOCTYPE|ENTITY)", text, re.I):
         return None
     try:
-        return ET.fromstring(text)
+        root = ET.fromstring(text.lstrip("﻿"))
     except ET.ParseError:
         return None
+    # Strip namespace prefixes so a report wrapped in a default xmlns still matches the
+    # literal-name lookups (iter("ReportHost") / iter("result")) the parsers use.
+    for el in root.iter():
+        if isinstance(el.tag, str) and el.tag.startswith("{"):
+            el.tag = el.tag.rsplit("}", 1)[1]
+    return root
 
 
 def _cvss_to_sev(score: float) -> str:
