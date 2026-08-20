@@ -547,3 +547,11 @@ body { background: var(--ground); color: var(--text); }
 .tablewrap::-webkit-scrollbar-thumb { background: var(--line); border-radius: 7px; border: 3px solid var(--surface); }
 .tablewrap::-webkit-scrollbar-thumb:hover { background: var(--faint); }
 .tablewrap::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- first-run / empty-engagement state ---- */
+.firstrun { display: grid; place-items: center; justify-items: center; text-align: center; gap: 8px; padding: 72px 24px; }
+.firstrun .fr-emoji { font-size: 44px; }
+.firstrun h3 { margin: 6px 0 0; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+.firstrun p { margin: 0; max-width: 520px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+.firstrun p b { color: var(--text); font-weight: 700; }
+.firstrun p.muted { font-size: 12.5px; }

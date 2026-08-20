@@ -316,6 +316,16 @@ export function Hosts(
   }, [hosts, q, cov, who, c.assignments, me]);
   const { shown, limit, total, sentinel } = useBounded(rows, 120, [q, cov, who]);
 
+  if (hosts.length === 0) return (
+    <div className="firstrun">
+      <div className="fr-emoji">🛰️</div>
+      <h3>No hosts yet</h3>
+      <p>Discover hosts with <b>▶ Scan</b>, or fold in results you already have with
+        <b> ⭱ Import</b> (nmap, netexec, Nessus, on-target loot…) — both are in the toolbar above.</p>
+      <p className="muted">Everything you scan or import lands here, live for the whole team.</p>
+    </div>
+  );
+
   const enumPct = ov.hosts_up ? Math.round((100 * ov.enumerated) / ov.hosts_up) : 0;
   const revHosts = hosts.filter((h) => h.reviewed).length;
   const COV: [string, string, number][] = [
