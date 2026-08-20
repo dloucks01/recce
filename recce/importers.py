@@ -19,6 +19,18 @@ _THREAT_SEV = {"critical": "critical", "high": "high", "medium": "medium",
                "low": "low", "log": "info", "info": "info", "debug": "info"}
 
 
+def _safe_fromstring(text: str):
+    """Parse XML, refusing DTD/entity declarations. stdlib ElementTree expands internal
+    entities (a 'billion laughs' DoS vector on untrusted input, and we have no defusedxml
+    in an airgapped stdlib-only build). Returns the root element, or None on any problem."""
+    if re.search(r"<!(?:DOCTYPE|ENTITY)", text[:8000], re.I):
+        return None
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError:
+        return None
+
+
 def _cvss_to_sev(score: float) -> str:
     if score >= 9.0:
         return "critical"
@@ -44,9 +56,8 @@ def parse_nessus(text: str, include_info: bool = False) -> list[Vuln]:
     """Nessus v2 export (.nessus): ReportHost > ReportItem. Info-level (severity 0)
     items are open-port/service noise and are skipped unless include_info."""
     out: list[Vuln] = []
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError:
+    root = _safe_fromstring(text)
+    if root is None:
         return out
     for host in root.iter("ReportHost"):
         ip = host.get("name", "")
@@ -77,9 +88,8 @@ def parse_nessus(text: str, include_info: bool = False) -> list[Vuln]:
 def parse_openvas(text: str) -> list[Vuln]:
     """OpenVAS / Greenbone (GVM) XML report: results > result."""
     out: list[Vuln] = []
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError:
+    root = _safe_fromstring(text)
+    if root is None:
         return out
     for res in root.iter("result"):
         ip = (res.findtext("host") or "").strip().split()[0] if res.findtext("host") else ""

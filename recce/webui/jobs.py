@@ -34,6 +34,9 @@ class Job:
         self.ended: float | None = None
 
 
+_MAX_JOBS = 60          # cap the in-memory registry; oldest FINISHED jobs are evicted
+
+
 class JobManager:
     """In-memory registry of scan jobs (results persist in the store, not here)."""
 
@@ -47,8 +50,19 @@ class JobManager:
         job = Job(jid, argv)
         with self._lock:
             self._jobs[jid] = job
+            self._prune()
         threading.Thread(target=self._run, args=(job, argv, on_done), daemon=True).start()
         return job
+
+    def _prune(self) -> None:
+        """Keep memory bounded: drop the oldest finished jobs past the cap. A running
+        job is never evicted (its SSE stream and buffer are still in use)."""
+        if len(self._jobs) <= _MAX_JOBS:
+            return
+        finished = sorted((j for j in self._jobs.values() if j.status != "running"),
+                          key=lambda j: j.started)
+        for j in finished[: len(self._jobs) - _MAX_JOBS]:
+            self._jobs.pop(j.id, None)
 
     def _run(self, job: Job, argv: list[str], on_done=None) -> None:
         try:
