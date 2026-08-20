@@ -815,6 +815,76 @@ SIGNATURES: list[dict] = [
      "desc": "The Barracuda ESG had a remote command-injection (CVE-2023-2868) "
              "exploited for months by a state actor; the vendor advised full "
              "appliance replacement, not just patching."},
+
+    # --- additional coverage: web frameworks / apps / mail / proxies -----------
+    {"product": ["nginx"], "ge": "1.3.9", "lt": "1.4.1", "severity": "critical",
+     "title": "nginx chunked-encoding stack buffer overflow",
+     "cves": ["CVE-2013-2028"], "cwe": ["CWE-121"],
+     "remediation": "Upgrade nginx to 1.4.1 / 1.5.0 or later.",
+     "desc": "A signedness error in nginx's chunked-request parsing allows a stack "
+             "buffer overflow and remote code execution / DoS."},
+    {"product": ["nginx"], "ge": "0.5.6", "lt": "1.13.3", "severity": "medium",
+     "title": "nginx range-filter integer overflow (memory disclosure)",
+     "cves": ["CVE-2017-7529"], "cwe": ["CWE-190"],
+     "remediation": "Upgrade nginx to 1.13.3 / 1.12.1 or later.",
+     "desc": "An integer overflow in the range filter lets a crafted Range header leak "
+             "adjacent cache/memory contents."},
+    {"product": ["struts", "apache struts"], "severity": "critical", "advisory": True,
+     "title": "Apache Struts 2 exposed - known unauthenticated RCE chain",
+     "cves": ["CVE-2017-5638", "CVE-2018-11776", "CVE-2023-50164"], "cwe": ["CWE-20", "CWE-1336"],
+     "remediation": "Upgrade Struts to the latest release; audit for OGNL/multipart RCE.",
+     "desc": "Apache Struts 2 has a history of unauthenticated OGNL RCE (S2-045 Jakarta "
+             "multipart, S2-057 namespace, and the 2023 file-upload path traversal). "
+             "Version is rarely in the banner - confirm the patch level directly."},
+    {"product": ["roundcube"], "lt": "1.4.4", "severity": "critical",
+     "title": "Roundcube Webmail RCE via image handler config",
+     "cves": ["CVE-2020-12641"], "cwe": ["CWE-94"],
+     "remediation": "Upgrade Roundcube to 1.4.4 / 1.3.11 / 1.2.11 or later.",
+     "desc": "An argument-injection in the rcube_image config lets an authenticated user "
+             "run arbitrary commands on the mail server."},
+    {"product": ["adminer"], "lt": "4.8.1", "severity": "high",
+     "title": "Adminer SSRF / arbitrary file read (AdminerRead)",
+     "cves": ["CVE-2021-43008"], "cwe": ["CWE-918", "CWE-98"],
+     "remediation": "Upgrade Adminer to 4.8.1+ or remove it from the web root.",
+     "desc": "Adminer's Elasticsearch/ClickHouse drivers can be coerced into server-side "
+             "requests and reading local files - often used to loot DB credentials."},
+    {"product": ["opensmtpd"], "lt": "6.6.4", "severity": "critical",
+     "title": "OpenSMTPD unauthenticated remote command execution",
+     "cves": ["CVE-2020-7247"], "cwe": ["CWE-78"],
+     "remediation": "Upgrade OpenSMTPD to 6.6.4p1 or later.",
+     "desc": "An input-validation flaw in the SMTP MAIL FROM handling allows an "
+             "unauthenticated attacker to run shell commands as root."},
+    {"product": ["superset", "apache superset"], "lt": "2.1.0", "severity": "high",
+     "advisory": True,
+     "title": "Apache Superset default SECRET_KEY - session forgery to admin",
+     "cves": ["CVE-2023-27524"], "cwe": ["CWE-1188", "CWE-287"],
+     "remediation": "Set a strong SECRET_KEY and upgrade Superset to 2.1+.",
+     "desc": "Superset deployments left on the shipped default SECRET_KEY let an attacker "
+             "forge a session cookie and authenticate as an administrator."},
+    {"product": ["haproxy"], "severity": "high", "advisory": True,
+     "title": "HAProxy exposed - HTTP request smuggling (CVE-2021-40346)",
+     "cves": ["CVE-2021-40346"], "cwe": ["CWE-444"],
+     "remediation": "Upgrade HAProxy to 2.0.25 / 2.2.17 / 2.3.14 / 2.4.4 or later.",
+     "desc": "An integer overflow in HAProxy header handling enables request smuggling "
+             "past ACLs. Confirm the patched point release for your branch."},
+    {"product": ["moveit"], "severity": "critical", "advisory": True,
+     "title": "MOVEit Transfer exposed - pre-auth SQLi to RCE (CVE-2023-34362)",
+     "cves": ["CVE-2023-34362"], "cwe": ["CWE-89"],
+     "remediation": "Patch MOVEit Transfer per Progress advisories; hunt for webshells.",
+     "desc": "A pre-authentication SQL injection in MOVEit Transfer led to mass data "
+             "theft (Cl0p). KEV-listed; confirm the build is patched and uncompromised."},
+    {"product": ["papercut"], "severity": "critical", "advisory": True,
+     "title": "PaperCut MF/NG exposed - auth bypass to RCE (CVE-2023-27350)",
+     "cves": ["CVE-2023-27350"], "cwe": ["CWE-284"],
+     "remediation": "Upgrade PaperCut to 20.1.7 / 21.2.11 / 22.0.9 or later.",
+     "desc": "An access-control flaw lets an unauthenticated attacker reach the admin "
+             "SetupCompleted page and run code via the scripting interface. KEV-listed."},
+    {"product": ["minio"], "severity": "high", "advisory": True,
+     "title": "MinIO exposed - cluster env/secret disclosure (CVE-2023-28432)",
+     "cves": ["CVE-2023-28432"], "cwe": ["CWE-200"],
+     "remediation": "Upgrade MinIO to RELEASE.2023-03-20 or later.",
+     "desc": "A distributed MinIO returns environment variables - including "
+             "MINIO_SECRET_KEY / root credentials - to an unauthenticated request. KEV-listed."},
 ]
 
 

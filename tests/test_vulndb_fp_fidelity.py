@@ -129,6 +129,21 @@ class VulndbFalsePositiveFidelityTest(unittest.TestCase):
             self.assertFalse(_cves(product, version, service),
                              f"{product} {version} (patched/modern) was flagged")
 
+    def test_added_coverage_fires(self):
+        # the batch of added signatures detects its vulnerable versions
+        for product, version, service, cve in [
+            ("nginx", "1.4.0", "http", "CVE-2013-2028"),
+            ("nginx", "1.10.0", "http", "CVE-2017-7529"),
+            ("OpenSMTPD", "6.6.2", "smtp", "CVE-2020-7247"),
+            ("Adminer", "4.7.0", "http", "CVE-2021-43008"),
+            ("Roundcube", "1.4.2", "http", "CVE-2020-12641"),
+        ]:
+            self.assertIn(cve, _cves(product, version, service),
+                          f"{product} {version} should flag {cve}")
+        # advisory product-only signatures fire on the product regardless of version
+        self.assertIn("CVE-2017-5638", _cves("Apache Struts", "", "http"))
+        self.assertIn("CVE-2023-34362", _cves("MOVEit", "", "http"))
+
 
 if __name__ == "__main__":
     unittest.main()
