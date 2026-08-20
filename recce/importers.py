@@ -13,6 +13,68 @@ import xml.etree.ElementTree as ET
 
 from .models import Vuln
 
+# --- upload decoding + shared classifiers ---------------------------------------
+# CSI + a few OSC/other escape sequences a piped tool log can carry.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+_IPV6_RE = re.compile(r"^[0-9a-fA-F:]+:[0-9a-fA-F:]*$")
+_NT_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+_LMNT_RE = re.compile(r"^([0-9a-fA-F]{32}):([0-9a-fA-F]{32})$")
+
+
+def decode_bytes(raw: bytes) -> str:
+    """Decode uploaded bytes to text, handling the encodings real tool output uses —
+    UTF-16 (the DEFAULT of a Windows PowerShell `>` / Out-File redirect), a UTF-8/UTF-16
+    BOM, then UTF-8, falling back to latin-1. Never raises."""
+    if not raw:
+        return ""
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):        # UTF-16 with BOM (decode auto-picks endianness)
+        try:
+            return raw.decode("utf-16")
+        except (UnicodeDecodeError, ValueError):
+            pass
+    head = raw[:512]
+    if head.count(0) > len(head) // 4:               # BOM-less UTF-16: interleaved NULs
+        for enc in ("utf-16-le", "utf-16-be"):
+            try:
+                return raw.decode(enc)
+            except (UnicodeDecodeError, ValueError):
+                pass
+    if raw[:3] == b"\xef\xbb\xbf":                    # UTF-8 BOM
+        return raw[3:].decode("utf-8", "replace")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1", "replace")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI colour/escape sequences a piped/`tee`'d tool log carries, so line
+    parsers (netexec, on-target loot) match on the real text."""
+    return _ANSI_RE.sub("", text)
+
+
+def is_ip(value: str) -> bool:
+    """True if value is an IPv4 or (loosely) IPv6 literal — used to reject a hostname/URL
+    being stored as a host's `ip` key."""
+    v = (value or "").strip()
+    return bool(_IPV4_RE.match(v) or (":" in v and _IPV6_RE.match(v)))
+
+
+def classify_secret(secret: str) -> tuple[str, str]:
+    """(kind, sprayable_secret) for a captured secret. An `LM:NT` pair collapses to the NT
+    half (the sprayable one); a bare 32-hex is an NT hash; a `$krb5*` is a roast hash;
+    anything else is a plaintext password."""
+    s = (secret or "").strip()
+    m = _LMNT_RE.match(s)
+    if m:
+        return "nthash", m.group(2)
+    if _NT_RE.match(s):
+        return "nthash", s
+    if s.startswith(("$krb5tgs$", "$krb5asrep$")):
+        return "hash", s
+    return "password", s
+
 # Nessus severity code (0-4) and OpenVAS/GVM threat word -> recce severity.
 _NESSUS_SEV = {"4": "critical", "3": "high", "2": "medium", "1": "low", "0": "info"}
 _THREAT_SEV = {"critical": "critical", "high": "high", "medium": "medium",

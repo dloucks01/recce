@@ -374,14 +374,27 @@ def create_app(eng_dir: str) -> FastAPI:
         Auto-detects the format (or takes an explicit `kind`) and routes to the same
         parsers the CLI uses: nmap/masscan -> `import`, on-target loot -> `ingest`, and
         netexec / GetUserSPNs / GetNPUsers / secretsdump -> credenum's parsers."""
+        import base64
         import tempfile
-        content = str(body.get("content", ""))
+        from .. import importers
+        content_in = str(body.get("content", ""))
         filename = str(body.get("filename", ""))
         kind = str(body.get("kind", "auto")).lower()
-        if not content.strip():
+        enc = str(body.get("encoding", "")).lower()
+        if not content_in.strip():
             raise HTTPException(400, "no content to import")
-        if len(content) > 25_000_000:                    # ~25 MB — generous for real scans
+        # Decode the upload to bytes ONCE. The browser sends base64 (binary-safe) so a
+        # UTF-16 / BOM / binary file survives intact; older/plain callers may send raw text.
+        try:
+            raw_bytes = (base64.b64decode(content_in, validate=False) if enc == "base64"
+                         else content_in.encode("utf-8", "replace"))
+        except Exception:
+            raise HTTPException(400, "could not decode the uploaded file")
+        if len(raw_bytes) > 25_000_000:                  # ~25 MB — cap the REAL decoded size
             raise HTTPException(413, "import too large (max ~25 MB)")
+        # Text-safe decode (UTF-16 is the default of a PowerShell redirect); bloodhound
+        # re-reads raw_bytes below since a SharpHound zip is binary.
+        content = importers.decode_bytes(raw_bytes)
         if kind in ("", "auto"):
             kind = _detect_import_kind(content, filename)
         if kind == "unknown":
@@ -393,17 +406,10 @@ def create_app(eng_dir: str) -> FastAPI:
         # zip, so accept a base64 payload, decode, and run it through the `recce ad`
         # engine (works with no creds — findings + graph, just no owned-account paths).
         if kind == "bloodhound":
-            import base64
-            enc = str(body.get("encoding", ""))
-            try:
-                raw = base64.b64decode(content) if enc == "base64" else content.encode()
-            except Exception:
-                raise HTTPException(400, "could not decode the uploaded file")
+            raw = raw_bytes                               # already decoded above (binary-safe)
             is_zip = raw[:2] == b"PK" or filename.lower().endswith(".zip")
             fd, tmp = tempfile.mkstemp(prefix="recce-import-",
                                        suffix=".zip" if is_zip else ".json")
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(raw)
             label = f"ad {filename or kind}"
 
             def _done_ad(job, _tmp=tmp):
@@ -413,21 +419,38 @@ def create_app(eng_dir: str) -> FastAPI:
                     pass
                 broker.publish({"type": "scan", "status": job.status,
                                 "tester": x_tester, "targets": label})
-            job = jobs.start(recce_argv("ad", tmp, "-o", eng_dir), on_done=_done_ad)
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(raw)
+                job = jobs.start(recce_argv("ad", tmp, "-o", eng_dir), on_done=_done_ad)
+            except BaseException:
+                try:
+                    os.remove(tmp)                        # never leak the temp file on start failure
+                except OSError:
+                    pass
+                raise
             broker.publish({"type": "scan_started", "tester": x_tester, "targets": label})
             return {"mode": "job", "id": job.id, "kind": kind}
 
         # nmap + on-target loot + fieldkit have a real CLI pipeline (host resolution,
         # merge, enrich): run it as a job so the browser streams progress like a scan.
         if kind in ("nmap", "loot", "fieldkit"):
-            cmd, suffix = {
-                "nmap": ("import", ".xml" if content.lstrip().startswith("<") else ".gnmap"),
-                "loot": ("ingest", ".txt"),
-                "fieldkit": ("fieldkit-import", ".json"),
-            }[kind]
+            if kind == "nmap":
+                # Choose the suffix from the CONTENT (parse_nmap_file dispatches on extension),
+                # so the right parser runs: XML (-oX), grepable (-oG), or normal (-oN). The old
+                # "starts with '<'" guess sent a -oN file to the gnmap parser and a BOM'd XML
+                # to gnmap too.
+                if "<nmaprun" in content[:4000] or content.lstrip().startswith("<?xml"):
+                    suffix = ".xml"
+                elif re.search(r"^Host:\s+\S+\s+\(", content, re.M):
+                    suffix = ".gnmap"
+                else:
+                    suffix = ".nmap"
+                cmd = "import"
+            else:
+                cmd, suffix = {"loot": ("ingest", ".txt"),
+                               "fieldkit": ("fieldkit-import", ".json")}[kind]
             fd, tmp = tempfile.mkstemp(prefix="recce-import-", suffix=suffix)
-            with os.fdopen(fd, "w") as fh:
-                fh.write(content)
             label = f"{cmd} {filename or kind}"
 
             def _done(job, _tmp=tmp):
@@ -437,7 +460,16 @@ def create_app(eng_dir: str) -> FastAPI:
                     pass
                 broker.publish({"type": "scan", "status": job.status,
                                 "tester": x_tester, "targets": label})
-            job = jobs.start(recce_argv(cmd, tmp, "-o", eng_dir), on_done=_done)
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(content)
+                job = jobs.start(recce_argv(cmd, tmp, "-o", eng_dir), on_done=_done)
+            except BaseException:
+                try:
+                    os.remove(tmp)                        # never leak the temp file on start failure
+                except OSError:
+                    pass
+                raise
             broker.publish({"type": "scan_started", "tester": x_tester, "targets": label})
             return {"mode": "job", "id": job.id, "kind": kind}
 
@@ -450,6 +482,7 @@ def create_app(eng_dir: str) -> FastAPI:
         summary = ""
         try:
             if kind == "nxc":
+                content = importers.strip_ansi(content)      # a piped nxc log carries colour codes
                 # SMB gets the full fold (access, shares, users, local-admin finding).
                 groups: dict[str, list[str]] = {}
                 for raw in content.splitlines():
@@ -458,6 +491,8 @@ def create_app(eng_dir: str) -> FastAPI:
                         groups.setdefault(m.group(2), []).append(raw)
                 hosts_folded = 0
                 for ip, lines in groups.items():
+                    if not importers.is_ip(ip):              # nxc targeted a hostname, not an IP:
+                        continue                             # don't create a hostname-keyed host
                     data = ce.parse_nxc_smb("\n".join(lines))
                     if not (data["auth"] or data["admin"] or data["shares"] or data["users"]):
                         continue
@@ -480,15 +515,16 @@ def create_app(eng_dir: str) -> FastAPI:
                     if not cm:
                         continue
                     dom, user, secret, pwn = cm.group(1) or "", cm.group(2), cm.group(3), cm.group(4)
+                    knd, sec = importers.classify_secret(secret)   # LM:NT -> nthash (spray the NT half)
                     if st.add_credential(Credential(
-                            username=user, secret=secret, domain=dom,
-                            kind="nthash" if re.fullmatch(r"[0-9a-fA-F]{32}", secret) else "password",
-                            origin_ip=ip, source="nxc-validated",
+                            username=user, secret=sec, domain=dom, kind=knd,
+                            origin_ip=ip if importers.is_ip(ip) else "", source="nxc-validated",
                             notes=f"validated over {proto}" + (" (local admin)" if pwn else ""))):
                         creds_added += 1
                     # a validated login IS a foothold — record it so Access auto-ticks
-                    access.setdefault(ip, f"{proto} login "
-                                       f"({'local admin' if pwn else 'valid creds'}) - imported nxc")
+                    if importers.is_ip(ip):
+                        access.setdefault(ip, f"{proto} login "
+                                          f"({'local admin' if pwn else 'valid creds'}) - imported nxc")
                 for ip, detail in access.items():
                     host = st.get_host(ip) or Host(ip=ip)
                     host.state = "up"
@@ -514,28 +550,43 @@ def create_app(eng_dir: str) -> FastAPI:
                         added += 1
                 summary = f"stored {added} AS-REP hash(es)"
             elif kind == "secretsdump":
+                skipped_hist = 0
                 for r in ce.parse_secretsdump(content):
+                    if r.get("history"):            # a rotated/old password — never spray as current
+                        skipped_hist += 1
+                        continue
+                    note = ("cleartext (WDigest/LSA)" if r.get("kind") == "password"
+                            else ("rid " + r.get("rid", "")).strip())
                     if st.add_credential(Credential(
-                            username=r["name"], secret=r["nt"], kind="nthash",
-                            source="secretsdump", notes=("rid " + r.get("rid", "")).strip())):
+                            username=r["name"], secret=r.get("secret") or r.get("nt", ""),
+                            kind=r.get("kind", "nthash"), source="secretsdump", notes=note)):
                         added += 1
-                summary = f"stored {added} NTLM hash(es)"
+                summary = (f"stored {added} credential(s)"
+                           + (f" ({skipped_hist} history entr{'y' if skipped_hist == 1 else 'ies'} "
+                              "skipped)" if skipped_hist else ""))
             elif kind == "creds":
-                # a plain credential list to stack + spray: [domain\]user:secret per line
-                # (hashcat/john --show, a cracked list, or a hand-built spray list).
+                # A plain credential list to stack + spray. Accepts `[domain\]user:secret`
+                # (john --show / a spray list), `user:LM:NT` (pass-the-hash — the old
+                # count(":")==1 guard silently dropped these), and the hashcat
+                # `NThash:plaintext` --show shape (left is the hash, right the cracked pw).
                 for raw in content.splitlines():
                     line = raw.strip()
-                    if not line or line.startswith("#") or line.count(":") != 1:
+                    if not line or line.startswith("#") or ":" not in line:
                         continue
-                    left, secret = line.split(":", 1)
-                    if not left or not secret:
+                    left, right = line.split(":", 1)
+                    if not left or not right:
                         continue
-                    dom, user = (left.split("\\", 1) if "\\" in left else ("", left))
-                    is_hash = bool(re.fullmatch(r"[0-9a-fA-F]{32}", secret))
-                    if st.add_credential(Credential(
-                            username=user, secret=secret, domain=dom,
-                            kind="nthash" if is_hash else "password",
-                            source="imported", notes="imported credential list")):
+                    if (re.fullmatch(r"[0-9a-fA-F]{32}", left)
+                            and not re.fullmatch(r"[0-9a-fA-F]{32}", right)):
+                        cred = Credential(username="", secret=right, kind="password",
+                                          source="imported",
+                                          notes=f"plaintext cracked from NT {left.lower()}")
+                    else:
+                        dom, user = (left.split("\\", 1) if "\\" in left else ("", left))
+                        knd, sec = importers.classify_secret(right)
+                        cred = Credential(username=user, secret=sec, domain=dom, kind=knd,
+                                          source="imported", notes="imported credential list")
+                    if st.add_credential(cred):
                         added += 1
                 summary = f"stored {added} credential(s)"
             elif kind in ("nessus", "openvas", "nuclei", "testssl"):
@@ -545,7 +596,12 @@ def create_app(eng_dir: str) -> FastAPI:
                 by_ip: dict[str, list] = {}
                 for v in vulns:
                     by_ip.setdefault(v.ip, []).append(v)
+                skipped_noip = 0
+                folded_hosts = 0
                 for ip, vs in by_ip.items():
+                    if not ip.strip():                 # a finding with no host — don't create ip=""
+                        skipped_noip += len(vs)
+                        continue
                     host = st.get_host(ip) or Host(ip=ip)
                     host.state = "up"
                     host.vulns.extend(vs)
@@ -553,7 +609,9 @@ def create_app(eng_dir: str) -> FastAPI:
                     epss.annotate(host)                # imported CVEs rank with the rest
                     st.upsert_host(host, merge=True)   # union-merge dedups on re-import
                     added += len(vs)
-                summary = f"folded {added} {kind} finding(s) across {len(by_ip)} host(s)"
+                    folded_hosts += 1
+                summary = (f"folded {added} {kind} finding(s) across {folded_hosts} host(s)"
+                           + (f"; {skipped_noip} without a host skipped" if skipped_noip else ""))
             else:
                 raise HTTPException(422, f"unsupported import kind {kind!r}")
         finally:
