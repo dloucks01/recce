@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 
 # meta keys (namespaced so they never collide with engagement metadata)
 _ASSIGN = "collab.assignments"      # {ip: tester}
@@ -17,6 +18,8 @@ _PORTS = "collab.port_status"       # {"ip:port": "todo"|"wip"|"done"}
 _DISMISS = "collab.dismissed"       # {finding_key: tester}
 _ACTIVITY = "collab.activity"       # [{ts, tester, kind, text}], newest last
 _ACTIVITY_CAP = 300
+_CHAT = "collab.chat"               # [{id, ts, tester, text, image}], oldest -> newest
+_CHAT_CAP = 500
 LABELS = ("interesting", "needs-review", "out-of-scope")
 
 
@@ -108,6 +111,35 @@ def add_activity(st, tester: str, kind: str, text: str) -> dict:
 
 def get_activity(st, limit: int = 100) -> list:
     return list(reversed(_load(st, _ACTIVITY, [])))[:limit]      # newest first
+
+
+# --- team chat ----------------------------------------------------------------
+def add_chat(st, tester: str, text: str, image: str = "") -> dict:
+    """Append a chat message. `image` is a stored media filename (or "" for text-only).
+    Message metadata lives in meta; the image bytes live on disk (see the app layer)."""
+    log = _load(st, _CHAT, [])
+    msg = {"id": uuid.uuid4().hex[:12], "ts": time.time(),
+           "tester": tester or "someone", "text": text, "image": image}
+    log.append(msg)
+    _save(st, _CHAT, log[-_CHAT_CAP:])
+    return msg
+
+
+def get_chat(st, limit: int = 200) -> list:
+    return _load(st, _CHAT, [])[-limit:]         # oldest -> newest, for a chat transcript
+
+
+# recognise the common image types a paste can produce (magic bytes -> extension)
+def image_ext(raw: bytes) -> str:
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "webp"
+    return ""
 
 
 class Presence:

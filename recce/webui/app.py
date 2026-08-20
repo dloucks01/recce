@@ -852,6 +852,61 @@ def create_app(eng_dir: str) -> FastAPI:
         broker.publish({"type": "add", "what": "access", "ip": ip, "by": x_tester})
         return {"ok": True}
 
+    # --- team chat ----------------------------------------------------------------
+    _CHAT_MAX_BYTES = 8_000_000
+
+    @app.get("/api/chat")
+    def chat_history(limit: int = 200):
+        from ..store import Store
+        st = Store(db_path)
+        try:
+            return collab.get_chat(st, limit)
+        finally:
+            st.close()
+
+    @app.post("/api/chat")
+    def chat_post(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        """A chat message: text and/or a pasted image. The image (base64) is decoded
+        and stored on disk under the engagement; the message keeps only its filename."""
+        from ..store import Store
+        text = str(body.get("text", "")).strip()
+        image_b64 = body.get("image") or ""
+        image_name = ""
+        if image_b64:
+            import base64
+            try:
+                raw = base64.b64decode(image_b64)
+            except Exception:
+                raise HTTPException(400, "could not decode the image")
+            if len(raw) > _CHAT_MAX_BYTES:
+                raise HTTPException(413, "image too large (max ~8 MB)")
+            ext = collab.image_ext(raw)
+            if not ext:
+                raise HTTPException(415, "unsupported image type (png/jpg/gif/webp)")
+            image_name = f"{time.strftime('%Y%m%d')}-{os.urandom(6).hex()}.{ext}"
+            media_dir = os.path.join(eng_dir, "chat-media")
+            os.makedirs(media_dir, exist_ok=True)
+            with open(os.path.join(media_dir, image_name), "wb") as fh:
+                fh.write(raw)
+        if not text and not image_name:
+            raise HTTPException(400, "empty message")
+        st = Store(db_path)
+        try:
+            msg = collab.add_chat(st, x_tester, text[:4000], image_name)
+        finally:
+            st.close()
+        broker.publish({"type": "chat", "msg": msg})
+        return msg
+
+    @app.get("/api/chat/media/{name}")
+    def chat_media(name: str):
+        if "/" in name or "\\" in name or ".." in name:      # no path traversal
+            raise HTTPException(400, "bad name")
+        path = os.path.join(eng_dir, "chat-media", name)
+        if not os.path.isfile(path):
+            raise HTTPException(404, "no such image")
+        return FileResponse(path)
+
     @app.get("/api/report/{kind}")
     def report(kind: str):
         """Regenerate the deliverables from the live datastore and hand back the

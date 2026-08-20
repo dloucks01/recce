@@ -139,6 +139,27 @@ class ApiShape(unittest.TestCase):
             # bad input is rejected
             self.assertEqual(c.post("/api/label", json={"ip": ip, "label": "bogus"}, headers=H).status_code, 400)
 
+    def test_chat_endpoints_text_and_image(self):
+        """Team chat: post text + a pasted image (stored on disk, served back), history."""
+        import base64
+        PNG = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhf"
+               "DwAChwGA60e6kgAAAABJRU5ErkJggg==")
+        with _client(self.eng) as c:
+            self.assertEqual(c.post("/api/chat", json={"text": "dc01 looks juicy"},
+                                    headers={"X-Tester": "alex"}).status_code, 200)
+            r = c.post("/api/chat", json={"text": "proof:", "image": PNG},
+                       headers={"X-Tester": "bob"})
+            self.assertEqual(r.status_code, 200)
+            img = r.json()["image"]
+            self.assertTrue(img.endswith(".png"))
+            hist = c.get("/api/chat").json()
+            self.assertEqual([m["tester"] for m in hist[-2:]], ["alex", "bob"])
+            media = c.get(f"/api/chat/media/{img}")
+            self.assertEqual((media.status_code, media.headers["content-type"]), (200, "image/png"))
+            # guards: empty message + path traversal + missing file
+            self.assertEqual(c.post("/api/chat", json={"text": ""}).status_code, 400)
+            self.assertEqual(c.get("/api/chat/media/nope.png").status_code, 404)
+
     def test_attack_endpoint_feeds_the_coverage_panel(self):
         with _client(self.eng) as c:
             cov = c.get("/api/attack").json()
@@ -194,7 +215,8 @@ class ShippedSpa(unittest.TestCase):
         js = "".join(p.read_text(errors="replace")
                      for p in (_STATIC / "assets").glob("index-*.js"))
         for marker in ("Top priorities", "Collected credentials", "MITRE ATT",
-                       "Spray these credentials", "Next moves", "Import tool output"):
+                       "Spray these credentials", "Next moves", "Import tool output",
+                       "Team chat"):
             self.assertIn(marker, js, f"shipped SPA is missing {marker!r} - rebuild it")
 
 
