@@ -118,9 +118,3 @@ def _target_expr(ips: list[str]) -> str:
     # x.y.z.0/24 would emit a command that sprays up to 256 addresses, most of them
     # never enumerated (lockout risk on out-of-scope hosts). Cf. credentials._target_expr.
     return " ".join(ips) if ips else "<ip>"
-
-
-def as_candidates(port):
-    """Default (user, pass) pairs as Credential-shaped candidates for the spray stack -
-    NOT confirmed, just worth trying. Returns [(user, secret)] (blank pass allowed)."""
-    return [(u, p) for u, p, _n in creds_for(port) if u]     # drop community-only entries

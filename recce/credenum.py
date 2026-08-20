@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
 
 from .models import Account, Host, Script, Vuln
 

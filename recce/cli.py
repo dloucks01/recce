@@ -1107,7 +1107,7 @@ def _discover(args, profile, store, paths):
     if getattr(args, "resume", False):
         # Skip only hosts the enum phase actually finished (host.enumerated, set at the
         # end of _enum_worker), NOT every seeded row. _seed_targets pre-writes a row for
-        # every target before scanning, so store.scanned_ips() would wrongly treat a
+        # every target before scanning, so a naive "all seeded IPs" set would wrongly treat a
         # host that was seeded-but-not-yet-enumerated (a run interrupted right after
         # seeding) as done and skip it forever.
         done = {h.ip for h in store.all_hosts() if h.enumerated}
@@ -1641,7 +1641,7 @@ def _phase_credenum(store, paths, args) -> None:
     _summarize_failures("credenum", errs, total)
 
 
-def _setup_scan(args, need_targets=True):
+def _setup_scan(args):
     """Shared setup: profile, env check, store. Returns (profile, paths, store)."""
     # deepcopy: PROFILES holds shared module-level singletons; overriding a live one
     # would leak flags (--all-ports, --min-rate, a downgraded scanner) into later runs
@@ -2202,7 +2202,7 @@ def cmd_credenum(args: argparse.Namespace) -> int:
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum` first.")
         return 1
-    _, paths, store = _setup_scan(args, need_targets=False)
+    _, paths, store = _setup_scan(args)
     if store is None:
         return 1
     title = store.get_meta("engagement") or args.title
@@ -2572,9 +2572,12 @@ def cmd_poc(args: argparse.Namespace) -> int:
         cves = _cves_from_findings(hosts, confirmed_only=args.confirmed)
     cves = sorted(set(cves))
     if not cves:
-        print("[x] No CVEs to build. Pass CVE ids (recce poc CVE-2021-44228 …) or run "
-              "enum/vulns first so findings carry CVEs" +
-              (" (none are CONFIRMED - drop --confirmed to include all)." if args.confirmed else "."))
+        if args.cves:                    # args were supplied but every one was rejected above
+            print("[x] None of those look like CVE ids (expected CVE-YYYY-NNNN).")
+        else:
+            print("[x] No CVEs to build. Pass CVE ids (recce poc CVE-2021-44228 …) or run "
+                  "enum/vulns first so findings carry CVEs" +
+                  (" (none are CONFIRMED - drop --confirmed to include all)." if args.confirmed else "."))
         return 1
     if not exploits.available():
         print("[!] searchsploit not found - dossiers will omit Exploit-DB references "
@@ -5150,11 +5153,11 @@ def cmd_fieldkit_export(args: argparse.Namespace) -> int:
     print(f"[+] fieldkit seed written to {out_dir}/ "
           f"({len(bridge['hosts'])} live host(s), {actionable} with a fieldkit route, "
           f"{len(users)} user(s), {len(creds)} cred(s)):")
-    print(f"    ports.gnmap        -> sweep.py triage --nmap ports.gnmap")
-    print(f"    smb-null.txt       -> sweep.py triage --nxc smb-null.txt")
-    print(f"    recce-bridge.json  -> sweep.py triage --recce recce-bridge.json  (richest)")
-    print(f"    FIELDKIT.md        -> human, severity-ranked attack plan")
-    print(f"    users.txt/creds.txt-> gen_spray.py --users / gen_shell.py")
+    print("    ports.gnmap        -> sweep.py triage --nmap ports.gnmap")
+    print("    smb-null.txt       -> sweep.py triage --nxc smb-null.txt")
+    print("    recce-bridge.json  -> sweep.py triage --recce recce-bridge.json  (richest)")
+    print("    FIELDKIT.md        -> human, severity-ranked attack plan")
+    print("    users.txt/creds.txt-> gen_spray.py --users / gen_shell.py")
     print(f"    Next (in the fieldkit checkout): "
           f"python3 access/network/sweep.py triage --recce {out_dir}/recce-bridge.json")
     store.close()
@@ -5164,7 +5167,7 @@ def cmd_fieldkit_export(args: argparse.Namespace) -> int:
 def cmd_fieldkit_import(args: argparse.Namespace) -> int:
     """Fold a fieldkit findings.json (proven exploitation) back into the workbook + report."""
     from . import fieldkit
-    from .models import Host, Port
+    from .models import Host
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']} - run `enum` first, or `import` a scan.")
@@ -5398,7 +5401,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     team opens http://<this-box>:<port> in a browser over the LAN. Run scans from the
     UI, work the Hosts/Findings/Act/Credentials tabs, import tool output, collaborate
     (claim/assign, presence, activity, chat), and export reports. Unauthenticated -
-    run only on a trusted engagement network (see SECURITY.md)."""
+    run only on a trusted engagement network."""
     _open_paths(args.output_dir)          # ensure the engagement dir exists (scan from UI)
     try:
         import uvicorn
@@ -5413,8 +5416,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print("    ⚠ UNAUTHENTICATED and reachable on this network: anyone who can reach "
               "the URL gets\n      full access (findings, credentials, scans). Run only on a "
-              "TRUSTED engagement\n      network - or use --host 127.0.0.1 to keep it local. "
-              "See SECURITY.md §7.")
+              "TRUSTED engagement\n      network - or use --host 127.0.0.1 to keep it local.")
     print("    Open it in a browser; share the URL with your team on the LAN. Ctrl-C to stop.")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

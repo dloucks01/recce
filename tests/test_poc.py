@@ -66,6 +66,19 @@ class Generate(unittest.TestCase):
         self.assertIn('("10.0.20.6", 21)', harness)         # target pinned from the engagement
         self.assertIn("NotImplementedError", harness)       # check()/exploit() are stubs
 
+    def test_harness_survives_hostile_title(self):
+        # a scan-derived finding title carries free text; one containing `"""`, a backslash
+        # or a newline must not break the generated harness (it lands in the docstring).
+        h = Host(ip="10.0.0.5", state="up")
+        h.ports.append(Port(portid=8080, protocol="tcp", state="open"))
+        h.vulns.append(Vuln(ip="10.0.0.5", port=8080, protocol="tcp", script_id="x",
+                            state="VULNERABLE", title='evil"""\nimport os  # \\ break out',
+                            severity="high", ids=["CVE-2099-0001"], confidence="likely"))
+        out = tempfile.mkdtemp()
+        pocgen.generate(["CVE-2099-0001"], [h], out)          # no vulndb sig -> title falls back
+        harness = Path(out, "poc", "CVE-2099-0001", "poc.py").read_text()
+        ast.parse(harness)                                    # must still be valid Python
+
     def test_cves_from_findings(self):
         from recce.cli import _cves_from_findings
         hosts = [_host_with_cve(cve="CVE-2011-2523"), _host_with_cve(ip="10.0.0.9", cve="CVE-2017-0143")]

@@ -23,7 +23,10 @@ def _safe_fromstring(text: str):
     """Parse XML, refusing DTD/entity declarations. stdlib ElementTree expands internal
     entities (a 'billion laughs' DoS vector on untrusted input, and we have no defusedxml
     in an airgapped stdlib-only build). Returns the root element, or None on any problem."""
-    if re.search(r"<!(?:DOCTYPE|ENTITY)", text[:8000], re.I):
+    # Scan the WHOLE document: comments/whitespace are legal in the prolog, so a DOCTYPE
+    # can be padded past any fixed prefix window. The regex over the (already size-capped)
+    # text runs once and is cheap.
+    if re.search(r"<!(?:DOCTYPE|ENTITY)", text, re.I):
         return None
     try:
         return ET.fromstring(text)
@@ -196,10 +199,11 @@ def detect_scanner(text: str) -> str:
     """Sniff a scanner export -> a SCANNER_PARSERS key, or '' if not one of them."""
     head = text.lstrip()[:600]
     low = head.lower()
+    wide = text[:8000].lower()          # GVM/OpenVAS markers can sit well past the first tag
     if "nessusclientdata" in low:
         return "nessus"
-    if "<report" in low and ("openvas" in low or "<results" in low or "greenbone" in low
-                             or "gmp" in low):
+    if "<report" in wide and ("openvas" in wide or "<results" in wide or "greenbone" in wide
+                              or "gmp" in wide):
         return "openvas"
     if head[:1] == "{" and '"template-id"' in text[:4000]:
         return "nuclei"

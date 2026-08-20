@@ -197,7 +197,6 @@ def host_tile(x, y, w, h, *, kind, role, ip, hostname="", subline="", stroke="#8
     a faintly role-tinted body with the IP, an optional real hostname and a subline
     (OS or note), an outline severity chip and an 'owned' ✓. Shared by the network map
     and the reachability map so every host reads the same. Returns SVG markup."""
-    from html import escape as _e
     hh, r = 22, 8
     cx = x + w / 2
     out = [
@@ -382,7 +381,6 @@ def _svg_overview(up, by_subnet, subnets, doms, dc_names):
 
 def _svg_full(up, by_subnet, subnets, doms, dc_names):
     """Full per-host map: one bordered panel per subnet, hosts in a multi-column grid."""
-    from html import escape as _e
     cardW, cardH, gap = 186, 78, 14
     m, ppad, hbar, NCOL = 22, 16, 34, 5
     innerW = NCOL * cardW + (NCOL - 1) * gap
@@ -950,7 +948,6 @@ def reachability_svg(hosts: list[Host], ad_data=None, max_nodes: int = 60) -> st
     topology on-target enums brought back. Footholds (left) with solid edges to the
     ARP neighbours they reached and dashed edges to live connection peers (right).
     Pivots (dual-homed hosts bridging segments) are flagged. Renders with no tools."""
-    from html import escape as _e
     adj = adjacency(hosts)
     if not adj["footholds"]:
         return ('<svg viewBox="0 0 560 60" width="560" height="60" role="img" '
@@ -1022,7 +1019,7 @@ def reachability_svg(hosts: list[Host], ad_data=None, max_nodes: int = 60) -> st
                    f'{x2 - 6},{y2:.0f}" fill="none" stroke="{col}" stroke-width="1.5" '
                    f'{dash}marker-end="url(#rar)"/>')
 
-    def card(x, y, ip, foothold):
+    def card(x, y, ip):
         h = up.get(ip)
         role = role_with_ad(h, dc_names) if h else ""
         stroke = _ROLE_COLOR.get(role, ("#ffffff", "#8a9997"))[1] if h else "#b7c0be"
@@ -1037,9 +1034,9 @@ def reachability_svg(hosts: list[Host], ad_data=None, max_nodes: int = 60) -> st
                          owned=(has_access(h) if h else False))
 
     for ip in foot:
-        els.append(card(xL, posL[ip], ip, True))
+        els.append(card(xL, posL[ip], ip))
     for ip in others:
-        els.append(card(xR, posR[ip], ip, False))
+        els.append(card(xR, posR[ip], ip))
 
     ly = H - 30
     els.append(glyph_legend(m, ly - 10))

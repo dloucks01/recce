@@ -295,10 +295,3 @@ def host_entries(host: Host) -> list[dict]:
         vec = f.get("vector", "")
         add(vec, vec[:80])
     return out
-
-
-def all_entries(hosts: list[Host]) -> list[dict]:
-    out = []
-    for h in hosts:
-        out.extend(host_entries(h))
-    return out

@@ -19,7 +19,7 @@ nxc mssql, MSSQLPwner, SQLRecon) does, folded into recce's model:
 recce does the pre-auth probing itself and generates the full, credential-filled
 runbook + chain (copy-paste ready); it references existing tools (nxc / impacket /
 mssqlpwner) for the authenticated actions. Airgapped, stdlib only for the pre-auth
-probe. Safety posture: see SECURITY.md.
+probe.
 """
 from __future__ import annotations
 
@@ -411,10 +411,6 @@ _NARRATIVE = {
         "broad rights, coercing and relaying one is a high-impact, credential-free-ish "
         "pivot out of the database and into the domain."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 # How MSSQL is tested end-to-end - the methodology shown at the top of the report so

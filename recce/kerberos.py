@@ -16,7 +16,7 @@ Candidate usernames come from what recce already enumerated (LDAP / SharpHound u
 accounts in the datastore) or an operator `--userlist`. recce only requests tickets -
 it makes no logon attempt and locks out no account. Findings fold into the severity
 totals, the Vulnerabilities sheet, the write-ups, a dedicated **Kerberos** tab, and
-the prove engine. Safety posture: SECURITY.md.
+the prove engine.
 """
 from __future__ import annotations
 
@@ -39,7 +39,6 @@ KDC_ERR_PRINCIPAL_UNKNOWN = 6
 KDC_ERR_CLIENT_REVOKED = 18
 KDC_ERR_KEY_EXPIRED = 23
 KDC_ERR_PREAUTH_REQUIRED = 25
-KDC_ERR_WRONG_REALM = 68
 
 # etype numbers; RC4-HMAC (23) first so we get the classic crackable AS-REP.
 _ETYPES = (23, 17, 18)
@@ -586,10 +585,6 @@ _NARRATIVE = {
         "lockouts). A confirmed user list is the input for password spraying, AS-REP / "
         "Kerberoasting, and targeted phishing."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

@@ -14,7 +14,7 @@ only, read-only.
 
 recce only issues the read-only EXPORT/DUMP calls - it never mounts a filesystem or
 touches a file. Positive findings fold into the severity totals, the Vulnerabilities
-sheet, the write-ups, a dedicated **NFS** tab, and the prove engine. Safety: SECURITY.md.
+sheet, the write-ups, a dedicated **NFS** tab, and the prove engine.
 """
 from __future__ import annotations
 
@@ -336,10 +336,6 @@ _NARRATIVE = {
         "RPC services and ports to anyone. It is reconnaissance-friendly and has a "
         "history of reflection/amplification abuse - firewall it to trusted hosts."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

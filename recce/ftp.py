@@ -13,7 +13,7 @@ Modelled on recce/smb.py. Two layers:
 
 Everything positive becomes a finding that folds into the main severity totals,
 the Vulnerabilities sheet, the write-ups, and a dedicated **FTP** workbook tab.
-Airgapped, stdlib only (the write proof uses `ftplib`). Safety posture: see SECURITY.md.
+Airgapped, stdlib only (the write proof uses `ftplib`).
 """
 from __future__ import annotations
 
@@ -167,10 +167,6 @@ _NARRATIVE = {
         "ProFTPD mod_copy SITE CPFR/CPTO). A remote attacker can copy/execute files "
         "on the server without logging in - verify with the referenced PoC in ROE."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

@@ -178,5 +178,8 @@ class Presence:
 
     def roster(self) -> list[str]:
         now = time.time()
-        self._seen = {t: s for t, s in self._seen.items() if now - s < self._ttl}
-        return sorted(self._seen)
+        # snapshot items() before pruning: a concurrent ping() from another request
+        # thread must not resize the dict mid-iteration.
+        alive = {t: s for t, s in list(self._seen.items()) if now - s < self._ttl}
+        self._seen = alive
+        return sorted(alive)

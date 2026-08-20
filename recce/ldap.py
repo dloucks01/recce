@@ -2,7 +2,6 @@
 
 Modelled on recce/smb.py and recce/ftp.py. A hand-rolled BER/ASN.1 LDAP client on
 a raw socket - no python-ldap, no ldap3 - so it runs on a stock airgapped Kali.
-Safety posture: see SECURITY.md.
 
 Against a Directory port (389/636/3268/3269) recce:
 
@@ -24,7 +23,6 @@ workbook tab. Airgapped-safe; degrades cleanly when the port doesn't speak LDAP.
 """
 from __future__ import annotations
 
-import re
 import shlex
 import socket
 import struct
@@ -169,33 +167,8 @@ def f_equal(attr: str, value: str) -> bytes:
     return _tlv(0xA3, _octet(attr) + _octet(value))
 
 
-def f_present(attr: str) -> bytes:
-    """present [7] AttributeDescription."""
-    return _tlv(0x87, attr.encode())
-
-
 def f_and(*subs: bytes) -> bytes:
     return _tlv(0xA0, b"".join(subs))               # and [0]
-
-
-def f_or(*subs: bytes) -> bytes:
-    return _tlv(0xA1, b"".join(subs))               # or [1]
-
-
-def f_not(sub: bytes) -> bytes:
-    return _tlv(0xA2, sub)                           # not [2]
-
-
-# LDAP_MATCHING_RULE_BIT_AND - test individual userAccountControl bits.
-_RULE_BIT_AND = "1.2.840.113556.1.4.803"
-
-
-def f_bitand(attr: str, bit: int, rule: str = _RULE_BIT_AND) -> bytes:
-    """extensibleMatch [9] MatchingRuleAssertion - e.g. a userAccountControl bit test
-    (AS-REP: userAccountControl:1.2.840.113556.1.4.803:=4194304)."""
-    return _tlv(0xA9, _tlv(0x81, rule.encode())     # matchingRule [1]
-                + _tlv(0x82, attr.encode())         # type [2]
-                + _tlv(0x83, str(bit).encode()))    # matchValue [3]
 
 
 # --- SimplePagedResults control (1.2.840.113556.1.4.319) ------------------------
@@ -922,10 +895,6 @@ _NARRATIVE = {
         "credential harvests them - a recurring source of valid, often privileged, "
         "passwords. Remove secrets from directory attributes and rotate anything exposed."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

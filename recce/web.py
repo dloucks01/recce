@@ -7,7 +7,7 @@ dangerous HTTP methods, weak cookie flags, and (via probes) the security-header 
 analysis. Everything positive becomes a Vuln, so web findings flow into the
 Vulnerabilities / Verification / Exploitation sheets like anything else. Heavier
 scanning is bridged to the Kali tools (whatweb / nikto / nuclei / gobuster / wpscan /
-sslscan). Airgapped, stdlib only. Safety posture: see SECURITY.md.
+sslscan). Airgapped, stdlib only.
 """
 
 from __future__ import annotations

@@ -14,7 +14,7 @@ Stdlib-only HTTP(S) probes of the cluster's most dangerous network exposures:
 
 Each positive read is the proof, folds into the main severity totals, the
 Vulnerabilities sheet and the write-ups, and lands on a dedicated Kubernetes tab.
-Airgapped, stdlib only. Safety posture: see SECURITY.md.
+Airgapped, stdlib only.
 """
 from __future__ import annotations
 
@@ -265,10 +265,6 @@ _NARRATIVE = {
         "etcd is equivalent to owning the cluster: impersonate any service account, "
         "mint tokens, or decrypt traffic."),
 }
-
-
-def narrative_for(kind: str) -> str:
-    return _NARRATIVE.get(kind, "")
 
 
 TESTING_NARRATIVE = [

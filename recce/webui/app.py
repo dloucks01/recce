@@ -123,16 +123,15 @@ def _detect_import_kind(content: str, filename: str = "") -> str:
     """Best-effort format sniffing so a teammate can drop ANY tool's output and have
     it routed to the right recce parser. Order matters: the most specific signatures
     (Kerberos hashes, secretsdump rows) are checked before the looser ones."""
-    import re
     from ..importers import detect_scanner
     scanner = detect_scanner(content)                                  # nessus/openvas/nuclei/testssl
     if scanner:
         return scanner
-    head = content.lstrip()[:400]
     low = content.lower()
     fn = filename.lower()
-    if head.startswith("<?xml") or "<nmaprun" in head:                 # nmap/masscan XML
-        return "nmap"
+    if "<nmaprun" in content[:4000]:                                   # nmap/masscan XML
+        return "nmap"                                                  # require the nmap marker,
+    #  don't route arbitrary <?xml (e.g. an unrecognized scanner report) to the nmap parser
     if "$krb5tgs$" in content:
         return "kerberoast"
     if "$krb5asrep$" in content:
@@ -451,7 +450,6 @@ def create_app(eng_dir: str) -> FastAPI:
         summary = ""
         try:
             if kind == "nxc":
-                import re
                 # SMB gets the full fold (access, shares, users, local-admin finding).
                 groups: dict[str, list[str]] = {}
                 for raw in content.splitlines():
@@ -525,7 +523,6 @@ def create_app(eng_dir: str) -> FastAPI:
             elif kind == "creds":
                 # a plain credential list to stack + spray: [domain\]user:secret per line
                 # (hashcat/john --show, a cracked list, or a hand-built spray list).
-                import re
                 for raw in content.splitlines():
                     line = raw.strip()
                     if not line or line.startswith("#") or line.count(":") != 1:
