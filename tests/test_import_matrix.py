@@ -215,5 +215,62 @@ class EncodingAndDetection(unittest.TestCase):
             self.assertEqual(_detect_import_kind(sample), want, f"auto-detect for {want}")
 
 
+class EdgeCases(unittest.TestCase):
+    def test_reimport_is_idempotent(self):
+        c, d = _client()
+        _post(c, NESSUS)
+        _post(c, NESSUS)                                  # same file twice
+        st = Store(os.path.join(d, "results.sqlite"))
+        try:
+            vulns = [v for h in st.all_hosts() for v in h.vulns]
+        finally:
+            st.close()
+        self.assertEqual(len(vulns), 1)                   # union-merge dedups, no double count
+
+    def test_nxc_hostname_target_captures_cred_no_bogus_host(self):
+        c, d = _client()
+        # nxc run against a NAME, not an IP: the cred is valuable, the host key is not.
+        _post(c, "SMB DC01.corp.local 445 DC01 [+] corp\\admin:Passw0rd! (Pwn3d!)\n", kind="nxc")
+        st = Store(os.path.join(d, "results.sqlite"))
+        try:
+            self.assertTrue(any(x.username == "admin" for x in st.all_credentials()))
+            self.assertFalse(any(h.ip == "DC01.corp.local" for h in st.all_hosts()))
+        finally:
+            st.close()
+
+    def test_empty_rejected(self):
+        c, _ = _client()
+        self.assertEqual(_post(c, "   ").status_code, 400)
+
+    def test_unknown_format_rejected(self):
+        c, _ = _client()
+        r = _post(c, "just some random prose that isn't any tool output at all")
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("could not detect", r.json()["detail"])
+
+    def test_bloodhound_zip_routes_to_job(self):
+        c, _ = _client()
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("20240101_users.json",
+                       '{"meta":{"type":"users","count":0},"data":[]}')
+        r = _post(c, buf.getvalue(), kind="bloodhound", filename="bh.zip").json()
+        self.assertEqual(r["mode"], "job")                # decoded zip -> ad engine, no error
+
+    def test_wrong_kind_scanner_still_safe(self):
+        # user picks "nessus" but pastes nuclei — parses 0, flagged, doesn't crash/pollute
+        c, d = _client()
+        r = _post(c, NUCLEI_JSONL, kind="nessus").json()
+        self.assertEqual(r["added"], 0)
+        self.assertIn("0 rows", r["summary"])
+        st = Store(os.path.join(d, "results.sqlite"))
+        try:
+            self.assertEqual(st.all_hosts(), [])
+        finally:
+            st.close()
+
+
 if __name__ == "__main__":
     unittest.main()
