@@ -27,6 +27,7 @@ Every command takes targets as a single IP, several IPs, a range
 | `writeup <selector>` | **One** finding's write-up, pre-filled with looted/obtained evidence (F-id / CVE / IP / title; omit to list) | `--no-screenshots`, `--overwrite` |
 | `services [targets]` | Print the per-service enum command (`recce/scripts/`) for every open port found | `-a` (append the intrusive flag) |
 | `exploitplan [targets]` | Ready-to-run artifacts (msf `.rc` + tool commands) for **confirmed** findings, params pre-filled | `--lhost`, `--lport`, `--run` |
+| `poc [CVEs…]` | Per-CVE PoC dossier + Python harness skeleton from offline intel (vulndb/KEV/EPSS/Exploit-DB/msf); default = the engagement's CVEs | `--confirmed`, `--with-exploits` |
 | `attackpath [targets]` | Chain confirmed findings into a staged attack path (foothold → priv-esc → creds → lateral → domain) | — |
 | `creds [targets]` | Stack captured credentials + build a netexec/impacket spray plan | `--add`, `--user/--pass/--hash/--domain`, `--plan` |
 | `serve` | Serve the **web workbench** for this engagement (browser UI, multi-tester over the LAN; run scans, Act/Loot, export) | `--host` (bind, default `0.0.0.0`), `--port` (default `8008`) |

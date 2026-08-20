@@ -4,6 +4,18 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+### Added
+- **Per-CVE PoC dossiers (`recce poc`).** Assembles everything recce knows about a CVE
+  offline — the version→CVE signature, KEV / EPSS priority, the local **Exploit-DB**
+  entries that reference it (`searchsploit`, by path; `--with-exploits` copies the
+  published PoC files in), a mapped **Metasploit** module, a matching build recipe, and
+  the hosts affected in the engagement — into a Markdown dossier plus a runnable Python
+  **harness skeleton** (target pinned, a safe `check()`, and a `[TESTER]` line for the
+  ROE-approved action). With CVE args it targets those; otherwise the engagement's
+  findings (`--confirmed` to gate). References published exploits and scaffolds a harness;
+  it does not author weaponized code (SECURITY.md §4). New `recce/pocgen.py`. The airgap
+  bundle can bake in the full Exploit-DB (`RECCE_WITH_SEARCHSPLOIT=1`).
+
 ## [0.5.0] - 2026-08-20
 
 Headline: the web workbench (`recce serve`) grows into a full multi-tester workspace —
