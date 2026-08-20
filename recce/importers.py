@@ -61,6 +61,36 @@ def is_ip(value: str) -> bool:
     return bool(_IPV4_RE.match(v) or (":" in v and _IPV6_RE.match(v)))
 
 
+def host_from(value: str) -> str:
+    """Best-effort host key from a scanner's target field — an IP, hostname, URL, or
+    `host:port`. Returns the IP when present, else a bare hostname; strips scheme/port/path.
+    Never returns a URL (the nuclei/testssl bug that stuffed `https://…` into `ip`)."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    m = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", v)
+    if m:                                     # an IP anywhere wins (testssl 'host/ip', URLs, host:port)
+        return m.group(0)
+    if "://" in v:
+        from urllib.parse import urlparse
+        v = urlparse(v).hostname or v.split("://", 1)[1]
+    v = v.split("/")[0]                       # strip any path
+    if v.startswith("["):                     # [IPv6]:port
+        v = v[1:].split("]")[0]
+    elif v.count(":") == 1:                   # host:port (not IPv6)
+        v = v.split(":")[0]
+    return v.lower().rstrip(".")
+
+
+def port_from(value: str) -> int | None:
+    """Extract a :port from a URL / host:port / `443/tcp` string, or None."""
+    m = re.search(r":(\d{1,5})(?:[/?#]|$)", value or "") or re.match(r"\s*(\d{1,5})/", value or "")
+    if m:
+        p = int(m.group(1))
+        return p if 0 < p < 65536 else None
+    return None
+
+
 def classify_secret(secret: str) -> tuple[str, str]:
     """(kind, sprayable_secret) for a captured secret. An `LM:NT` pair collapses to the NT
     half (the sprayable one); a bare 32-hex is an NT hash; a `$krb5*` is a roast hash;
@@ -130,12 +160,20 @@ def parse_nessus(text: str, include_info: bool = False) -> list[Vuln]:
             if tag.get("name") == "host-ip" and tag.text:
                 ip = tag.text.strip()
                 break
+        ip = host_from(ip)                         # a hostname-target scan won't pretend to be an IP
         if not ip:
             continue
         for item in host.findall("ReportItem"):
             sev = _NESSUS_SEV.get(item.get("severity", "0"), "info")
-            if sev == "info" and not include_info:
-                continue
+            if sev == "info":
+                # a compliance-audit item is severity 0 but its verdict lives in a
+                # compliance-result child — a FAILED/WARNING is a real finding, not noise.
+                verdict = next((ch.text or "" for ch in item
+                                if ch.tag.rsplit("}", 1)[-1] == "compliance-result"), "")
+                if verdict.strip().upper() in ("FAILED", "WARNING"):
+                    sev = "medium"
+                elif not include_info:
+                    continue
             port, proto = item.get("port", "0"), (item.get("protocol", "tcp") or "tcp")
             cves = [c.text.strip() for c in item.findall("cve") if c.text]
             desc = (item.findtext("synopsis") or item.findtext("description") or "").strip()
@@ -157,7 +195,7 @@ def parse_openvas(text: str) -> list[Vuln]:
     if root is None:
         return out
     for res in root.iter("result"):
-        ip = (res.findtext("host") or "").strip().split()[0] if res.findtext("host") else ""
+        ip = host_from((res.findtext("host") or "").strip().split()[0] if res.findtext("host") else "")
         if not ip:
             continue
         port, proto = _split_port(res.findtext("port") or "")
@@ -174,8 +212,12 @@ def parse_openvas(text: str) -> list[Vuln]:
         name = (nvt.findtext("name") if nvt is not None else None) or res.findtext("name") or "OpenVAS finding"
         cves = []
         if nvt is not None:
-            cves = [c.text.strip() for c in nvt.iter("cve") if c.text] or \
-                   re.findall(r"CVE-\d{4}-\d+", nvt.findtext("refs") or "")
+            # legacy <cve> children, modern <refs><ref type="cve" id="CVE-…"/>, then any CVE
+            # text anywhere in the NVT as a last resort.
+            cves = ([c.text.strip() for c in nvt.iter("cve") if c.text]
+                    or [r.get("id") for r in nvt.iter("ref")
+                        if (r.get("type") or "").lower() == "cve" and r.get("id")]
+                    or re.findall(r"CVE-\d{4}-\d+", ET.tostring(nvt, encoding="unicode")))
         out.append(Vuln(
             ip=ip, port=port, protocol=proto,
             script_id="openvas", state="VULNERABLE" if sev in ("critical", "high") else "finding",
@@ -185,66 +227,106 @@ def parse_openvas(text: str) -> list[Vuln]:
     return out
 
 
-def parse_nuclei(text: str) -> list[Vuln]:
-    """nuclei JSON lines (`-json`/`-jsonl`): one result object per line."""
-    out: list[Vuln] = []
-    for line in text.splitlines():
-        line = line.strip()
+def _nuclei_rows(text: str):
+    """Yield nuclei result objects from either the JSON array export (`-je`) or the JSON
+    lines form (`-jsonl`/`-json`), tolerant of a BOM / pretty-printing."""
+    s = text.lstrip("﻿").lstrip()
+    if s[:1] == "[":                              # array export: parse the whole document
+        try:
+            data = json.loads(s)
+        except json.JSONDecodeError:
+            data = []
+        if isinstance(data, list):
+            yield from (r for r in data if isinstance(r, dict))
+        return
+    for line in text.splitlines():               # JSONL: one object per line
+        line = line.strip().lstrip("﻿")
         if not line or line[0] != "{":
             continue
         try:
-            r = json.loads(line)
+            yield json.loads(line)
         except json.JSONDecodeError:
             continue
-        info = r.get("info") or {}
-        host = (r.get("ip") or r.get("host") or "").strip()
-        m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", host or r.get("matched-at", ""))
-        ip = m.group(1) if m else host
-        if not ip:
+
+
+def parse_nuclei(text: str, include_info: bool = False) -> list[Vuln]:
+    """nuclei output — JSON array (`-je`) or JSON lines (`-jsonl`). info/detection templates
+    are skipped unless include_info (they're not vulnerabilities)."""
+    out: list[Vuln] = []
+    for r in _nuclei_rows(text):
+        if not isinstance(r, dict):
             continue
-        pm = re.search(r":(\d+)", r.get("matched-at", "") or host)
+        info = r.get("info") or {}
+        sev = (info.get("severity") or "info").lower()
+        if sev in ("info", "unknown", "") and not include_info:
+            continue
+        target = (r.get("host") or r.get("matched-at") or r.get("matched")
+                  or r.get("url") or r.get("ip") or "")
+        host = host_from(r.get("ip") or target)      # never a URL; IP if present else hostname
+        if not host:
+            continue
+        port = port_from(target) or port_from(host)
         cls = info.get("classification") or {}
-        cves = [c.upper() for c in (cls.get("cve-id") or []) if c]
+        cve = cls.get("cve-id") or []
+        if isinstance(cve, str):                     # a single cve-id as a bare string, not a list
+            cve = [cve]
+        cves = [c.upper() for c in cve if c]
+        tid = r.get("template-id") or r.get("templateID") or ""
         out.append(Vuln(
-            ip=ip, port=int(pm.group(1)) if pm else None, protocol="tcp",
-            script_id=f"nuclei-{r.get('template-id', '')}",
-            state="VULNERABLE", title=(info.get("name") or r.get("template-id") or "nuclei finding").strip(),
-            severity=(info.get("severity") or "info").lower(), ids=cves,
-            output=(r.get("matched-at", "") + "\n" + (info.get("description") or "")).strip()[:4000],
+            ip=host, port=port, protocol="tcp", script_id=f"nuclei-{tid}",
+            state="VULNERABLE" if sev in ("critical", "high") else "finding",
+            title=(info.get("name") or tid or "nuclei finding").strip(),
+            severity=sev, ids=cves,
+            output=(str(target) + "\n" + (info.get("description") or "")).strip()[:4000],
             source="nuclei", confidence="likely"))
     return out
 
 
+_TESTSSL_SEV = {"critical": "critical", "high": "high", "medium": "medium",
+                "low": "low", "warn": "low"}
+
+
 def parse_testssl(text: str) -> list[Vuln]:
-    """testssl.sh JSON (`--jsonfile`): a flat array of finding objects."""
+    """testssl.sh JSON — the flat `--jsonfile` array [{id,severity,finding,ip,port}, …] AND
+    the nested `--jsonfile-pretty` shape {"scanResult":[{ip,port, <category>:[findings…]}]}
+    where findings live in per-host category arrays (previously imported as zero)."""
     out: list[Vuln] = []
     try:
-        data = json.loads(text)
+        data = json.loads(text.lstrip("﻿"))
     except json.JSONDecodeError:
         return out
-    rows = data.get("scanResult", data) if isinstance(data, dict) else data
-    if not isinstance(rows, list):
-        return out
-    sev_map = {"critical": "critical", "high": "high", "medium": "medium",
-               "low": "low", "warn": "low"}
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        sev = sev_map.get(str(r.get("severity", "")).lower())
+
+    def emit(finding: dict, ip: str, port) -> None:
+        sev = _TESTSSL_SEV.get(str(finding.get("severity", "")).lower())
         if not sev:                                    # OK / INFO / LOW-noise dropped
-            continue
-        ip = (r.get("ip") or "").split("/")[-1] or r.get("ip", "")
-        m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", ip)
-        ip = m.group(1) if m else ip
-        if not ip:
-            continue
-        cve = [c.upper() for c in re.findall(r"CVE-\d{4}-\d+", r.get("cve", "") or "")]
+            return
+        host = host_from(ip)
+        if not host:
+            return
+        cve = [c.upper() for c in re.findall(r"CVE-\d{4}-\d+", finding.get("cve", "") or "")]
         out.append(Vuln(
-            ip=ip, port=int(r["port"]) if str(r.get("port", "")).isdigit() else None,
-            protocol="tcp", script_id=f"testssl-{r.get('id', '')}",
+            ip=host, port=int(port) if str(port).isdigit() else None,
+            protocol="tcp", script_id=f"testssl-{finding.get('id', '')}",
             state="VULNERABLE" if sev in ("critical", "high") else "finding",
-            title=f"TLS: {r.get('id', 'finding')}", severity=sev, ids=cve,
-            output=str(r.get("finding", ""))[:4000], source="testssl", confidence="likely"))
+            title=f"TLS: {finding.get('id', 'finding')}", severity=sev, ids=cve,
+            output=str(finding.get("finding", ""))[:4000], source="testssl", confidence="likely"))
+
+    if isinstance(data, list):                         # flat array
+        for f in data:
+            if isinstance(f, dict):
+                emit(f, f.get("ip", ""), f.get("port", ""))
+    elif isinstance(data, dict):
+        hosts = data.get("scanResult")
+        if isinstance(hosts, list):                    # nested pretty: per-host category arrays
+            for h in hosts:
+                if not isinstance(h, dict):
+                    continue
+                ip, port = h.get("ip", ""), h.get("port", "")
+                for val in h.values():
+                    if isinstance(val, list):
+                        for f in val:
+                            if isinstance(f, dict) and "severity" in f:
+                                emit(f, ip, port)
     return out
 
 
@@ -259,7 +341,8 @@ SCANNER_PARSERS = {
 
 def detect_scanner(text: str) -> str:
     """Sniff a scanner export -> a SCANNER_PARSERS key, or '' if not one of them."""
-    head = text.lstrip()[:600]
+    body = text.lstrip("﻿").lstrip()    # strip a UTF-8 BOM before sniffing the first char
+    head = body[:600]
     low = head.lower()
     wide = text[:8000].lower()          # GVM/OpenVAS markers can sit well past the first tag
     if "nessusclientdata" in low:
@@ -267,10 +350,12 @@ def detect_scanner(text: str) -> str:
     if "<report" in wide and ("openvas" in wide or "<results" in wide or "greenbone" in wide
                               or "gmp" in wide):
         return "openvas"
-    if head[:1] == "{" and '"template-id"' in text[:4000]:
-        return "nuclei"
-    if head[:1] in "[{" and ('"severity"' in text[:4000] and
-                             ('"finding"' in text[:4000] or '"testssl"' in low
-                              or "scanresult" in low)):
-        return "testssl"
+    if body[:1] in "[{":                # nuclei (array OR jsonl) vs testssl (flat OR pretty)
+        w = text[:8000]
+        if ('"template-id"' in w or '"templateID"' in w or '"matched-at"' in w
+                or '"matched"' in w):
+            return "nuclei"
+        if ("scanresult" in wide or '"testssl"' in wide
+                or ('"severity"' in w and '"finding"' in w)):
+            return "testssl"
     return ""

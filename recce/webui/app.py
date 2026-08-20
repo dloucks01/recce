@@ -119,35 +119,48 @@ class _Broker:
 _IMPORT_TOOLS = ("nmap", "nxc", "kerberoast", "asrep", "secretsdump", "loot")
 
 
-def _detect_import_kind(content: str, filename: str = "") -> str:
-    """Best-effort format sniffing so a teammate can drop ANY tool's output and have
-    it routed to the right recce parser. Order matters: the most specific signatures
-    (Kerberos hashes, secretsdump rows) are checked before the looser ones."""
+def _import_signatures(content: str, filename: str = "") -> list[str]:
+    """Every import format whose signature is present in `content`, most-specific first.
+    Returns a list so the endpoint can spot a concatenated multi-tool paste (>1 kind)."""
     from ..importers import detect_scanner
-    scanner = detect_scanner(content)                                  # nessus/openvas/nuclei/testssl
-    if scanner:
-        return scanner
+    content = content.lstrip("﻿")
     low = content.lower()
     fn = filename.lower()
-    if "<nmaprun" in content[:4000]:                                   # nmap/masscan XML
-        return "nmap"                                                  # require the nmap marker,
-    #  don't route arbitrary <?xml (e.g. an unrecognized scanner report) to the nmap parser
+    kinds: list[str] = []
+    sc = detect_scanner(content)                                       # nessus/openvas/nuclei/testssl
+    if sc:
+        kinds.append(sc)
+    if "<nmaprun" in content[:4000] or "nmap scan report for" in low \
+            or re.search(r"^Host:\s+\S+.*\bPorts:", content, re.M) \
+            or re.search(r"^(open|closed)\s+(tcp|udp)\s+\d+\s+[0-9a-fA-F:.]+", content, re.M) \
+            or (content.lstrip()[:1] == "[" and '"ports"' in content and '"status"' in content):
+        kinds.append("nmap")                                          # nmap XML/-oG/-oN + masscan -oL/-oJ
     if "$krb5tgs$" in content:
-        return "kerberoast"
+        kinds.append("kerberoast")
     if "$krb5asrep$" in content:
-        return "asrep"
+        kinds.append("asrep")
     if re.search(r"^[^:\s]+:\d+:[0-9a-f]{32}:[0-9a-f]{32}:::", content, re.I | re.M):
-        return "secretsdump"                                           # user:rid:lm:nt:::
-    if re.search(r"^\s*SMB\s+\S+\s+\d+\s+\S+\s", content, re.M):        # netexec/cme SMB
-        return "nxc"
-    if ("nmap scan report for" in low                                  # nmap -oN
-            or re.search(r"^Host:\s+\S+.*\bPorts:", content, re.M)      # nmap -oG
-            or fn.endswith((".gnmap", ".nmap", ".xml"))):
-        return "nmap"
+        kinds.append("secretsdump")                                    # user:rid:lm:nt:::
+    if re.search(r"^\s*(SMB|LDAP|MSSQL|WINRM|SSH|RDP|FTP|WMI|NFS)\s+\S+\s+\d+\s+\S+\s",
+                 content, re.M):
+        kinds.append("nxc")                                            # netexec/cme, any protocol
     if ("recce-enum" in low or "recce-service" in low or "net-iface" in low
-            or re.search(r"^===[A-Z]", content, re.M) or "[!]" in content):
-        return "loot"                                                  # on-target sweep
-    return "unknown"
+            or re.search(r"^===[A-Z]", content, re.M)):
+        kinds.append("loot")                                           # on-target sweep
+    if not kinds and fn.endswith((".gnmap", ".nmap")):                 # extension is the last hint
+        kinds.append("nmap")
+    return kinds
+
+
+def _detect_import_kind(content: str, filename: str = "") -> str:
+    """The single best-guess kind (or 'unknown'). 'multiple' means a concatenated paste of
+    more than one tool's output — the endpoint asks the user to import them separately."""
+    kinds = _import_signatures(content, filename)
+    if not kinds:
+        return "unknown"
+    if len(set(kinds)) > 1:
+        return "multiple"
+    return kinds[0]
 
 
 def create_app(eng_dir: str) -> FastAPI:
@@ -397,11 +410,16 @@ def create_app(eng_dir: str) -> FastAPI:
         content = importers.decode_bytes(raw_bytes)
         if kind in ("", "auto"):
             kind = _detect_import_kind(content, filename)
+        if kind == "multiple":
+            raise HTTPException(422, "this looks like more than one tool's output pasted "
+                                "together — import them one at a time, or pick the exact "
+                                "tool from the dropdown to force a single parser.")
         if kind == "unknown":
-            raise HTTPException(422, "could not detect the format — pick the tool from "
-                                "the dropdown. Supported: nmap/masscan, netexec (nxc smb), "
-                                "impacket GetUserSPNs / GetNPUsers / secretsdump, and recce "
-                                "on-target loot.")
+            raise HTTPException(422, "could not detect the format — pick the tool from the "
+                                "dropdown. Supported: nmap/masscan (XML/-oG/-oN/-oL/-oJ), "
+                                "netexec (any protocol), impacket GetUserSPNs / GetNPUsers / "
+                                "secretsdump, Nessus/OpenVAS/nuclei/testssl, BloodHound+Certipy, "
+                                "a credential list, and recce on-target loot.")
         # BloodHound (.zip, binary) + Certipy (.json): the SharpHound collection is a
         # zip, so accept a base64 payload, decode, and run it through the `recce ad`
         # engine (works with no creds — findings + graph, just no owned-account paths).

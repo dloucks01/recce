@@ -97,5 +97,58 @@ class ImportEndpoint(unittest.TestCase):
         self.assertEqual(kinds["bob"], "nthash")
 
 
+class ParserVariants(unittest.TestCase):
+    def test_nuclei_array_url_host_info_gate(self):
+        arr = ('[{"template-id":"CVE-2021-44228","info":{"name":"Log4Shell","severity":"critical",'
+               '"classification":{"cve-id":"CVE-2021-44228"}},"host":"https://shop.ex.com:8443/x"},'
+               '{"template-id":"tech","info":{"name":"nginx","severity":"info"},"host":"https://shop.ex.com"}]')
+        v = im.parse_nuclei(arr)
+        self.assertEqual(len(v), 1)                       # info template dropped
+        self.assertEqual(v[0].ip, "shop.ex.com")          # hostname, not the URL
+        self.assertEqual(v[0].port, 8443)
+        self.assertEqual(v[0].ids, ["CVE-2021-44228"])
+
+    def test_testssl_pretty_nested(self):
+        pretty = ('{"scanResult":[{"ip":"web/93.184.216.34","port":"443",'
+                  '"vulnerabilities":[{"id":"heartbleed","severity":"CRITICAL","cve":"CVE-2014-0160"}]}]}')
+        v = im.parse_testssl(pretty)
+        self.assertEqual(len(v), 1)
+        self.assertEqual((v[0].ip, v[0].port, v[0].ids), ("93.184.216.34", 443, ["CVE-2014-0160"]))
+
+    def test_openvas_modern_ref_cve(self):
+        ov = ('<report><results><result><host>10.0.0.9</host><port>443/tcp</port><threat>High</threat>'
+              '<nvt><name>X</name><refs><ref type="cve" id="CVE-2019-1234"/></refs></nvt></result></results></report>')
+        self.assertEqual(im.parse_openvas(ov)[0].ids, ["CVE-2019-1234"])
+
+    def test_nessus_compliance_failed(self):
+        ns = ('<NessusClientData_v2><Report><ReportHost name="1.2.3.4"><HostProperties>'
+              '<tag name="host-ip">1.2.3.4</tag></HostProperties>'
+              '<ReportItem severity="0" pluginID="9" pluginName="CIS" port="0">'
+              '<compliance-result>FAILED</compliance-result></ReportItem></ReportHost></Report></NessusClientData_v2>')
+        v = im.parse_nessus(ns)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].severity, "medium")
+
+    def test_masscan_list_and_json(self):
+        from recce import parser
+        import tempfile
+        d = tempfile.mkdtemp()
+        lp = os.path.join(d, "m.list")
+        open(lp, "w").write("open tcp 80 10.0.0.5 1\nopen udp 53 10.0.0.9 1\n")
+        self.assertEqual(sorted(h.ip for h in parser.parse_masscan_list(lp)), ["10.0.0.5", "10.0.0.9"])
+        jp = os.path.join(d, "m.json")
+        open(jp, "w").write('[{"ip":"10.0.0.5","ports":[{"port":22,"proto":"tcp","status":"open"}]}]')
+        hs = parser.parse_masscan_json(jp)
+        self.assertEqual(hs[0].open_ports[0].portid, 22)
+
+    def test_detection(self):
+        from recce.webui.app import _detect_import_kind
+        self.assertEqual(_detect_import_kind("open tcp 80 10.0.0.5 1\n"), "nmap")           # masscan -oL
+        self.assertEqual(_detect_import_kind("LDAP 10.0.0.10 389 DC01 [+] c\\u:p"), "nxc")  # non-SMB nxc
+        cat = ("Nmap scan report for 10.0.0.5\n80/tcp open http\n"
+               "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::\n")
+        self.assertEqual(_detect_import_kind(cat), "multiple")                              # concatenated
+
+
 if __name__ == "__main__":
     unittest.main()
