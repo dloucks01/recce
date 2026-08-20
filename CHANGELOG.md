@@ -5,6 +5,24 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Hardened tool-output import** (the Import panel + `recce import`/`fieldkit-import`).
+  A deep-dive fixed the ways a real-world file could silently lose data:
+  - **Encoding.** Uploads travel as base64 and the server decodes with detection — UTF-16
+    (the *default* of a Windows PowerShell `>`/Out-File redirect), BOM, UTF-8, latin-1 —
+    and line parsers strip ANSI colour codes. A UTF-16 or coloured nxc/secretsdump/loot
+    dump no longer imports as garbage / zero rows.
+  - **Hash types** (a wrong label breaks the spray): `LM:NT` → the NT half, labeled nthash;
+    secretsdump keeps cleartext, labels NT hashes, and skips `_historyN` rows; the creds
+    list accepts `user:LM:NT` and hashcat `NThash:plaintext`; AS-REP parses the JtR form.
+  - **Format variants** that used to import as zero: nuclei JSON **array** export + URL→host
+    + info-gate, testssl `--jsonfile-pretty`, modern GVM `<ref type="cve">`, Nessus
+    compliance FAILs, and new **masscan `-oL`/`-oJ`** parsers. Detection strips a BOM,
+    tells nuclei-array from testssl-pretty, detects netexec on **any** protocol, and flags a
+    concatenated multi-tool paste instead of dropping all but the first format.
+  - **Safety net:** a **dry-run Preview** (see the detected format + row count + a 0-row
+    warning before committing to the shared engagement), "parsed 0 rows" feedback on
+    commit, host-key validation (never store a hostname/URL as an IP), an ASGI body-size
+    guard, and namespaced-XML support.
 - **Deeper enumeration + vuln coverage.**
   - **Web content / directory discovery.** The active web scan now probes a curated,
     bounded wordlist (admin panels, API/Swagger, dev/debug, dumps, listings). Exposed
