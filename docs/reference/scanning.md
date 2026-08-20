@@ -25,6 +25,13 @@ coverage is broad but cheap. Highlights:
 - **SNMP/DNS/misc**: `snmp-info`/`-win32-*`, `dns-zone-transfer`, `nfs-showmount`,
   `rpcinfo`, `vnc-info`, `rdp-ntlm-info`, `ike-version`, `ipmi-version`, `upnp-info`
 
+**UDP** (needs root): `enum` sweeps a curated set of 35 high-value UDP ports with
+`-sV` + the cheap SNMP/DNS/NTP/NetBIOS/IKE scripts (DNS/DHCP/TFTP/rpcbind/NTP/NetBIOS/
+SNMP/CLDAP/SLP/IKE/Syslog/RIP/IPMI/IPP/OpenVPN/RADIUS/L2TP/NFS/STUN/SSDP/SIP/mDNS/LLMNR/
+CoAP/memcached/VxWorks/BACnet), and `vulns` adds a top-N UDP sweep by default
+(`udp_top` = 30 on **standard**, 0 on **quick**, 100 on **thorough**). Tune with
+`--udp-top N` (0 disables) or skip all UDP with `--no-udp`.
+
 **Four vulnerability channels feed the Vulnerabilities sheet** (all work
 airgapped, none need internet):
 
@@ -33,7 +40,7 @@ airgapped, none need internet):
    methods, empty DB passwords, cleartext Telnet, SMTP open relay, exposed
    Redis/Mongo, SNMP community strings, DNS zone transfer, etc.
 2. **Offline version→CVE engine** (`vulndb.py`) — a curated knowledge base of
-   **95+ high-signal signatures** that matches the product+version data `enum`
+   **108 high-signal signatures** that matches the product+version data `enum`
    already collected against known CVEs, with a description, CWE(s) and
    **remediation**. Covers FTP/SSH/web servers, Samba/SMB, databases, CI/web apps
    (Jenkins, Tomcat, Drupal, Confluence, GitLab, Grafana…), **edge/VPN/firewall
@@ -76,7 +83,13 @@ airgapped, none need internet):
    or an over-broad parent `Domain`. A **confirmed** SQLi isn't handed a
    reimplemented exploiter — recce **bridges to a pre-filled `sqlmap` command**
    (in the Act plan and the exploit plan) so you weaponise it with the purpose-built
-   tool, within your ROE.
+   tool, within your ROE. The active web scan also runs **content/directory
+   discovery** (a curated wordlist — admin panels, API/Swagger, dev/debug, dumps,
+   listings; exposed files become their own findings, other hits roll up, and a
+   200-everything SPA/catch-all is detected and suppressed so it never floods) and
+   **virtual-host enumeration** (candidate names from the TLS cert SAN/CN, reverse
+   DNS and the nmap hostname are probed via Host-header; a site that differs from the
+   default response is reported as a distinct vhost to scan by name).
 4. **`searchsploit` (Exploit-DB, offline)** maps every service's product+version
    to known public exploits on a dedicated **Exploits** sheet (EDB-ID, type,
    title, CVEs, local path).
