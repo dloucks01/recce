@@ -581,3 +581,12 @@ body { background: var(--ground); color: var(--text); }
 .drawer-resize { position: absolute; left: 0; top: 0; width: 8px; height: 100%; cursor: ew-resize; z-index: 43; }
 .drawer-resize::after { content: ""; position: absolute; left: 2px; top: 50%; transform: translateY(-50%); width: 3px; height: 44px; border-radius: 3px; background: var(--line); transition: background .12s; }
 .drawer-resize:hover::after, .drawer-resize:active::after { background: var(--accent); height: 64px; }
+
+/* ---- chat search ---- */
+.chat-search { position: relative; display: flex; align-items: center; margin-top: 10px; }
+.chat-search input { flex: 1; font-family: var(--sans); font-size: 13px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface2); color: var(--text); }
+.chat-search input::placeholder { color: var(--faint); }
+.chat-search-x { position: absolute; right: 8px; background: none; border: 0; color: var(--faint); font-size: 12px; cursor: pointer; padding: 4px; }
+.chat-search-x:hover { color: var(--text); }
+.chat-search-n { position: absolute; right: 30px; font-family: var(--mono); font-size: 11px; color: var(--muted); pointer-events: none; }
+.cm-text mark { background: color-mix(in srgb, var(--accent) 35%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }

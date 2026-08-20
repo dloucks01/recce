@@ -219,6 +219,13 @@ function when(ts: number) {
 }
 
 /* ------------------------------ team chat -------------------------------- */
+// Wrap occurrences of the (lowercased) query in <mark> for search highlighting.
+function highlight(text: string, q: string): React.ReactNode {
+  if (!q) return text;
+  const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "ig");
+  return text.split(re).map((p, i) => (p.toLowerCase() === q ? <mark key={i}>{p}</mark> : p));
+}
+
 export function ChatButton() {
   const { chat, unread, sendChat, markChatRead, me } = useCollab();
   const [open, setOpen] = useState(false);
@@ -226,11 +233,14 @@ export function ChatButton() {
   const [img, setImg] = useState("");           // full data: URL of a pasted image
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [q, setQ] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const { width, startResize } = useResizableDrawer("recce.chatw", 440);
-  useEscape(() => setOpen(false), open);
+  useEscape(() => (q ? setQ("") : setOpen(false)), open);   // Esc clears search first, then closes
   useEffect(() => { if (open) markChatRead(); }, [open, chat.length, markChatRead]);
-  useEffect(() => { if (open) endRef.current?.scrollIntoView({ block: "end" }); }, [open, chat.length]);
+  useEffect(() => { if (open && !q) endRef.current?.scrollIntoView({ block: "end" }); }, [open, chat.length, q]);
+  const ql = q.trim().toLowerCase();
+  const shown = ql ? chat.filter((m) => `${m.text} ${m.tester}`.toLowerCase().includes(ql)) : chat;
 
   function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
     const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/"));
@@ -260,15 +270,21 @@ export function ChatButton() {
             <button className="drawer-x" onClick={() => setOpen(false)}>✕</button>
             <div className="dh"><div className="dh-ip">Team chat</div>
               <div className="dh-name">shared with everyone on this engagement</div></div>
+            <div className="chat-search">
+              <input placeholder="🔍 search messages…" value={q} onChange={(e) => setQ(e.target.value)} />
+              {q && <button className="chat-search-x" onClick={() => setQ("")} title="clear">✕</button>}
+              {ql && <span className="chat-search-n">{shown.length} of {chat.length}</span>}
+            </div>
             <div className="chatlog">
               {chat.length === 0 && <div className="chat-empty">No messages yet — say hi 👋</div>}
-              {chat.map((m) => (
+              {chat.length > 0 && shown.length === 0 && <div className="chat-empty">No messages match “{q.trim()}”.</div>}
+              {shown.map((m) => (
                 <div key={m.id} className={"chatmsg" + (m.tester === me ? " mine" : "")}>
                   <span className="avatar sm" style={{ background: `hsl(${hue(m.tester)} 55% 45%)` }}>{initials(m.tester)}</span>
                   <div className="cm-body">
                     <div className="cm-head"><b>{m.tester === me ? "you" : m.tester}</b>
                       <span className="cm-when">{when(m.ts)}</span></div>
-                    {m.text && <div className="cm-text">{m.text}</div>}
+                    {m.text && <div className="cm-text">{highlight(m.text, ql)}</div>}
                     {m.image && (
                       <a href={`/api/chat/media/${m.image}`} target="_blank" rel="noopener">
                         <img className="cm-img" src={`/api/chat/media/${m.image}`} alt="shared" loading="lazy" />
