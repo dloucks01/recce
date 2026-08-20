@@ -136,7 +136,10 @@ PROFILES: dict[str, ScanProfile] = {
     # PLUS every live host gets an independent congestion-adaptive UNION re-scan (cli
     # _enum_worker) - a port dropped in one pass is caught by the other. Speed is opt-in:
     # `quick`, `--top-ports`, `--min-rate`, `--fast`.
-    "standard": ScanProfile(name="standard", min_rate=0),
+    # udp_top=30: a bounded top-N UDP sweep runs by default in the vulns phase (on top of
+    # the always-on curated basic set), so UDP-only services aren't missed. --no-udp opts
+    # out; `quick` keeps it 0 for speed; `thorough` widens it.
+    "standard": ScanProfile(name="standard", min_rate=0, udp_top=30),
     # NO --min-rate floor here either (min_rate=0): a floor forces nmap to send faster
     # than a scan-detecting firewall tolerates, throttles the source, and drops open
     # ports - the exact bug the standard profile was fixed for. "thorough" must not be
@@ -909,7 +912,13 @@ def reprobe_services(ip: str, ports: list[int], out_xml: str,
 # High-value UDP services a TCP-only sweep misses. Kept small so the enum-phase sweep
 # stays fast: DNS, DHCP, TFTP, NTP, NetBIOS, SNMP(+trap), IKE/VPN, syslog, RIP, IPMI,
 # MSSQL browser, SIP, SSDP/UPnP, IPsec NAT-T, mDNS.
-_UDP_BASIC_PORTS = "53,67,69,123,137,138,161,162,500,514,520,623,1434,1900,4500,5060,5353"
+# Curated high-value UDP ports swept in the enum phase (bounded cost, always-on with root).
+# DNS/DHCP/TFTP/rpcbind/NTP/NetBIOS/SNMP/XDMCP/CLDAP/SLP/IKE/Syslog/RIP/IPMI/IPP/OpenVPN/
+# MSSQL-browser/Citrix/RADIUS/L2TP/SSDP/NFS/STUN/SIP/mDNS/LLMNR/CoAP/memcached/VxWorks/
+# rpc/BACnet - the services that most often expose data or amplify.
+_UDP_BASIC_PORTS = ("53,67,69,111,123,137,138,161,162,177,389,427,500,514,520,623,631,"
+                    "1194,1434,1604,1645,1701,1812,1900,2049,3478,4500,5060,5353,5355,"
+                    "5683,11211,17185,32768,47808")
 
 
 def udp_basic_scan(ip: str, out_xml: str, profile: ScanProfile) -> tuple[str, ScanIssue | None]:
