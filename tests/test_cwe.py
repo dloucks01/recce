@@ -57,6 +57,17 @@ def test_report_docx_cwe_label_falls_back_to_fuller_table():
     assert cwe_label("CWE-1392") == "CWE-1392 (Use of Default Credentials)"
 
 
+def test_names_table_covers_every_report_docx_cwe():
+    # cwe.NAMES is the fuller, first-class table (its own docstring's claim) that
+    # markdown/HTML's coverage() draws on - unlike report_docx.cwe_label(), it has no
+    # fallback, so any CWE missing here renders with a blank "-" weakness name in
+    # those reports' CWE coverage table. Regression: CWE-917 and 26 others were
+    # missing, so a real finding's CWE row would render nameless.
+    from recce.report_docx import _CWE_NAME
+    missing = sorted(set(_CWE_NAME) - set(cwe.NAMES))
+    assert missing == [], f"CWE(s) missing from cwe.NAMES: {missing}"
+
+
 def test_act_cards_are_tagged_with_cwe():
     h = Host(ip="10.0.0.5", ports=[Port(portid=6379, service="redis", state="open")],
              vulns=[_v("redis-unauth", "Redis exposed without authentication")])
