@@ -487,6 +487,8 @@ def create_app(eng_dir: str) -> FastAPI:
         # Text-safe decode (UTF-16 is the default of a PowerShell redirect); bloodhound
         # re-reads raw_bytes below since a SharpHound zip is binary.
         content = importers.decode_bytes(raw_bytes)
+        if not content.strip():                          # empty / whitespace-only decoded upload
+            raise HTTPException(400, "no content to import")
         if kind in ("", "auto"):
             kind = _detect_import_kind(content, filename)
         if kind == "multiple":
