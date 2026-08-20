@@ -225,7 +225,25 @@ export function ChatButton() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(() => {
+    const w = Number(localStorage.getItem("recce.chatw"));
+    return w >= 320 ? w : 440;
+  });
   useEscape(() => setOpen(false), open);
+  useEffect(() => { localStorage.setItem("recce.chatw", String(Math.round(width))); }, [width]);
+  function startResize(e: React.MouseEvent) {
+    e.preventDefault();
+    const onMove = (ev: MouseEvent) =>
+      setWidth(Math.min(Math.max(320, window.innerWidth - ev.clientX), window.innerWidth - 60));
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+    };
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
   useEffect(() => { if (open) markChatRead(); }, [open, chat.length, markChatRead]);
   useEffect(() => { if (open) endRef.current?.scrollIntoView({ block: "end" }); }, [open, chat.length]);
 
@@ -252,7 +270,8 @@ export function ChatButton() {
       {open && (
         <>
           <div className="drawer-backdrop" onClick={() => setOpen(false)} />
-          <div className="drawer chat-drawer">
+          <div className="drawer chat-drawer" style={{ width }}>
+            <div className="drawer-resize" onMouseDown={startResize} title="drag to resize" />
             <button className="drawer-x" onClick={() => setOpen(false)}>✕</button>
             <div className="dh"><div className="dh-ip">Team chat</div>
               <div className="dh-name">shared with everyone on this engagement</div></div>
