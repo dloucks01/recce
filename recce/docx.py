@@ -41,6 +41,7 @@ _CONTENT_TYPES = (
     '<Default Extension="jpeg" ContentType="image/jpeg"/>'
     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
     '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+    '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
     '</Types>'
 )
 
@@ -157,10 +158,14 @@ class Document:
     def __init__(self) -> None:
         self._paras: list[str] = []
         self._media: list[tuple[str, bytes]] = []   # (filename, bytes)
+        self._has_toc = False                        # emit updateFields so a TOC self-builds
         self._rels: list[tuple[str, str, str]] = [   # (id, type, target)
             ("rId1",
              "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
-             "styles.xml")]
+             "styles.xml"),
+            ("rId2",
+             "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings",
+             "settings.xml")]
 
     def _p(self, body: str, style: str | None = None) -> None:
         ppr = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
@@ -173,6 +178,24 @@ class Document:
 
     def heading(self, text: str, level: int = 1) -> None:
         self._p(_run(text), f"Heading{level}")
+
+    def toc(self, label: str = "Contents", levels: str = "1-1") -> None:
+        """Insert an auto-updating table of contents over the given heading levels
+        (default: Heading1 only). Word rebuilds it on open via the updateFields
+        setting; the placeholder run shows until then. The `label` is a plain bold
+        heading, NOT an outline level, so the TOC never lists itself."""
+        self._has_toc = True
+        self._p(_run(label, bold=True, color="0E6E67"))     # visible, but not in the TOC
+        instr = f' TOC \\o "{levels}" \\h \\z \\u '           # hyperlinked, outline-based
+        self._paras.append(
+            "<w:p>"
+            '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+            f'<w:r><w:instrText xml:space="preserve">{instr}</w:instrText></w:r>'
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            + _run("Right-click here and choose \"Update Field\" to build the "
+                   "table of contents.", italic=True, color=_MUTED)
+            + '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+            "</w:p>")
 
     def para(self, text: str = "", *, bold=False, italic=False,
              color: str | None = None) -> None:
@@ -247,8 +270,11 @@ class Document:
             self.para(caption, italic=True, color=_MUTED)
 
     def table(self, header: list[str], rows: list[list[str]],
-              widths: list[int] | None = None) -> None:
-        """A bordered table with a shaded header row. Widths in DXA (sum ~9360)."""
+              widths: list[int] | None = None,
+              body_colors: list[list[str | None]] | None = None) -> None:
+        """A bordered table with a shaded header row. Widths in DXA (sum ~9360).
+        `body_colors` (parallel to `rows`) tints individual body cells - e.g. the
+        severity ramp on a counts row; a None entry leaves that cell default."""
         ncol = len(header)
         if not widths:
             widths = [9360 // ncol] * ncol
@@ -257,10 +283,15 @@ class Document:
             for e in ("top", "left", "bottom", "right", "insideH", "insideV"))
         grid = "".join(f'<w:gridCol w:w="{w}"/>' for w in widths)
 
-        def cell(text, w, *, is_header=False):
+        def cell(text, w, *, is_header=False, color=None):
             shd = ('<w:shd w:val="clear" w:color="auto" w:fill="D7ECEA"/>'
                    if is_header else "")
-            rpr = '<w:rPr><w:b/><w:color w:val="0A4F4A"/></w:rPr>' if is_header else ""
+            if is_header:
+                rpr = '<w:rPr><w:b/><w:color w:val="0A4F4A"/></w:rPr>'
+            elif color:
+                rpr = f'<w:rPr><w:b/><w:color w:val="{color}"/></w:rPr>'
+            else:
+                rpr = ""
             run = (f'<w:r>{rpr}<w:t xml:space="preserve">{_esc(text)}'
                    f'</w:t></w:r>') if str(text) else ""
             return (f'<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/>{shd}'
@@ -268,9 +299,11 @@ class Document:
 
         trs = ['<w:tr>' + "".join(cell(h, widths[i], is_header=True)
                                   for i, h in enumerate(header)) + '</w:tr>']
-        for row in rows:
+        for ri, row in enumerate(rows):
+            rc = body_colors[ri] if body_colors and ri < len(body_colors) else None
             trs.append('<w:tr>' + "".join(
-                cell(row[i] if i < len(row) else "", widths[i])
+                cell(row[i] if i < len(row) else "", widths[i],
+                     color=(rc[i] if rc and i < len(rc) else None))
                 for i in range(ncol)) + '</w:tr>')
         self._paras.append(
             f'<w:tbl><w:tblPr><w:tblW w:w="{sum(widths)}" w:type="dxa"/>'
@@ -290,6 +323,13 @@ class Document:
             + "".join(self._paras) + _SECTPR +
             '</w:body></w:document>'
         )
+
+    def _settings_xml(self) -> str:
+        # updateFields makes Word rebuild the TOC field on open (prompting once);
+        # only emitted when a TOC is present, so plain write-ups never prompt.
+        update = '<w:updateFields w:val="true"/>' if self._has_toc else ""
+        return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<w:settings xmlns:w="{W}">{update}</w:settings>')
 
     def _doc_rels_xml(self) -> str:
         rels = "".join(
@@ -311,6 +351,7 @@ class Document:
                 z.writestr("_rels/.rels", _ROOT_RELS)
                 z.writestr("word/_rels/document.xml.rels", self._doc_rels_xml())
                 z.writestr("word/styles.xml", _STYLES)
+                z.writestr("word/settings.xml", self._settings_xml())
                 z.writestr("word/document.xml", self._document_xml())
                 for fname, data in self._media:
                     z.writestr(f"word/media/{fname}", data)

@@ -674,6 +674,45 @@ class DocxWriterTest(unittest.TestCase):
         self.assertIn('w:ascii="Consolas"', body)            # mono CVE + evidence
         self.assertIn('w:fill="EDF6F4"', body)               # teal-tinted evidence
 
+    def test_toc_field_and_updatefields_toggle(self):
+        """A doc with a TOC emits the field + updateFields (Word rebuilds on open);
+        a plain doc emits settings.xml WITHOUT updateFields, so it never prompts."""
+        import zipfile
+        from recce.docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            # with TOC
+            p1 = os.path.join(d, "toc.docx")
+            doc = Document(); doc.title("T"); doc.toc(); doc.heading("A"); doc.save(p1)
+            with zipfile.ZipFile(p1) as z:
+                body = z.read("word/document.xml").decode()
+                s1 = z.read("word/settings.xml").decode()
+            self.assertIn('w:fldCharType="begin"', body)
+            self.assertIn('TOC \\o', body)
+            self.assertIn('<w:updateFields w:val="true"/>', s1)
+            # without TOC -> settings present but no updateFields (no open-time prompt)
+            p2 = os.path.join(d, "plain.docx")
+            doc = Document(); doc.title("T"); doc.heading("A"); doc.save(p2)
+            with zipfile.ZipFile(p2) as z:
+                s2 = z.read("word/settings.xml").decode()
+            self.assertNotIn("updateFields", s2)
+            _docx_text(p1); _docx_text(p2)   # both parts well-formed
+
+    def test_table_body_cell_colour(self):
+        """body_colors tints an individual body cell (severity ramp on counts)."""
+        import zipfile
+        from recce.docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "tc.docx")
+            doc = Document()
+            doc.table(["Critical", "Low"], [["3", "1"]],
+                      body_colors=[["C00000", "2E5AAC"]])
+            doc.save(out)
+            with zipfile.ZipFile(out) as z:
+                body = z.read("word/document.xml").decode()
+            self.assertIn('w:color w:val="C00000"', body)
+            self.assertIn('w:color w:val="2E5AAC"', body)
+            _docx_text(out)
+
     def test_image_embed(self):
         import struct
         import binascii
@@ -1055,11 +1094,22 @@ class WriteupTest(unittest.TestCase):
             import zipfile
             with zipfile.ZipFile(out) as z:
                 body = z.read("word/document.xml").decode()
+                settings = z.read("word/settings.xml").decode()
+                ctypes = z.read("[Content_Types].xml").decode()
             self.assertIn("<w:tbl>", body)              # has tables
             self.assertIn("Test Engagement", text)      # title
             self.assertIn("Summary", text)
             self.assertIn("F-001", text)                # findings numbered
             self.assertIn("vsftpd 2.3.4 backdoor", text)
+            # Auto-updating table of contents: the TOC field + the updateFields
+            # setting that makes Word rebuild it on open (jump-list over findings).
+            self.assertIn("Contents", text)
+            self.assertIn('w:fldCharType="begin"', body)
+            self.assertIn('TOC \\o', body)
+            self.assertIn('<w:updateFields w:val="true"/>', settings)
+            self.assertIn("/word/settings.xml", ctypes)   # declared, so Word reads it
+            # Severity summary counts carry the ramp colour (critical = red).
+            self.assertIn('w:color w:val="C00000"', body)
 
     def test_screenshot_url_classification(self):
         from recce import screenshot
