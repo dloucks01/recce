@@ -4,6 +4,13 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-20
+
+Headline: the web workbench (`recce serve`) grows into a full multi-tester workspace —
+claim/assign hosts, presence, activity feed, per-tester progress, import from ~14 tools,
+add-by-hand, and a team chat with pasted screenshots — plus fix-first KEV/EPSS
+prioritisation, data-driven detection rules, and the API-enumeration phase.
+
 ### Added
 - **Collaborative web workbench.** The `recce serve` app grew from a shared view into a shared *workspace* for a whole team on one engagement, all live over SSE: **claim/assign hosts** (with My / Unclaimed filters and a one-click **My queue** of your unreviewed hosts), **triage labels** (interesting / needs-review / out-of-scope), **per-port ☐/◐/☑ status**, a **presence** roster, a persistent **activity feed**, **per-tester progress** (done/total) on the Dashboard "Team coverage" panel and the Hosts view, and **deep-links** from team rows / avatars / activity into a filtered Hosts view or a host drawer. **Add data by hand** — a finding, credential, host/scope, or access record — and **dismiss** false-positive findings. **Import panel:** drop or paste output from ~14 tools (nmap/masscan, Nessus, OpenVAS, nuclei, testssl, netexec smb/ldap/mssql/winrm, impacket Kerberoast/AS-REP/secretsdump, credential lists, BloodHound+Certipy, on-target loot, fieldkit) and have it folded into the live engagement, KEV/EPSS-ranked. New `recce/webui/collab.py`, `recce/importers.py`.
 - **Team chat.** A shared chat in the workbench: real-time **text** and **pasted screenshots** (stored under `<engagement>/chat-media/`, served back inline), an unread badge, live toasts, persisted history, resizable/searchable drawer. Text copy/paste is native. `POST/GET /api/chat`, `GET /api/chat/media/{name}`.
