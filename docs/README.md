@@ -5,7 +5,6 @@ Start with the two guides at the repo root, then dip into the reference below.
 - **[QUICKSTART.md](../QUICKSTART.md)** — zero to a filled-in workbook in five commands.
 - **[README.md](../README.md)** — what recce is, install, and the big picture.
 - **[TROUBLESHOOTING.md](../TROUBLESHOOTING.md)** — symptom → cause → fix, per phase.
-- **[SECURITY.md](../SECURITY.md)** — safety model, authorized-use, opt-in intrusive actions.
 - **[INTEGRATION.md](../INTEGRATION.md)** — the fieldkit round-trip.
 
 ## Reference

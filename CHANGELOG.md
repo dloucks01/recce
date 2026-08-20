@@ -13,7 +13,7 @@ All notable changes to recce are documented here. Dates are UTC.
   **harness skeleton** (target pinned, a safe `check()`, and a `[TESTER]` line for the
   ROE-approved action). With CVE args it targets those; otherwise the engagement's
   findings (`--confirmed` to gate). References published exploits and scaffolds a harness;
-  it does not author weaponized code (SECURITY.md §4). New `recce/pocgen.py`. The airgap
+  it does not author weaponized code. New `recce/pocgen.py`. The airgap
   bundle can bake in the full Exploit-DB (`RECCE_WITH_SEARCHSPLOIT=1`).
 
 ## [0.5.0] - 2026-08-20
