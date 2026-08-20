@@ -319,10 +319,10 @@ def _netgear(ip, hostname) -> Host:
 
 def _fileserver(ip, hostname) -> Host:
     ports = [
-        _p(111, "rpcbind", "2-4", version="2-4 (RPC #100000)"),
+        _p(111, "rpcbind", "rpcbind", version="2-4", extrainfo="RPC #100000"),
         _p(139, "netbios-ssn", "Samba smbd", version="4.15.13-Ubuntu"),
         _p(445, "microsoft-ds", "Samba smbd", version="4.15.13-Ubuntu", banner="SMB 3.1.1"),
-        _p(2049, "nfs", "3-4", version="3-4 (RPC #100003)"),
+        _p(2049, "nfs", "nfs", version="3-4", extrainfo="RPC #100003"),
     ]
     for p in ports:
         p.vuln_scanned = True
@@ -372,6 +372,7 @@ def build(eng_dir: str, hosts: int = 48, seed: int = 1337,
     random.seed(seed)
     from recce.cli import _open_paths
     from recce.store import Store
+    from recce.targets import _subnet_of
 
     st = Store(_open_paths(eng_dir)["db"])
     try:
@@ -411,6 +412,7 @@ def build(eng_dir: str, hosts: int = 48, seed: int = 1337,
 
         nf = 0
         for h in made:
+            h.subnet = _subnet_of(h.ip)     # a real scan/import always sets this
             st.upsert_host(h, merge=False)
             nf += len(h.vulns)
 
