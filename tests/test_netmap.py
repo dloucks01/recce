@@ -265,8 +265,8 @@ class TieredMapTest(unittest.TestCase):
         self.assertIn("AD domain", s)
         self.assertIn("pivot surface", s.lower())
         self.assertIn("1 foothold", s)             # the ws01 access overlay
-        # honesty: it must not claim network reachability
-        self.assertIn("does not test host-to-host", s)
+        # honesty: it must not claim network reachability (the pivot surface is inferred)
+        self.assertIn("does not test reachability", s)
 
     def test_tiered_svg_empty_is_graceful(self):
         import xml.dom.minidom as md

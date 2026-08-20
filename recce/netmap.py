@@ -781,8 +781,8 @@ def tiered_svg(hosts: list[Host], domains=None, ad_data=None) -> str:
                f'<tspan fill="#2E7D32">   ·   {footholds} foothold'
                f'{"s" if footholds != 1 else ""} held</tspan></text>')
     els.append(f'<text x="{m}" y="{ly + 20}" font-size="10.5" fill="#5f6f6e">'
-               'Logical view: tiers group hosts by role; arrows show escalation. The '
-               'pivot surface lists remote-auth services — inferred, not reachability-tested.'
+               'Logical view: tiers group hosts by role; arrows show escalation. The pivot '
+               'surface lists remote-auth services — inferred; recce does not test reachability.'
                '</text>')
 
     return (f'<svg viewBox="0 0 {W} {int(H)}" width="{W}" height="{int(H)}" role="img" '
