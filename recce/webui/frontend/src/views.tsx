@@ -663,42 +663,46 @@ export function Playbook({ pb, nav }: { pb: PlaybookData | null; nav: Nav }) {
   const showCmd = (s: string) => s === "current" || s === "active" || s === "ready";
   return (
     <div className="playbook">
-      <div className="pb-col">
-        <h3>Where we are</h3>
-        <ol className="pb-track">
-          {pb.phases.map((p) => (
-            <li key={p.key} className={"pb-step " + p.state}>
-              <span className="pb-ic">{icon(p.state)}</span>
-              <div className="pb-body">
-                <div className="pb-lab">{p.label} <span className="pb-badge">{p.state}</span></div>
-                <div className="pb-detail">{p.detail}</div>
-                {p.cmd && showCmd(p.state) && (
-                  <code className="pb-cmd" onClick={() => copy(p.cmd)} title="click to copy">
-                    {p.cmd}{copied === p.cmd ? "  ✓ copied" : ""}
-                  </code>
-                )}
-              </div>
-            </li>
-          ))}
-        </ol>
-      </div>
-      <div className="pb-col">
-        <h3>What's next</h3>
-        {pb.branches.length === 0 ? (
-          <p className="muted">Nothing outstanding — regenerate the report.</p>
-        ) : (
-          <ul className="pb-branches">
-            {pb.branches.map((b, i) => (
-              <li key={i}>
-                <div className="pb-branch-lab">{b.label}</div>
-                <div className="pb-why">{b.why}</div>
-                <code className="pb-cmd" onClick={() => copy(b.cmd)} title="click to copy">
-                  {b.cmd}{copied === b.cmd ? "  ✓" : ""}
-                </code>
+      <div className="pb-top">
+        <div className="pb-col">
+          <h3>Where we are</h3>
+          <ol className="pb-track">
+            {pb.phases.map((p) => (
+              <li key={p.key} className={"pb-step " + p.state}>
+                <span className="pb-ic">{icon(p.state)}</span>
+                <div className="pb-body">
+                  <div className="pb-lab">{p.label} <span className="pb-badge">{p.state}</span></div>
+                  <div className="pb-detail">{p.detail}</div>
+                  {p.cmd && showCmd(p.state) && (
+                    <code className="pb-cmd" onClick={() => copy(p.cmd)} title="click to copy">
+                      {p.cmd}{copied === p.cmd ? "  ✓ copied" : ""}
+                    </code>
+                  )}
+                </div>
               </li>
             ))}
-          </ul>
-        )}
+          </ol>
+        </div>
+        <div className="pb-col">
+          <h3>What's next</h3>
+          {pb.branches.length === 0 ? (
+            <p className="muted">Nothing outstanding — regenerate the report.</p>
+          ) : (
+            <ul className="pb-branches">
+              {pb.branches.map((b, i) => (
+                <li key={i}>
+                  <div className="pb-branch-lab">{b.label}</div>
+                  <div className="pb-why">{b.why}</div>
+                  <code className="pb-cmd" onClick={() => copy(b.cmd)} title="click to copy">
+                    {b.cmd}{copied === b.cmd ? "  ✓" : ""}
+                  </code>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+      <div className="pb-pathsec">
         <h3 className="pb-path-h">
           Attack path <button className="linkish" onClick={nav.toAct}>see the graph →</button>
         </h3>
