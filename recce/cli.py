@@ -5177,8 +5177,9 @@ def cmd_fieldkit_import(args: argparse.Namespace) -> int:
         print(f"[x] No such file: {args.findings}")
         return 1
     try:
-        with open(args.findings) as fh:
-            data = json.load(fh)
+        from . import importers
+        with open(args.findings, "rb") as fh:
+            data = json.loads(importers.decode_bytes(fh.read()))   # UTF-16/BOM-safe (Windows tooling)
     except (OSError, ValueError) as e:
         print(f"[x] Cannot read {args.findings}: {e}")
         return 1
