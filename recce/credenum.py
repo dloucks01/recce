@@ -81,10 +81,11 @@ def parse_nxc_smb(output: str) -> dict:
 
     Tolerant of version differences: keys off the message text, not columns.
     """
+    from .importers import strip_ansi
     result: dict = {"admin": False, "auth": False, "host_info": "", "shares": [],
                     "users": [], "sessions": [], "loggedon": [], "passpol": {}}
     section = None
-    for raw in output.splitlines():
+    for raw in strip_ansi(output).splitlines():          # a piped nxc log carries colour codes
         m = _NXC_LINE.match(raw)
         if not m:
             continue
@@ -150,14 +151,17 @@ def parse_nxc_smb(output: str) -> dict:
 # --- impacket roasting ----------------------------------------------------------
 
 _SPN_HASH = re.compile(r"\$krb5tgs\$\S+")
-_ASREP_HASH = re.compile(r"\$krb5asrep\$\d+\$([^@]+)@\S+")
+# Both the impacket form ($krb5asrep$23$user@REALM:hash) and the JtR form with no etype
+# ($krb5asrep$user@REALM:hash); the etype group is optional so a JtR-style hash isn't lost.
+_ASREP_HASH = re.compile(r"\$krb5asrep\$(?:\d+\$)?([^@$\s]+)@\S+")
 
 
 def parse_getuserspns(output: str) -> list[dict]:
     """Kerberoast results: SPN table rows + any `$krb5tgs$` hashes (with -request)."""
+    from .importers import strip_ansi
     accounts: list[dict] = []
     by_name: dict[str, dict] = {}
-    for raw in output.splitlines():
+    for raw in strip_ansi(output).splitlines():
         line = raw.rstrip()
         # Table row: "SPN  Name  MemberOf  PasswordLastSet ..."
         tm = re.match(r"^(\S+/\S+)\s+([\w.$-]+)\s+", line)
@@ -180,9 +184,10 @@ def parse_getuserspns(output: str) -> list[dict]:
 
 def parse_getnpusers(output: str) -> list[dict]:
     """AS-REP roast results: `$krb5asrep$` lines -> accounts with hashes."""
+    from .importers import strip_ansi
     out: list[dict] = []
     seen: set[str] = set()
-    for raw in output.splitlines():
+    for raw in strip_ansi(output).splitlines():
         m = _ASREP_HASH.search(raw)
         if m:
             name = m.group(1)
@@ -194,16 +199,32 @@ def parse_getnpusers(output: str) -> list[dict]:
 
 # NTLM hash rows: user:rid:lmhash:nthash::: (secretsdump SAM/NTDS output).
 _HASH_ROW = re.compile(r"^([^:]+):(\d+):([0-9a-f]{32}):([0-9a-f]{32}):::", re.I)
+# WDigest / LSA cleartext rows: `domain\user:CLEARTEXT:password` (the highest-value loot).
+_CLEARTEXT_ROW = re.compile(r"^(\S+?):CLEARTEXT[:\s]+(.+)$", re.I)
+_HISTORY_RE = re.compile(r"_history\d+$", re.I)
 
 
 def parse_secretsdump(output: str) -> list[dict]:
-    """Extract user:rid:lm:nt hash rows from secretsdump output."""
+    """Extract credential rows from secretsdump output: NTLM `user:rid:lm:nt:::` rows AND
+    WDigest/LSA `user:CLEARTEXT:password` rows. Each row carries its own `kind`/`secret`
+    (so a cleartext isn't mislabeled as a hash), and a password-`_historyN` row is flagged
+    (a rotated/stale hash must not be sprayed as the current one). Keeps name/rid/nt for
+    backward compatibility."""
+    from .importers import strip_ansi
     out: list[dict] = []
-    for raw in output.splitlines():
-        m = _HASH_ROW.match(raw.strip())
+    for raw in strip_ansi(output).splitlines():
+        line = raw.strip()
+        mc = _CLEARTEXT_ROW.match(line)
+        if mc and mc.group(2).strip():
+            out.append({"name": mc.group(1), "rid": "", "nt": "",
+                        "secret": mc.group(2), "kind": "password", "history": False})
+            continue
+        m = _HASH_ROW.match(line)
         if m:
-            out.append({"name": m.group(1), "rid": m.group(2),
-                        "nt": m.group(4)})
+            name = m.group(1)
+            out.append({"name": name, "rid": m.group(2), "nt": m.group(4),
+                        "secret": m.group(4), "kind": "nthash",
+                        "history": bool(_HISTORY_RE.search(name))})
     return out
 
 

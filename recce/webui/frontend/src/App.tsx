@@ -99,18 +99,15 @@ function ImportModal(
   function readFile(file: File) {
     const r = new FileReader();
     setFilename(file.name);
-    if (isBinaryFile(file.name)) {
-      r.onload = () => {
-        const url = String(r.result || "");
-        setText(url.slice(url.indexOf(",") + 1));   // strip the data: URL prefix -> base64
-        setEncoding("base64");
-      };
-      r.readAsDataURL(file);
-      if (kind === "auto") setKind("bloodhound");
-    } else {
-      r.onload = () => { setText(String(r.result || "")); setEncoding(""); };
-      r.readAsText(file);
-    }
+    // Always read as base64 so a UTF-16 (the default of a Windows PowerShell redirect),
+    // BOM'd, or binary file reaches the server intact; the server decodes with detection.
+    r.onload = () => {
+      const url = String(r.result || "");
+      setText(url.slice(url.indexOf(",") + 1));   // strip the data: URL prefix -> base64
+      setEncoding("base64");
+    };
+    r.readAsDataURL(file);
+    if (isBinaryFile(file.name) && kind === "auto") setKind("bloodhound");
   }
   async function go() {
     if (!text.trim() || busy) return;
@@ -150,7 +147,8 @@ function ImportModal(
           {filename && <span className="imp-fn">· {filename}</span>}
         </div>
         <textarea className="imp-paste" placeholder="…or paste the tool output here"
-                  value={text} onChange={(e) => setText(e.target.value)} disabled={busy} />
+                  value={text} onChange={(e) => { setText(e.target.value); setEncoding(""); }}
+                  disabled={busy} />
         {err && <div className="ranmsg warn-msg">{err}</div>}
         <div className="modal-actions">
           <button className="toggle" onClick={onClose} disabled={busy}>Cancel</button>
