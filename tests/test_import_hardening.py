@@ -97,6 +97,54 @@ class ImportEndpoint(unittest.TestCase):
         self.assertEqual(kinds["bob"], "nthash")
 
 
+class Feedback(unittest.TestCase):
+    def _client(self):
+        from fastapi.testclient import TestClient
+        from recce.store import Store
+        from recce.webui.app import create_app
+        d = tempfile.mkdtemp()
+        Store(os.path.join(d, "results.sqlite")).close()
+        return TestClient(create_app(d))
+
+    def _b64(self, raw):
+        return base64.b64encode(raw if isinstance(raw, bytes) else raw.encode()).decode()
+
+    def test_preview_does_not_commit(self):
+        c = self._client()
+        arr = ('[{"template-id":"CVE-2021-44228","info":{"name":"Log4Shell","severity":"critical"},'
+               '"host":"https://1.2.3.4:8443/x"}]')
+        r = c.post("/api/import", json={"content": self._b64(arr), "encoding": "base64",
+                                        "kind": "auto", "preview": True}).json()
+        self.assertEqual(r["mode"], "preview")
+        self.assertEqual(r["kind"], "nuclei")
+        self.assertEqual(r["count"], 1)
+        self.assertFalse(r["warning"])                  # a real finding -> no warning
+        # nothing committed
+        self.assertEqual(c.get("/api/findings").json(), [])
+
+    def test_preview_warns_on_zero_rows(self):
+        c = self._client()
+        r = c.post("/api/import", json={"content": self._b64("not xml"), "encoding": "base64",
+                                        "kind": "nessus", "preview": True}).json()
+        self.assertEqual(r["count"], 0)
+        self.assertIn("0 rows", r["warning"])
+
+    def test_commit_zero_rows_is_flagged_not_success(self):
+        c = self._client()
+        r = c.post("/api/import", json={"content": self._b64("garbage"), "encoding": "base64",
+                                        "kind": "nessus"}).json()
+        self.assertEqual(r["added"], 0)
+        self.assertIn("0 rows", r["summary"])
+
+    def test_concatenated_paste_rejected(self):
+        c = self._client()
+        cat = ("Nmap scan report for 10.0.0.5\n80/tcp open http\n"
+               "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::\n")
+        r = c.post("/api/import", json={"content": self._b64(cat), "encoding": "base64", "kind": "auto"})
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("more than one", r.json()["detail"])
+
+
 class ParserVariants(unittest.TestCase):
     def test_nuclei_array_url_host_info_gate(self):
         arr = ('[{"template-id":"CVE-2021-44228","info":{"name":"Log4Shell","severity":"critical",'

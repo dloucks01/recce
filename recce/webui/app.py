@@ -163,6 +163,74 @@ def _detect_import_kind(content: str, filename: str = "") -> str:
     return kinds[0]
 
 
+def _import_preview(kind: str, content: str, raw_bytes: bytes) -> dict:
+    """Dry-run: parse `content` WITHOUT committing, so the user sees what an import would
+    fold into the shared engagement (and a 0-row warning if the format looks wrong)."""
+    from .. import importers
+    n = 0
+    detail = ""
+    sample: list[str] = []
+    try:
+        if kind in ("nessus", "openvas", "nuclei", "testssl"):
+            vs = importers.SCANNER_PARSERS[kind](content)
+            n = len(vs)
+            detail = f"{n} finding(s) across {len({v.ip for v in vs})} host(s)"
+            sample = [f"{v.severity}: {v.title} @ {v.ip}" for v in vs[:6]]
+        elif kind == "nxc":
+            lines = importers.strip_ansi(content).splitlines()
+            n = sum(1 for ln in lines if re.search(r"\[\+\]", ln))
+            detail = f"~{n} validated login line(s)"
+        elif kind == "secretsdump":
+            from .. import credenum as ce
+            rows = ce.parse_secretsdump(content)
+            live = [r for r in rows if not r.get("history")]
+            n = len(live)
+            detail = f"{len(live)} credential(s), {len(rows) - len(live)} history skipped"
+            sample = [f"{r['name']} ({r.get('kind')})" for r in live[:6]]
+        elif kind in ("kerberoast", "asrep"):
+            from .. import credenum as ce
+            fn = ce.parse_getuserspns if kind == "kerberoast" else ce.parse_getnpusers
+            rows = [r for r in fn(content) if r.get("hash")]
+            n = len(rows)
+            detail = f"{n} roastable hash(es)"
+            sample = [r["name"] for r in rows[:6]]
+        elif kind == "creds":
+            n = sum(1 for ln in content.splitlines()
+                    if ":" in ln and not ln.strip().startswith("#") and ln.strip())
+            detail = f"~{n} credential line(s)"
+        elif kind == "nmap":
+            import tempfile
+            from ..parser import parse_nmap_file
+            suffix = ".xml" if ("<nmaprun" in content[:4000]
+                                or content.lstrip().startswith("<?xml")) else ".gnmap.txt"
+            fd, tmp = tempfile.mkstemp(suffix=suffix)
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(content)
+                hs = parse_nmap_file(tmp)
+            finally:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            n = sum(len(h.open_ports) for h in hs)
+            detail = f"{len(hs)} host(s), {n} open port(s)"
+            sample = [f"{h.ip}: {len(h.open_ports)} port(s)" for h in hs[:6]]
+        elif kind == "bloodhound":
+            detail = f"SharpHound/Certipy file ({len(raw_bytes)} bytes) — runs the `ad` engine"
+            n = 1
+        elif kind in ("loot", "fieldkit"):
+            detail = f"{kind} file ({len(content.splitlines())} line(s))"
+            n = 1
+    except Exception:  # noqa: BLE001 — a preview must never 500
+        pass
+    warning = ("" if n or kind in ("loot", "fieldkit", "bloodhound")
+               else f"parsed 0 rows — this may not be {kind} output, or it's a variant recce "
+               "can't read yet. Check the tool/format before importing.")
+    return {"mode": "preview", "kind": kind, "count": n, "detail": detail,
+            "sample": sample, "warning": warning}
+
+
 def create_app(eng_dir: str) -> FastAPI:
     from .. import __version__
     from ..cli import _open_paths
@@ -171,6 +239,17 @@ def create_app(eng_dir: str) -> FastAPI:
     app = FastAPI(title="recce workbench", version=__version__)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                        allow_headers=["*"])
+
+    @app.middleware("http")
+    async def _limit_body(request, call_next):
+        # Reject an oversized upload from its Content-Length before the whole body is
+        # buffered into memory (a ~25 MB decoded import is ~34 MB of base64).
+        cl = request.headers.get("content-length", "")
+        if cl.isdigit() and int(cl) > 45_000_000:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "request too large (max ~45 MB)"}, status_code=413)
+        return await call_next(request)
+
     jobs = JobManager()
     broker = _Broker()
     from . import collab
@@ -420,6 +499,10 @@ def create_app(eng_dir: str) -> FastAPI:
                                 "netexec (any protocol), impacket GetUserSPNs / GetNPUsers / "
                                 "secretsdump, Nessus/OpenVAS/nuclei/testssl, BloodHound+Certipy, "
                                 "a credential list, and recce on-target loot.")
+        # Dry-run: show what WOULD import (and a 0-row warning) before committing to the
+        # shared engagement. The frontend calls this on file-select.
+        if body.get("preview"):
+            return _import_preview(kind, content, raw_bytes)
         # BloodHound (.zip, binary) + Certipy (.json): the SharpHound collection is a
         # zip, so accept a base64 payload, decode, and run it through the `recce ad`
         # engine (works with no creds — findings + graph, just no owned-account paths).
@@ -634,6 +717,10 @@ def create_app(eng_dir: str) -> FastAPI:
                 raise HTTPException(422, f"unsupported import kind {kind!r}")
         finally:
             st.close()
+        if added == 0:                                   # don't let "0 rows" read as success
+            summary = (summary + " — " if summary else "") + (
+                f"parsed 0 rows; check this is really {kind} output (or a variant recce "
+                "can't read yet)")
         broker.publish({"type": "import", "kind": kind, "added": added, "tester": x_tester})
         return {"mode": "done", "kind": kind, "added": added, "summary": summary}
 
