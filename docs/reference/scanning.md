@@ -28,9 +28,9 @@ coverage is broad but cheap. Highlights:
 **UDP** (needs root): `enum` sweeps a curated set of 35 high-value UDP ports with
 `-sV` + the cheap SNMP/DNS/NTP/NetBIOS/IKE scripts (DNS/DHCP/TFTP/rpcbind/NTP/NetBIOS/
 SNMP/CLDAP/SLP/IKE/Syslog/RIP/IPMI/IPP/OpenVPN/RADIUS/L2TP/NFS/STUN/SSDP/SIP/mDNS/LLMNR/
-CoAP/memcached/VxWorks/BACnet), and `vulns` adds a top-N UDP sweep by default
-(`udp_top` = 30 on **standard**, 0 on **quick**, 100 on **thorough**). Tune with
-`--udp-top N` (0 disables) or skip all UDP with `--no-udp`.
+CoAP/memcached/VxWorks/BACnet) — the default UDP coverage. `vulns` can add a broader
+top-N UDP sweep with `--udp-top N` (opt-in; **thorough** runs 100). Skip all UDP with
+`--no-udp`.
 
 **Four vulnerability channels feed the Vulnerabilities sheet** (all work
 airgapped, none need internet):

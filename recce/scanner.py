@@ -136,10 +136,11 @@ PROFILES: dict[str, ScanProfile] = {
     # PLUS every live host gets an independent congestion-adaptive UNION re-scan (cli
     # _enum_worker) - a port dropped in one pass is caught by the other. Speed is opt-in:
     # `quick`, `--top-ports`, `--min-rate`, `--fast`.
-    # udp_top=30: a bounded top-N UDP sweep runs by default in the vulns phase (on top of
-    # the always-on curated basic set), so UDP-only services aren't missed. --no-udp opts
-    # out; `quick` keeps it 0 for speed; `thorough` widens it.
-    "standard": ScanProfile(name="standard", min_rate=0, udp_top=30),
+    # The always-on enum-phase curated UDP sweep (35 high-value ports, _UDP_BASIC_PORTS)
+    # is the default UDP coverage. A broader top-N UDP sweep in the vulns phase stays
+    # opt-in via --udp-top N (default off here to avoid adding UDP-scan time - and a
+    # non-root skip warning - to every run); `thorough` turns it on (udp_top=100).
+    "standard": ScanProfile(name="standard", min_rate=0),
     # NO --min-rate floor here either (min_rate=0): a floor forces nmap to send faster
     # than a scan-detecting firewall tolerates, throttles the source, and drops open
     # ports - the exact bug the standard profile was fixed for. "thorough" must not be
