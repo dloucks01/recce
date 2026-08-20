@@ -955,15 +955,22 @@ def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
              f"{len({a[0] for f in findings for a in f.affected})} affected host(s).",
              italic=True, color="666666")
 
-    # Severity counts.
+    # Contents: a hyperlinked jump-list over the Heading1 sections (each finding is
+    # one). Word builds it on open; a long combined report is otherwise scroll-only.
+    if findings:
+        doc.toc()
+        doc.page_break()
+
+    # Severity counts, cells tinted with the same ramp as the workbook / HTML preview.
+    _sevs = ("critical", "high", "medium", "low", "info")
     counts: dict[str, int] = {}
     for f in findings:
         counts[f.severity] = counts.get(f.severity, 0) + 1
     doc.heading("Summary", 1)
     doc.table(["Critical", "High", "Medium", "Low", "Info"],
-              [[str(counts.get(s, 0)) for s in
-                ("critical", "high", "medium", "low", "info")]],
-              widths=[1600, 1600, 1600, 1600, 1600])
+              [[str(counts.get(s, 0)) for s in _sevs]],
+              widths=[1600, 1600, 1600, 1600, 1600],
+              body_colors=[[_SEV_COLOR[s] for s in _sevs]])
 
     # Findings summary table.
     doc.heading("Findings", 1)
