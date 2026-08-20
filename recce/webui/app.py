@@ -546,7 +546,10 @@ def create_app(eng_dir: str) -> FastAPI:
                 elif re.search(r"^Host:\s+\S+\s+\(", content, re.M):
                     suffix = ".gnmap"
                 else:
-                    suffix = ".nmap"
+                    # -oN (normal) / masscan -oL / -oJ: a NEUTRAL suffix so parse_nmap_file
+                    # content-sniffs the real format (a .nmap suffix would force parse_normal
+                    # and misparse a masscan list as zero hosts).
+                    suffix = ".scan"
                 cmd = "import"
             else:
                 cmd, suffix = {"loot": ("ingest", ".txt"),
