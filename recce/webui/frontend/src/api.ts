@@ -189,3 +189,13 @@ export type ChatMsg = { id: string; ts: number; tester: string; text: string; im
 export async function getChat(): Promise<ChatMsg[]> { return getJSON<ChatMsg[]>("/api/chat"); }
 // image = base64 (no data: prefix) or "" for text-only
 export const postChat = (text: string, image: string): Promise<ChatMsg> => post("/api/chat", { text, image });
+
+// --- playbook (shared engagement plan) ----------------------------------------
+export type PbPhase = { key: string; label: string; state: string; detail: string; cmd: string };
+export type PbBranch = { label: string; cmd: string; why: string };
+export type Playbook = {
+  phases: PbPhase[]; current: string | null;
+  next: { label: string; cmd: string } | null;
+  branches: PbBranch[]; path: string[];
+};
+export async function fetchPlaybook(): Promise<Playbook> { return getJSON<Playbook>("/api/playbook"); }
