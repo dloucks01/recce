@@ -97,3 +97,38 @@ class ImportMergeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConcurrentUpsert(unittest.TestCase):
+    """upsert_host must be atomic: concurrent writers to the SAME host can't clobber
+    each other's merge (the read-merge-write runs under BEGIN IMMEDIATE). Without it,
+    ~all-but-one of N simultaneous same-host updates were lost."""
+
+    def test_concurrent_same_host_upserts_lose_nothing(self):
+        import threading
+        from recce.models import Host, Port
+        eng = tempfile.mkdtemp()
+        db = _open_paths(eng)["db"]
+        Store(db).close()
+        N = 40
+        gate = threading.Barrier(N)
+
+        def add(port):
+            st = Store(db)
+            try:
+                gate.wait()                       # release together -> maximise overlap
+                st.upsert_host(Host(ip="10.0.0.5", state="up",
+                                    ports=[Port(portid=port, protocol="tcp", state="open")]))
+            finally:
+                st.close()
+        threads = [threading.Thread(target=add, args=(1000 + i,)) for i in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        st = Store(db)
+        try:
+            ports = {p.portid for p in st.get_host("10.0.0.5").open_ports}
+        finally:
+            st.close()
+        self.assertEqual(len(ports), N, f"lost {N - len(ports)} of {N} concurrent upserts")
