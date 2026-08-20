@@ -103,7 +103,7 @@ class RealNmapImport(unittest.TestCase):
                 self.assertTrue(os.path.exists(out) and os.path.getsize(out) > 0,
                                 f"nmap produced no {ext} output")
                 c, d = _client()
-                r = _import_file(c, out)
+                _import_file(c, out)
                 os.remove(out)
                 # job-mode: the CLI import folds asynchronously
                 h = _wait_host(d, "127.0.0.1")
