@@ -48,6 +48,15 @@ class Detection(unittest.TestCase):
             self.assertEqual(fn("<not valid"), [])
             self.assertEqual(fn(""), [])
 
+    def test_xml_entity_declarations_are_refused(self):
+        # a 'billion laughs' style doc must be refused, not expanded, by the XML parsers
+        bomb = ('<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY a "AAAAAAAAAA">]>'
+                '<NessusClientData_v2><Report><ReportHost name="1.1.1.1">'
+                '<ReportItem severity="4" pluginName="&a;"><cve>CVE-2021-1</cve>'
+                '</ReportItem></ReportHost></Report></NessusClientData_v2>')
+        self.assertEqual(I.parse_nessus(bomb), [])
+        self.assertIsNone(I._safe_fromstring('<!DOCTYPE x><x/>'))
+
 
 class Nessus(unittest.TestCase):
     def test_folds_findings_and_drops_info(self):

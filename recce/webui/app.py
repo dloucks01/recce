@@ -381,6 +381,8 @@ def create_app(eng_dir: str) -> FastAPI:
         kind = str(body.get("kind", "auto")).lower()
         if not content.strip():
             raise HTTPException(400, "no content to import")
+        if len(content) > 25_000_000:                    # ~25 MB — generous for real scans
+            raise HTTPException(413, "import too large (max ~25 MB)")
         if kind in ("", "auto"):
             kind = _detect_import_kind(content, filename)
         if kind == "unknown":
@@ -405,7 +407,11 @@ def create_app(eng_dir: str) -> FastAPI:
                 fh.write(raw)
             label = f"ad {filename or kind}"
 
-            def _done_ad(job):
+            def _done_ad(job, _tmp=tmp):
+                try:
+                    os.remove(_tmp)                       # the job has read it; don't leak /tmp
+                except OSError:
+                    pass
                 broker.publish({"type": "scan", "status": job.status,
                                 "tester": x_tester, "targets": label})
             job = jobs.start(recce_argv("ad", tmp, "-o", eng_dir), on_done=_done_ad)
@@ -425,7 +431,11 @@ def create_app(eng_dir: str) -> FastAPI:
                 fh.write(content)
             label = f"{cmd} {filename or kind}"
 
-            def _done(job):
+            def _done(job, _tmp=tmp):
+                try:
+                    os.remove(_tmp)                       # the job has read it; don't leak /tmp
+                except OSError:
+                    pass
                 broker.publish({"type": "scan", "status": job.status,
                                 "tester": x_tester, "targets": label})
             job = jobs.start(recce_argv(cmd, tmp, "-o", eng_dir), on_done=_done)
