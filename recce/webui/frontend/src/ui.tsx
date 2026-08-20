@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { SEVS } from "./api";
 
 // Close an overlay on Escape. `active` gates it so a closed overlay doesn't listen.
@@ -9,6 +9,29 @@ export function useEscape(onEsc: () => void, active = true) {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, [onEsc, active]);
+}
+
+// A right-edge drawer you can drag-resize by its left edge; width persists per key.
+export function useResizableDrawer(storageKey: string, defaultW = 440) {
+  const [width, setWidth] = useState(() => {
+    const w = Number(localStorage.getItem(storageKey));
+    return w >= 320 ? w : defaultW;
+  });
+  useEffect(() => { localStorage.setItem(storageKey, String(Math.round(width))); }, [storageKey, width]);
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const onMove = (ev: MouseEvent) =>
+      setWidth(Math.min(Math.max(320, window.innerWidth - ev.clientX), window.innerWidth - 60));
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+    };
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
+  return { width, startResize };
 }
 
 export function Stat(
