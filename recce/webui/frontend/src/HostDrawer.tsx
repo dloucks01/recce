@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { HostDetail, VulnDetail, getHost } from "./api";
-import { SevTag, NoteCell, useEscape } from "./ui";
+import { SevTag, NoteCell, useEscape, useResizableDrawer } from "./ui";
 import { FindingDetail } from "./FindingDetail";
 import { PortStatus } from "./collab";
 
@@ -22,6 +22,7 @@ export function HostDrawer(
   }, [ip]);
 
   useEscape(onClose, ip != null);
+  const { width, startResize } = useResizableDrawer("recce.hostw", 620);
 
   if (!ip) return null;
 
@@ -44,7 +45,8 @@ export function HostDrawer(
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose} />
-      <aside className="drawer" role="dialog" aria-label={`host ${ip}`}>
+      <aside className="drawer" role="dialog" aria-label={`host ${ip}`} style={{ width }}>
+        <div className="drawer-resize" onMouseDown={startResize} title="drag to resize" />
         <button className="drawer-x" onClick={onClose} aria-label="close">✕</button>
         {err && <div className="err">Could not load host: {err}</div>}
         {!d && !err && <div className="loading">Loading {ip}…</div>}

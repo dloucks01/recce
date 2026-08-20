@@ -3,7 +3,7 @@ import {
   Collab, ChatMsg, TRIAGE_LABELS, getCollab, getChat, postChat, pingPresence, postAssign,
   postLabel, postPortStatus, postDismiss, addFinding, addCredential, addHostScope, addAccess,
 } from "./api";
-import { useEscape } from "./ui";
+import { useEscape, useResizableDrawer } from "./ui";
 
 const EMPTY: Collab = { assignments: {}, labels: {}, port_status: {}, dismissed: {}, activity: [], online: [] };
 
@@ -176,6 +176,7 @@ const IP_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/;
 export function ActivityButton({ onOpenHost }: { onOpenHost?: (ip: string) => void }) {
   const { c } = useCollab();
   const [open, setOpen] = useState(false);
+  const { width, startResize } = useResizableDrawer("recce.actw", 440);
   useEscape(() => setOpen(false), open);
   return (
     <>
@@ -184,7 +185,8 @@ export function ActivityButton({ onOpenHost }: { onOpenHost?: (ip: string) => vo
       {open && (
         <>
           <div className="drawer-backdrop" onClick={() => setOpen(false)} />
-          <div className="drawer activity-drawer">
+          <div className="drawer activity-drawer" style={{ width }}>
+            <div className="drawer-resize" onMouseDown={startResize} title="drag to resize" />
             <button className="drawer-x" onClick={() => setOpen(false)}>✕</button>
             <div className="dh"><div className="dh-ip">Team activity</div>
               <div className="dh-name">{c.online.length} online · newest first</div></div>
@@ -225,25 +227,8 @@ export function ChatButton() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(() => {
-    const w = Number(localStorage.getItem("recce.chatw"));
-    return w >= 320 ? w : 440;
-  });
+  const { width, startResize } = useResizableDrawer("recce.chatw", 440);
   useEscape(() => setOpen(false), open);
-  useEffect(() => { localStorage.setItem("recce.chatw", String(Math.round(width))); }, [width]);
-  function startResize(e: React.MouseEvent) {
-    e.preventDefault();
-    const onMove = (ev: MouseEvent) =>
-      setWidth(Math.min(Math.max(320, window.innerWidth - ev.clientX), window.innerWidth - 60));
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      document.body.style.userSelect = "";
-    };
-    document.body.style.userSelect = "none";
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }
   useEffect(() => { if (open) markChatRead(); }, [open, chat.length, markChatRead]);
   useEffect(() => { if (open) endRef.current?.scrollIntoView({ block: "end" }); }, [open, chat.length]);
 
