@@ -35,10 +35,23 @@ def test_unmappable_finding_is_none_not_a_wrong_code():
     assert attack.technique_for(_v("http-robots", "robots.txt discloses paths")) is None
 
 
-def test_technique_url_and_tactic_id():
+def test_technique_id_and_tactic_id():
     tech = attack.technique_for(_v("krb5", "Kerberoasting"))
-    assert tech.url == "https://attack.mitre.org/techniques/T1558/003/"
+    assert tech.id == "T1558.003"
     assert tech.tactic_id == "TA0006"
+    # airgap: a Technique exposes no external attack.mitre.org URL
+    assert not hasattr(tech, "url")
+
+
+def test_coverage_carries_no_external_url():
+    from recce.models import Host, Vuln
+    h = Host(ip="1.2.3.4", state="up")
+    h.vulns.append(Vuln(ip="1.2.3.4", port=445, protocol="tcp",
+                        script_id="smb-vuln-ms17-010", state="VULNERABLE",
+                        title="EternalBlue", severity="critical"))
+    for techs in attack.coverage([h])["by_tactic"].values():
+        for t in techs:
+            assert "url" not in t          # no external URL emitted in the served data
 
 
 def test_coverage_groups_by_tactic_and_counts_hosts():
