@@ -3038,6 +3038,28 @@ class ExploitPlanTest(unittest.TestCase):
                          "exploit/unix/ftp/vsftpd_234_backdoor")
         self.assertIsNone(ep._msf_for("telnet cleartext credentials"))
 
+    def test_msf_mapping_covers_headline_cves_exploitref_already_names(self):
+        # Regression: exploitref.PROVEN_EXPLOIT ("the single source of truth shared
+        # by the Word write-ups") named a real msf module for Zerologon/Log4Shell/
+        # the Apache path-traversal RCE/Struts2, but _MSF here had no entry for any
+        # of them - a confirmed finding of one of these (the demo engagement's own
+        # flagship critical findings) silently got NO .rc from `recce exploitplan`,
+        # despite the write-up step correctly naming a module that exists.
+        from recce import exploitplan as ep
+        self.assertEqual(ep._msf_for("Zerologon CVE-2020-1472")["module"],
+                         "auxiliary/admin/dcerpc/cve_2020_1472_zerologon")
+        self.assertEqual(ep._msf_for("Log4Shell CVE-2021-44228")["module"],
+                         "exploit/multi/http/log4shell_header_injection")
+        self.assertEqual(ep._msf_for("Apache path traversal CVE-2021-41773")["module"],
+                         "exploit/multi/http/apache_normalize_path_rce")
+        self.assertEqual(ep._msf_for("Struts2 OGNL CVE-2017-5638")["module"],
+                         "exploit/multi/http/struts2_content_type_ognl")
+        # PrintNightmare / MS10-061 are deliberately excluded: their msf modules
+        # require SMBUser/SMBPass/SMBDomain, which the generic RHOSTS/RPORT/PAYLOAD
+        # template has no field for - a generated .rc would look ready but fail.
+        self.assertIsNone(ep._msf_for("PrintNightmare CVE-2021-34527"))
+        self.assertIsNone(ep._msf_for("MS10-061 spoolss CVE-2010-2729"))
+
     def test_build_plan_safe_default(self):
         from recce import exploitplan as ep
         with tempfile.TemporaryDirectory() as d:
