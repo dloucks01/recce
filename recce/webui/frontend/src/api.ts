@@ -185,10 +185,13 @@ export const addHostScope = (targets: string) => post("/api/add/host", { targets
 export const addAccess = (ip: string, note: string) => post("/api/add/access", { ip, note });
 
 // --- team chat ----------------------------------------------------------------
-export type ChatMsg = { id: string; ts: number; tester: string; text: string; image: string };
+export type ChatFile = { stored: string; name: string; size: number };
+export type ChatMsg = { id: string; ts: number; tester: string; text: string; image: string; file?: ChatFile | null };
 export async function getChat(): Promise<ChatMsg[]> { return getJSON<ChatMsg[]>("/api/chat"); }
-// image = base64 (no data: prefix) or "" for text-only
-export const postChat = (text: string, image: string): Promise<ChatMsg> => post("/api/chat", { text, image });
+// image = base64 (no data: prefix) or "" for text-only; file = a general (non-image)
+// attachment, {data: base64, name: original filename} or omitted.
+export const postChat = (text: string, image: string, file?: { data: string; name: string } | null): Promise<ChatMsg> =>
+  post("/api/chat", { text, image, file: file || null });
 
 // --- playbook (shared engagement plan) ----------------------------------------
 export type PbPhase = { key: string; label: string; state: string; detail: string; cmd: string };
