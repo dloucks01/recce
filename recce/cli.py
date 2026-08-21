@@ -6295,8 +6295,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cd.add_argument("--add", action="append", metavar="USER:SECRET",
                     help="add a captured credential: 'user:secret', "
                          "'DOMAIN\\user:secret' (a 32-hex secret => NT hash). Repeatable.")
-    cd.add_argument("-u", "--user", help="add a credential: username")
-    cd.add_argument("-p", "--pass", dest="password", help="add a credential: password")
+    # --username/--password (not --user/--pass) so -u/-p read the same across every
+    # subcommand's --help, even though creds' -u/-p stage a credential rather than
+    # authenticate with one; dest= pinned so cmd_creds's args.user is unaffected.
+    cd.add_argument("-u", "--username", dest="user", help="add a credential: username")
+    cd.add_argument("-p", "--password", dest="password", help="add a credential: password")
     cd.add_argument("-H", "--hash", help="add a credential: NT hash (for pass-the-hash)")
     cd.add_argument("-d", "--domain", help="add a credential: AD domain (blank = local)")
     cd.add_argument("--plan", action="store_true",

@@ -2915,6 +2915,51 @@ class CliSmokeTest(unittest.TestCase):
             ns = p.parse_args(argv)
             self.assertTrue(callable(ns.func))
 
+    def test_no_dest_collisions_except_the_intentional_toggle_pair(self):
+        # Two add_argument() calls sharing a dest= is legal argparse but usually a
+        # copy-paste mistake - one flag silently shadows the other. The single
+        # legitimate case is an explicit enable/disable pair sharing one dest
+        # (--show-refuted/--no-show-refuted); anything else should fail loudly.
+        import argparse
+        from collections import defaultdict
+        from recce import cli
+        p = cli.build_arg_parser()
+        sub = next(a for a in p._actions if isinstance(a, argparse._SubParsersAction))
+        allowed = {("report", "show_refuted")}
+        for name, subp in sub.choices.items():
+            by_dest = defaultdict(list)
+            for act in subp._actions:
+                if isinstance(act, argparse._HelpAction):
+                    continue
+                by_dest[act.dest].append(act.option_strings)
+            for dest, groups in by_dest.items():
+                if len(groups) > 1 and (name, dest) not in allowed:
+                    self.fail(f"[{name}] dest={dest!r} shared by {groups} - "
+                             f"unintentional dest collision?")
+
+    def test_short_flags_mean_the_same_thing_in_every_subcommand(self):
+        # -u/-p/-d etc. should resolve to the same long flag everywhere an operator
+        # might reasonably expect consistency (muscle memory across subcommands).
+        # Regression: `creds` used -u/--user and -p/--pass while every other
+        # credentialed subcommand used --username/--password.
+        import argparse
+        from collections import defaultdict
+        from recce import cli
+        p = cli.build_arg_parser()
+        sub = next(a for a in p._actions if isinstance(a, argparse._SubParsersAction))
+        by_short: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+        for name, subp in sub.choices.items():
+            for act in subp._actions:
+                shorts = [o for o in act.option_strings
+                         if len(o) == 2 and o[0] == "-" and o[1] != "-"]
+                longs = [o for o in act.option_strings if o.startswith("--")]
+                if shorts and longs:
+                    by_short[shorts[0]][longs[0]].append(name)
+        for short, longs in by_short.items():
+            self.assertEqual(len(longs), 1,
+                             f"{short} means different things across subcommands: "
+                             f"{dict((k, v) for k, v in longs.items())}")
+
     def test_doctor_runs_without_crashing(self):
         from recce import cli
         rc = cli.cmd_doctor(SimpleNamespace(no_self_scan=True))
