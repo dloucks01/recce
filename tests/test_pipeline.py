@@ -3087,6 +3087,70 @@ class IngestServiceTest(unittest.TestCase):
         self.assertEqual(sign.port, 445)
         self.assertEqual(sign.severity, "high")
 
+    def test_rce_and_nfs_export_severity_from_real_scripts(self):
+        # Literal find_ strings copied verbatim from the real per-service scripts
+        # (not hand-approximated), so this catches severity drift against what
+        # recce-service.sh actually prints, not just an idealized fixture.
+        from recce import ingest
+        cases = [
+            # elasticsearch.sh: RCE named mid-sentence, not right after "->" - the
+            # old "-> rce" pattern missed it and fell through to medium.
+            ("Elasticsearch 1.4 (old) -> Groovy/MVEL sandbox RCE "
+             "(CVE-2014-3120 / CVE-2015-1427)", "critical"),
+            # smtp.sh / ftp.sh: "(RCE)" in parens, same gap.
+            ("Exim 4.87 -> check CVE-2019-10149 (RCE) and the 4.87-4.91 "
+             "local-root chain", "critical"),
+            ("ProFTPD 1.3.4 -> check mod_copy RCE CVE-2015-3306 (SITE CPFR/CPTO)",
+             "critical"),
+            # rpc-nfs.sh: a wildcard NFS export is the same finding class recce's
+            # own NFS probe already rates high (vulndb's nfs-world-export); the
+            # service-script path disagreed until this severity list caught up.
+            ("NFS export shared to * (everyone) -> mountable by any host", "high"),
+            # Words that CONTAIN "rce" as a substring (enfoRCEd, coeRCE) must not
+            # false-positive into critical - \brce\b is word-boundaried.
+            ("NLA does not appear enforced -> pre-auth attack surface", "medium"),
+            ("SMB coerce potential (xp_dirtree) -> often SYSTEM", "medium"),
+        ]
+        for text, want in cases:
+            self.assertEqual(ingest._svc_sev(text), want, text)
+
+    def test_real_lib_sh_output_round_trips(self):
+        # Strongest check: source the REAL recce/scripts/lib.sh, call its actual
+        # svc_header/find_/ok/info/note functions (what every service script under
+        # recce/scripts/services/ uses), and parse genuinely bash-produced stdout -
+        # not a hand-typed fixture approximating the format. Guards against lib.sh's
+        # printf formats drifting out of sync with _SVC_HDR/_FIND without anyone
+        # updating the Python side (or a fixture) to match.
+        import shutil
+        import subprocess
+        from recce import ingest
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash not available")
+        libsh = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "recce", "scripts", "lib.sh")
+        script = (
+            f'. "{libsh}"\n'
+            'svc_header "SMB" "10.0.10.5" "445"\n'
+            'ok "445/tcp is open"\n'
+            'find_ "SMB signing not required - relay possible"\n'
+            'info "just an informational line, not a finding"\n'
+            'note "next: netexec smb 10.0.10.5 --shares"\n'
+        )
+        r = subprocess.run([bash, "-c", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        parsed = ingest.parse_service_output(r.stdout)
+        self.assertTrue(parsed["is_service"])
+        self.assertEqual(len(parsed["findings"]), 1)
+        f = parsed["findings"][0]
+        self.assertEqual((f["ip"], f["port"], f["service"]),
+                         ("10.0.10.5", 445, "smb"))
+        self.assertIn("signing not required", f["text"])
+        # info/ok/note lines must never be picked up as findings.
+        vulns = ingest.service_findings_to_vulns(parsed)
+        self.assertEqual(len(vulns), 1)
+        self.assertEqual(vulns[0].severity, "high")
+
     def test_ingest_service_output_into_store(self):
         from recce import cli
         from recce.store import Store
