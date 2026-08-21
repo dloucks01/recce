@@ -12,7 +12,7 @@ import os
 import re
 import time
 
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1102,7 +1102,17 @@ def create_app(eng_dir: str) -> FastAPI:
         return {"ok": True}
 
     # --- team chat ----------------------------------------------------------------
-    _CHAT_MAX_BYTES = 8_000_000
+    _CHAT_MAX_BYTES = 8_000_000          # pasted image (rendered inline)
+    _CHAT_FILE_MAX_BYTES = 20_000_000    # general attachment (forced download)
+    _SAFE_NAME = re.compile(r"[^A-Za-z0-9 ._-]+")
+
+    def _safe_chat_filename(name: str) -> str:
+        """A display/download filename from client-supplied input - never trusted for
+        filesystem access (the file is always stored under a random name; this is only
+        the Content-Disposition hint and the name shown in the chat log)."""
+        base = os.path.basename((name or "").strip().replace("\\", "/"))
+        base = _SAFE_NAME.sub("_", base).strip(" ._")[:180]
+        return base or "file"
 
     @app.get("/api/chat")
     def chat_history(limit: int = 200):
@@ -1115,14 +1125,16 @@ def create_app(eng_dir: str) -> FastAPI:
 
     @app.post("/api/chat")
     def chat_post(body: dict = Body(...), x_tester: str = Header(default="someone")):
-        """A chat message: text and/or a pasted image. The image (base64) is decoded
-        and stored on disk under the engagement; the message keeps only its filename."""
+        """A chat message: text, and/or one attachment. A pasted/dropped image is kept
+        as `image` (base64) and rendered inline; any other file (or an oversize image)
+        is kept as `file` ({data: base64, name}) and offered as a forced download -
+        never rendered inline, so an uploaded .html/.svg/etc. can't execute in-origin."""
         from ..store import Store
+        import base64
         text = str(body.get("text", "")).strip()
         image_b64 = body.get("image") or ""
         image_name = ""
         if image_b64:
-            import base64
             try:
                 raw = base64.b64decode(image_b64)
             except Exception:
@@ -1137,11 +1149,28 @@ def create_app(eng_dir: str) -> FastAPI:
             os.makedirs(media_dir, exist_ok=True)
             with open(os.path.join(media_dir, image_name), "wb") as fh:
                 fh.write(raw)
-        if not text and not image_name:
+        file_meta = None
+        file_in = body.get("file")
+        if isinstance(file_in, dict) and file_in.get("data"):
+            try:
+                raw = base64.b64decode(file_in["data"])
+            except Exception:
+                raise HTTPException(400, "could not decode the file")
+            if len(raw) > _CHAT_FILE_MAX_BYTES:
+                raise HTTPException(413, "file too large (max ~20 MB)")
+            orig = _safe_chat_filename(str(file_in.get("name") or ""))
+            ext = os.path.splitext(orig)[1][:12]     # cosmetic only, never trusted
+            stored_name = f"{time.strftime('%Y%m%d')}-{os.urandom(8).hex()}{ext}"
+            media_dir = os.path.join(eng_dir, "chat-media")
+            os.makedirs(media_dir, exist_ok=True)
+            with open(os.path.join(media_dir, stored_name), "wb") as fh:
+                fh.write(raw)
+            file_meta = {"stored": stored_name, "name": orig, "size": len(raw)}
+        if not text and not image_name and not file_meta:
             raise HTTPException(400, "empty message")
         st = Store(db_path)
         try:
-            msg = collab.add_chat(st, x_tester, text[:4000], image_name)
+            msg = collab.add_chat(st, x_tester, text[:4000], image_name, file_meta)
         finally:
             st.close()
         broker.publish({"type": "chat", "msg": msg})
@@ -1155,6 +1184,21 @@ def create_app(eng_dir: str) -> FastAPI:
         if not os.path.isfile(path):
             raise HTTPException(404, "no such image")
         return FileResponse(path)
+
+    @app.get("/api/chat/file/{name}")
+    def chat_file(name: str, dl: str = Query(default="")):
+        """A general chat attachment - ALWAYS served as application/octet-stream with a
+        forced Content-Disposition: attachment, regardless of what was uploaded (an
+        .html/.svg/.js file must never render in-origin). `name` is the trusted random
+        stored filename (path-checked below); `dl` is only a display-filename hint for
+        the download, never used for filesystem access."""
+        if "/" in name or "\\" in name or ".." in name:      # no path traversal
+            raise HTTPException(400, "bad name")
+        path = os.path.join(eng_dir, "chat-media", name)
+        if not os.path.isfile(path):
+            raise HTTPException(404, "no such file")
+        return FileResponse(path, media_type="application/octet-stream",
+                            filename=_safe_chat_filename(dl) if dl else name)
 
     @app.get("/api/report/{kind}")
     def report(kind: str):

@@ -160,6 +160,50 @@ class ApiShape(unittest.TestCase):
             self.assertEqual(c.post("/api/chat", json={"text": ""}).status_code, 400)
             self.assertEqual(c.get("/api/chat/media/nope.png").status_code, 404)
 
+    def test_chat_general_file_attachment(self):
+        """Drag-and-drop / file-picker attachments: any file type, not just images -
+        served as a forced download (never rendered in-origin) with the filename
+        sanitized against path traversal / control-char injection."""
+        import base64
+        payload = b"user:pass\nadmin:admin\n"
+        with _client(self.eng) as c:
+            r = c.post("/api/chat", json={
+                "text": "loot from the share", "image": "",
+                "file": {"data": base64.b64encode(payload).decode(),
+                         "name": "../../etc/passwd"}},
+                headers={"X-Tester": "carol"})
+            self.assertEqual(r.status_code, 200)
+            f = r.json()["file"]
+            self.assertNotIn("/", f["name"])       # path components stripped
+            self.assertNotIn("..", f["name"])
+            self.assertEqual(f["size"], len(payload))
+            got = c.get(f"/api/chat/file/{f['stored']}", params={"dl": f["name"]})
+            self.assertEqual(got.status_code, 200)
+            self.assertEqual(got.content, payload)
+            # never rendered inline - always a forced download, regardless of content
+            self.assertEqual(got.headers["content-type"], "application/octet-stream")
+            self.assertIn("attachment", got.headers["content-disposition"])
+            # a message with ONLY a file (no text) is valid
+            self.assertEqual(c.post("/api/chat", json={"text": "", "image": "",
+                             "file": {"data": base64.b64encode(b"x").decode(), "name": "a.txt"}}
+                             ).status_code, 200)
+            # oversize file rejected before it's written to disk
+            big = base64.b64encode(b"x" * 20_000_001).decode()
+            self.assertEqual(c.post("/api/chat", json={"text": "", "image": "",
+                             "file": {"data": big, "name": "big.bin"}}).status_code, 413)
+            # a file whose UPLOADED CONTENT is HTML must still be served as a safe
+            # download, not rendered - the stored-XSS check that motivated the
+            # separate /api/chat/file endpoint in the first place.
+            html = base64.b64encode(b"<script>alert(1)</script>").decode()
+            r2 = c.post("/api/chat", json={"text": "", "image": "",
+                        "file": {"data": html, "name": "notes.html"}})
+            f2 = r2.json()["file"]
+            got2 = c.get(f"/api/chat/file/{f2['stored']}")
+            self.assertEqual(got2.headers["content-type"], "application/octet-stream")
+            # traversal / missing-file guards, same contract as /api/chat/media
+            self.assertEqual(c.get("/api/chat/file/nope.bin").status_code, 404)
+            self.assertEqual(c.get(r"/api/chat/file/a%5c..%5cb").status_code, 400)
+
     def test_collab_writes_survive_concurrency(self):
         """Concurrent chat/assignment writes (threadpool + per-request connection) must
         not clobber each other — the load-modify-save is serialised by a process lock."""

@@ -17,7 +17,7 @@ type Ctx = {
   dismiss: (key: string, on: boolean) => void;
   chat: ChatMsg[];
   unread: number;
-  sendChat: (text: string, image: string) => Promise<void>;
+  sendChat: (text: string, image: string, file?: { data: string; name: string } | null) => Promise<void>;
   pushChat: (m: ChatMsg) => void;
   markChatRead: () => void;
 };
@@ -45,8 +45,8 @@ export function CollabProvider({ children }: { children: React.ReactNode }) {
     if (m.tester !== me()) setUnread((u) => u + 1);
   }, []);
   const markChatRead = useCallback(() => setUnread(0), []);
-  const sendChat = useCallback(async (text: string, image: string) => {
-    const m = await postChat(text, image);       // server broadcasts; SSE echoes to everyone
+  const sendChat = useCallback(async (text: string, image: string, file?: { data: string; name: string } | null) => {
+    const m = await postChat(text, image, file); // server broadcasts; SSE echoes to everyone
     pushChat(m);                                  // reflect our own message immediately
   }, [pushChat]);
 
@@ -218,6 +218,12 @@ function when(ts: number) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
+function fmtSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /* ------------------------------ team chat -------------------------------- */
 // Wrap occurrences of the (lowercased) query in <mark> for search highlighting.
 function highlight(text: string, q: string): React.ReactNode {
@@ -226,15 +232,21 @@ function highlight(text: string, q: string): React.ReactNode {
   return text.split(re).map((p, i) => (p.toLowerCase() === q ? <mark key={i}>{p}</mark> : p));
 }
 
+const CHAT_ATTACH_MAX = 20_000_000;   // client-side courtesy check; the server is authoritative
+
+type Pending = { dataUrl: string; name: string; size: number; isImage: boolean };
+
 export function ChatButton() {
   const { chat, unread, sendChat, markChatRead, me } = useCollab();
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
-  const [img, setImg] = useState("");           // full data: URL of a pasted image
+  const [pending, setPending] = useState<Pending | null>(null);   // any pasted/dropped/picked attachment
+  const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const { width, startResize } = useResizableDrawer("recce.chatw", 440);
   useEscape(() => (q ? setQ("") : setOpen(false)), open);   // Esc clears search first, then closes
   useEffect(() => { if (open) markChatRead(); }, [open, chat.length, markChatRead]);
@@ -242,19 +254,42 @@ export function ChatButton() {
   const ql = q.trim().toLowerCase();
   const shown = ql ? chat.filter((m) => `${m.text} ${m.tester}`.toLowerCase().includes(ql)) : chat;
 
+  function readAttachment(file: File) {
+    setErr("");
+    if (file.size > CHAT_ATTACH_MAX) { setErr(`"${file.name}" is too large (max ~20 MB)`); return; }
+    const r = new FileReader();
+    r.onload = () => setPending({ dataUrl: String(r.result || ""), name: file.name,
+                                  size: file.size, isImage: file.type.startsWith("image/") });
+    r.onerror = () => setErr(`could not read "${file.name}"`);
+    r.readAsDataURL(file);
+  }
   function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
     const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/"));
     if (item) {
       const file = item.getAsFile();
-      if (file) { const r = new FileReader(); r.onload = () => setImg(String(r.result || "")); r.readAsDataURL(file); }
+      if (file) readAttachment(file);
       e.preventDefault();
     }
   }
+  function onDragOver(e: React.DragEvent) {
+    if (Array.from(e.dataTransfer.types).includes("Files")) { e.preventDefault(); setDragging(true); }
+  }
+  function onDragLeave(e: React.DragEvent) { e.preventDefault(); setDragging(false); }
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault(); setDragging(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) readAttachment(f);
+  }
   async function send() {
-    if ((!text.trim() && !img) || busy) return;
+    if ((!text.trim() && !pending) || busy) return;
     setBusy(true); setErr("");
-    try { await sendChat(text.trim(), img ? img.split(",")[1] || "" : ""); setText(""); setImg(""); }
-    catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+    try {
+      const b64 = pending ? pending.dataUrl.split(",")[1] || "" : "";
+      if (pending && pending.isImage) await sendChat(text.trim(), b64);
+      else if (pending) await sendChat(text.trim(), "", { data: b64, name: pending.name });
+      else await sendChat(text.trim(), "");
+      setText(""); setPending(null);
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
     finally { setBusy(false); }
   }
   return (
@@ -265,7 +300,8 @@ export function ChatButton() {
       {open && (
         <>
           <div className="drawer-backdrop" onClick={() => setOpen(false)} />
-          <div className="drawer chat-drawer" style={{ width }}>
+          <div className={"drawer chat-drawer" + (dragging ? " dragging" : "")} style={{ width }}
+               onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
             <div className="drawer-resize" onMouseDown={startResize} title="drag to resize" />
             <button className="drawer-x" onClick={() => setOpen(false)}>✕</button>
             <div className="dh"><div className="dh-ip">Team chat</div>
@@ -290,23 +326,42 @@ export function ChatButton() {
                         <img className="cm-img" src={`/api/chat/media/${m.image}`} alt="shared" loading="lazy" />
                       </a>
                     )}
+                    {m.file && (
+                      <a className="cm-file" href={`/api/chat/file/${m.file.stored}?dl=${encodeURIComponent(m.file.name)}`}
+                         target="_blank" rel="noopener" title={`download ${m.file.name}`}>
+                        <span className="cm-file-ic">📄</span>
+                        <span className="cm-file-name">{m.file.name}</span>
+                        <span className="cm-file-size">{fmtSize(m.file.size)}</span>
+                      </a>
+                    )}
                   </div>
                 </div>
               ))}
               <div ref={endRef} />
             </div>
-            {img && (
+            {dragging && <div className="chat-dropzone">Drop to attach</div>}
+            {pending && (
               <div className="chat-preview">
-                <img src={img} alt="pending attachment" />
-                <button className="tagbtn" onClick={() => setImg("")}>remove</button>
+                {pending.isImage
+                  ? <img src={pending.dataUrl} alt="pending attachment" />
+                  : <div className="chat-preview-file">
+                      <span className="cm-file-ic">📄</span>
+                      <span className="cm-file-name">{pending.name}</span>
+                      <span className="cm-file-size">{fmtSize(pending.size)}</span>
+                    </div>}
+                <button className="tagbtn" onClick={() => setPending(null)}>remove</button>
               </div>
             )}
             {err && <div className="ranmsg warn-msg">{err}</div>}
             <div className="chat-input">
-              <textarea placeholder="Message the team… (paste a screenshot to attach)" value={text}
+              <input ref={fileRef} type="file" hidden
+                     onChange={(e) => { const f = e.target.files?.[0]; if (f) readAttachment(f); e.target.value = ""; }} />
+              <button className="chat-attach-btn" title="attach a file" aria-label="attach a file"
+                      onClick={() => fileRef.current?.click()} disabled={busy} type="button">📎</button>
+              <textarea placeholder="Message the team… (paste, drop, or attach a file)" value={text}
                         onChange={(e) => setText(e.target.value)} onPaste={onPaste}
                         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
-              <button className="btn primary" onClick={send} disabled={busy || (!text.trim() && !img)}>Send</button>
+              <button className="btn primary" onClick={send} disabled={busy || (!text.trim() && !pending)}>Send</button>
             </div>
           </div>
         </>

@@ -137,12 +137,16 @@ def get_activity(st, limit: int = 100) -> list:
 
 # --- team chat ----------------------------------------------------------------
 @_serialized
-def add_chat(st, tester: str, text: str, image: str = "") -> dict:
-    """Append a chat message. `image` is a stored media filename (or "" for text-only).
-    Message metadata lives in meta; the image bytes live on disk (see the app layer)."""
+def add_chat(st, tester: str, text: str, image: str = "", file: dict | None = None) -> dict:
+    """Append a chat message. `image` is a stored media filename (or "" for text-only) -
+    rendered as an inline thumbnail. `file` is {"stored", "name", "size"} for a general
+    (non-image) attachment - rendered as a download link, never inline (see the app
+    layer's forced attachment/octet-stream serving - a stored file is never trusted
+    enough to render in-origin). Message metadata lives in meta; bytes live on disk."""
     log = _load(st, _CHAT, [])
     msg = {"id": uuid.uuid4().hex[:12], "ts": time.time(),
-           "tester": tester or "someone", "text": text, "image": image}
+           "tester": tester or "someone", "text": text, "image": image,
+           "file": file}
     log.append(msg)
     _save(st, _CHAT, log[-_CHAT_CAP:])
     return msg
