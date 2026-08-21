@@ -181,7 +181,7 @@ Built for a **team on one engagement**, live over SSE:
   OpenVAS, nuclei, testssl, netexec, impacket roast/secretsdump, BloodHound+Certipy,
   on-target loot, fieldkit…) straight into the live engagement.
 - **Add by hand** — a finding, credential, host, or access record — and **chat** with
-  the team (text + pasted screenshots).
+  the team (text, pasted screenshots, or drag-and-drop any file).
 
 The web UI needs `fastapi` + `uvicorn` — both are **bundled in the airgap package**.
 For a dev install: `pip install 'recce[bundle]'`.

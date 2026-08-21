@@ -36,7 +36,7 @@ Every command takes targets as a single IP, several IPs, a range
 | `exploitplan [targets]` | Ready-to-run artifacts (msf `.rc` + tool commands) for **confirmed** findings, params pre-filled | `--lhost`, `--lport`, `--run` |
 | `poc [CVEs…]` | Per-CVE PoC dossier + Python harness skeleton from offline intel (vulndb/KEV/EPSS/Exploit-DB/msf); default = the engagement's CVEs | `--confirmed`, `--with-exploits` |
 | `attackpath [targets]` | Chain confirmed findings into a staged attack path (foothold → priv-esc → creds → lateral → domain) | — |
-| `creds [targets]` | Stack captured credentials + build a netexec/impacket spray plan | `--add`, `--user/--pass/--hash/--domain`, `--plan` |
+| `creds [targets]` | Stack captured credentials + build a netexec/impacket spray plan | `--add`, `--username/--password/--hash/--domain`, `--plan` |
 | `serve` | Serve the **web workbench** for this engagement (browser UI, multi-tester over the LAN; run scans, Act/Credentials, import, chat, export) | `--host` (bind, default `0.0.0.0`), `--port` (default `8008`) |
 | `report` | Rebuild the workbook/reports from the datastore | — |
 | `status` | Print live coverage + suggested next command | — |

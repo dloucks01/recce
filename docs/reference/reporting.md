@@ -96,6 +96,7 @@ run it as you go. Both stay stdlib-only / airgap-safe. Full guide: **[INTEGRATIO
 | `exploit-plan/*`   | Ready-to-run msf `.rc` + per-host plans — after `exploitplan` |
 | `creds/*.txt`      | `users.txt` / `passwords.txt` / `nthashes.txt` for the spray plan — after `creds --plan` |
 | `loot/<ip>.txt`    | raw on-target enum output per host — after `deploy` |
+| `chat-media/*`     | Team-chat attachments (images render inline; any other file is a forced download) — after someone attaches one in `recce serve` |
 | `recce.log`        | Scan errors / timeouts / incomplete hosts (also on the Overview tab) |
 | `results.sqlite`   | Normalized datastore (resume + re-report) |
 | `raw/*.xml`        | Every raw nmap XML, for auditing / re-parsing |

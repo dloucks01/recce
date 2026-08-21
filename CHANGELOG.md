@@ -50,6 +50,52 @@ All notable changes to recce are documented here. Dates are UTC.
   findings (`--confirmed` to gate). References published exploits and scaffolds a harness;
   it does not author weaponized code. New `recce/pocgen.py`. The airgap
   bundle can bake in the full Exploit-DB (`RECCE_WITH_SEARCHSPLOIT=1`).
+- **Team chat now takes any file, not just pasted screenshots.** Drag-and-drop
+  (anywhere on the open chat panel) and a 📎 file-picker join the existing
+  clipboard-paste. An image still renders inline as before; any other file (loot,
+  a scan export, a doc) shows as a download card. A general attachment is always
+  served `application/octet-stream` + forced `Content-Disposition: attachment`
+  regardless of what was uploaded, so an `.html`/`.svg` dropped into shared chat
+  can never render in-origin (stored-XSS). 20 MB cap (images stay at 8 MB); the
+  filename is sanitized server-side before it's ever stored or shown.
+- **`recce exploitplan` covers four more headline CVEs** it already referenced but
+  never generated a ready-to-run `.rc` for: **Zerologon**, **Log4Shell**, the
+  Apache path-normalization RCE, and **Struts2** (OGNL). PrintNightmare and
+  MS10-061/spoolss are deliberately still excluded — their msf modules require
+  `SMBUser`/`SMBPass`/`SMBDomain`, which the generic RHOSTS/RPORT/PAYLOAD template
+  has no field for, so a generated `.rc` would look ready but fail.
+
+### Fixed
+- **The combined findings write-up (`findings_report.docx`) had no table of
+  contents.** A 20+ finding report was scroll-only despite every section already
+  carrying the right heading styles. It now has an auto-updating, hyperlinked TOC
+  (Word rebuilds it on open) and severity-coloured summary counts.
+- **27 CWEs rendered with a blank weakness name** in the Markdown/HTML "CWE
+  weakness coverage" table. `cwe.NAMES` — its own docstring calls it "the fuller,
+  first-class" table — was missing entries a separate, older table in
+  `report_docx.py` already had; merged.
+- **`recce-service.sh` findings that name a real RCE CVE were classified only
+  `medium`.** The severity regex only matched `"RCE"` immediately after an arrow
+  (`-> rce`); real findings from four scripts name the CVE with `RCE` elsewhere in
+  the sentence ("sandbox RCE (CVE-2014-3120)", "(RCE)", …) and fell through. Fixed
+  with a word-boundaried match, verified against every real `find_()` line in
+  `recce/scripts/services/*.sh`. A wildcard-open NFS export was also upgraded
+  medium → high to match recce's own NFS probe's severity for the same finding.
+- **`creds -u/-p` used `--user`/`--pass`**, the only credentialed subcommand not
+  spelled `--username`/`--password`. Renamed (short flags unchanged, so nothing
+  behavioral changes) for muscle-memory consistency across `--help`.
+- **Several file writes assumed the platform's default text encoding**, not
+  UTF-8 — a real finding title, hostname, or captured credential containing a
+  non-ASCII character would raise `UnicodeEncodeError` on a platform whose
+  default isn't UTF-8 (e.g. cp1252 on Windows, which recce explicitly ships an
+  airgap build for). Fixed across the PoC dossier/harness, the spray-plan files,
+  the exploitation-plan scripts, the DCSync/kerberoast loot files, and
+  `fieldkit-export`'s output (whose own `creds.txt` boilerplate has an em-dash).
+- **The seeded demo/sample data** (`tools/mock_engagement.py`, behind `recce demo`
+  and the workbench's sample-data seeder) silently read `Subnets: 0`, showed a
+  nonsense `"2-4 2-4 (RPC #100000)"` service line, and dropped the whole "Domain"
+  summary + the assets page's "Key information" section — the AD domain never
+  resolved because the seeded account carried it in the wrong field.
 
 ## [0.5.0] - 2026-08-20
 
