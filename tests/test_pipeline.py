@@ -3060,6 +3060,28 @@ class ExploitPlanTest(unittest.TestCase):
         self.assertIsNone(ep._msf_for("PrintNightmare CVE-2021-34527"))
         self.assertIsNone(ep._msf_for("MS10-061 spoolss CVE-2010-2729"))
 
+    def test_plan_files_are_written_as_utf8_not_platform_default(self):
+        # Regression: the per-host .sh and README.txt were opened bare open(...,
+        # "w") - they embed real finding titles (e.g. "Zerologon — Netlogon
+        # privilege escalation", a real em-dash) - which would raise
+        # UnicodeEncodeError on a platform whose default text encoding isn't UTF-8
+        # (e.g. cp1252 on Windows, which recce explicitly ships an airgap build for).
+        from recce import exploitplan as ep
+        from recce.models import Vuln
+        h = Host(ip="10.0.10.5", os_family="Windows",
+                 ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[Vuln(ip="10.0.10.5", port=445, protocol="tcp",
+                             script_id="smb-vuln-zerologon",
+                             title="Zerologon — Netlogon privilege escalation",
+                             severity="critical", source="nse",
+                             ids=["CVE-2020-1472"], confidence="confirmed")])
+        with tempfile.TemporaryDirectory() as d:
+            s = ep.build_plan([h], d, lhost="10.9.9.9")
+            with open(os.path.join(s["dir"], "10.0.10.5.sh"), encoding="utf-8") as fh:
+                self.assertIn("Zerologon — Netlogon", fh.read())
+            with open(os.path.join(s["dir"], "README.txt"), encoding="utf-8") as fh:
+                self.assertIn("10.0.10.5.sh", fh.read())
+
     def test_build_plan_safe_default(self):
         from recce import exploitplan as ep
         with tempfile.TemporaryDirectory() as d:
@@ -4832,6 +4854,23 @@ class CredentialsTest(unittest.TestCase):
             self.assertIn("netexec ssh 10.0.20.9", cmds)
             self.assertNotIn("netexec ssh 10.0.20.9 -u users.txt -H", cmds)  # no PtH over ssh
 
+    def test_spray_plan_files_are_written_as_utf8_not_platform_default(self):
+        # Regression: users.txt/passwords.txt were opened bare open(...,"w") - a
+        # captured non-ASCII username/password (real in an AD environment with
+        # international display names) would raise UnicodeEncodeError on a
+        # platform whose default text encoding isn't UTF-8 (e.g. cp1252 on
+        # Windows, which recce explicitly ships an airgap build for).
+        from recce import credentials as cr
+        from recce.models import Credential
+        creds = [Credential(username="josé", secret="contraseña—uno!",
+                            kind="password", domain="CORP")]
+        with tempfile.TemporaryDirectory() as d:
+            s = cr.build_spray(creds, self._hosts(), d)
+            with open(s["files"]["users.txt"], encoding="utf-8") as fh:
+                self.assertIn("josé", fh.read())
+            with open(s["files"]["passwords.txt"], encoding="utf-8") as fh:
+                self.assertIn("contraseña—uno!", fh.read())
+
     def test_harvest_from_accounts(self):
         from recce import credentials as cr
         from recce.models import Account
@@ -4863,6 +4902,38 @@ class CredentialsTest(unittest.TestCase):
             st.close()
             self.assertEqual(cli.cmd_creds(ns(plan=True)), 0)
             self.assertTrue(os.path.exists(os.path.join(d, "creds", "users.txt")))
+
+
+class AdLiveKerberosLootTest(unittest.TestCase):
+    def test_loot_files_are_written_as_utf8_not_platform_default(self):
+        # Regression: kerberoast.hash/asrep.hash/secretsdump.txt were opened bare
+        # open(...,"w") - no encoding= - and a $krb5tgs$/$krb5asrep$ hash embeds the
+        # account name, and secretsdump's own output embeds account names too, both
+        # of which can be non-ASCII in a real AD environment. Would raise
+        # UnicodeEncodeError on a platform whose default text encoding isn't UTF-8
+        # (e.g. cp1252 on Windows, which recce explicitly ships an airgap build for).
+        from types import SimpleNamespace
+        from recce import cli
+
+        class _FakeBH:
+            @staticmethod
+            def live_kerberos(creds, graph, do_roast, do_asrep, do_dcsync):
+                return {
+                    "runs": {
+                        "kerberoast": {"hashes": [
+                            {"hash": "$krb5tgs$23$*josé$CORP.LOCAL$MSSQLSvc/db*$aa$bb"}]},
+                        "dcsync": {"output": "corp.local\\josé:1104:aad3...:31d6...:::\n"},
+                    },
+                    "findings": [],
+                }
+        with tempfile.TemporaryDirectory() as d:
+            args = SimpleNamespace(output_dir=d, roast=True, asrep=False, dcsync=True)
+            creds = {"secret": "x", "dc_ip": "10.0.0.1"}
+            cli._ad_live_kerberos(args, _FakeBH(), creds, [], {})
+            with open(os.path.join(d, "loot", "kerberoast.hash"), encoding="utf-8") as fh:
+                self.assertIn("josé", fh.read())
+            with open(os.path.join(d, "loot", "secretsdump.txt"), encoding="utf-8") as fh:
+                self.assertIn("josé", fh.read())
 
 
 class KubernetesTest(unittest.TestCase):

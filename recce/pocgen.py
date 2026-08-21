@@ -242,9 +242,13 @@ def generate(cves: list[str], hosts: list, out_dir: str,
         d = gather(cve, hosts)
         cdir = os.path.join(base, cve)
         os.makedirs(cdir, exist_ok=True)
-        with open(os.path.join(cdir, f"{cve}.md"), "w") as fh:
+        # Explicit UTF-8, not the platform default: both files embed real finding
+        # titles/descriptions (from the engagement or an ingested tool), which can
+        # carry non-ASCII - the platform default is locale-dependent (e.g. cp1252
+        # on Windows) and would raise UnicodeEncodeError there.
+        with open(os.path.join(cdir, f"{cve}.md"), "w", encoding="utf-8") as fh:
             fh.write(render_dossier(d))
-        with open(os.path.join(cdir, "poc.py"), "w") as fh:
+        with open(os.path.join(cdir, "poc.py"), "w", encoding="utf-8") as fh:
             fh.write(render_harness(d))
         copied = 0
         if with_exploits:

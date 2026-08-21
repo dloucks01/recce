@@ -3923,14 +3923,16 @@ def _ad_live_kerberos(args, bh, creds, sh_paths, analysis):
             print(f"      [+] DCSync replicated {n} account hash(es)")
             if run.get("output"):
                 os.makedirs(loot_dir, exist_ok=True)
-                with open(os.path.join(loot_dir, fname), "w") as fh:
+                # Explicit UTF-8: secretsdump output can carry non-ASCII account names.
+                with open(os.path.join(loot_dir, fname), "w", encoding="utf-8") as fh:
                     fh.write(run["output"])
                 print(f"          loot -> {os.path.join(loot_dir, fname)}")
         else:
             print(f"      [+] {kind}: captured {n} hash(es) (hashcat -m {mode})")
             if run.get("hashes"):
                 os.makedirs(loot_dir, exist_ok=True)
-                with open(os.path.join(loot_dir, fname), "w") as fh:
+                # Explicit UTF-8: a $krb5tgs$/$krb5asrep$ hash embeds the account name.
+                with open(os.path.join(loot_dir, fname), "w", encoding="utf-8") as fh:
                     fh.write("\n".join(h["hash"] for h in run["hashes"]) + "\n")
                 print(f"          loot -> {os.path.join(loot_dir, fname)}")
         if run.get("output"):
@@ -5145,7 +5147,11 @@ def cmd_fieldkit_export(args: argparse.Namespace) -> int:
                      else "# (recce holds no captured credentials yet)\n",
     }
     for name, content in files.items():
-        with open(os.path.join(out_dir, name), "w") as fh:
+        # Explicit UTF-8: FIELDKIT.md/ports.gnmap/etc. embed real finding text and
+        # captured usernames/credentials (creds.txt's own boilerplate even has an
+        # em-dash) - the platform default is locale-dependent (e.g. cp1252 on
+        # Windows) and would raise UnicodeEncodeError there.
+        with open(os.path.join(out_dir, name), "w", encoding="utf-8") as fh:
             fh.write(content)
     _relax_perms(out_dir)
 

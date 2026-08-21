@@ -66,6 +66,26 @@ class Generate(unittest.TestCase):
         self.assertIn('("10.0.20.6", 21)', harness)         # target pinned from the engagement
         self.assertIn("NotImplementedError", harness)       # check()/exploit() are stubs
 
+    def test_dossier_and_harness_are_written_as_utf8_not_platform_default(self):
+        # Regression: both files were opened bare open(...,"w") - no encoding= - so
+        # a non-ASCII finding title/KEV flag (recce's own dossier renders a real 🔥
+        # emoji for a CISA-KEV CVE) would raise UnicodeEncodeError on a platform
+        # whose default text encoding isn't UTF-8 (e.g. cp1252 on Windows, which
+        # recce explicitly ships an airgap build for). Prove the failure mode is
+        # real, then prove recce's own writer is immune to it.
+        d = pocgen.gather("CVE-2017-0143", [])       # EternalBlue -> CISA KEV -> 🔥 in the dossier
+        dossier = pocgen.render_dossier(d)
+        self.assertTrue(any(ord(c) > 127 for c in dossier), "expected non-ASCII (KEV flag) in the dossier")
+        with tempfile.TemporaryDirectory() as scratch:
+            with self.assertRaises(UnicodeEncodeError):
+                with open(os.path.join(scratch, "x.md"), "w", encoding="cp1252") as fh:
+                    fh.write(dossier)
+        out = tempfile.mkdtemp()
+        pocgen.generate(["CVE-2017-0143"], [], out)
+        cdir = os.path.join(out, "poc", "CVE-2017-0143")
+        with open(os.path.join(cdir, "CVE-2017-0143.md"), encoding="utf-8") as fh:
+            self.assertIn("\U0001f525", fh.read())    # round-trips correctly as UTF-8
+
     def test_harness_survives_hostile_title(self):
         # a scan-derived finding title carries free text; one containing `"""`, a backslash
         # or a newline must not break the generated harness (it lands in the docstring).

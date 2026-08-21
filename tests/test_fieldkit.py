@@ -239,6 +239,24 @@ class RoundTripCliTest(unittest.TestCase):
         bridge = json.load(open(os.path.join(sk, "recce-bridge.json")))
         self.assertEqual(len(bridge["hosts"]), 2)
 
+    def test_export_files_are_written_as_utf8_not_platform_default(self):
+        # Regression: fieldkit-export's files were opened bare open(...,"w") - no
+        # encoding= - and creds.txt's OWN boilerplate comment has a literal em-dash
+        # ("— domain/user:secret"), so this crashes with UnicodeEncodeError on a
+        # platform whose default text encoding isn't UTF-8 (e.g. cp1252 on Windows,
+        # which recce explicitly ships an airgap build for) - with ZERO scan-derived
+        # non-ASCII content needed to trigger it.
+        from recce.models import Credential
+        paths = cli._open_paths(self.eng)
+        store = Store(paths["db"])
+        store.add_credential(Credential(username="alice", secret="Pw!", kind="password"))
+        store.close()
+        rc = cli.cmd_fieldkit_export(self._args())
+        self.assertEqual(rc, 0)
+        path = os.path.join(self.eng, "fieldkit", "creds.txt")
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("—", fh.read())          # round-trips correctly as UTF-8
+
     def test_import_lands_in_store_and_marks_access(self):
         ff = os.path.join(self.dir, "recce_findings.json")
         json.dump({"source": "fieldkit", "findings": [{

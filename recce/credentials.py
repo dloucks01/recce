@@ -120,7 +120,8 @@ def write_files(creds: list[Credential], out_dir: str) -> dict[str, str]:
                        ("nthashes.txt", hashes)):
         if rows:
             path = os.path.join(out_dir, name)
-            with open(path, "w") as fh:
+            # Explicit UTF-8: a captured username/password can be non-ASCII.
+            with open(path, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(rows) + "\n")
             files[name] = path
     return files
