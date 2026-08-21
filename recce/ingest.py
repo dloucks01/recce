@@ -281,12 +281,20 @@ _PROMOTE = [(re.compile(rx, re.I), sev, cwes, title, rem)
 # are kept as low-confidence 'potential' so they don't inflate the findings report.
 _SVC_HDR = re.compile(r"^=+\s*(\S+)\s+->\s+(\d{1,3}(?:\.\d{1,3}){3}):(\d+)\s*=+$")
 _SVC_SEV = [
+    # \brce\b catches "RCE" anywhere (parenthesised, mid-sentence, ...) - the old
+    # "-> rce" required it immediately after an arrow, so e.g. "sandbox RCE
+    # (CVE-2014-3120)" and "check CVE-2019-10149 (RCE)" fell through to medium
+    # despite naming an actual remote-code-execution CVE. Word-boundaried so it
+    # doesn't fire on "enforced"/"coerce"/"source" etc.
     (r"eternalblue|ms17-010|ms08-067|smbghost|bluekeep|backdoor|unauthenticated .*rce|"
-     r"remote root|-> rce", "critical"),
+     r"remote root|\brce\b", "critical"),
+    # "mountable by any" catches the NFS wildcard-export finding (showmount -e
+    # showed "*") - recce's own NFS probe already rates the same condition high
+    # (see vulndb's nfs-world-export); the shell-script path disagreed until now.
     (r"anonymous .*(login|ftp)|null session|unauth|no auth|without auth|"
      r"signing not required|cpassword|zone transfer allowed|community string works|"
      r"is readable|is writable|writable|world-readable|open recursion|"
-     r"unauthenticated", "high"),
+     r"mountable by any|unauthenticated", "high"),
     (r"cleartext|without starttls|no starttls|weak|sslv|tls1\.0|poodle|"
      r"dangerous http methods|nla off", "medium"),
 ]
