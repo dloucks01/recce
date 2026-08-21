@@ -4,6 +4,14 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-21
+
+Headline: `recce exploitplan` grows real coverage for four more headline CVEs
+(Zerologon, Log4Shell, the Apache path-normalization RCE, Struts2), team chat
+takes any file via drag-and-drop (not just pasted screenshots), and a sweep of
+correctness fixes — the write-up TOC, CWE-name gaps, service-enum severity
+classification, and a cross-codebase UTF-8 encoding fix.
+
 ### Added
 - **Hardened tool-output import** (the Import panel + `recce import`/`fieldkit-import`).
   A deep-dive fixed the ways a real-world file could silently lose data:
