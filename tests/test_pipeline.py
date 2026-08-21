@@ -2915,6 +2915,46 @@ class CliSmokeTest(unittest.TestCase):
             ns = p.parse_args(argv)
             self.assertTrue(callable(ns.func))
 
+    def test_cli_works_with_every_optional_dependency_absent(self):
+        # The core promise: recce is stdlib-only, and ONLY `recce serve` needs
+        # fastapi/uvicorn (the bundle extra). Verify it for real, in a fresh
+        # subprocess with fastapi/uvicorn/openpyxl/ldap3/impacket blocked at
+        # __import__ time - not just by reading cli.py's own top-level imports,
+        # which only proves ONE file, not the whole transitive import graph
+        # reachable from `recce.cli` / `from .webui.app import create_app`.
+        # Regression target: a future module that cli.py imports at module level
+        # (not lazily, like cmd_serve's own try/except) picking up a stray
+        # `import openpyxl`/etc. would silently break every OTHER command too,
+        # not just serve - this catches that even though no single file's diff
+        # would look wrong on its own.
+        import subprocess
+        import textwrap
+        script = textwrap.dedent("""
+            import sys, builtins, tempfile
+            _BLOCKED = {"fastapi", "uvicorn", "openpyxl", "ldap3", "impacket"}
+            _orig_import = builtins.__import__
+            def _blocking_import(name, *a, **kw):
+                if name.split(".")[0] in _BLOCKED:
+                    raise ImportError(f"No module named {name!r} (simulated absent)")
+                return _orig_import(name, *a, **kw)
+            builtins.__import__ = _blocking_import
+
+            from recce import cli
+            p = cli.build_arg_parser()
+            assert len(p._subparsers._group_actions[0].choices) > 40
+
+            ns = p.parse_args(["doctor", "--no-self-scan"])
+            assert ns.func(ns) in (0, 1)               # never raises
+
+            d = tempfile.mkdtemp()
+            ns2 = p.parse_args(["serve", "-o", d])
+            assert ns2.func(ns2) == 1                   # fails CLEANLY, not a crash
+            print("ALL_OK")
+        """)
+        r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ALL_OK", r.stdout)
+
     def test_no_dest_collisions_except_the_intentional_toggle_pair(self):
         # Two add_argument() calls sharing a dest= is legal argparse but usually a
         # copy-paste mistake - one flag silently shadows the other. The single
