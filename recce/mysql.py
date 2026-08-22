@@ -66,6 +66,38 @@ def _server_version(payload: bytes) -> str:
     return payload[1:end].decode("utf-8", "replace")
 
 
+def _greeting(payload: bytes) -> dict:
+    """Parse a MySQL/MariaDB server greeting (Handshake v10) for the capability flags
+    and default auth plugin - read-only, no credentials. Returns {ssl, auth_plugin}."""
+    out = {"ssl": False, "auth_plugin": ""}
+    try:
+        if not payload or payload[0] != 10:
+            return out
+        i = payload.find(b"\x00", 1)
+        if i < 0:
+            return out
+        i += 1                                             # past version NUL
+        i += 4 + 8 + 1                                     # conn id + auth1 + filler
+        if i + 2 > len(payload):
+            return out
+        cap_lo = struct.unpack_from("<H", payload, i)[0]
+        i += 2 + 1 + 2                                     # cap_lo + charset + status
+        cap_hi = struct.unpack_from("<H", payload, i)[0] if i + 2 <= len(payload) else 0
+        caps = cap_lo | (cap_hi << 16)
+        out["ssl"] = bool(caps & 0x00000800)               # CLIENT_SSL
+        # auth plugin name is the last NUL-terminated string when CLIENT_PLUGIN_AUTH set.
+        if caps & 0x00080000:
+            end = payload.rfind(b"\x00")
+            start = payload.rfind(b"\x00", 0, end) + 1 if end > 0 else -1
+            if 0 < start < end:
+                cand = payload[start:end].decode("ascii", "replace")
+                if cand.endswith("_password") or "sha2" in cand or "socket" in cand:
+                    out["auth_plugin"] = cand
+    except (struct.error, IndexError):
+        pass
+    return out
+
+
 def _handshake_response(user: str) -> bytes:
     # HandshakeResponse41 with an EMPTY auth response (empty password).
     body = struct.pack("<IIB", _CAPS, _MAX_PKT, 0x21)      # caps, max packet, utf8 charset
@@ -78,7 +110,8 @@ def _handshake_response(user: str) -> bytes:
 
 def _login_empty(ip: str, port: int, user: str, timeout: float) -> dict:
     """Attempt an empty-password login. Returns {reachable, version, ok, err}."""
-    res = {"reachable": False, "version": "", "ok": False, "err": ""}
+    res = {"reachable": False, "version": "", "ok": False, "err": "",
+           "ssl": False, "auth_plugin": ""}
     try:
         sock = socket.create_connection((ip, port), timeout=timeout)
         sock.settimeout(timeout)
@@ -96,6 +129,8 @@ def _login_empty(ip: str, port: int, user: str, timeout: float) -> dict:
             return res
         res["reachable"] = True
         res["version"] = _server_version(payload)
+        g = _greeting(payload)
+        res["ssl"], res["auth_plugin"] = g["ssl"], g["auth_plugin"]
         resp = _handshake_response(user)
         sock.sendall(struct.pack("<I", len(resp))[:3] + bytes([seq + 1]) + resp)
         reply, _ = _read_packet(sock)
@@ -121,12 +156,14 @@ def _login_empty(ip: str, port: int, user: str, timeout: float) -> dict:
 
 def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     res = {"reachable": False, "unauth": False, "auth_required": False,
-           "version": "", "user": "", "error": ""}
+           "version": "", "user": "", "error": "", "ssl": False, "auth_plugin": ""}
     for user in ("root", ""):                              # empty-password root, then anon
         r = _login_empty(ip, port, user, timeout)
         if r["reachable"]:
             res["reachable"] = True
             res["version"] = res["version"] or r["version"]
+            res["ssl"] = res["ssl"] or r.get("ssl", False)
+            res["auth_plugin"] = res["auth_plugin"] or r.get("auth_plugin", "")
         if r["ok"]:
             res["unauth"] = True
             res["user"] = user or "<anonymous>"
@@ -268,15 +305,28 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         + (f"; {len(hashes)} password hash(es) captured (hashcat -m 300) -> "
                            + ", ".join(f"{h['user']}@{h['host']}" for h in hashes[:6])
                            if hashes else ""))
+                plug = f"; default auth plugin {pr['auth_plugin']}" if pr.get("auth_plugin") else ""
                 out.append(_finding(
                     "high", f"MySQL '{who}' login with empty password", tgt,
                     f"The account '{who}' authenticated with an EMPTY password"
-                    + (f" (server {ver})" if ver else "")
+                    + (f" (server {ver})" if ver else "") + plug
                     + " - full database access without a credential." + loot_txt,
                     f"mysql -h {h.ip} -P {p.portid} -u {who or 'root'}",
                     "Set a strong password on every account (esp. root); remove anonymous "
                     "''@'%' accounts; bind to localhost / a private interface.",
                     ["CWE-521", "CWE-306"], kind="mysql_empty_password"))
+            # TLS not offered by the server -> credentials + queries cross the wire in
+            # cleartext (sniffable / MITM). Only assert it when we actually parsed a
+            # greeting (reachable), never as a guess.
+            if pr.get("reachable") and pr.get("version") and not pr.get("ssl"):
+                out.append(_finding(
+                    "medium", "MySQL does not offer TLS (credential sniffing)", tgt,
+                    "The server greeting advertised no CLIENT_SSL capability - the "
+                    "handshake, credentials and queries traverse the network unencrypted.",
+                    f"mysql -h {h.ip} -P {p.portid} --ssl-mode=REQUIRED   # fails = no TLS",
+                    "Enable TLS (require_secure_transport=ON) and install a server "
+                    "certificate; bind to a trusted interface.",
+                    ["CWE-319"], kind="mysql_no_tls"))
     return out
 
 

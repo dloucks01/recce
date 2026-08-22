@@ -124,7 +124,31 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
         health = _get(ip, port, "/_cluster/health", tls, timeout)
         if health and health[0] == 200 and isinstance(health[1], dict):
             out["status"] = health[1].get("status", "")
+            out["nodes"] = health[1].get("number_of_nodes", "")
+        if out.get("unauth"):
+            _deep_es(ip, port, tls, timeout, out)
     return out
+
+
+def _deep_es(ip: str, port: int, tls: bool, timeout: float, out: dict) -> None:
+    """Read-only deep enumeration on an unauthenticated cluster: node OS/JVM (targeting
+    for path-traversal / scripting RCE) and snapshot repositories (data-exfil / arbitrary
+    read surface). Populates out[os_name|jvm_version|data_paths|snapshot_repos]."""
+    nodes = _get(ip, port, "/_nodes/_local/os,jvm,settings?format=json", tls, timeout)
+    if nodes and nodes[0] == 200 and isinstance(nodes[1], dict):
+        nd = nodes[1].get("nodes")
+        if isinstance(nd, dict):
+            for info in nd.values():
+                if not isinstance(info, dict):
+                    continue
+                osd = info.get("os") if isinstance(info.get("os"), dict) else {}
+                jvm = info.get("jvm") if isinstance(info.get("jvm"), dict) else {}
+                out["os_name"] = osd.get("pretty_name") or osd.get("name", "")
+                out["jvm_version"] = jvm.get("version", "")
+                break
+    snaps = _get(ip, port, "/_snapshot/_all", tls, timeout)
+    if snaps and snaps[0] == 200 and isinstance(snaps[1], dict):
+        out["snapshot_repos"] = list(snaps[1].keys())[:20]
 
 
 def es_targets(hosts: list[Host]) -> list[dict]:
@@ -200,6 +224,19 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 idx = pr.get("indices") or []
                 docs = pr.get("docs", 0)
                 names = ", ".join(i for i in idx[:12] if not i.startswith("."))
+                # Deeper: node OS/JVM (targeting) + snapshot repos (exfil surface).
+                deep = ""
+                if pr.get("os_name") or pr.get("jvm_version"):
+                    deep += (f"\n\nNode: {pr.get('os_name', '?')}"
+                             + (f", JVM {pr['jvm_version']}" if pr.get("jvm_version") else "")
+                             + (f", {pr['nodes']} node(s)" if pr.get("nodes") else "")
+                             + " (targets the exact build for scripting-sandbox / "
+                               "path-traversal RCE).")
+                repos = pr.get("snapshot_repos") or []
+                if repos:
+                    deep += (f"\n\nSnapshot repositories readable: {', '.join(repos[:8])} "
+                             "(data-exfil / restore-tampering surface; arbitrary read on "
+                             "old builds).")
                 out.append(_finding(
                     "critical", "Elasticsearch exposed without authentication", tgt,
                     f"recce listed {len(idx)} index/indices with no credential"
@@ -207,7 +244,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     + (f", {docs} document(s) total" if docs else "")
                     + (f": {names}" if names else "")
                     + ". Unauthenticated read (and, by default, write) access to all "
-                    "data.",
+                    "data." + deep,
                     "curl / elasticdump",
                     f"curl -s http://{h.ip}:{p.portid}/_cat/indices ; "
                     f"curl -s http://{h.ip}:{p.portid}/_search?size=100   # then "

@@ -521,6 +521,136 @@ class MongoDeepLoot(unittest.TestCase):
         self.assertIn("mozjs", detail)
 
 
+class MssqlNtlmLeak(unittest.TestCase):
+    """Native pre-auth NTLM-over-TDS leak (no nmap): domain / FQDN / OS from Type-2."""
+
+    def _type2(self):
+        def av(av_id, s):
+            b = s.encode("utf-16-le")
+            return struct.pack("<HH", av_id, len(b)) + b
+        target_info = (av(0x0002, "CONTOSO") + av(0x0001, "SQL01")
+                       + av(0x0004, "contoso.local") + av(0x0003, "sql01.contoso.local")
+                       + struct.pack("<HH", 0x0000, 0))          # EOL
+        flags = 0x02000000 | 0x00000001                          # NEGOTIATE_VERSION | UNICODE
+        version = bytes([10, 0]) + struct.pack("<H", 17763) + b"\x00\x00\x00\x0f"
+        ti_off = 56
+        msg = (b"NTLMSSP\x00" + struct.pack("<I", 2)
+               + struct.pack("<HHI", 0, 0, 56)                   # TargetName fields (empty)
+               + struct.pack("<I", flags)
+               + b"\x11\x22\x33\x44\x55\x66\x77\x88"             # ServerChallenge
+               + b"\x00" * 8                                     # Reserved
+               + struct.pack("<HHI", len(target_info), len(target_info), ti_off)
+               + version + target_info)
+        return msg
+
+    def setUp(self):
+        t2 = self._type2()
+
+        def handle(conn):
+            conn.recv(4096)                                      # PRELOGIN
+            # minimal PRELOGIN response (version option + encryption off)
+            pre = struct.pack(">BHH", 0x00, 8 + 5 + 1, 6) + b"\xff" \
+                + bytes([16, 0]) + struct.pack(">H", 4711) + b"\x00\x00"
+            conn.sendall(struct.pack(">BBHHBB", 0x04, 0x01, 8 + len(pre), 0, 0, 0) + pre)
+            conn.recv(65536)                                     # LOGIN7
+            payload = b"\xed" + struct.pack("<H", len(t2)) + t2  # SSPI token wrapper
+            conn.sendall(struct.pack(">BBHHBB", 0x04, 0x01, 8 + len(payload), 0, 0, 0)
+                         + payload)
+        self.port = _tcp_once(handle)
+
+    def test_ntlm_info_extracts_identity(self):
+        from recce import mssql
+        nt = mssql.ntlm_info("127.0.0.1", self.port)
+        self.assertEqual(nt["nb_domain"], "CONTOSO")
+        self.assertEqual(nt["nb_computer"], "SQL01")
+        self.assertEqual(nt["dns_domain"], "contoso.local")
+        self.assertEqual(nt["dns_computer"], "sql01.contoso.local")
+        self.assertEqual(nt["os_version"], "10.0.17763")
+
+    def test_finding_uses_native_ntlm(self):
+        from recce import mssql
+        nt = mssql.ntlm_info("127.0.0.1", self.port)
+        h = _host(1433, "ms-sql-s")
+        fs = mssql.findings([h], {"127.0.0.1:1433": {"ntlm": nt, "prelogin": {}}})
+        nd = [f for f in fs if f["kind"] == "ntlm_disclosure"]
+        self.assertTrue(nd)
+        self.assertIn("CONTOSO", nd[0]["detail"])
+        self.assertIn("sql01.contoso.local", nd[0]["detail"])
+
+
+class MysqlGreetingDepth(unittest.TestCase):
+    """Handshake parsing surfaces the auth plugin + TLS capability; no-TLS is flagged."""
+
+    def test_greeting_parses_ssl_and_plugin(self):
+        from recce import mysql
+        # v10 greeting: version, conn id, auth1(8), filler, caps_lo(SSL+PLUGIN_AUTH),
+        # charset, status, caps_hi, ...  ending in the auth-plugin name.
+        caps_lo = 0x0800 | 0x0200          # CLIENT_SSL | CLIENT_PROTOCOL_41
+        payload = (bytes([10]) + b"8.0.36\x00" + struct.pack("<I", 7)
+                   + b"\x00" * 8 + b"\x00"
+                   + struct.pack("<H", caps_lo) + b"\x21" + struct.pack("<H", 2)
+                   + struct.pack("<H", 0x0008)          # caps_hi -> CLIENT_PLUGIN_AUTH
+                   + bytes([21]) + b"\x00" * 10 + b"\x00" * 13
+                   + b"caching_sha2_password\x00")
+        g = mysql._greeting(payload)
+        self.assertTrue(g["ssl"])
+        self.assertEqual(g["auth_plugin"], "caching_sha2_password")
+
+    def test_no_tls_finding(self):
+        from recce import mysql
+        h = _host(3306, "mysql")
+        probes = {("127.0.0.1", 3306): {"reachable": True, "version": "5.7.30",
+                  "ssl": False, "unauth": False, "auth_required": True}}
+        fs = mysql.findings([h], probes)
+        self.assertIn("mysql_no_tls", {f["kind"] for f in fs})
+
+
+class ElasticDeep(unittest.TestCase):
+    """Unauth ES deep pass adds node OS/JVM + snapshot-repo enumeration to the finding."""
+
+    def setUp(self):
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _j(self, obj):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(obj).encode())
+
+            def do_GET(self):
+                if self.path == "/":
+                    self._j({"name": "es01", "cluster_name": "logs",
+                             "version": {"number": "7.10.0"},
+                             "tagline": "You Know, for Search"})
+                elif self.path.startswith("/_cat/indices"):
+                    self._j([{"index": "app-logs", "docs.count": "9000"}])
+                elif self.path == "/_cluster/health":
+                    self._j({"status": "green", "number_of_nodes": 3})
+                elif self.path.startswith("/_nodes/_local"):
+                    self._j({"nodes": {"x": {"os": {"pretty_name": "Ubuntu 20.04"},
+                                             "jvm": {"version": "15.0.1"}}}})
+                elif self.path == "/_snapshot/_all":
+                    self._j({"backups": {"type": "fs"}})
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+        self.port = _http_server(H)
+
+    def test_deep_fields_in_finding(self):
+        from recce import elasticsearch as es
+        pr = es.probe("127.0.0.1", self.port)
+        self.assertTrue(pr["unauth"])
+        self.assertEqual(pr["os_name"], "Ubuntu 20.04")
+        self.assertEqual(pr["jvm_version"], "15.0.1")
+        self.assertIn("backups", pr["snapshot_repos"])
+        fs = es.findings([_host(self.port, "elasticsearch")], {("127.0.0.1", self.port): pr})
+        detail = fs[0]["detail"]
+        self.assertIn("Ubuntu 20.04", detail)
+        self.assertIn("Snapshot repositories", detail)
+
+
 class DbPocRecipes(unittest.TestCase):
     """Confirmed DB findings must scaffold an initial-PoC harness (the poc phase)."""
 

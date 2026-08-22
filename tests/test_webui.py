@@ -29,7 +29,7 @@ def _load_mock():
 def client(tmp_path_factory):
     from recce.webui.app import create_app
     eng = tmp_path_factory.mktemp("eng")
-    stats = _load_mock().build(str(eng), hosts=16, seed=99)
+    stats = _load_mock().build(str(eng), hosts=24, seed=99)
     app = create_app(str(eng))
     with TestClient(app) as c:
         c.stats = stats            # type: ignore[attr-defined]
@@ -38,7 +38,7 @@ def client(tmp_path_factory):
 
 def test_overview_reflects_the_engagement(client):
     o = client.get("/api/overview").json()
-    assert o["hosts_up"] == 16
+    assert o["hosts_up"] == 24
     assert o["scope_subnets"] == 3
     assert o["services"] > 0
     # a realistic mix means several severities and some KEV-flagged findings
@@ -53,7 +53,7 @@ def test_overview_reflects_the_engagement(client):
 
 def test_hosts_carry_ad_role_and_completion(client):
     hosts = client.get("/api/hosts").json()
-    assert len(hosts) == 16
+    assert len(hosts) == 24
     by_ip = {h["ip"]: h for h in hosts}
     dc = by_ip["10.20.10.10"]
     assert "Domain Controller" in dc["roles"]
