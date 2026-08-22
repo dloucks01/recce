@@ -8,9 +8,11 @@ store. These tests exercise the real extractor (`_web_credentials`) and the full
 from __future__ import annotations
 
 import http.server
+import re
 import shutil
 import subprocess
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -871,3 +873,140 @@ class CachePoison(unittest.TestCase):
 
     def test_reflected_but_not_cacheable_no_finding(self):
         self.assertEqual(self._run(self._Safe), [])
+
+
+# --------------------- File upload -> webshell (gated proof) ----------------------
+
+_UPLOAD_FORM = (b'<html><body><form method="post" enctype="multipart/form-data" '
+                b'action="/upload"><input type="hidden" name="csrf" value="tok123">'
+                b'<input type="file" name="f"><input type="submit"></form></body></html>')
+
+
+class UploadShell(unittest.TestCase):
+    """--upload-shell: benign server-computed-marker payload proves RCE end to end."""
+
+    class _Exec(http.server.BaseHTTPRequestHandler):
+        store: dict = {}
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path == "/":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html"); self.end_headers()
+                self.wfile.write(_UPLOAD_FORM); return
+            fn = self.path.rsplit("/", 1)[-1]
+            if self.path.startswith("/uploads/") and fn in self.store:
+                payload = self.store[fn]
+                self.send_response(200); self.end_headers()
+                if fn.rsplit(".", 1)[-1] in ("php", "phtml", "php5", "pht"):
+                    # Simulate the PHP engine: echo tag + (7*7), never the source.
+                    m = re.search(r"echo '([^']+)'\.\(7\*7\)", payload)
+                    self.wfile.write((m.group(1) + "49").encode() if m else b"")
+                else:
+                    self.wfile.write(payload.encode())        # served verbatim
+                return
+            self.send_response(404); self.end_headers()
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(n).decode("latin-1")
+            fm = re.search(r'filename="([^"]+)"', raw)
+            cm = re.search(r'filename="[^"]+"\r\nContent-Type:[^\r]*\r\n\r\n(.*?)\r\n------',
+                           raw, re.S)
+            if fm and cm:
+                self.store[fm.group(1)] = cm.group(1)
+                self.send_response(200); self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(f"Saved to /uploads/{fm.group(1)}".encode()); return
+            self.send_response(400); self.end_headers()
+
+    class _StoreOnly(_Exec):
+        def do_GET(self):                                     # serves .php verbatim (no exec)
+            if self.path == "/":
+                self.send_response(200); self.end_headers(); self.wfile.write(_UPLOAD_FORM)
+                return
+            fn = self.path.rsplit("/", 1)[-1]
+            if self.path.startswith("/uploads/") and fn in self.store:
+                self.send_response(200); self.end_headers()
+                self.wfile.write(self.store[fn].encode()); return
+            self.send_response(404); self.end_headers()
+
+    def _run(self, handler, **kw):
+        handler.store = {}
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            base = web.url_for("127.0.0.1", p)
+            return web._scan_upload("127.0.0.1", p, base, _UPLOAD_FORM.decode(), None, **kw)
+        finally:
+            srv.shutdown()
+
+    def test_lead_only_without_prove(self):
+        fs = self._run(self._Exec, prove=False)
+        self.assertEqual([f.script_id for f in fs], ["web-upload-form"])
+        self.assertEqual(fs[0].confidence, "potential")
+
+    def test_rce_confirmed_with_prove(self):
+        fs = self._run(self._Exec, prove=True)
+        rce = [f for f in fs if f.script_id == "web-upload-rce"]
+        self.assertTrue(rce, [f.script_id for f in fs])
+        self.assertEqual(rce[0].severity, "critical")
+        self.assertEqual(rce[0].confidence, "confirmed")
+        from recce import proofs
+        self.assertEqual(proofs.recipe_for(rce[0])["fn"](None, 80, rce[0])[0], "CONFIRMED")
+
+    def test_stored_not_executed_is_medium(self):
+        fs = self._run(self._StoreOnly, prove=True)
+        up = [f for f in fs if f.script_id == "web-upload"]
+        self.assertTrue(up, [f.script_id for f in fs])
+        self.assertEqual(up[0].severity, "medium")
+
+    def test_no_form_no_finding(self):
+        p = Port(portid=8080, service="http", state="open")
+        self.assertEqual(web._scan_upload("127.0.0.1", p, "http://x", "<html>hi</html>",
+                                          None, prove=True), [])
+
+
+# --------------------- HTTP request smuggling (gated timing probe) ----------------
+
+class SmuggleTiming(unittest.TestCase):
+    """CL.TE/TE.CL timing probe: a request bearing both CL and TE stalls; control is fast."""
+
+    def _server(self, stall_on_te: bool):
+        import socketserver
+
+        class H(socketserver.BaseRequestHandler):
+            def handle(self):
+                data = self.request.recv(4096)
+                if stall_on_te and b"Transfer-Encoding" in data:
+                    time.sleep(3.0)                          # never answer promptly
+                self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+        srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    def test_stall_flags_smuggling(self):
+        srv = self._server(stall_on_te=True)
+        try:
+            p = Port(portid=srv.server_address[1], service="http", state="open")
+            fs = web._scan_smuggle("127.0.0.1", p, timeout=2.0)
+        finally:
+            srv.shutdown()
+        self.assertTrue(any(f.script_id == "web-smuggle" for f in fs), [f.title for f in fs])
+        self.assertEqual(fs[0].severity, "high")
+
+    def test_fast_server_not_flagged(self):
+        srv = self._server(stall_on_te=False)                # answers everything promptly
+        try:
+            p = Port(portid=srv.server_address[1], service="http", state="open")
+            fs = web._scan_smuggle("127.0.0.1", p, timeout=2.0)
+        finally:
+            srv.shutdown()
+        self.assertEqual(fs, [])

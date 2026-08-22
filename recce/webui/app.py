@@ -67,7 +67,11 @@ _COMMANDS: dict = {
     "web": _cmd("Web deep-enum", "Web", "optional",
                 flags=[_f("crawl", "--crawl", "crawl + inject"),
                        _f("autologin", "--autologin", "auto-login w/ looted creds (active)", True),
-                       _f("sqli-time", "--sqli-time", "time-based SQLi", True)]),
+                       _f("sqli-time", "--sqli-time", "time-based SQLi", True),
+                       _f("upload-shell", "--upload-shell",
+                          "upload benign webshell to prove RCE (active, writes a file)", True),
+                       _f("smuggle", "--smuggle",
+                          "CL.TE/TE.CL smuggling probe (active, may disturb proxies)", True)]),
     "api": _cmd("API — OpenAPI enum / IDOR / BOLA", "Web", "optional"),
     # --- other services ---
     "smb": _cmd("SMB", "Services", "optional", creds=True),

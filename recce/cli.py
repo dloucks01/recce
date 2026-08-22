@@ -2421,6 +2421,9 @@ def cmd_web(args: argparse.Namespace) -> int:
     _import_excel_tracking(store, paths)
     hosts = _selected_hosts(store.all_hosts(), args)
     active = not getattr(args, "no_active", False)
+    # The two side-effecting proofs are meaningless passively - they force active mode.
+    if getattr(args, "upload_shell", False) or getattr(args, "smuggle", False):
+        active = True
     # Optional authenticated scan: --cookie and/or repeated --header "K: V".
     auth: dict = {}
     if getattr(args, "cookie", None):
@@ -2445,6 +2448,8 @@ def cmd_web(args: argparse.Namespace) -> int:
     do_crawl = getattr(args, "crawl", False)
     sqli_time = getattr(args, "sqli_time", False)
     fuzz_risky = getattr(args, "fuzz_risky_forms", False)
+    upload_shell = getattr(args, "upload_shell", False)
+    smuggle = getattr(args, "smuggle", False)
     # Authenticated crawl: auto-login with the engagement's harvested credentials.
     autologin = getattr(args, "autologin", False) and not auth
     login_creds = _web_login_creds(args, store) if autologin else []
@@ -2466,7 +2471,8 @@ def cmd_web(args: argparse.Namespace) -> int:
                     "Rotate the credential; enforce MFA; monitor for credential reuse.",
                     confidence="confirmed"))
                 print(f"    [{h.ip}] auto-login OK as '{sess['user']}' -> authenticated scan")
-        profiles = web.scan_host(h, active, h_auth, creds)
+        profiles = web.scan_host(h, active, h_auth, creds,
+                                 upload_shell=upload_shell, smuggle=smuggle)
         if do_crawl:
             pages, added = web.scan_crawl(h, h_auth, time_based=sqli_time,
                                           fuzz_risky=fuzz_risky)
@@ -6433,6 +6439,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "side effect (delete / pay / send / post / ...). Off by default "
                          "- those forms are recorded, not submitted. File uploads are "
                          "never submitted. Use only on a throwaway/dev target.")
+    wb.add_argument("--upload-shell", action="store_true",
+                    help="ACTIVE PROOF: when a multipart upload form is found, upload a "
+                         "BENIGN server-computed-marker payload (echoes tag + 7*7) across "
+                         "common script extensions and fetch it back - a computed marker in "
+                         "the response CONFIRMS code execution (RCE). Writes a file to the "
+                         "target; the finding names the path to delete. Use only in ROE.")
+    wb.add_argument("--smuggle", action="store_true",
+                    help="ACTIVE PROOF: CL.TE/TE.CL HTTP request-smuggling timing probe "
+                         "(sends a request with both Content-Length and Transfer-Encoding; "
+                         "an incomplete body only, never a smuggled second request). Can "
+                         "disturb fragile proxies and may affect SHARED front-ends - use "
+                         "only against dedicated infra in ROE.")
     _add_budget(wb)
     wb.set_defaults(func=cmd_web)
 

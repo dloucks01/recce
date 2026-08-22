@@ -173,6 +173,9 @@ def test_command_catalog_exposes_the_full_surface(client):
     assert cat["postgres"]["creds"] is True
     assert any(f["name"] == "prove" for f in cat["postgres"]["flags"])
     assert any(f["name"] == "autologin" for f in cat["web"]["flags"])
+    # the two gated active-proof web flags are reachable from the browser too
+    web_flags = {f["name"] for f in cat["web"]["flags"]}
+    assert {"upload-shell", "smuggle"} <= web_flags
     assert cat["exploitplan"]["lhost"] is True
     assert cat["attackpath"]["targets"] == "none"
 
@@ -191,6 +194,10 @@ def test_scan_builds_safe_argv_with_creds_and_flags(client):
     r2 = client.post("/api/scan", json={"command": "web", "targets": "10.0.0.5",
                                         "flags": ["autologin", "crawl"]})
     assert "--autologin" in r2.json()["cmd"] and "--crawl" in r2.json()["cmd"]
+    # the gated active-proof flags build into a safe argv from the browser
+    r3 = client.post("/api/scan", json={"command": "web", "targets": "10.0.0.5",
+                                        "flags": ["upload-shell", "smuggle"]})
+    assert "--upload-shell" in r3.json()["cmd"] and "--smuggle" in r3.json()["cmd"]
 
 
 def test_scan_guards(client):

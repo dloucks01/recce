@@ -70,7 +70,11 @@ to confirm when active), CSP weaknesses, subdomain takeover, CORS arbitrary/null
 GraphQL introspection/batching/field-suggestion, insecure-deserialization markers
 (Java/PHP/.NET ViewState), and web cache poisoning via unkeyed Host-family headers —
 each with a prove-engine verdict; the poisoning/confusion probes stay detection-only
-unless `--active`/active mode is set.
+unless `--active`/active mode is set. Two side-effecting proofs are opt-in: `recce web
+--upload-shell` uploads a **benign** server-computed-marker payload and fetches it back to
+CONFIRM upload→RCE (writes a file; the finding names the path to delete), and `recce web
+--smuggle` runs a CL.TE/TE.CL request-smuggling **timing** probe (incomplete body only,
+never a smuggled second request — but it can disturb shared proxies, so ROE-gated).
 
 Credentials passed to `enum`/`vulns` (`-u/-p/-d`) also feed the SMB/LDAP NSE
 scripts during the scan. Run `recce <command> -h` for the full list.

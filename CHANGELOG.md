@@ -48,6 +48,13 @@ proof is opt-in), and feeds one sprayable credential store + the prove engine.
   `rO0AB`, PHP `O:…`, unencrypted .NET ViewState); and **web cache poisoning** via an
   unkeyed Host-family header reflected into a cacheable response. Each carries a
   prove-engine verdict; the poisoning/confusion probes stay detection-only unless active.
+- **Two opt-in active web proofs** — `recce web --upload-shell` finds multipart upload
+  forms and, when set, uploads a **benign server-computed-marker** payload and fetches it
+  back: a computed marker in the response CONFIRMS upload→RCE (the finding names the file
+  to delete); otherwise a stored-and-retrievable copy is flagged as unrestricted upload.
+  `recce web --smuggle` runs a CL.TE/TE.CL **request-smuggling timing** probe (an
+  incomplete body only, never a smuggled second request). Both are surfaced as marked
+  active flags in the web workbench's command runner.
 - Every new exploitable finding has a **prove-engine** verdict; the service-modules and
   command references document the full kill-chain, and `commands.md` notes exactly which
   capabilities the **web workbench** exposes vs. which are CLI-only.

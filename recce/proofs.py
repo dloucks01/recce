@@ -713,6 +713,50 @@ def _v_csp(host, port, vuln):
         "Not applicable - a policy header, verified by reading it."]
 
 
+def _v_upload(host, port, vuln):
+    b = _blob(vuln)
+    if "code execution" in b or "was executed" in b:
+        return CONFIRMED, [
+            "recce uploaded a benign file whose body echoes a SERVER-COMPUTED marker "
+            "(tag + 7*7) and fetched it back - the response contained the computed value, "
+            "not the source, so the server executed the upload. Remote code execution, "
+            "directly proven.",
+            "Replace the payload with a real webshell / reverse shell at the same path for "
+            "an interactive foothold (within ROE), then delete the artifact.",
+            "FP: none - a static file server would have returned the source verbatim, not "
+            "the computed marker."]
+    if "stored and retrievable" in b or "stored an attacker-named file" in b:
+        return LIKELY, [
+            "recce uploaded an attacker-named file and fetched it back at a web path (HTTP "
+            "200) - unrestricted storage is proven; execution was not (this extension isn't "
+            "handled as code here).",
+            "Try an executable extension the stack DOES run (.php/.phtml/.asp/.jsp), a "
+            "double extension, or a content-type/magic-byte bypass; or use the stored file "
+            "for stored-XSS / client-side attacks.",
+            "FP: the file may be served from a sandboxed/non-executing store - confirm you "
+            "can reach a variant the server treats as code."]
+    return LIKELY, [
+        "A multipart file-upload form is exposed - an upload attack surface, not yet "
+        "exercised (re-run with --upload-shell to actively test it).",
+        "Upload a server-computed-marker script and fetch it; a computed marker in the "
+        "response = RCE.",
+        "FP: the upload may be validated/stored safely - the active test settles it."]
+
+
+def _v_smuggle(host, port, vuln):
+    return LIKELY, [
+        "A CL.TE/TE.CL probe (a request bearing both Content-Length and Transfer-Encoding) "
+        "stalled the connection near the socket timeout on repeated tries while a "
+        "well-formed request returned immediately - the front-end and back-end frame the "
+        "body differently (request-smuggling desync signal). recce sent only an incomplete "
+        "body, never a smuggled second request.",
+        "Prove impact carefully and OUT of a shared cache: send a full CL.TE/TE.CL desync "
+        "(smuggled prefix) and observe it prepended to another request (Burp Repeater/HTTP "
+        "Request Smuggler) - capture a poisoned response or a stolen request.",
+        "FP: a slow/overloaded back-end can also stall - the fast well-formed control and "
+        "the two-try repeat reduce but don't eliminate this; confirm with a real desync."]
+
+
 def _v_cache_poison(host, port, vuln):
     # recce observed an unkeyed header reflected into a response the cache headers say is
     # cacheable - the poisonable condition is directly observed. It stops short of writing
@@ -1443,6 +1487,27 @@ _RECIPES: list[dict] = [
                "OOB-exfiltrate non-text files (within ROE).",
      "fp": "None - the returned file content proves entity resolution.",
      "fn": _v_xxe},
+    {"id": "web-upload",
+     "match": r"file upload to .* code execution|unrestricted file upload|"
+              r"file-upload form present",
+     "name": "Unrestricted file upload (webshell / RCE)",
+     "pre": ["An upload accepts an attacker-named/typed file",
+             "The stored file is reachable (and, for RCE, executed) over HTTP"],
+     "finish": "Upload a real webshell/reverse shell at the proven path for a foothold, "
+               "then delete the artifact (within ROE).",
+     "fp": "The upload may be validated or served from a non-executing store - the active "
+           "--upload-shell test (computed marker echoed back) settles it.",
+     "fn": _v_upload},
+    {"id": "web-smuggle",
+     "match": r"request smuggling|cl\.te|te\.cl|desync",
+     "name": "HTTP request smuggling (CL.TE / TE.CL desync)",
+     "pre": ["Both Content-Length and Transfer-Encoding are accepted",
+             "Front-end and back-end frame the body differently (timing stall)"],
+     "finish": "Send a full desync (smuggled prefix) OUT of a shared cache and observe it "
+               "prepended to another request (Burp HTTP Request Smuggler).",
+     "fp": "A slow back-end can also stall; the fast control + two-try repeat reduce but "
+           "don't eliminate it - confirm with a real desync.",
+     "fn": _v_smuggle},
     {"id": "web-cache-poison",
      "match": r"cache poisoning via unkeyed header|web cache poisoning",
      "name": "Web cache poisoning (unkeyed header reflection)",
