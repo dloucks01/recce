@@ -638,6 +638,28 @@ def _v_web_exposure(host, port, vuln):
                        "(whatweb / nikto / nuclei). For .git, dump it: git-dumper <url>/.git ./loot."]
 
 
+def _v_ssrf(host, port, vuln):
+    # recce pointed a URL param at the metadata service / file:// and the content came
+    # back in the response - the server-side fetch is directly observed -> CONFIRMED.
+    b = _blob(vuln)
+    if "metadata" in b or "imds" in b or "iam" in b:
+        return CONFIRMED, [
+            "recce set a URL parameter to the cloud metadata endpoint and the response "
+            "returned instance-metadata / IAM content - the server fetched it (SSRF, "
+            "directly observed).",
+            "Steal the role creds: request /latest/meta-data/iam/security-credentials/"
+            "<role> through the same param, then use the AccessKeyId/SecretAccessKey/"
+            "Token against the cloud API (within ROE). Pivot to other internal services.",
+            "FP only if a proxy legitimately returns metadata to the client."]
+    return CONFIRMED, [
+        "recce set a URL parameter to an attacker-chosen target and the fetched content "
+        "(e.g. /etc/passwd via file://) came back - the server issues requests from our "
+        "input (SSRF, directly observed).",
+        "Reach internal-only services and cloud metadata through the same param; try "
+        "gopher:// for non-HTTP protocol smuggling (within ROE).",
+        "FP only if the reflected content wasn't actually server-fetched."]
+
+
 def _v_api_access(host, port, vuln):
     # recce enumerated the OpenAPI spec, then GET the endpoints itself - the broken
     # auth / IDOR is directly observed (200 with no credential) -> CONFIRMED.
@@ -1188,6 +1210,14 @@ _RECIPES: list[dict] = [
      "finish": "impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass  ->  hashcat -m 18200.",
      "fp": "Existence is confirmed by the query; the only question is whether the hash cracks.",
      "fn": _v_asrep},
+    {"id": "web-ssrf",
+     "match": r"server-side request forgery via",
+     "name": "Server-Side Request Forgery (SSRF)",
+     "pre": ["A URL parameter is fetched server-side", "Metadata/file content returned"],
+     "finish": "Pull IAM role creds via /latest/meta-data/iam/security-credentials/ through "
+               "the same param; reach internal services; try gopher:// (within ROE).",
+     "fp": "A proxy legitimately returns the content to the client.",
+     "fn": _v_ssrf},
     {"id": "api-access",
      "match": r"idor / bola|reachable without authentication \(broken auth|"
               r"broken object level|api endpoints reachable without",

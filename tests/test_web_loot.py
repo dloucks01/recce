@@ -183,3 +183,50 @@ class SourceMapReconstruction(unittest.TestCase):
         self.assertIn("S3cr3tMapPw", looted)             # from recovered source
         self.assertIn("maproot123", looted)              # connection string in source
         self.assertTrue(any(c.source == "web-sourcemap-loot" for c in profile["credentials"]))
+
+
+# ------------------------------ SSRF + headers -----------------------------------
+
+class SsrfDetection(unittest.TestCase):
+    """SSRF is confirmed when a URL-ish param makes the server fetch cloud metadata."""
+
+    def test_imds_credentials_ssrf(self):
+        def send(payload):
+            if "169.254.169.254" in payload and "iam/security-credentials" in payload:
+                body = ('{"Code":"Success","AccessKeyId":"ASIAEXAMPLE",'
+                        '"SecretAccessKey":"sk","Token":"tok","Expiration":"2030"}')
+                return ((200, {}, body), 0.05)
+            return ((200, {}, "nothing here"), 0.05)
+        p = Port(portid=80, service="http", state="open")
+        fs = web._ssrf_via("1.1.1.1", p, "query 'url'", "url", send)
+        self.assertTrue(fs)
+        self.assertEqual(fs[0].script_id, "web-ssrf")
+        self.assertEqual(fs[0].severity, "critical")     # IAM creds via IMDS
+
+    def test_non_url_param_skipped(self):
+        def send(payload):
+            return ((200, {}, "root:x:0:0:"), 0.05)      # would match file:// marker
+        p = Port(portid=80, service="http", state="open")
+        self.assertEqual(web._ssrf_via("1.1.1.1", p, "query 'q'", "q", send), [])
+
+    def test_benign_response_no_finding(self):
+        def send(payload):
+            return ((200, {}, "totally normal page"), 0.05)
+        p = Port(portid=80, service="http", state="open")
+        self.assertEqual(web._ssrf_via("1.1.1.1", p, "query 'url'", "url", send), [])
+
+
+class SecurityHeaders(unittest.TestCase):
+    def test_missing_headers_flagged_medium(self):
+        p = Port(portid=80, service="http", state="open")
+        fs = web._security_headers("1.1.1.1", p, {"server": "nginx"})
+        self.assertTrue(fs and fs[0].script_id == "web-security-headers")
+        self.assertEqual(fs[0].severity, "medium")       # CSP + clickjacking missing
+        self.assertIn("Content-Security-Policy", fs[0].output)
+
+    def test_all_present_no_finding(self):
+        p = Port(portid=80, service="http", state="open")
+        ok = {"content-security-policy": "default-src 'self'", "x-frame-options": "DENY",
+              "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
+              "permissions-policy": "geolocation=()"}
+        self.assertEqual(web._security_headers("1.1.1.1", p, ok), [])
