@@ -95,6 +95,38 @@ def _fetch(ip: str, port: Port, path: str = "/", method: str = "GET", read: int 
                 pass
 
 
+def _fetch_raw(ip: str, port: Port, path: str, auth: dict | None = None,
+               read: int = 4_000_000):
+    """GET a path and return the RAW response bytes on 200 (or None). Used to pull
+    binary artifacts (git objects, source maps) that must not be text-decoded."""
+    use_tls = probes._is_tls(port)
+    conn = None
+    try:
+        if use_tls:
+            conn = http.client.HTTPSConnection(
+                ip, port.portid, timeout=proxy.scaled(_TIMEOUT),
+                context=ssl._create_unverified_context())
+        else:
+            conn = http.client.HTTPConnection(ip, port.portid, timeout=proxy.scaled(_TIMEOUT))
+        req_headers = {"User-Agent": _UA, "Connection": "close", "Accept": "*/*"}
+        if auth:
+            req_headers.update(auth)
+        conn.request("GET", path, headers=req_headers)
+        resp = conn.getresponse()
+        if resp.status != 200:
+            resp.read(1)
+            return None
+        return resp.read(read)
+    except (OSError, http.client.HTTPException, ssl.SSLError, ValueError):
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
 # --- fingerprinting -------------------------------------------------------------
 
 _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
@@ -254,6 +286,56 @@ def _web_credentials(sid: str, body: str, ip: str, port: int):
             _add(akid.group(1), secret.group(1), "password",
                  f"AWS key pair leaked in .aws/credentials on {ip}:{port}")
     return out
+
+
+def _scan_git_dump(ip: str, port: Port, auth: dict | None, findings: list) -> list:
+    """Reconstruct an exposed .git over HTTP: recover the tracked source tree, mine the
+    recovered files for secrets/credentials, and emit a web-git-dump finding. Returns the
+    captured Credential objects (folded into the profile's credential loot)."""
+    from . import gitdump
+    from .models import Credential
+
+    def _gf(rel: str):
+        if rel.endswith("/"):
+            return None                               # dir listing not needed
+        return _fetch_raw(ip, port, "/" + rel, auth)
+
+    try:
+        gd = gitdump.reconstruct(_gf)
+    except Exception:      # noqa: BLE001 - reconstruction must never break the sweep
+        return []
+    if not gd.get("is_git") or not (gd.get("tracked") or gd.get("recovered")):
+        return []
+    creds: list = []
+    for c in gd.get("creds", []):
+        secret = c.get("secret", "")
+        if not secret or secret == "(aws-access-key-id)":
+            continue
+        creds.append(Credential(
+            username=c.get("username", ""), secret=secret, kind="password",
+            source="web-git-loot", origin_ip=ip,
+            notes=f"recovered from .git {c.get('path', '')} on {ip}:{port.portid} (sprayable)"))
+    tracked = gd.get("tracked", [])
+    rec = gd.get("recovered", [])
+    detail = (f"Reconstructed the exposed .git: {len(tracked)} tracked file(s); "
+              f"recovered {len(rec)} blob(s) ({gd.get('bytes_recovered', 0)} bytes) "
+              "including " + ", ".join(r["path"] for r in rec[:6])
+              + (" …" if len(rec) > 6 else "") + ".")
+    if gd.get("secrets"):
+        detail += "\n\nSecrets in recovered source: " + "; ".join(gd["secrets"][:8])
+    if creds:
+        detail += (f"\n\nCAPTURED {len(creds)} credential(s) -> credential store "
+                   "(sprayable): " + ", ".join(c.label for c in creds[:6]))
+    if gd.get("packed"):
+        detail += ("\n\nPackfiles present - run `git-dumper`/`GitTools` to resolve "
+                   "delta-compressed objects for the full history.")
+    findings.append(_mk(
+        ip, port, "web-git-dump", "high",
+        "Exposed .git reconstructed - source tree + secrets recovered",
+        ["CWE-538", "CWE-540"], detail,
+        "Remove .git from the web root (deny /.git), rotate every leaked secret, and "
+        "invalidate the exposed tokens."))
+    return creds
 
 
 # --- Spring Boot Actuator deep-dive --------------------------------------------
@@ -1624,6 +1706,9 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                 findings.append(_mk(ip, port, sid, sev, title, cwes, detail, fix))
         except Exception:  # noqa: BLE001 - a bad body never breaks the sweep
             continue
+    # Exposed .git -> reconstruct the source tree + mine it for secrets/credentials.
+    if active and "web-git" in seen_sid:
+        looted_creds.extend(_scan_git_dump(ip, port, auth, findings))
     # Deep dives (each self-gates so they cost nothing when absent).
     findings.extend(_scan_actuator(ip, port, base, auth))
     findings.extend(_scan_backups(ip, port, base, auth))

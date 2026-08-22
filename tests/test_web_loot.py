@@ -8,7 +8,10 @@ store. These tests exercise the real extractor (`_web_credentials`) and the full
 from __future__ import annotations
 
 import http.server
+import shutil
+import subprocess
 import threading
+import unittest
 from pathlib import Path
 
 from recce import web
@@ -91,3 +94,56 @@ def test_scan_endpoint_loots_git_and_env(tmp_path):
     # notes carry a clean host:port, not a Port repr
     assert all(str(port) in c.notes and "Port(" not in c.notes
                for c in profile["credentials"])
+
+
+# --------------------------- full .git reconstruction ----------------------------
+
+def _git(args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+class GitDumpReconstruction(unittest.TestCase):
+    """An exposed .git is reconstructed over HTTP: source tree + secrets recovered,
+    not just the .git/config remote URL."""
+
+    def setUp(self):
+        if not shutil.which("git"):
+            self.skipTest("git not available")
+
+    def test_scan_endpoint_reconstructs_git_and_mines_source(self):
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        _git(["init", "-q"], d)
+        _git(["config", "user.email", "x@x"], d)
+        _git(["config", "user.name", "x"], d)
+        (d / "config").mkdir()
+        (d / "config" / "settings.env").write_text(
+            "DB_PASSWORD=Sup3rSecret123\n"
+            "DATABASE_URL=postgres://svc:hunter2@db.internal:5432/app\n")
+        (d / "app.py").write_text("api_key = 'sk_live_deadbeefcafe1234567890'\n")
+        _git(["add", "-A"], d)
+
+        srv = _serve(d)
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            profile, findings = web.scan_endpoint("127.0.0.1", p, active=True)
+        finally:
+            srv.shutdown()
+
+        # the dedicated reconstruction finding fired
+        self.assertTrue(any(f.script_id == "web-git-dump" for f in findings),
+                        "no web-git-dump finding")
+        dump = next(f for f in findings if f.script_id == "web-git-dump")
+        self.assertIn("settings.env", dump.output)          # tracked source recovered
+
+        # secrets mined from the RECOVERED SOURCE (not present in .git/config)
+        looted = {c.secret for c in profile.get("credentials", [])}
+        self.assertIn("Sup3rSecret123", looted)             # from config/settings.env
+        self.assertIn("hunter2", looted)                    # connection string in source
+        self.assertTrue(any(c.source == "web-git-loot" for c in profile["credentials"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

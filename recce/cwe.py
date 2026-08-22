@@ -153,7 +153,7 @@ _INFER: list[tuple[tuple[str, ...], list[str]]] = [
     (("default cred", "default-cred", "default password", "default community",
       "public community"), ["CWE-1392"]),
     (("gpp", "cpassword", "unattend", "autologon"), ["CWE-257"]),
-    (("web-git", "gitconfig", ".git"), ["CWE-527"]),
+    (("web-git", "gitconfig", ".git", "source tree", "source code"), ["CWE-527", "CWE-540"]),
     (("dotenv", ".env"), ["CWE-526"]),
     (("-aws", ".aws", "secret-file", "credentials in file", "id_rsa", "private key",
       "htpasswd", "exposed .env", "credential"), ["CWE-522"]),
