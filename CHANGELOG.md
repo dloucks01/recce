@@ -588,9 +588,8 @@ prioritisation, data-driven detection rules, and the API-enumeration phase.
     than aborting the run.
   - Surfaced everywhere: the `recce` quickstart, `status`'s suggested-next-step (points
     to `sweep` when several deep-dives are pending), the workbook **Start Here** +
-    **Runbook** tabs, `README.md`, `QUICKSTART.md`, `CHEATSHEET.html` and `SECURITY.md`
-    (which notes `sweep` is credential-free/read-only and `credsweep` is the
-    authenticated pass) were all updated to lead with the two grouped commands.
+    **Runbook** tabs, `README.md`, `QUICKSTART.md` and `CHEATSHEET.html` were all
+    updated to lead with the two grouped commands.
 - **Live end-to-end smoke test** (`tests/test_live_smoke.py`). Stands up real localhost
   web / MongoDB-wire / FTP servers and drives the actual `recce` CLI against them —
   `import` → `sweep` folds genuine findings from the live probes (MongoDB unauth
