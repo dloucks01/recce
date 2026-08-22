@@ -282,6 +282,79 @@ def _linux_db(ip, hostname, kind) -> Host:
                 enumerated=True)
 
 
+# --- extra database engines (the native deep modules recce added) -------------
+# One archetype per newly-covered engine, each carrying the CONFIRMED finding its
+# deep module emits - so the workbench / reports exercise every DB tab, and the
+# mock matches what a real sweep against these services would fold in.
+
+def _extra_db(ip, hostname, kind) -> Host:
+    spec = {
+        "memcached": (11211, "memcached", "memcached", "1.4.15",
+                      "memcached exposed without authentication", "memcached", "high",
+                      ["CWE-306", "CWE-284"], 95, "active_vuln",
+                      "`stats` answered with no credential (version 1.4.15); 3 item(s) "
+                      "cached (sample keys: session:ab12, user:42, apikey:x). Full "
+                      "unauthenticated read + cache poisoning + UDP amplification.",
+                      "Bind to localhost, enable SASL (-S), disable UDP (-U 0), firewall 11211."),
+        "couchdb": (5984, "couchdb", "Apache CouchDB", "2.1.0",
+                    "Apache CouchDB 'admin party' (no admin configured)", "couchdb",
+                    "critical", ["CWE-306", "CWE-269"], 95, "active_vuln",
+                    "Admin-only /_node/_local/_config read with no credential (version "
+                    "2.1.0): no admins exist, so every anonymous request is a full admin "
+                    "- total DB control and RCE via the config query-server.",
+                    "Create an admin, bind to localhost, firewall 5984/6984 + Erlang ports."),
+        "influxdb": (8086, "influxdb", "InfluxDB", "1.6.4",
+                     "InfluxDB exposed - unauthenticated query API", "influxdb", "high",
+                     ["CWE-306", "CWE-287"], 95, "active_vuln",
+                     "SHOW DATABASES ran with no credential (version 1.6.4); 2 database(s) "
+                     "incl. telemetry, prod_metrics. Auth disabled - full read/write; "
+                     "<1.7.6 also carries the empty-secret JWT bypass (CVE-2019-20933).",
+                     "Set auth-enabled=true, create an admin, firewall 8086."),
+        "cassandra": (9042, "cassandra", "Apache Cassandra", "4.0.1",
+                      "Apache Cassandra exposed - no authentication (AllowAll)",
+                      "cassandra", "high", ["CWE-306", "CWE-284"], 95, "active_vuln",
+                      "CQL STARTUP returned READY with no credential; read system.local "
+                      "(version 4.0.1, cluster 'Prod Cluster', DC dc1). Full CQL "
+                      "read/write; with UDFs enabled this is RCE (CVE-2021-44521).",
+                      "Set PasswordAuthenticator + CassandraAuthorizer; firewall 9042/7000/7199."),
+    }
+    if kind in spec:
+        port, svc, product, ver, title, src, sev, cwes, qod, qodt, out, rem = spec[kind]
+        ports = [_p(22, "ssh", "OpenSSH", version="8.9p1", banner="SSH-2.0-OpenSSH_8.9p1"),
+                 _p(port, svc, product, version=ver)]
+        os_name, os_family = "Debian 12", "Linux"
+    elif kind == "oracle":
+        ports = [_p(22, "ssh", "OpenSSH", version="8.9p1"),
+                 _p(1521, "oracle-tns", "Oracle TNS Listener", version="19.3.0.0.0")]
+        title, src, sev, cwes, qod, qodt = ("Oracle TNS listener exposed", "oracle",
+            "high", ["CWE-306", "CWE-1188"], 90, "active_enum")
+        out = ("Confirmed an Oracle TNS listener (REFUSE response); version 19.3.0.0.0; "
+               "banner: TNSLSNR for Linux: Version 19.3.0.0.0. Exposed listeners allow "
+               "SID brute, TNS Poison (CVE-2012-1675), and default-credential access.")
+        rem = ("Set a listener password / valid-node-checking, apply the CVE-2012-1675 "
+               "fix, remove default accounts, firewall 1521.")
+        os_name, os_family = "Oracle Linux 8", "Linux"
+        port = 1521
+    else:   # db2
+        ports = [_p(22, "ssh", "OpenSSH", version="8.9p1"),
+                 _p(50000, "drda", "IBM Db2", version="11.5.5")]
+        title, src, sev, cwes, qod, qodt = ("IBM Db2 (DRDA) endpoint exposed", "db2",
+            "medium", ["CWE-306", "CWE-200"], 90, "active_enum")
+        out = ("Confirmed a Db2/DRDA endpoint via an EXCSAT exchange (QDB2/LINUXX8664, "
+               "release 11.5.5). Discloses version/platform; subject to database-name "
+               "enumeration, credential brute-forcing, and default instance accounts.")
+        rem = "Require strong authentication, keep Db2 patched, firewall 50000/523."
+        os_name, os_family = "Red Hat Enterprise Linux 8", "Linux"
+        port = 50000
+    for p in ports:
+        p.vuln_scanned = True
+    vulns = [_v(ip, port, f"{src}:{title[:30]}", title, sev, cwes=cwes, source=src,
+                qod=qod, qod_type=qodt, confidence="confirmed", output=out, remediation=rem,
+                evidence=[{"kind": "live-probe", "detail": title[:110], "positive": True}])]
+    return Host(ip=ip, up_reason="syn-ack", hostnames=[hostname], os_name=os_name,
+                os_family=os_family, ports=ports, vulns=vulns, enumerated=True)
+
+
 # --- workstation / network gear ---------------------------------------------
 
 def _workstation(ip, hostname) -> Host:
@@ -400,6 +473,13 @@ def build(eng_dir: str, hosts: int = 48, seed: int = 1337,
         made.append(_linux_db("10.20.20.31", "mongo01.contoso.local", "mongo"))
         made.append(_linux_db("10.20.20.32", "db01.contoso.local", "mysql"))
         made.append(_linux_db("10.20.20.33", "pg01.contoso.local", "postgres"))
+        # the newly-covered engines (native deep modules): one archetype each.
+        made.append(_extra_db("10.20.20.34", "memcache01.contoso.local", "memcached"))
+        made.append(_extra_db("10.20.20.35", "couch01.contoso.local", "couchdb"))
+        made.append(_extra_db("10.20.20.36", "influx01.contoso.local", "influxdb"))
+        made.append(_extra_db("10.20.20.37", "cass01.contoso.local", "cassandra"))
+        made.append(_extra_db("10.20.10.24", "ora01.contoso.local", "oracle"))
+        made.append(_extra_db("10.20.10.25", "db201.contoso.local", "db2"))
         made.append(_fileserver("10.20.20.40", "nas01"))       # non-AD workgroup NAS
         made.append(_netgear("10.20.30.1", "core-sw01.contoso.local"))
 
