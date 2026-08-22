@@ -68,12 +68,18 @@ is separate, resumable, and safe-by-default; follow the links for the full detai
   service/version + OS detection, and a deep service-aware NSE set across many
   subnets, normalized into a resumable SQLite datastore. → [workflow](docs/reference/workflow.md)
 - **Identify vulnerabilities (airgapped)** — a curated detection NSE set, an
-  offline version→CVE/CWE engine (108 signatures), stdlib HTTP/TLS probes,
+  offline version→CVE/CWE engine (117 signatures), stdlib HTTP/TLS probes,
   **web content/directory discovery + virtual-host enumeration**, and searchsploit
   mapping — ranked **fix-first** with CISA KEV + EPSS. → [scanning](docs/reference/scanning.md)
-- **Deep per-service modules** — databases, SMB, FTP, Docker, Kubernetes, SNMP,
-  MongoDB and MSSQL, each self-proving and airgapped. Run one, or all at once with
-  `recce sweep`. → [services](docs/reference/services.md)
+- **Deep per-service modules** — a native stdlib module per service, self-proving and
+  airgapped. **Databases** (mssql, mysql, postgres, mongodb, redis, elasticsearch,
+  memcached, couchdb, influxdb, cassandra, oracle, db2) run a full kill-chain:
+  enumeration → **credentialed follow-through** (SCRAM / native-password) → **data
+  exfiltration** (schema-aware secret mining) → **RCE proof** (opt-in) → **lateral
+  movement** (fdw pivot, replica auto-probe). **Web/web-app** adds `.git` + source-map
+  reconstruction, OpenAPI **IDOR/BOLA**, **SSRF**, **JWT secret crack**, and an
+  authenticated crawl. Plus SMB, FTP, Docker, Kubernetes, SNMP, LDAP, and more. Run one,
+  or all at once with `recce sweep`. → [services](docs/reference/services.md)
 - **Active Directory** — DC identification, NTLM-relay targets, credentialed LDAP
   enumeration, and offline **BloodHound + Certipy** import that maps the shortest
   paths to Domain Admin. → [active-directory](docs/reference/active-directory.md)

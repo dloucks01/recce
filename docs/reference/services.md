@@ -6,13 +6,52 @@ The per-service deep enumeration modules — each safe-by-default, airgapped, an
 
 ## Databases (`db`)
 
-`db` finds database services (MySQL, MSSQL, Oracle, PostgreSQL, MongoDB, Redis,
-CouchDB, …) and runs engine-specific NSE. **Safe by default** — version/config
-enumeration, database & user listing, empty-password checks. `--aggressive` adds
-intrusive checks (brute force, `xp_cmdshell`, hash dumping). Results populate a
-**Databases** sheet (engine, version, auth posture, databases, users, findings);
-security issues also land in the Vulnerabilities sheet. Credentials via
-`--username/--password` are passed to the DB scripts for authenticated checks.
+`db` finds database services and runs engine-specific NSE for the inventory view.
+**Safe by default** — version/config enumeration, database & user listing,
+empty-password checks. `--aggressive` adds intrusive NSE (brute force, `xp_cmdshell`,
+hash dumping). Results populate a **Databases** sheet; security issues also land in
+the Vulnerabilities sheet.
+
+Alongside the NSE inventory, recce ships a **native stdlib deep-enum module per
+engine** (airgapped, no client library) that you can run individually — these are the
+modules that carry the offensive kill-chain below. Engines with a native deep module:
+
+`mssql`, `mysql`, `postgres`, `mongodb`, `redis`, `elasticsearch`, **`memcached`**,
+**`couchdb`**, **`influxdb`**, **`cassandra`**, **`oracle`**, **`db2`**.
+
+### Database kill-chain — exfiltration, foothold, priv-esc, lateral
+
+The DB modules go past inventory to the full engagement chain. Every capability is
+read-only by default (active proof is opt-in), and every credential recovered is
+lifted into the credential store (sprayable) to feed lateral movement.
+
+- **Enumeration (no creds):** each module speaks the real wire protocol to CONFIRM the
+  exposure — trust auth (postgres), empty-password (mysql), unauth `listDatabases`
+  (mongo), unauth `INFO`/`stats` (redis/memcached), admin-party (couchdb), unauth query
+  API + JWT bypass (influxdb), `AllowAllAuthenticator` (cassandra), the TNS listener
+  (oracle), the DRDA endpoint (db2), and the exact version → CVE (offline `vulndb`).
+- **Credentialed follow-through:** a password-protected instance is retried with the
+  engagement's harvested credentials (`recce postgres|mysql|mongodb -u USER -p PASS`,
+  or auto-sprayed from the datastore). Postgres/Mongo speak native **SCRAM**, MySQL
+  speaks **`mysql_native_password`** — so the deep enum works against real, locked DBs.
+- **Data exfiltration (`datamine`):** on any accessible instance recce reads the schema,
+  flags columns/fields whose names denote secrets/PII, samples a few **redacted** rows
+  to prove the data is real, and **harvests embedded connection strings / credentials**
+  out of the data into the store (postgres/mysql/mongo).
+- **Loot → crackable creds:** `pg_shadow` (postgres), `mysql.user` (mysql, hashcat
+  `-m 300`), and **MongoDB SCRAM** hashes exported as hashcat `-m 24100/24200` lines.
+- **Foothold (RCE):** the modules *identify* the RCE path — postgres superuser →
+  `COPY … FROM PROGRAM`, MySQL **FILE** privilege → `LOAD_FILE`/`INTO OUTFILE`/UDF,
+  redis `CONFIG`+`SAVE`/`MODULE LOAD`/replication, couchdb query-server. `recce
+  postgres --prove` runs a **benign `id`** via `COPY … FROM PROGRAM` on a temp table to
+  turn "capability" into **"RCE CONFIRMED: uid=…"** (opt-in; default stays read-only).
+- **Lateral movement:** postgres **`dblink`/`postgres_fdw`** pivots to internal DB hosts
+  and SSRFs `host:port` (+ foreign-server credentials harvested); MongoDB **replica-set
+  members** are auto-probed as new targets; every looted cleartext credential sprays
+  onward via `credsweep`.
+
+Each finding is adjudicated by the **prove engine** (`recce prove`) with a verdict + the
+exact next step, and flows into `attackpath` / `exploitplan` / the write-ups.
 
 
 ## SMB (`recce smb`)
@@ -189,3 +228,72 @@ python -m recce mssql -u sa -p 'Sql2019!' --local-auth -o eng     # SQL (not dom
 ```
 
 
+
+
+## New database engines (`memcached` · `couchdb` · `influxdb` · `cassandra` · `oracle` · `db2`)
+
+Native stdlib deep modules for the engines recce previously only NSE-scanned — each
+speaks the real wire protocol, no client library, airgapped:
+
+- **`memcached`** (11211, text protocol) — reads `version` + `stats`, and samples live
+  key names (`stats items`/`cachedump`) to CONFIRM unauthenticated data exposure; flags
+  the UDP amplification vector and the pre-1.4.32 SASL-RCE CVEs.
+- **`couchdb`** (5984/6984, HTTP) — `GET /_all_dbs` (unauth DB listing) and the
+  admin-only `/_node/_local/_config`; a readable config = **admin party** (anyone is
+  admin → RCE via the config query-server, or the CVE-2017-12635→12636 chain).
+- **`influxdb`** (8086, HTTP) — `/ping` version + `SHOW DATABASES` with no credential
+  (auth-off default); `< 1.7.6` also flags the empty-secret **JWT auth bypass**
+  (CVE-2019-20933).
+- **`cassandra`** (9042, CQL native binary) — a `STARTUP` handshake; a `READY` reply =
+  `AllowAllAuthenticator` (no auth), then reads `system.local` (version/cluster/DC).
+  Flags the UDF sandbox-escape RCE (CVE-2021-44521) and the JMX vector.
+- **`oracle`** (1521, TNS) — builds a TNS `CONNECT` and confirms the listener, best-
+  effort leaking the version; surfaces SID-brute / TNS-Poison (CVE-2012-1675) /
+  default-credential paths.
+- **`db2`** (50000, DRDA/DDM) — an `EXCSAT` exchange confirms the endpoint and reads its
+  class name + release level (EBCDIC-aware) — version disclosure + credential-brute
+  surface.
+
+```bash
+python -m recce sweep -o eng                 # runs all of these (unauth) in one pass
+python -m recce couchdb -o eng               # or one engine
+python -m recce influxdb -o eng
+```
+
+
+## Web & web-app (`recce web` · `recce api`)
+
+`recce web` deep-enumerates every HTTP/S endpoint (stdlib client, no external tools);
+`recce api` focuses the API angle. Both fold into the Vulnerabilities sheet and the
+prove engine. Highlights (all read-only unless noted):
+
+- **Recon / fingerprint:** tech stack, headers/TLS, cookies, dangerous methods,
+  directory listing, virtual-host discovery, content discovery, WordPress/CMS.
+- **Exposure & secret exfiltration:** exposed `.git` is **fully reconstructed** — recce
+  parses `.git/index`, inflates the loose objects to recover the **source tree**, and
+  mines it for secrets/credentials; exposed **`.js.map` source maps** are reconstructed
+  the same way; `.env` / actuator (`/env`, heapdump) / backups / `.htpasswd` are read.
+  Every harvested credential lands in the store (sprayable).
+- **API surface (`recce api`):** parses the **OpenAPI/Swagger** spec and probes it —
+  **broken authentication** (spec-secured endpoints answering 200 with no token) and
+  **IDOR/BOLA** (an object-by-id endpoint serving different objects for id=1 vs id=2),
+  plus GraphQL introspection and Swagger-UI exposure; embedded spec credentials
+  harvested.
+- **Injection:** reflected-XSS/SSTI (`7*7→49`), SQLi (error + time-based), path
+  traversal / LFI, open redirect, and **SSRF** — a URL-ish parameter pointed at the
+  cloud **metadata service** / `file://`; a confirmed metadata/IAM-credential read is
+  **critical**.
+- **Auth / tokens:** CORS misconfig, a consolidated **security-headers audit**
+  (CSP/HSTS/X-Frame-Options/…), default-credential login, JWT `alg:none` forge + replay,
+  and an offline **JWT HMAC secret crack** (weak/default secret → forge any token =
+  auth bypass / privilege escalation).
+- **Authenticated crawl (`--autologin`):** logs into each site's form with the
+  engagement's harvested credentials, then scans the **authenticated** surface
+  (post-login pages/forms/APIs) — credentialed follow-through for the web.
+
+```bash
+python -m recce web -o eng                    # full unauth deep enum (.git dump, SSRF, JWT, …)
+python -m recce web --crawl -o eng            # + same-origin crawl: injection on discovered params
+python -m recce web --crawl --autologin -o eng  # + auto-login with harvested creds, authenticated scan
+python -m recce api -o eng                    # OpenAPI enumeration: broken-auth + IDOR/BOLA
+```

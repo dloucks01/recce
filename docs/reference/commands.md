@@ -47,11 +47,42 @@ Every command takes targets as a single IP, several IPs, a range
 
 Each protocol also has its own deep-enum command — run one instead of the whole
 `sweep`: `smb`, `ftp`, `mssql`, `mysql`, `postgres`, `mongodb`, `redis`,
-`elasticsearch`, `snmp`, `ldap`, `nfs`, `rsync`, `kerberos`, `docker`, `k8s`,
-`web`, `dns`, `smtp` (many take `-u/-p/-d` for the authenticated pass).
+`elasticsearch`, `memcached`, `couchdb`, `influxdb`, `cassandra`, `oracle`, `db2`,
+`snmp`, `ldap`, `nfs`, `rsync`, `kerberos`, `docker`, `k8s`, `web`, `api`, `dns`,
+`smtp`. See the [service modules reference](services.md) for the full database
+kill-chain (exfiltration / foothold / priv-esc / lateral) and the web/web-app
+capabilities.
+
+**Database deep-enum flags:** `postgres`/`mysql`/`mongodb` take `-u/-p` to try a
+credential against an auth-required instance (and auto-spray the datastore's looted
+creds); `recce postgres --prove` runs a benign `id` via `COPY … FROM PROGRAM` to
+CONFIRM RCE (opt-in — the default stays read-only). Exfiltration (`datamine`),
+credential harvesting, and lateral pivot (`dblink`/replica auto-probe) run
+automatically on any accessible instance.
+
+**Web deep-enum flags:** `recce web --crawl` adds a same-origin crawl with injection
+testing on discovered params; `--autologin` logs into each site's form with the
+engagement's harvested credentials and scans the **authenticated** surface;
+`--sqli-time` / `--fuzz-risky-forms` gate the slower/side-effecting probes. `recce api`
+enumerates the OpenAPI/Swagger surface for broken-auth + IDOR/BOLA.
 
 Credentials passed to `enum`/`vulns` (`-u/-p/-d`) also feed the SMB/LDAP NSE
 scripts during the scan. Run `recce <command> -h` for the full list.
+
+### What the web workbench (`recce serve`) exposes
+
+The browser workbench is a **curated subset** of the CLI, not a full mirror. From the
+UI you can run the scan phases **`run` · `scan` · `enum` · `vulns` · `sweep`** (and
+`sweep` covers all the credential-free deep modules — web, api, and every database
+engine incl. the new ones), plus **Act** (auto-loot the cheap wire-protocol
+credentials), **credential spray**, **import** (nmap/loot), manual finding/credential/
+host entry, the collaboration layer (assignments, labels, chat, activity), and every
+report export. The **credentialed and active-flag** paths — `credsweep`, the DB
+`-u/-p` follow-through and `--prove`, `web --autologin`/`--crawl`, `api`, and
+`exploitplan`/`poc`/`prove`/`attackpath`/`credenum`/`deploy` — are **CLI-only** by
+design (they take credentials or perform active actions that belong on the operator's
+command line). Run those from the CLI on the same engagement folder; their results
+appear in the workbench live.
 
 **Environment:** `RECCE_DEBUG=1` (full tracebacks), `RECCE_BROWSER=/path`
 (screenshot browser). **Exit codes:** `0` ok · `1` error · `2` bad args · `130`

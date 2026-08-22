@@ -4,6 +4,45 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+Headline: a full offensive **database** and **web/web-app** kill-chain — deep
+enumeration through exfiltration, foothold, and lateral movement — plus six more
+native database engines. Everything is stdlib/airgapped, read-only by default (active
+proof is opt-in), and feeds one sprayable credential store + the prove engine.
+
+### Added
+- **Six new native database engines** (stdlib deep modules + `recce <engine>` commands,
+  wired into `sweep`): `memcached` (unauth stats/key-dump + amplification), `couchdb`
+  (admin-party → RCE chain), `influxdb` (unauth query API + `<1.7.6` JWT bypass),
+  `cassandra` (CQL `AllowAllAuthenticator` + UDF RCE), `oracle` (TNS listener + SID/
+  poison surface), `db2` (DRDA `EXCSAT` identity). Expanded `vulndb` CVE coverage for
+  all of them.
+- **Credentialed follow-through** for postgres/mongodb/mysql — native **SCRAM**
+  (`recce/scram.py`, RFC-5802-validated) and `mysql_native_password`, so the deep enum
+  works against password-protected instances with looted/supplied creds (`-u/-p`, or
+  auto-sprayed from the datastore).
+- **Data exfiltration (`datamine`)** for postgres/mysql/mongo — schema-aware
+  secret/PII hunting with redacted row samples and embedded-credential harvesting;
+  MongoDB SCRAM hashes exported as hashcat `-m 24100/24200`.
+- **Foothold proof** — `recce postgres --prove` runs a benign `id` via `COPY … FROM
+  PROGRAM` to CONFIRM RCE (opt-in); MySQL **FILE**-privilege privesc detection
+  (`LOAD_FILE`/`INTO OUTFILE`/UDF); deeper redis/mongodb/mssql RCE-primitive + native
+  NTLM-over-TDS enumeration.
+- **Database lateral movement** — postgres `dblink`/`postgres_fdw` pivot (internal DB
+  targets + foreign-server cred harvest) and MongoDB replica-set-member auto-probe.
+- **Web `.git` reconstruction** — recovers the tracked source tree from an exposed
+  `.git` and mines it for secrets; **`.js.map` source-map** reconstruction does the same
+  for front-end source.
+- **API enumeration (`recce api`)** — parses the OpenAPI/Swagger spec and probes it for
+  **broken authentication** and **IDOR/BOLA**, harvesting embedded spec credentials.
+- **Web injection & auth** — **SSRF** (→ cloud metadata / `file://`), a consolidated
+  **security-headers audit**, and an offline **JWT HMAC secret crack** (weak secret →
+  forge any token).
+- **Authenticated crawl (`recce web --autologin`)** — logs into each site's form with
+  harvested credentials and scans the authenticated surface.
+- Every new exploitable finding has a **prove-engine** verdict; the service-modules and
+  command references document the full kill-chain, and `commands.md` notes exactly which
+  capabilities the **web workbench** exposes vs. which are CLI-only.
+
 ## [0.6.0] - 2026-08-21
 
 Headline: `recce exploitplan` grows real coverage for four more headline CVEs
