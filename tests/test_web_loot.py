@@ -448,3 +448,37 @@ class FrameworkDebugExposure(unittest.TestCase):
             self.assertEqual(web._scan_debug("127.0.0.1", p, "http://x", None), [])
         finally:
             srv.shutdown()
+
+
+# --------------------------- SSTI engine identification --------------------------
+
+class SstiEngineId(unittest.TestCase):
+    """Confirmed SSTI is escalated: identify the engine + give the exact RCE payload."""
+
+    def test_jinja2_identified_critical(self):
+        def send(payload):
+            b = payload.replace("{{7*7}}", "49").replace("{{7*'7'}}", "7777777")
+            return ((200, {}, f"page {b}"), 0.05)
+        p = Port(portid=80, service="http", state="open")
+        fs = web._reflect_via("1.1.1.1", p, "query 'q'", send)
+        self.assertTrue(fs)
+        self.assertIn("Jinja2", fs[0].title)
+        self.assertEqual(fs[0].severity, "critical")
+        self.assertIn("popen", fs[0].output)             # the concrete RCE payload
+
+    def test_twig_identified(self):
+        def send(payload):
+            # Twig: {{7*7}}->49 and {{7*'7'}}->49 (numeric coercion)
+            b = payload.replace("{{7*7}}", "49").replace("{{7*'7'}}", "49")
+            return ((200, {}, f"page {b}"), 0.05)
+        p = Port(portid=80, service="http", state="open")
+        fs = web._reflect_via("1.1.1.1", p, "query 'q'", send)
+        self.assertIn("Twig", fs[0].title)
+
+    def test_unknown_engine_stays_high_generic(self):
+        def send(payload):
+            return ((200, {}, payload.replace("{{7*7}}", "49")), 0.05)
+        p = Port(portid=80, service="http", state="open")
+        fs = web._reflect_via("1.1.1.1", p, "query 'q'", send)
+        self.assertEqual(fs[0].severity, "high")
+        self.assertNotIn("—", fs[0].title)
