@@ -67,6 +67,7 @@ NAMES: dict[str, str] = {
     "CWE-327": "Use of a Broken or Risky Cryptographic Algorithm",
     "CWE-330": "Use of Insufficiently Random Values",
     "CWE-347": "Improper Verification of Cryptographic Signature",
+    "CWE-349": "Acceptance of Extraneous Untrusted Data With Trusted Data",
     "CWE-352": "Cross-Site Request Forgery (CSRF)",
     "CWE-359": "Exposure of Private Personal Information",
     "CWE-364": "Signal Handler Race Condition",

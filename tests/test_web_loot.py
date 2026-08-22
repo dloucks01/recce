@@ -818,3 +818,56 @@ class DeserialMarkers(unittest.TestCase):
             r = proofs.recipe_for(v)
             self.assertIsNotNone(r, title)
             self.assertEqual(r["id"], "web-deserial")
+
+
+# --------------------- Web cache poisoning (unkeyed header) ----------------------
+
+class CachePoison(unittest.TestCase):
+    """Unkeyed X-Forwarded-Host reflected into a cacheable response = poisonable."""
+
+    class _Vuln(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            xfh = self.headers.get("X-Forwarded-Host", "localhost")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Cache-Control", "public, max-age=60")
+            self.send_header("X-Cache", "miss")
+            self.end_headers()
+            self.wfile.write(f'<script src="https://{xfh}/app.js"></script>'.encode())
+
+    class _Safe(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            xfh = self.headers.get("X-Forwarded-Host", "localhost")   # reflects...
+            self.send_response(200)
+            self.send_header("Cache-Control", "no-store, private")    # ...but not cacheable
+            self.end_headers()
+            self.wfile.write(f'<a href="https://{xfh}/">home</a>'.encode())
+
+    def _run(self, handler):
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            return web._scan_cache_poison("127.0.0.1", p, None)
+        finally:
+            srv.shutdown()
+
+    def test_reflected_and_cacheable_flags(self):
+        fs = self._run(self._Vuln)
+        self.assertEqual(len(fs), 1)
+        self.assertEqual(fs[0].script_id, "web-cache-poison")
+        self.assertEqual(fs[0].severity, "high")
+        self.assertIn("CWE-349", fs[0].cwes)
+        from recce import proofs
+        self.assertEqual(proofs.recipe_for(fs[0])["id"], "web-cache-poison")
+
+    def test_reflected_but_not_cacheable_no_finding(self):
+        self.assertEqual(self._run(self._Safe), [])

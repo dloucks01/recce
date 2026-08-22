@@ -713,6 +713,22 @@ def _v_csp(host, port, vuln):
         "Not applicable - a policy header, verified by reading it."]
 
 
+def _v_cache_poison(host, port, vuln):
+    # recce observed an unkeyed header reflected into a response the cache headers say is
+    # cacheable - the poisonable condition is directly observed. It stops short of writing
+    # a poisoned entry, so the impact side is LIKELY, not CONFIRMED.
+    return LIKELY, [
+        "recce sent an unkeyed Host-family header (X-Forwarded-Host etc.) and its value "
+        "reflected into a response whose own cache headers mark it cacheable - the "
+        "poisoning precondition is directly observed (recce did NOT write a poisoned entry).",
+        "Prove: with Burp Param Miner / a repeat request, land the reflected value in a "
+        "cached entry (match the cache buster + confirm X-Cache: hit), then weaponise the "
+        "reflection (redirect to attacker host / inject script) so every visitor is served "
+        "it - within ROE, on a non-shared cache.",
+        "FP: the value may reflect but the specific URL not actually be cached (vary/keyed "
+        "differently) - confirm a second request returns the poisoned copy from cache."]
+
+
 def _v_deserial(host, port, vuln):
     b = _blob(vuln)
     if "viewstate" in b:
@@ -1427,6 +1443,16 @@ _RECIPES: list[dict] = [
                "OOB-exfiltrate non-text files (within ROE).",
      "fp": "None - the returned file content proves entity resolution.",
      "fn": _v_xxe},
+    {"id": "web-cache-poison",
+     "match": r"cache poisoning via unkeyed header|web cache poisoning",
+     "name": "Web cache poisoning (unkeyed header reflection)",
+     "pre": ["An unkeyed header reflects into the response",
+             "The response is cacheable (proxy cache / shared-cacheable Cache-Control)"],
+     "finish": "Land the reflected value in a cached entry (Burp Param Miner; confirm "
+               "X-Cache: hit) and weaponise the reflection - within ROE, non-shared cache.",
+     "fp": "The value reflects but that URL is not actually cached (keyed/vary differently) "
+           "- confirm a second request returns the poisoned copy from cache.",
+     "fn": _v_cache_poison},
     {"id": "web-deserial",
      "match": r"serialized object in client-controllable|viewstate is not encrypted|"
               r"deserializ",

@@ -1535,6 +1535,58 @@ def _scan_deserial(ip: str, port: Port, headers: dict, body: str) -> list[Vuln]:
     return out
 
 
+_CACHE_HDRS = ("x-forwarded-host", "x-forwarded-scheme", "x-host", "x-forwarded-server",
+               "x-original-url", "x-rewrite-url")
+_CACHEABLE = re.compile(r"public|max-age=[1-9]|s-maxage=[1-9]", re.I)
+
+
+def _cacheable(headers: dict) -> str:
+    """Return a short reason the response looks cacheable, else ''. Requires a positive
+    cache signal (a proxy cache header, or Cache-Control that permits shared caching)
+    and no store-blocking directive - keeps the poison finding low-FP."""
+    cc = headers.get("cache-control", "").lower()
+    if "no-store" in cc or "private" in cc:
+        return ""
+    for h in ("x-cache", "cf-cache-status", "age", "x-cache-hits", "x-varnish"):
+        if h in headers:
+            return f"{h}: {headers[h]}"
+    if _CACHEABLE.search(cc):
+        return f"cache-control: {headers['cache-control']}"
+    return ""
+
+
+def _scan_cache_poison(ip: str, port: Port, auth) -> list[Vuln]:
+    """Unkeyed-header cache poisoning: does an X-Forwarded-Host (etc.) value reflect
+    into a CACHEABLE response? Reflection + cacheability = a poisonable cache entry
+    (we detect, we do not actually poison). One extra request per candidate header."""
+    marker = "recce-cachepoison.example"
+    out: list[Vuln] = []
+    for h in _CACHE_HDRS:
+        r = _fetch(ip, port, "/", auth={**(auth or {}), h.title(): marker})
+        if not r:
+            continue
+        st, hd, bd = r
+        if st >= 500:
+            continue
+        loc = hd.get("location", "")
+        reflected = marker in bd or marker in loc
+        if not reflected:
+            continue
+        reason = _cacheable(hd)
+        if not reason:
+            continue
+        where = "Location redirect" if marker in loc else "response body (absolute URL/link)"
+        out.append(_mk(ip, port, "web-cache-poison", "high",
+            "Web cache poisoning via unkeyed header", ["CWE-349"],
+            f"{h}: {marker} was reflected into the {where} AND the response is cacheable "
+            f"({reason}). The header is not part of the cache key, so a poisoned entry is "
+            "served to every subsequent visitor (redirect hijack / stored-XSS delivery).",
+            "Include the header in the cache key or strip it at the edge; never reflect "
+            "Host-family headers into responses."))
+        break                                  # one proof of the class is enough
+    return out
+
+
 def _scan_reflection(ip: str, port: Port, base: str, auth) -> list[Vuln]:
     # One request. {{7*7}} / ${7*7} / <%=7*7%> evaluating to 49 near our canary is a
     # strong, low-false-positive SSTI signal; an unencoded <i> reflection is an
@@ -2570,6 +2622,8 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                     "(a sandboxed iframe / data: document sends 'Origin: null' and can then read "
                     "authenticated responses).",
                     "Never allow-list the null origin; echo only trusted origins."))
+    # Web cache poisoning: unkeyed header reflected into a cacheable response.
+    findings.extend(_scan_cache_poison(ip, port, auth))
     # GraphQL: introspection, plus query batching (brute-force/DoS amplifier) and
     # field-suggestion schema leak when introspection is off.
     gql = '{"query":"query{__schema{queryType{name}}}"}'
