@@ -291,5 +291,38 @@ class VulnDbSignatures(unittest.TestCase):
                             for t in self._titles("redis", "7.0.0")))
 
 
+class DbPocRecipes(unittest.TestCase):
+    """Confirmed DB findings must scaffold an initial-PoC harness (the poc phase)."""
+
+    def test_finding_text_maps_to_recipe(self):
+        from recce import poc
+        cases = {
+            "Redis exposed without authentication. Write primitive available "
+            "(dir=/var/lib/redis) -> arbitrary file write / RCE.": "redis_rce",
+            "Apache CouchDB 'admin party' (no admin configured)": "couchdb_rce",
+            "PostgreSQL trust authentication (no password required)": "postgres_rce",
+            "memcached exposed without authentication; 3 items cached": "db_unauth_read",
+            "Apache Cassandra exposed - no authentication (AllowAll)": "db_unauth_read",
+            "InfluxDB exposed - unauthenticated query API": "db_unauth_read",
+        }
+        for text, expected in cases.items():
+            self.assertEqual(poc.recipe_key_for(text), expected, text[:50])
+
+    def test_recipes_write_runnable_files(self):
+        import os
+        import tempfile
+        from recce import poc
+        recipes = {k: poc.RECIPES[k] for k in
+                   ("redis_rce", "couchdb_rce", "postgres_rce", "db_unauth_read")}
+        d = tempfile.mkdtemp()
+        written = poc.write_files(d, recipes)
+        names = {os.path.basename(f) for f in written}
+        self.assertIn("recce_poc_redis_rce.sh", names)
+        self.assertIn("recce_poc_db_read.sh", names)
+        for f in written:
+            with open(f) as fh:
+                self.assertIn("#!/bin/sh", fh.read())
+
+
 if __name__ == "__main__":
     unittest.main()

