@@ -230,3 +230,45 @@ class SecurityHeaders(unittest.TestCase):
               "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
               "permissions-policy": "geolocation=()"}
         self.assertEqual(web._security_headers("1.1.1.1", p, ok), [])
+
+
+# ------------------------------ JWT HMAC crack -----------------------------------
+
+class JwtHmacCrack(unittest.TestCase):
+    """Offline HMAC brute of an HS* JWT: recover a weak secret -> forge arbitrary tokens."""
+
+    def _jwt(self, secret, claims, alg="HS256"):
+        import base64 as _b, hashlib as _h, hmac as _hm, json as _j
+        def b64(x): return _b.urlsafe_b64encode(x).rstrip(b"=").decode()
+        head = b64(_j.dumps({"alg": alg, "typ": "JWT"}).encode())
+        pay = b64(_j.dumps(claims).encode())
+        mod = {"HS256": _h.sha256, "HS384": _h.sha384}[alg]
+        sig = b64(_hm.new(secret.encode(), f"{head}.{pay}".encode(), mod).digest())
+        return f"{head}.{pay}.{sig}"
+
+    def test_weak_secret_cracked(self):
+        tok = self._jwt("secret", {"user": "bob", "admin": False})
+        self.assertEqual(web._jwt_crack_hs(tok), "secret")
+
+    def test_strong_secret_not_cracked(self):
+        tok = self._jwt("Zx9!k3jf-a-long-random-256-bit-secret-value", {"user": "bob"})
+        self.assertIsNone(web._jwt_crack_hs(tok))
+
+    def test_forged_token_verifies_and_escalates(self):
+        import base64 as _b, hashlib as _h, hmac as _hm, json as _j
+        tok = self._jwt("changeme", {"user": "bob", "admin": False})
+        forged = web._forge_hs(tok, "changeme", {"admin": True})
+        h, p, s = forged.split(".")
+        exp = _b.urlsafe_b64encode(_hm.new(b"changeme", f"{h}.{p}".encode(),
+                                           _h.sha256).digest()).rstrip(b"=").decode()
+        self.assertEqual(s, exp)                             # signature valid under the secret
+        claims = _j.loads(_b.urlsafe_b64decode(p + "==="))
+        self.assertTrue(claims["admin"])                    # escalated claim
+
+    def test_scan_emits_critical_when_cracked(self):
+        tok = self._jwt("jwt_secret", {"sub": "u1"})
+        p = Port(portid=80, service="http", state="open")
+        fs = web._scan_jwts("1.1.1.1", p, {"set-cookie": f"session={tok}; Path=/"}, "")
+        crit = [f for f in fs if f.severity == "critical" and "cracked" in f.title]
+        self.assertTrue(crit)
+        self.assertEqual(crit[0].confidence, "confirmed")

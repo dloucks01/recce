@@ -106,6 +106,7 @@ NAMES: dict[str, str] = {
     "CWE-614": "Sensitive Cookie Without 'Secure' Attribute",
     "CWE-615": "Sensitive Information in Source Code / Comments",
     "CWE-639": "Authorization Bypass Through User-Controlled Key (IDOR)",
+    "CWE-1391": "Use of Weak Credentials",
     "CWE-640": "Weak Password Recovery Mechanism",
     "CWE-650": "Trusting HTTP Permission Methods on the Server Side",
     "CWE-693": "Protection Mechanism Failure",

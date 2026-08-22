@@ -783,6 +783,14 @@ def _v_ssti(host, port, vuln):
 def _v_jwt(host, port, vuln):
     t = (vuln.title or "").lower()
     blob = f"{t} {(vuln.output or '').lower()}"
+    if "hmac secret cracked" in t or "secret cracked" in t:
+        return CONFIRMED, [
+            "recce recovered the JWT's HMAC signing secret by offline brute force - the "
+            "HMAC verification is exact, so this IS the secret (not a guess).",
+            "Forge any token: sign {sub/admin/role: <target>} with the recovered secret "
+            "(jwt_tool <token> -S hs256 -p '<secret>' -T) and replay it for full auth "
+            "bypass / account takeover / privilege escalation (within ROE).",
+            "FP: none - a matching HMAC signature is cryptographic proof of the secret."]
     if "alg:none" in t and ("proven" in t or "the server returned the same authenticated" in blob):
         return CONFIRMED, [
             "recce actively proved this: it forged an unsigned token (alg:none, original "
@@ -1286,7 +1294,8 @@ _RECIPES: list[dict] = [
                "payload (Jinja2 {{config}}, Freemarker, ERB) - within ROE.",
      "fp": "Very low - the engine already evaluated 7*7 to 49. Confirm the engine for the RCE payload.",
      "fn": _v_ssti},
-    {"id": "web-jwt", "match": r"jwt (accepts|uses)|alg:none|algorithm-confusion|json web token",
+    {"id": "web-jwt", "match": r"jwt (accepts|uses|hmac secret cracked)|alg:none|"
+                               r"algorithm-confusion|json web token|hmac secret cracked",
      "name": "JWT weakness (alg:none / weak secret / confusion)",
      "pre": ["The app trusts a JWT whose signature can be forged or cracked"],
      "finish": "jwt_tool <token> -X a (alg:none) / -C -d rockyou.txt (crack HS256) / -X k (RS256->HS256), "
