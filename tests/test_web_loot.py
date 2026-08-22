@@ -393,3 +393,58 @@ class CommandInjection(unittest.TestCase):
             return ((200, {}, f"echo: {payload}"), 0.05)
         p = Port(portid=80, service="http", state="open")
         self.assertEqual(web._cmdi_via("1.1.1.1", p, "query 'cmd'", "cmd", send), [])
+
+
+# --------------------------- framework debug exposure ----------------------------
+
+class FrameworkDebugExposure(unittest.TestCase):
+    """Exposed debuggers / debug pages: Werkzeug (RCE), Laravel Ignition, Symfony."""
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path.startswith("/_ignition/health-check"):
+                self.send_response(200); self.end_headers()
+                self.wfile.write(b'{"can_execute_commands":true}')
+            elif self.path == "/_profiler":
+                self.send_response(200); self.end_headers()
+                self.wfile.write(b'<html>Symfony Profiler<div class="sf-toolbar"></div></html>')
+            else:
+                self.send_response(500); self.end_headers()
+                self.wfile.write(b"<title>Werkzeug Debugger</title><div class=__debugger__>x")
+
+    def test_detects_debuggers(self):
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self._H)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            fs = web._scan_debug("127.0.0.1", p, f"http://127.0.0.1:{port}", None)
+        finally:
+            srv.shutdown()
+        ids = {f.script_id for f in fs}
+        self.assertIn("web-werkzeug-debug", ids)      # RCE (critical)
+        self.assertIn("web-ignition", ids)            # CVE-2021-3129 (critical)
+        self.assertIn("web-symfony-profiler", ids)    # disclosure
+        self.assertEqual(next(f for f in fs if f.script_id == "web-werkzeug-debug").severity,
+                         "critical")
+
+    def test_clean_server_no_findings(self):
+        class Clean(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+                self.wfile.write(b"<html>Not Found</html>")
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Clean)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            p = Port(portid=srv.server_address[1], service="http", state="open")
+            self.assertEqual(web._scan_debug("127.0.0.1", p, "http://x", None), [])
+        finally:
+            srv.shutdown()

@@ -662,6 +662,33 @@ def _v_authsession(host, port, vuln):
         "form + a success signal, so this is unlikely)."]
 
 
+def _v_debug(host, port, vuln):
+    # recce fetched the debug page / debug endpoint itself, so the exposure is directly
+    # observed -> CONFIRMED (RCE for the debugger/Ignition; disclosure otherwise).
+    t = (vuln.title or "").lower()
+    if "werkzeug" in t or "interactive debugger" in t:
+        return CONFIRMED, [
+            "recce observed the Werkzeug/Flask interactive debugger (debug=True in "
+            "production) - its console executes arbitrary Python.",
+            "Open the console at /console (or trigger a traceback); on old builds there "
+            "is no PIN, otherwise brute/derive the PIN - then run any Python (RCE as the "
+            "app user) within ROE.",
+            "FP only if a WAF blocks the console despite the debugger banner."]
+    if "ignition" in t:
+        return CONFIRMED, [
+            "recce reached Laravel Ignition's debug endpoint (APP_DEBUG=true). On Laravel "
+            "< 8.4.2 this is unauthenticated RCE (CVE-2021-3129).",
+            "Exploit within ROE: the public CVE-2021-3129 PoC (phpggc + the "
+            "execute-solution log-poisoning chain) yields a shell as the web user.",
+            "FP only if the Laravel/Ignition version is already patched."]
+    return CONFIRMED, [
+        "recce observed a framework debug page (DEBUG on) that leaks source, the "
+        "configuration and secrets (SECRET_KEY, DB creds, env) - directly observed.",
+        "Harvest the leaked secrets and spray them; the disclosed source + routes map "
+        "the rest of the attack surface (within ROE).",
+        "FP only if the page is a static error template, not the real debug view."]
+
+
 def _v_cmdi(host, port, vuln):
     # recce injected a shell payload and the RESPONSE carried a shell-computed marker
     # (or scaled the delay) - direct command execution, observed -> CONFIRMED.
@@ -1281,6 +1308,16 @@ _RECIPES: list[dict] = [
                "credential against SSH/SMB/other apps (within ROE).",
      "fp": "The session isn't actually authenticated (unlikely given the success signal).",
      "fn": _v_authsession},
+    {"id": "web-debug",
+     "match": r"interactive debugger exposed|laravel ignition|django debug=true|"
+              r"symfony web profiler|rails debug exception|whoops debug page|"
+              r"debug=true \(",
+     "name": "Framework debug mode exposed (RCE / secret disclosure)",
+     "pre": ["A debug page / debugger endpoint answered", "Debug mode is on in production"],
+     "finish": "Werkzeug console / Ignition CVE-2021-3129 -> RCE; else harvest the leaked "
+               "SECRET_KEY / DB creds / source (within ROE).",
+     "fp": "A static error template rather than the live debug view.",
+     "fn": _v_debug},
     {"id": "web-cmdi",
      "match": r"os command injection in ",
      "name": "OS command injection (RCE)",

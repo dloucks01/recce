@@ -290,6 +290,72 @@ def _web_credentials(sid: str, body: str, ip: str, port: int):
     return out
 
 
+# Framework debug pages / consoles: an exposed debugger is RCE or a full-config leak.
+_DEBUG_MARKERS = [
+    ("web-werkzeug-debug", "critical",
+     "Werkzeug/Flask interactive debugger exposed (RCE)", ["CWE-489", "CWE-94"],
+     re.compile(r"Werkzeug Debugger|__debugger__|werkzeug\.debug|"
+                r"The debugger caught an exception|Interactive Console"),
+     "Set debug=False in production; the Werkzeug console is remote code execution."),
+    ("web-django-debug", "high",
+     "Django DEBUG=True (settings / SECRET_KEY disclosure)", ["CWE-489", "CWE-215"],
+     re.compile(r"You're seeing this error because you have|DisallowedHost at|"
+                r"Django Version:|using the URLconf defined in"),
+     "Set DEBUG=False in production; the debug page leaks SECRET_KEY, settings and env."),
+    ("web-rails-debug", "high",
+     "Rails debug exception page (source / env disclosure)", ["CWE-489", "CWE-215"],
+     re.compile(r"Action Controller: Exception caught|Rails\.root:|"
+                r"<title>Action Controller"),
+     "Set config.consider_all_requests_local=false in production."),
+    ("web-whoops-debug", "high",
+     "PHP Whoops debug page (source / env disclosure)", ["CWE-489", "CWE-215"],
+     re.compile(r"Whoops\\|whoops-container|Whoops, looks like something went wrong"),
+     "Disable the Whoops/debug handler in production."),
+]
+
+
+def _scan_debug(ip: str, port: Port, base: str, auth) -> list[Vuln]:
+    """Detect exposed framework debuggers / debug pages — an interactive debugger is
+    RCE, a debug error page leaks source/secrets. Self-gating (a handful of requests)."""
+    out: list[Vuln] = []
+    seen: set = set()
+    # 1) Error/debug page fingerprint: a 404 page + a best-effort 500 trigger.
+    blob = ""
+    for path in (f"/recce{int(_CMDI_A)}-nope", "/%c0%ae%c0%ae", "/?recce[]=1&x[y]=1"):
+        r = _fetch(ip, port, path, auth=auth)
+        if r:
+            blob += r[2][:20000]
+    for sid, sev, title, cwes, rx, fix in _DEBUG_MARKERS:
+        if sid not in seen and rx.search(blob):
+            seen.add(sid)
+            out.append(_mk(ip, port, sid, sev, title, cwes,
+                           f"An error/debug page on {base} matched the "
+                           f"{title.split('(')[0].strip()} signature (debug mode is on).",
+                           fix, confidence="confirmed"))
+    # 2) Laravel Ignition (CVE-2021-3129 unauth RCE surface).
+    ig = _fetch(ip, port, "/_ignition/health-check", auth=auth)
+    if ig and ig[0] == 200 and ("can_execute" in ig[2] or "ignition" in ig[2].lower()):
+        out.append(_mk(ip, port, "web-ignition", "critical",
+                       "Laravel Ignition debug endpoint exposed (CVE-2021-3129 RCE)",
+                       ["CWE-94", "CWE-489"],
+                       f"GET {base}/_ignition/health-check answered — Ignition is enabled; "
+                       "on Laravel < 8.4.2 with debug on this is unauthenticated RCE "
+                       "(CVE-2021-3129, log-poisoning via execute-solution).",
+                       "Set APP_DEBUG=false; upgrade Laravel/Ignition; remove the debug "
+                       "package in production.", confidence="confirmed"))
+    # 3) Symfony web profiler (full request/config/DB-query disclosure).
+    sp = _fetch(ip, port, "/_profiler", auth=auth)
+    if sp and sp[0] == 200 and ("symfony profiler" in sp[2].lower() or "sf-toolbar" in sp[2]):
+        out.append(_mk(ip, port, "web-symfony-profiler", "high",
+                       "Symfony web profiler exposed (request/config/secret disclosure)",
+                       ["CWE-489", "CWE-215"],
+                       f"GET {base}/_profiler returned the Symfony profiler — it exposes "
+                       "every request, the configuration, DB queries and secrets.",
+                       "Restrict the profiler to dev; never ship web-profiler-bundle to "
+                       "production.", confidence="confirmed"))
+    return out
+
+
 def _scan_git_dump(ip: str, port: Port, auth: dict | None, findings: list) -> list:
     """Reconstruct an exposed .git over HTTP: recover the tracked source tree, mine the
     recovered files for secrets/credentials, and emit a web-git-dump finding. Returns the
@@ -2125,6 +2191,7 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
         looted_creds.extend(_scan_git_dump(ip, port, auth, findings))
     # Deep dives (each self-gates so they cost nothing when absent).
     findings.extend(_scan_actuator(ip, port, base, auth))
+    findings.extend(_scan_debug(ip, port, base, auth))
     findings.extend(_scan_backups(ip, port, base, auth))
     findings.extend(_scan_reflection(ip, port, base, auth))
     findings.extend(_scan_js(ip, port, base, body, auth))
