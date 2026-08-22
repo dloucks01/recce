@@ -4764,7 +4764,7 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
     active = not args.no_probe
     # DB engines that support credentialed follow-through spray -u/-p plus the looted
     # password credentials from the datastore against auth-required instances.
-    db_creds = _db_login_creds(args, store) if source in ("postgres", "mongodb") else None
+    db_creds = _db_login_creds(args, store) if source in ("postgres", "mongodb", "mysql") else None
     extra_kw = {"prove": True} if source == "postgres" and getattr(args, "prove_rce", False) else {}
     analysis = mod.analyze(hosts, active=active, creds=db_creds,
                            **extra_kw, **_probe_kwargs(args, source))
@@ -6839,6 +6839,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "MySQL hosts in the datastore)")
     myp.add_argument("--no-probe", action="store_true",
                      help="skip the live probe; just write the commands")
+    myp.add_argument("-u", "--username", help="credential to try on auth-required "
+                     "instances (also sprays looted creds from the datastore)")
+    myp.add_argument("-p", "--password", help="password for -u")
     _add_io(myp)
     _add_budget(myp)
     myp.set_defaults(func=cmd_mysql)

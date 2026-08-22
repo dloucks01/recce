@@ -1149,6 +1149,129 @@ class MongoDatamine(unittest.TestCase):
         self.assertTrue(any(c.source == "mongodb-datamine" for c in analysis["credentials"]))
 
 
+def _mysql_server(dispatch, password=None):
+    """Fake MySQL server: v10 handshake (with a real salt), optional native-password
+    scramble verification, and COM_QUERY result sets via dispatch(sql) -> list-of-rows."""
+    salt = bytes((i % 250) + 1 for i in range(20))
+
+    def pkt(payload, seq):
+        return struct.pack("<I", len(payload))[:3] + bytes([seq]) + payload
+
+    def lenstr(s):
+        b = str(s).encode()
+        return bytes([len(b)]) + b
+
+    def result_set(rows):
+        ncol = len(rows[0]) if rows else 1
+        eof = b"\xfe\x00\x00\x02\x00"
+        out = pkt(bytes([ncol]), 1)
+        seq = 2
+        for _ in range(ncol):
+            out += pkt(b"\x03def", seq); seq += 1
+        out += pkt(eof, seq); seq += 1
+        for row in rows:
+            body = b"".join(b"\xfb" if v is None else lenstr(v) for v in row)
+            out += pkt(body, seq); seq += 1
+        out += pkt(eof, seq)
+        return out
+
+    def greeting():
+        auth1, auth2 = salt[:8], salt[8:20] + b"\x00"
+        return (bytes([10]) + b"8.0.36\x00" + struct.pack("<I", 7) + auth1 + b"\x00"
+                + struct.pack("<H", 0x0200) + b"\x21" + struct.pack("<H", 2)
+                + struct.pack("<H", 0x0008) + bytes([21]) + b"\x00" * 10 + auth2
+                + b"mysql_native_password\x00")
+
+    def read_pkt(conn):
+        hdr = conn.recv(4)
+        if len(hdr) < 4:
+            return None
+        ln = struct.unpack("<I", hdr[:3] + b"\x00")[0]
+        return conn.recv(ln)
+
+    def verify(resp):
+        # HandshakeResponse41: caps(4) maxpkt(4) charset(1) reserved(23) user\0 tokenlen token ...
+        i = 4 + 4 + 1 + 23
+        j = resp.index(b"\x00", i)
+        i = j + 1
+        tlen = resp[i]; i += 1
+        token = resp[i:i + tlen]
+        if password is None:
+            return True                                # empty-password server accepts all
+        import hashlib
+        stored = hashlib.sha1(hashlib.sha1(password.encode()).digest()).digest()
+        recovered = bytes(a ^ b for a, b in
+                          zip(token, hashlib.sha1(salt[:20] + stored).digest()))
+        return hashlib.sha1(recovered).digest() == stored
+
+    def handle(conn):
+        conn.sendall(pkt(greeting(), 0))
+        resp = read_pkt(conn)
+        if resp is None:
+            return
+        if not verify(resp):
+            conn.sendall(pkt(b"\xff\x15\x04Access denied", 2))     # ERR
+            return
+        conn.sendall(pkt(b"\x00\x00\x00\x02\x00\x00\x00", 2))      # OK
+        while True:
+            p = read_pkt(conn)
+            if p is None:
+                return
+            if p[:1] == b"\x03":
+                conn.sendall(result_set(dispatch(p[1:].decode("utf-8", "replace"))))
+    return _tcp_once(handle)
+
+
+class MysqlCredentialedDatamine(unittest.TestCase):
+    """MySQL: credentialed login, FILE-privilege privesc, and data exfiltration."""
+
+    def _dispatch(self, sql):
+        s = sql.lower()
+        if "mysql.user" in s:
+            return [["root", "localhost", "*ABC", "mysql_native_password"]]
+        if "show databases" in s:
+            return [["app"], ["information_schema"]]
+        if "current_user()" in s:
+            return [["root@localhost", "", "/usr/lib/mysql/plugin/", "linux"]]
+        if "show grants" in s:
+            return [["GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost'"]]
+        if "information_schema.columns" in s:
+            return [["app", "users", "password"], ["app", "users", "email"],
+                    ["app", "orders", "qty"]]
+        if "from `app`.`users`" in s:
+            return [["Secr3tValue!", "alice@corp.example"]]
+        return []
+
+    def test_native_scramble_and_authenticate(self):
+        from recce import mysql
+        port = _mysql_server(self._dispatch, password="Hunter2x")
+        self.assertTrue(mysql.authenticate("127.0.0.1", port, "root", "Hunter2x"))
+        self.assertFalse(mysql.authenticate("127.0.0.1", port, "root", "wrong"))
+
+    def test_loot_detects_file_priv(self):
+        from recce import mysql
+        port = _mysql_server(self._dispatch)
+        lt = mysql.loot("127.0.0.1", port, user="root")
+        self.assertTrue(lt["file_priv"])
+        self.assertEqual(lt["secure_file_priv"], "")
+
+    def test_datamine_and_finding(self):
+        from recce import mysql
+        port = _mysql_server(self._dispatch)
+        dm = mysql.datamine("127.0.0.1", port, ["app"], user="root")
+        cols = {c["column"] for c in dm["secret_columns"]}
+        self.assertIn("password", cols)
+        self.assertIn("email", cols)
+        self.assertNotIn("qty", cols)
+        self.assertNotIn("Secr3tValue!", str(dm["samples"]))       # redacted
+        # analyze emits the file-priv + datamine findings
+        h = _host(port, "mysql")
+        analysis = mysql.analyze([h])
+        kinds = {f["kind"] for f in analysis["findings"]}
+        self.assertIn("mysql_file_priv", kinds)
+        self.assertIn("mysql_datamine", kinds)
+
+
 class DbPocRecipes(unittest.TestCase):
     """Confirmed DB findings must scaffold an initial-PoC harness (the poc phase)."""
 
