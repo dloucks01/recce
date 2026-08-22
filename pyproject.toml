@@ -16,10 +16,15 @@ dynamic = ["version"]
 dependencies = []
 
 [project.optional-dependencies]
-# The tool itself is stdlib-only; the test suite pulls two dev-only packages:
-# openpyxl (validate the hand-rolled .xlsx against a real reader) and pytest-xdist
-# (run the real-nmap fidelity suites across cores - `-n auto`).
-test = ["openpyxl", "pytest-xdist"]
+# The tool itself is stdlib-only; the test suite pulls dev-only packages:
+# openpyxl (validate the hand-rolled .xlsx against a real reader), pytest-xdist
+# (run the real-nmap fidelity suites across cores - `-n auto`), and fastapi/httpx/
+# uvicorn - a meaningful slice of the suite (test_webui*.py, test_dogfood.py,
+# test_import_*.py, test_playbook.py, ...) drives the web workbench through
+# fastapi's TestClient, which itself needs httpx even though fastapi doesn't
+# declare it as a hard dependency. `pip install -e ".[test]"` (what CI's fast job
+# runs) previously left these out entirely: 22 failures + 4 collection errors.
+test = ["openpyxl", "pytest-xdist", "fastapi", "httpx", "uvicorn"]
 # Baked into the airgap bundle (tools/build_bundle.sh installs `.[bundle]`). recce
 # still runs without these - it falls back to its hand-rolled clients / CLI tools -
 # but bundled they replace the fragile shell-outs with maintained libraries.
