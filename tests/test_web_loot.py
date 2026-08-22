@@ -701,3 +701,69 @@ class JwtAlgConfusion(unittest.TestCase):
                 or "algorithm confusion" in f.title.lower()]
         self.assertTrue(conf, "no alg-confusion finding emitted")
         self.assertIn("orged", conf[0].output)                   # forged token in evidence
+
+
+# --------------------- CORS null-origin + GraphQL batching/suggestion -------------
+
+class CorsGraphqlDeep(unittest.TestCase):
+    """Null-Origin CORS acceptance, GraphQL query batching, and field-suggestion
+    schema leak (introspection disabled)."""
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, body=b"", extra=None):
+            self.send_response(code)
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+
+        def do_GET(self):
+            origin = self.headers.get("Origin", "")
+            extra = {"Content-Type": "text/html"}
+            if origin == "null":                       # reflect null + credentials
+                extra["Access-Control-Allow-Origin"] = "null"
+                extra["Access-Control-Allow-Credentials"] = "true"
+            self._send(200, b"<html><title>app</title></html>", extra)
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+            if self.path != "/graphql":
+                self._send(404); return
+            if raw.startswith("["):                    # batching: array in, array out
+                self._send(200, b'[{"data":{"__typename":"Query"}},'
+                                b'{"data":{"__typename":"Query"}}]',
+                           {"Content-Type": "application/json"}); return
+            if "__schema" in raw:                      # introspection disabled
+                self._send(400, b'{"errors":[{"message":"introspection disabled"}]}',
+                           {"Content-Type": "application/json"}); return
+            if "__typenamee" in raw:                   # field-suggestion leak
+                self._send(400, b'{"errors":[{"message":"Cannot query field '
+                                b'\\"__typenamee\\". Did you mean \\"__typename\\"?"}]}',
+                           {"Content-Type": "application/json"}); return
+            self._send(200, b'{"data":{"__typename":"Query"}}',
+                       {"Content-Type": "application/json"})
+
+    def test_cors_null_and_graphql(self):
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self._H)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            _profile, fs = web.scan_endpoint("127.0.0.1", p, active=True)
+        finally:
+            srv.shutdown()
+        titles = [f.title.lower() for f in fs]
+        self.assertTrue(any("null origin" in t for t in titles), titles)
+        self.assertTrue(any("batching" in t for t in titles), titles)
+        self.assertTrue(any("field-suggestion" in t for t in titles), titles)
+        # every one still gets a prove verdict (web-exposure recipe)
+        from recce import proofs
+        for f in fs:
+            if f.script_id in ("web-cors", "web-graphql", "web-graphql-batch"):
+                self.assertIsNotNone(proofs.recipe_for(f), f.title)

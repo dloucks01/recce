@@ -1458,7 +1458,9 @@ _RECIPES: list[dict] = [
                                     r"actuator|heapdump|gateway actuator|backup/source file|phpinfo|"
                                     r"web\.config readable|directory listing enabled|swagger|"
                                     r"\.ds_store|crossdomain|prometheus /metrics|\.htpasswd|"
-                                    r"graphql introspection|cors reflects|user enumeration via rest|"
+                                    r"graphql introspection|graphql field-suggestion|"
+                                    r"graphql query batching|cors reflects|cors allows the null|"
+                                    r"user enumeration via rest|"
                                     r"secret in client-side js|wordpress .*(present|detected)|xml-rpc|"
                                     r"source map|\.git reconstructed|source tree",
      "name": "Web exposure (VCS / config / status endpoint)",

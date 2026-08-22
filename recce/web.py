@@ -2494,29 +2494,69 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                     f"Dangerous HTTP methods enabled: {', '.join(bad)}", ["CWE-650"],
                     note, "Disable PUT/DELETE/TRACE/CONNECT unless required.",
                     confidence=conf))
-    # CORS: does the server reflect an arbitrary Origin AND allow credentials?
+    # CORS: reflected-arbitrary-Origin and null-Origin acceptance, both only weaponizable
+    # when credentials are allowed (a browser attaches the victim's cookies).
     probe_origin = "https://recce.example"
+    seen_cors = False
     cors = _fetch(ip, port, "/", auth={**(auth or {}), "Origin": probe_origin})
     if cors:
         ch = cors[1]
         acao = ch.get("access-control-allow-origin", "")
         acac = ch.get("access-control-allow-credentials", "").lower()
         if acao == probe_origin and acac == "true":
+            seen_cors = True
             findings.append(_mk(ip, port, "web-cors", "high",
                                 "CORS reflects arbitrary Origin with credentials", ["CWE-942"],
                                 f"Origin: {probe_origin} -> Access-Control-Allow-Origin: {acao}, "
                                 "Allow-Credentials: true (any site can read authenticated responses).",
                                 "Echo only an allow-list of trusted origins; never reflect + credentials."))
-    # GraphQL introspection enabled?
+    if not seen_cors:                         # null Origin: reachable from a sandboxed iframe
+        nc = _fetch(ip, port, "/", auth={**(auth or {}), "Origin": "null"})
+        if nc:
+            nh = nc[1]
+            if nh.get("access-control-allow-origin", "") == "null" and \
+                    nh.get("access-control-allow-credentials", "").lower() == "true":
+                findings.append(_mk(ip, port, "web-cors", "high",
+                    "CORS allows the null Origin with credentials", ["CWE-942"],
+                    "Origin: null -> Access-Control-Allow-Origin: null, Allow-Credentials: true "
+                    "(a sandboxed iframe / data: document sends 'Origin: null' and can then read "
+                    "authenticated responses).",
+                    "Never allow-list the null origin; echo only trusted origins."))
+    # GraphQL: introspection, plus query batching (brute-force/DoS amplifier) and
+    # field-suggestion schema leak when introspection is off.
     gql = '{"query":"query{__schema{queryType{name}}}"}'
     for gp in ("graphql", "api/graphql", "v1/graphql", "query"):
         r = _fetch(ip, port, "/" + gp, method="POST", body=gql, auth=auth)
-        if r and r[0] == 200 and ("__schema" in r[2] or '"queryType"' in r[2]):
+        if not r or r[0] not in (200, 400):
+            continue
+        base_gql = f"{profile['url']}/{gp}"
+        if r[0] == 200 and ("__schema" in r[2] or '"queryType"' in r[2]):
             findings.append(_mk(ip, port, "web-graphql", "medium",
                                 "GraphQL introspection enabled", ["CWE-200"],
-                                f"POST {profile['url']}/{gp} (__schema query) returned the schema.",
+                                f"POST {base_gql} (__schema query) returned the schema.",
                                 "Disable GraphQL introspection in production."))
-            break
+        else:
+            # Introspection blocked/failed: does the error leak field names ("Did you mean")?
+            probe = ('{"query":"query{__typenamee}"}')
+            sug = _fetch(ip, port, "/" + gp, method="POST", body=probe, auth=auth)
+            if sug and re.search(r"did you mean|didyoumean", sug[2], re.I):
+                findings.append(_mk(ip, port, "web-graphql", "low",
+                    "GraphQL field-suggestion schema leak", ["CWE-200"],
+                    f"POST {base_gql} with an invalid field returned a 'Did you mean' "
+                    "suggestion - the schema can be reconstructed field by field even with "
+                    "introspection disabled.",
+                    "Disable did-you-mean suggestions (production error masking)."))
+        # Batching: does it execute an array of queries in one request?
+        batch = '[{"query":"query{__typename}"},{"query":"query{__typename}"}]'
+        br = _fetch(ip, port, "/" + gp, method="POST", body=batch, auth=auth)
+        if br and br[0] == 200 and br[2].count('"__typename"') >= 2:
+            findings.append(_mk(ip, port, "web-graphql-batch", "medium",
+                "GraphQL query batching enabled", ["CWE-799"],
+                f"POST {base_gql} with a 2-query array returned 2 results in one request - "
+                "batching amplifies credential brute-force and rate-limit bypass (one HTTP "
+                "request = N login/OTP attempts).",
+                "Cap or disable array/aliased query batching; rate-limit per operation."))
+        break
     # High-signal exposure paths.
     seen_sid: set[str] = set()
     looted_creds: list = []
