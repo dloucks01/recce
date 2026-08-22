@@ -2026,8 +2026,11 @@ _UNAUTH_SWEEP = [
     ("elasticsearch", "cmd_elasticsearch"), ("rsync", "cmd_rsync"),
     ("nfs", "cmd_nfs"), ("kerberos", "cmd_kerberos"), ("docker", "cmd_docker"),
     ("kubernetes", "cmd_kubernetes"), ("mssql", "cmd_mssql"),
-    ("mysql", "cmd_mysql"), ("postgres", "cmd_postgres"), ("smtp", "cmd_smtp"),
-    ("dns", "cmd_dns"),
+    ("mysql", "cmd_mysql"), ("postgres", "cmd_postgres"),
+    ("memcached", "cmd_memcached"), ("couchdb", "cmd_couchdb"),
+    ("influxdb", "cmd_influxdb"), ("cassandra", "cmd_cassandra"),
+    ("oracle", "cmd_oracle"), ("db2", "cmd_db2"),
+    ("smtp", "cmd_smtp"), ("dns", "cmd_dns"),
 ]
 # The authenticated pass: the modules that DO something new once you have creds -
 # the netexec/impacket phase plus the authenticated facets of the deep modules. The
@@ -4961,6 +4964,121 @@ def cmd_elasticsearch(args: argparse.Namespace) -> int:
         fmt=_fmt_elasticsearch)
 
 
+def _fmt_memcached(t, active) -> str:
+    state = "UNAUTH (data readable)" if t.get("unauth") else (
+        "probed" if t.get("version") else "reachable")
+    items = f"  {t.get('items')} items" if t.get("items") else ""
+    return f"{t['ip']}:{t['port']}  {t.get('version') or 'memcached'}  {state}{items}"
+
+
+def cmd_memcached(args: argparse.Namespace) -> int:
+    """Deep memcached enumeration: speak the text protocol (stdlib), read the version +
+    stats, and sample live keys - an instance that answers `stats` with no credential is
+    a CONFIRMED unauthenticated data exposure (+ UDP amplification vector). Read-only."""
+    return _run_service_scan(
+        args, module="memcached", source="memcached", label="memcached",
+        noun="memcached endpoint(s)",
+        no_targets="[!] No memcached endpoints in the datastore (no port 11211). Run "
+                   "`enum` against the cache hosts first.",
+        fmt=_fmt_memcached)
+
+
+def _fmt_couchdb(t, active) -> str:
+    if t.get("admin_party"):
+        state = "ADMIN PARTY (no auth = RCE)"
+    elif t.get("unauth"):
+        state = "UNAUTH (dbs readable)"
+    else:
+        state = "probed" if t.get("version") else "reachable"
+    return f"{t['ip']}:{t['port']}  couchdb {t.get('version') or '?'}  {state}"
+
+
+def cmd_couchdb(args: argparse.Namespace) -> int:
+    """Deep Apache CouchDB enumeration: GET the HTTP API (stdlib), read /_all_dbs and the
+    admin-only config with no credential - a readable admin config means 'admin party'
+    (anyone is admin -> RCE), a CONFIRMED critical exposure. Read-only (GETs only)."""
+    return _run_service_scan(
+        args, module="couchdb", source="couchdb", label="CouchDB",
+        noun="CouchDB endpoint(s)",
+        no_targets="[!] No CouchDB endpoints in the datastore (no port 5984/6984). Run "
+                   "`enum` against the database hosts first.",
+        fmt=_fmt_couchdb)
+
+
+def _fmt_influxdb(t, active) -> str:
+    state = "UNAUTH query API" if t.get("unauth") else (
+        "probed" if t.get("version") else "reachable")
+    return f"{t['ip']}:{t['port']}  influxdb {t.get('version') or '?'}  {state}"
+
+
+def cmd_influxdb(args: argparse.Namespace) -> int:
+    """Deep InfluxDB enumeration: GET /ping for the version and run SHOW DATABASES with
+    no credential (stdlib) - a 200 means auth is disabled (default), a CONFIRMED unauth
+    exposure; <1.7.6 also flags the JWT auth bypass (CVE-2019-20933). Read-only."""
+    return _run_service_scan(
+        args, module="influxdb", source="influxdb", label="InfluxDB",
+        noun="InfluxDB endpoint(s)",
+        no_targets="[!] No InfluxDB endpoints in the datastore (no port 8086). Run "
+                   "`enum` against the metrics/TSDB hosts first.",
+        fmt=_fmt_influxdb)
+
+
+def _fmt_cassandra(t, active) -> str:
+    state = "NO AUTH (AllowAll)" if t.get("unauth") else (
+        "probed" if t.get("version") else "reachable")
+    cl = f"  cluster '{t.get('cluster')}'" if t.get("cluster") else ""
+    return f"{t['ip']}:{t['port']}  cassandra {t.get('version') or '?'}  {state}{cl}"
+
+
+def cmd_cassandra(args: argparse.Namespace) -> int:
+    """Deep Apache Cassandra enumeration: speak the CQL native protocol (stdlib) - a
+    READY response to STARTUP means the node accepts CQL with no credential (default
+    AllowAllAuthenticator), a CONFIRMED exposure (and UDF RCE surface). Read-only."""
+    return _run_service_scan(
+        args, module="cassandra", source="cassandra", label="Cassandra",
+        noun="Cassandra endpoint(s)",
+        no_targets="[!] No Cassandra endpoints in the datastore (no port 9042). Run "
+                   "`enum` against the NoSQL hosts first.",
+        fmt=_fmt_cassandra)
+
+
+def _fmt_oracle(t, active) -> str:
+    state = "TNS listener" if t.get("is_oracle") else (
+        "probed" if t.get("version") else "reachable")
+    ver = f"  {t.get('version')}" if t.get("version") else ""
+    return f"{t['ip']}:{t['port']}  oracle{ver}  {state}"
+
+
+def cmd_oracle(args: argparse.Namespace) -> int:
+    """Deep Oracle TNS-listener enumeration: speak the TNS wire format (stdlib) to
+    CONFIRM an exposed listener and best-effort leak its version - a foothold surface
+    for SID brute, TNS Poison (CVE-2012-1675) and default creds. Read-only."""
+    return _run_service_scan(
+        args, module="oracle", source="oracle", label="Oracle",
+        noun="Oracle TNS endpoint(s)",
+        no_targets="[!] No Oracle endpoints in the datastore (no port 1521/1522). Run "
+                   "`enum` against the database hosts first.",
+        fmt=_fmt_oracle)
+
+
+def _fmt_db2(t, active) -> str:
+    state = "DRDA endpoint" if t.get("is_db2") else (
+        "probed" if t.get("version") else "reachable")
+    ver = f"  {t.get('version')}" if t.get("version") else ""
+    return f"{t['ip']}:{t['port']}  db2{ver}  {state}"
+
+
+def cmd_db2(args: argparse.Namespace) -> int:
+    """Deep IBM Db2 enumeration: speak DRDA/DDM (stdlib) - exchange server attributes to
+    CONFIRM a Db2 endpoint and read its class name + release level, a version-disclosure
+    and credential-brute surface. Read-only (never authenticates)."""
+    return _run_service_scan(
+        args, module="db2", source="db2", label="Db2", noun="Db2 (DRDA) endpoint(s)",
+        no_targets="[!] No Db2 endpoints in the datastore (no port 50000). Run `enum` "
+                   "against the database hosts first.",
+        fmt=_fmt_db2)
+
+
 def cmd_rsync(args: argparse.Namespace) -> int:
     """Deep rsync-daemon enumeration: speak the rsync daemon protocol (stdlib), list
     the modules, and test each for anonymous access - an @RSYNCD: OK module is a
@@ -6744,6 +6862,84 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_io(ep)
     _add_budget(ep)
     ep.set_defaults(func=cmd_elasticsearch)
+
+    # memcached enumeration.
+    mcp = sub.add_parser("memcached", aliases=["memcache"],
+                         help="memcached: text-protocol probe (11211) -> CONFIRM `stats` "
+                              "without auth = unauthenticated data exposure + amplification")
+    mcp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                          "memcached hosts in the datastore)")
+    mcp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    _add_io(mcp)
+    _add_budget(mcp)
+    mcp.set_defaults(func=cmd_memcached)
+
+    # CouchDB enumeration.
+    cdp = sub.add_parser("couchdb", aliases=["couch"],
+                         help="CouchDB: HTTP probe (5984/6984) -> CONFIRM /_all_dbs + "
+                              "admin-party config without auth = critical exposure (RCE)")
+    cdp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                          "CouchDB hosts in the datastore)")
+    cdp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    _add_io(cdp)
+    _add_budget(cdp)
+    cdp.set_defaults(func=cmd_couchdb)
+
+    # InfluxDB enumeration.
+    idp = sub.add_parser("influxdb", aliases=["influx"],
+                         help="InfluxDB: /ping version + SHOW DATABASES (8086) -> CONFIRM "
+                              "unauth query API (default) + <1.7.6 JWT bypass")
+    idp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                          "InfluxDB hosts in the datastore)")
+    idp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    _add_io(idp)
+    _add_budget(idp)
+    idp.set_defaults(func=cmd_influxdb)
+
+    # Cassandra enumeration.
+    cap = sub.add_parser("cassandra", aliases=["cql", "scylla"],
+                         help="Cassandra: CQL native-protocol probe (9042) -> CONFIRM "
+                              "STARTUP READY without auth = no-auth exposure (UDF RCE)")
+    cap.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                          "Cassandra hosts in the datastore)")
+    cap.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    _add_io(cap)
+    _add_budget(cap)
+    cap.set_defaults(func=cmd_cassandra)
+
+    # Oracle TNS enumeration.
+    orp = sub.add_parser("oracle", aliases=["tns"],
+                         help="Oracle: TNS-listener probe (1521/1522) -> CONFIRM the "
+                              "listener + leak version (SID brute / TNS Poison surface)")
+    orp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                          "Oracle hosts in the datastore)")
+    orp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    _add_io(orp)
+    _add_budget(orp)
+    orp.set_defaults(func=cmd_oracle)
+
+    # IBM Db2 (DRDA) enumeration.
+    dbp = sub.add_parser("db2", aliases=["drda"],
+                         help="Db2: DRDA/DDM EXCSAT probe (50000) -> CONFIRM the endpoint "
+                              "+ read class name / release level (version disclosure)")
+    dbp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                          "Db2 hosts in the datastore)")
+    dbp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    _add_io(dbp)
+    _add_budget(dbp)
+    dbp.set_defaults(func=cmd_db2)
 
     # rsync-daemon enumeration.
     syp = sub.add_parser("rsync",

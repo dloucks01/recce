@@ -256,6 +256,14 @@ SIGNATURES: list[dict] = [
      "cves": [], "cwe": ["CWE-1104"],
      "remediation": "Upgrade to a supported PostgreSQL major version.",
      "desc": "Unsupported PostgreSQL exposed on the network."},
+    {"product": ["postgresql"], "severity": "high", "advisory": True,
+     "title": "PostgreSQL reachable - superuser COPY ... FROM PROGRAM = RCE",
+     "cves": [], "cwe": ["CWE-78"],
+     "remediation": "Never expose 5432; require scram-sha-256 (not trust); avoid "
+                    "superuser app accounts; restrict pg_execute_server_program.",
+     "desc": "Any superuser (or pg_execute_server_program member) can run "
+             "`COPY t FROM PROGRAM 'cmd'` for OS command execution. Combined with "
+             "trust auth or weak creds this is a direct foothold."},
     {"product": ["mongodb"], "lt": "3.6.0", "severity": "high",
      "title": "Legacy MongoDB (< 3.6) - default no-auth exposure",
      "cves": [], "cwe": ["CWE-306"],
@@ -280,6 +288,75 @@ SIGNATURES: list[dict] = [
      "remediation": "Bind memcached to localhost, disable UDP, firewall 11211.",
      "desc": "Network-exposed memcached leaks cached data and is a massive UDP "
              "reflection/amplification vector."},
+    {"product": ["memcached"], "lt": "1.4.32", "ge": "1.4.0", "severity": "high",
+     "title": "Memcached < 1.4.32 - SASL/binary-protocol integer overflow RCE",
+     "cves": ["CVE-2016-8704", "CVE-2016-8705", "CVE-2016-8706"], "cwe": ["CWE-190"],
+     "remediation": "Upgrade memcached to 1.4.33+; disable UDP; never expose 11211.",
+     "desc": "Integer overflows in the binary protocol (incl. process_bin_sasl_auth) "
+             "give heap corruption -> remote code execution on pre-1.4.32 builds."},
+    # --- Redis / Elasticsearch RCE enrichers -----------------------------------
+    {"product": ["redis"], "severity": "critical", "advisory": True,
+     "title": "Redis reachable - Lua sandbox escape / module-load / replication RCE",
+     "cves": [], "cwe": ["CWE-306", "CWE-94"],
+     "remediation": "Require a strong password/ACL, enable protected-mode, patch the "
+                    "Debian/Ubuntu Lua packaging (CVE-2022-0543), bind to localhost.",
+     "desc": "An unauthenticated Redis gives several RCE primitives: EVAL Lua "
+             "sandbox escape (CVE-2022-0543 on Debian/Ubuntu), MODULE LOAD of a "
+             "malicious .so, the SLAVEOF/replication payload, and CONFIG-rewrite "
+             "file-write (SSH keys / cron / webshell)."},
+    # (Elasticsearch Groovy/MVEL RCE is covered version-gated by the "< 6.0" signature
+    #  above; a product-only advisory carrying those CVEs would false-positive on
+    #  patched clusters, so it is intentionally omitted here.)
+    # --- CouchDB ---------------------------------------------------------------
+    {"product": ["couchdb"], "lt": "2.1.1", "severity": "critical",
+     "title": "Apache CouchDB < 2.1.1 - unauth privilege escalation -> RCE",
+     "cves": ["CVE-2017-12635", "CVE-2017-12636"], "cwe": ["CWE-269", "CWE-94"],
+     "remediation": "Upgrade CouchDB to 2.1.1 / 1.7.0+; require admin auth; firewall 5984.",
+     "desc": "A JSON-parser role-duplication bug (CVE-2017-12635) lets an anonymous "
+             "user create an admin, then the config/query-server RCE (CVE-2017-12636) "
+             "runs arbitrary commands - an unauthenticated RCE chain."},
+    # (admin-party / Erlang-cookie CVE-2022-24706 advisory lives in the middleware block)
+    # --- InfluxDB --------------------------------------------------------------
+    {"product": ["influxdb"], "lt": "1.7.6", "severity": "high",
+     "title": "InfluxDB < 1.7.6 - JWT auth bypass (empty shared secret)",
+     "cves": ["CVE-2019-20933"], "cwe": ["CWE-287"],
+     "remediation": "Upgrade InfluxDB to 1.7.6+; set a non-empty shared secret; "
+                    "require auth; firewall 8086.",
+     "desc": "The HTTP API accepts a JWT signed with an empty shared secret, so an "
+             "attacker forges an 'admin' token and runs any query (SHOW DATABASES, "
+             "read/write series) without credentials."},
+    {"product": ["influxdb"], "severity": "medium", "advisory": True,
+     "title": "InfluxDB reachable - check for unauthenticated query API",
+     "cves": [], "cwe": ["CWE-306"],
+     "remediation": "Enable auth (auth-enabled=true), require credentials, firewall 8086.",
+     "desc": "InfluxDB ships with authentication DISABLED by default; an exposed 8086 "
+             "often answers /query and /debug/vars with no credential."},
+    # --- Cassandra -------------------------------------------------------------
+    {"product": ["cassandra"], "severity": "high", "advisory": True,
+     "title": "Apache Cassandra reachable - default AllowAllAuthenticator / UDF RCE",
+     "cves": ["CVE-2021-44521"], "cwe": ["CWE-306", "CWE-94"],
+     "remediation": "Set authenticator: PasswordAuthenticator, firewall 9042/7000/7199 "
+                    "(CQL/gossip/JMX), keep enable_user_defined_functions_threads=true.",
+     "desc": "Cassandra defaults to AllowAllAuthenticator (no auth on CQL 9042). With "
+             "UDFs enabled a Nashorn sandbox escape (CVE-2021-44521) gives RCE; the JMX "
+             "port (7199) is a further RCE vector."},
+    # --- Oracle ----------------------------------------------------------------
+    {"product": ["oracle", "oracle tns", "oracle-tns"], "severity": "high",
+     "advisory": True,
+     "title": "Oracle TNS listener reachable - TNS poisoning / SID brute / default creds",
+     "cves": ["CVE-2012-1675"], "cwe": ["CWE-306", "CWE-1188"],
+     "remediation": "Set a listener password / valid-node-checking, patch for the TNS "
+                    "poison fix (CVE-2012-1675), remove default accounts, firewall 1521.",
+     "desc": "An exposed TNS listener leaks the version, allows SID enumeration/brute, "
+             "the TNS Poison MITM registration attack (CVE-2012-1675), and often still "
+             "carries default accounts (scott/tiger, system/manager, dbsnmp)."},
+    # --- IBM Db2 ---------------------------------------------------------------
+    {"product": ["db2", "ibm db2", "drda"], "severity": "medium", "advisory": True,
+     "title": "IBM Db2 (DRDA) reachable - version disclosure / credential brute",
+     "cves": [], "cwe": ["CWE-306"],
+     "remediation": "Firewall 50000/523, require strong auth, keep Db2 patched.",
+     "desc": "An exposed Db2/DRDA endpoint discloses the server version and platform "
+             "and is subject to database-name enumeration and credential brute-forcing."},
     # --- Web apps / middleware -------------------------------------------------
     {"product": ["jenkins"], "lt": "2.319", "severity": "high",
      "title": "Outdated Jenkins - multiple RCE / auth bypass",
@@ -634,7 +711,7 @@ SIGNATURES: list[dict] = [
              "default nagiosadmin credentials."},
     {"product": ["couchdb"], "severity": "critical", "advisory": True,
      "title": "Apache CouchDB exposed - admin bypass / Erlang cookie RCE",
-     "cves": ["CVE-2022-24706", "CVE-2017-12635"], "cwe": ["CWE-306", "CWE-94"],
+     "cves": ["CVE-2022-24706"], "cwe": ["CWE-306", "CWE-94"],
      "remediation": "Upgrade CouchDB (3.2.2+); set a strong Erlang cookie; require auth; "
                     "firewall 5984/4369.",
      "desc": "CouchDB had 'admin party' privilege escalation and an Erlang-distribution "
