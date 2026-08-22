@@ -1307,3 +1307,94 @@ class DbPocRecipes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PostgresLateralPivot(unittest.TestCase):
+    """dblink / postgres_fdw + foreign servers = lateral pivot + harvested fdw creds."""
+
+    def _dispatch(self, sql):
+        s = sql.lower()
+        if "pg_database" in s:
+            return [["app_prod"]]
+        if "pg_shadow" in s:
+            return [["postgres", "x", "t"]]
+        if "current_user" in s:
+            return [["postgres", "on", "PostgreSQL 16.2"]]
+        if "pg_has_role" in s:
+            return [["f", "f", "f"]]
+        if "pg_available_extensions" in s:
+            return [["dblink"], ["postgres_fdw"]]
+        if "pg_extension" in s and "dblink" in s:
+            return [["dblink"]]                              # installed
+        if "pg_extension" in s:                              # PL-language check
+            return []
+        if "pg_foreign_server" in s:
+            return [["remote_db", "host=10.0.0.50 dbname=prod port=5432",
+                     "user=svc_fdw password=fdwpass123"]]
+        return []
+
+    def test_pivot_finding_and_fdw_cred(self):
+        from recce import postgres
+        port = _pg_trust_server(self._dispatch)
+        h = _host(port, "postgresql")
+        analysis = postgres.analyze([h])
+        kinds = {f["kind"] for f in analysis["findings"]}
+        self.assertIn("pg_pivot", kinds)
+        piv = [f for f in analysis["findings"] if f["kind"] == "pg_pivot"][0]
+        self.assertIn("10.0.0.50", piv["detail"])           # internal DB host surfaced
+        # foreign-server user-mapping credential harvested for the spray chain
+        self.assertTrue(any(c.secret == "fdwpass123" and c.source == "postgres-fdw-loot"
+                            for c in analysis["credentials"]))
+
+
+class MongoReplicaAutoProbe(unittest.TestCase):
+    """A replica-set member advertised by the primary is auto-probed as a new target."""
+
+    def _mongo_server(self, member=None):
+        from recce import mongodb as M
+
+        def e_double(n, v):
+            return b"\x01" + M._cstr(n) + struct.pack("<d", v)
+
+        def e_doc(n, d):
+            return b"\x03" + M._cstr(n) + d
+
+        def e_array(n, docs):
+            return b"\x04" + M._cstr(n) + M.bson_doc(*[e_doc(str(i), d)
+                                                       for i, d in enumerate(docs)])
+
+        hello = M.bson_doc(M._e_int32("maxWireVersion", 17), e_double("ok", 1.0))
+        build = M.bson_doc(M._e_str("version", "6.0.1"), e_double("ok", 1.0))
+        listdbs = M.bson_doc(e_array("databases", [M.bson_doc(M._e_str("name", "prod"),
+                             e_double("sizeOnDisk", 9.0))]), e_double("ok", 1.0))
+        replies = {"hello": hello, "buildInfo": build, "listDatabases": listdbs}
+        if member:
+            replies["replSetGetStatus"] = M.bson_doc(
+                M._e_str("set", "rs0"),
+                e_array("members", [M.bson_doc(M._e_str("name", member))]),
+                e_double("ok", 1.0))
+
+        def handle(conn):
+            while True:
+                hdr = M._recvn(conn, 16)
+                if len(hdr) < 16:
+                    return
+                length = struct.unpack("<i", hdr[:4])[0]
+                rid = struct.unpack("<i", hdr[4:8])[0]
+                body = M._recvn(conn, length - 16)
+                doc, _ = M.bson_parse(hdr + body, 16 + 4 + 1)
+                cmd = next(iter(doc), "")
+                conn.sendall(M.op_msg(rid, replies.get(cmd) or M.bson_doc(
+                    M._e_str("errmsg", "no"), e_double("ok", 0.0))))
+        return _tcp_once(handle)
+
+    def test_replica_member_auto_probed(self):
+        from recce import mongodb as M
+        member_port = self._mongo_server()                     # the second node
+        primary_port = self._mongo_server(member=f"127.0.0.1:{member_port}")
+        h = _host(primary_port, "mongodb")
+        analysis = M.analyze([h])
+        member_findings = [f for f in analysis["findings"]
+                           if f["kind"] == "mongo_replica_member"]
+        self.assertTrue(member_findings, "replica member not auto-probed")
+        self.assertIn(f"127.0.0.1:{member_port}", member_findings[0]["title"])

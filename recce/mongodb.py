@@ -642,6 +642,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     probes: dict = {}
     state: dict = {}
     looted: list = []
+    discovered: list = []                     # (host:port, user, pw) replica members
     if active:
         for t, pr in svcprobe.iter_probe(
                 targets, lambda t: probe(t["ip"], t["port"]),
@@ -663,6 +664,8 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             t["cred_access"] = pr.get("cred_access", False)
             t["version"] = pr.get("version", "")
             t["databases"] = len(pr.get("databases") or [])
+            for m in (pr.get("replset_members") or []):
+                discovered.append((m, acc_user, acc_pw))
             # Exfil: mine collections for sensitive fields + embedded creds.
             if pr.get("unauth") or pr.get("cred_access"):
                 dbnames = [d["name"] for d in pr.get("databases", []) if d.get("name")]
@@ -680,6 +683,10 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                     notes=f"MongoDB SCRAM {hh['mechanism']} (hashcat "
                           f"{'24200' if '256' in hh['mechanism'] else '24100'}) :{t['port']}"))
     fs = findings(hosts, probes)
+    # Lateral: auto-probe the replica-set members (additional MongoDB hosts the set
+    # advertised) that aren't already in scope - they usually share the exposure/creds.
+    if active and discovered:
+        fs.extend(_probe_members(discovered, targets, creds))
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
                 for t in targets]
@@ -688,3 +695,51 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
             "stats": {"targets": len(targets), "findings": len(fs),
                       "credentials": len(looted), "stopped": state.get("stopped")}}
+
+
+def _probe_members(discovered: list, targets: list, creds, max_members: int = 8) -> list:
+    """Probe replica-set members not already in scope. Returns finding dicts for each
+    that is reachable AND accessible (unauth or the same working credential)."""
+    from .postgres import _cred_list
+    known = {(t["ip"], t["port"]) for t in targets}
+    seen: set = set()
+    out: list = []
+    for member, mu, mpw in discovered:
+        if len(seen) >= max_members:
+            break
+        host, _sep, mp = member.rpartition(":")
+        if not host:
+            host, mp = member, str(_DEFAULT_PORT)
+        portn = int(mp) if mp.isdigit() else _DEFAULT_PORT
+        key = (host, portn)
+        if key in known or key in seen:
+            continue
+        seen.add(key)
+        pr = probe(host, portn)
+        used = None
+        if isinstance(pr, dict) and not pr.get("unauth"):
+            for u, pw in ([(mu, mpw)] if mu else []) + _cred_list(creds):
+                if not u:
+                    continue
+                cp = probe_creds(host, portn, u, pw)
+                if cp.get("cred_access"):
+                    pr, used = cp, u
+                    break
+        if not isinstance(pr, dict) or not (pr.get("unauth") or pr.get("cred_access")):
+            continue
+        access = ("no authentication" if pr.get("unauth")
+                  else f"the harvested credential '{used}'")
+        dbs = pr.get("databases") or []
+        out.append(_finding(
+            "high", f"MongoDB replica-set member exposed ({host}:{portn})",
+            f"{host}:{portn}",
+            f"The replica set advertised member {host}:{portn}; recce reached it with "
+            f"{access}" + (f" (version {pr.get('version')})" if pr.get("version") else "")
+            + f" and read {len(dbs)} database(s). Lateral movement: the same exposure / "
+            "credential covers every node in the set.",
+            "mongosh", f"mongosh mongodb://{host}:{portn}/ --eval "
+            "'db.adminCommand({listDatabases:1})'   # then run `recce enum` on this host",
+            "Secure every replica-set member identically; bind to a trusted interface; "
+            "require SCRAM auth.",
+            ["CWE-306", "CWE-284"], kind="mongo_replica_member"))
+    return out
