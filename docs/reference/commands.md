@@ -71,18 +71,22 @@ scripts during the scan. Run `recce <command> -h` for the full list.
 
 ### What the web workbench (`recce serve`) exposes
 
-The browser workbench is a **curated subset** of the CLI, not a full mirror. From the
-UI you can run the scan phases **`run` · `scan` · `enum` · `vulns` · `sweep`** (and
-`sweep` covers all the credential-free deep modules — web, api, and every database
-engine incl. the new ones), plus **Act** (auto-loot the cheap wire-protocol
-credentials), **credential spray**, **import** (nmap/loot), manual finding/credential/
-host entry, the collaboration layer (assignments, labels, chat, activity), and every
-report export. The **credentialed and active-flag** paths — `credsweep`, the DB
-`-u/-p` follow-through and `--prove`, `web --autologin`/`--crawl`, `api`, and
-`exploitplan`/`poc`/`prove`/`attackpath`/`credenum`/`deploy` — are **CLI-only** by
-design (they take credentials or perform active actions that belong on the operator's
-command line). Run those from the CLI on the same engagement folder; their results
-appear in the workbench live.
+**Everything.** The workbench's **command runner** (the ▶ Scan button) offers the full
+recce command surface — grouped **Scan · Databases · Web · Services · Credentialed ·
+Exploitation · Reporting** — served live from `GET /api/commands`. Pick any command and
+the runner reveals exactly the fields it accepts: targets, `--profile`, **credential
+fields** (`-u/-p/-d`), an **LHOST** field, and per-command **flag checkboxes** (with
+active/intrusive flags — `--prove`, `--autologin`, `--aggressive` — clearly marked). So
+the credentialed DB follow-through, `postgres --prove`, `web --autologin/--crawl`,
+`api`, `credsweep`, and `exploitplan`/`poc`/`prove`/`attackpath`/`credenum`/`deploy` all
+run from the browser. The server builds a **safe argv** (no shell; every value a
+separate token; the command and flags are validated against the catalog; credentials
+are only passed to commands that accept them).
+
+Alongside the runner: **Act** (auto-loot the cheap wire-protocol credentials),
+**credential spray**, **import** (nmap/loot), manual finding/credential/host entry, the
+collaboration layer (assignments, labels, chat, activity), and every report export. All
+CLI runs against the same engagement folder also appear in the workbench live.
 
 **Environment:** `RECCE_DEBUG=1` (full tracebacks), `RECCE_BROWSER=/path`
 (screenshot browser). **Exit codes:** `0` ok · `1` error · `2` bad args · `130`
