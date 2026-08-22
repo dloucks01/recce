@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 from recce import web
-from recce.models import Port
+from recce.models import Port, Vuln
 
 
 # ------------------------------- pure extractor ----------------------------------
@@ -767,3 +767,54 @@ class CorsGraphqlDeep(unittest.TestCase):
         for f in fs:
             if f.script_id in ("web-cors", "web-graphql", "web-graphql-batch"):
                 self.assertIsNotNone(proofs.recipe_for(f), f.title)
+
+
+# --------------------- Insecure deserialization markers --------------------------
+
+class DeserialMarkers(unittest.TestCase):
+    """Java / PHP / .NET-ViewState serialized-object markers in cookies & fields."""
+
+    def _p(self):
+        return Port(portid=8080, service="http", state="open")
+
+    def test_java_in_cookie(self):
+        h = {"set-cookie": "session=rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA; Path=/"}
+        fs = web._scan_deserial("127.0.0.1", self._p(), h, "")
+        self.assertTrue(any(f.script_id == "web-deserial" and "Java" in f.title for f in fs))
+        self.assertEqual(fs[0].severity, "high")
+
+    def test_php_object_in_cookie(self):
+        h = {"set-cookie": 'data=O:4:"User":1:{s:4:"name";s:3:"bob";}; Path=/'}
+        fs = web._scan_deserial("127.0.0.1", self._p(), h, "")
+        self.assertTrue(any("PHP serialized object" in f.title for f in fs))
+
+    def test_unencrypted_viewstate(self):
+        import base64 as _b
+        vs = _b.b64encode(b"\xff\x01\x0f\x0fpayloaddata").decode()
+        body = f'<form><input type="hidden" name="__VIEWSTATE" value="{vs}" /></form>'
+        fs = web._scan_deserial("127.0.0.1", self._p(), {}, body)
+        self.assertTrue(any("ViewState is not encrypted" in f.title for f in fs))
+        self.assertEqual(fs[0].severity, "medium")
+
+    def test_encrypted_viewstate_not_flagged(self):
+        import base64 as _b
+        vs = _b.b64encode(b"\x00\x01encryptedopaqueblob").decode()   # no FF 01 marker
+        body = f'<input name="__VIEWSTATE" value="{vs}" />'
+        fs = web._scan_deserial("127.0.0.1", self._p(), {}, body)
+        self.assertEqual(fs, [])
+
+    def test_clean_no_markers(self):
+        h = {"set-cookie": "sessionid=abc123def456; HttpOnly"}
+        fs = web._scan_deserial("127.0.0.1", self._p(), h, "<html>ok</html>")
+        self.assertEqual(fs, [])
+
+    def test_every_marker_has_prove_recipe(self):
+        from recce import proofs
+        for title in ("Java serialized object in client-controllable data",
+                      "PHP serialized object in client-controllable data",
+                      "ASP.NET ViewState is not encrypted"):
+            v = Vuln(ip="1.1.1.1", port=8080, protocol="tcp", script_id="web-deserial",
+                     title=title, output="")
+            r = proofs.recipe_for(v)
+            self.assertIsNotNone(r, title)
+            self.assertEqual(r["id"], "web-deserial")

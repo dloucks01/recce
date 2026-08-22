@@ -1488,6 +1488,53 @@ def _scan_jwts(ip: str, port: Port, headers: dict, body: str,
 
 
 # --- SSTI / reflected-input quick check -----------------------------------------
+# Serialized-object signatures that show up in client-controllable data (cookies /
+# hidden form fields). Each is an insecure-deserialization attack surface (ysoserial /
+# PHP object injection / ViewState) - the marker alone is unambiguous.
+_PHP_SER = re.compile(r'O:\d{1,3}:"[\w\\]{1,64}":\d+:\{')
+_VIEWSTATE = re.compile(r'name="__VIEWSTATE"[^>]*\svalue="([^"]+)"', re.I)
+
+
+def _scan_deserial(ip: str, port: Port, headers: dict, body: str) -> list[Vuln]:
+    """Flag serialized-object markers in cookies / hidden fields: a Java serialized
+    stream, a PHP serialized object, or an unencrypted ASP.NET ViewState - each is a
+    deserialization sink reachable with attacker-controlled input."""
+    out: list[Vuln] = []
+    cookies = headers.get("set-cookie", "")
+    hay = cookies + "\n" + (body or "")
+    # Java: base64 of the stream magic AC ED 00 05 ("rO0AB..."), or the raw magic itself.
+    if "rO0AB" in hay or "\xac\xed\x00\x05" in hay:
+        where = "Set-Cookie" if ("rO0AB" in cookies or "\xac\xed\x00\x05" in cookies) else "response body"
+        out.append(_mk(ip, port, "web-deserial", "high",
+            "Java serialized object in client-controllable data", ["CWE-502"],
+            f"A Java serialized stream (magic AC ED 00 05 / 'rO0AB' base64) appears in the "
+            f"{where}. If the server deserializes it, a ysoserial gadget chain yields RCE.",
+            "Never deserialize untrusted input; use a look-ahead ObjectInputStream allow-list "
+            "or a data-only format (JSON)."))
+    m = _PHP_SER.search(cookies) or _PHP_SER.search(body or "")
+    if m:
+        where = "Set-Cookie" if _PHP_SER.search(cookies) else "response body"
+        out.append(_mk(ip, port, "web-deserial", "high",
+            "PHP serialized object in client-controllable data", ["CWE-502"],
+            f"A PHP serialized object ({m.group(0)[:48]}...) appears in the {where}. If it is "
+            "unserialize()d, a POP gadget chain (PHPGGC) can inject objects / reach RCE.",
+            "Do not unserialize() attacker input; use json_decode, or restrict allowed_classes."))
+    vs = _VIEWSTATE.search(body or "")
+    if vs:
+        try:
+            raw = base64.b64decode(vs.group(1) + "===")
+        except Exception:
+            raw = b""
+        if raw[:2] == b"\xff\x01":            # LOSFormatter marker => not encrypted
+            out.append(_mk(ip, port, "web-deserial", "medium",
+                "ASP.NET ViewState is not encrypted", ["CWE-502"],
+                "__VIEWSTATE decodes to the unencrypted LOSFormatter marker (FF 01). If MAC "
+                "is also disabled (EnableViewStateMac=false) or the machineKey leaks, ViewState "
+                "is a .NET deserialization RCE sink (ysoserial.net ViewState).",
+                "Keep EnableViewStateMac on, encrypt ViewState, and protect the machineKey."))
+    return out
+
+
 def _scan_reflection(ip: str, port: Port, base: str, auth) -> list[Vuln]:
     # One request. {{7*7}} / ${7*7} / <%=7*7%> evaluating to 49 near our canary is a
     # strong, low-false-positive SSTI signal; an unencoded <i> reflection is an
@@ -2445,6 +2492,7 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     # actively we forge an alg:none token and replay it to prove acceptance.
     if root:
         findings.extend(_scan_jwts(ip, port, headers, body, active=active))
+        findings.extend(_scan_deserial(ip, port, headers, body))
     # The active HTTP checks only make sense if the port actually spoke HTTP -
     # skip them for a TLS-only non-HTTP port (LDAPS/IMAPS) so we don't waste a
     # dozen dead requests there (its TLS findings above still count).

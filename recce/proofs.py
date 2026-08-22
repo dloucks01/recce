@@ -713,6 +713,25 @@ def _v_csp(host, port, vuln):
         "Not applicable - a policy header, verified by reading it."]
 
 
+def _v_deserial(host, port, vuln):
+    b = _blob(vuln)
+    if "viewstate" in b:
+        fam, tool = ".NET ViewState (LOSFormatter)", "ysoserial.net (ViewState plugin)"
+    elif "php serialized" in b or "unserialize" in b:
+        fam, tool = "PHP object injection", "PHPGGC to build a POP-chain payload"
+    else:
+        fam, tool = "Java deserialization", "ysoserial to build a gadget-chain payload"
+    return LIKELY, [
+        f"recce found a serialized-object marker ({fam}) in client-controllable data - a "
+        "deserialization sink is reachable with attacker input. The marker is directly "
+        "observed; reaching code execution needs a gadget/POP chain on the server's "
+        "classpath.",
+        f"Prove: replay the request with a {tool} payload and confirm the effect "
+        "(sleep/callback/file write) in ROE; a matching side effect = confirmed RCE.",
+        "FP: the app may re-serialize its own state and never deserialize your copy - "
+        "verify the value round-trips (tamper it and watch for a deserialization error)."]
+
+
 def _v_xxe(host, port, vuln):
     # recce POSTed an external-entity XML body and the referenced file's content came
     # back - the parser resolved the entity, directly observed -> CONFIRMED.
@@ -1408,6 +1427,17 @@ _RECIPES: list[dict] = [
                "OOB-exfiltrate non-text files (within ROE).",
      "fp": "None - the returned file content proves entity resolution.",
      "fn": _v_xxe},
+    {"id": "web-deserial",
+     "match": r"serialized object in client-controllable|viewstate is not encrypted|"
+              r"deserializ",
+     "name": "Insecure deserialization surface (Java / PHP / .NET ViewState)",
+     "pre": ["A serialized-object marker appears in cookie/hidden-field input",
+             "The server deserializes client-supplied data"],
+     "finish": "Replay with a ysoserial / PHPGGC / ysoserial.net payload and confirm a "
+               "benign side effect (sleep/callback/file) in ROE = RCE.",
+     "fp": "The app may re-serialize its own state and never deserialize your copy - "
+           "tamper the value and watch for a deserialization error to confirm the sink.",
+     "fn": _v_deserial},
     {"id": "web-nosqli",
      "match": r"nosql injection authentication bypass",
      "name": "NoSQL injection authentication bypass",
