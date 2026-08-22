@@ -1214,7 +1214,8 @@ _RECIPES: list[dict] = [
                                     r"web\.config readable|directory listing enabled|swagger|"
                                     r"\.ds_store|crossdomain|prometheus /metrics|\.htpasswd|"
                                     r"graphql introspection|cors reflects|user enumeration via rest|"
-                                    r"secret in client-side js|wordpress .*(present|detected)|xml-rpc",
+                                    r"secret in client-side js|wordpress .*(present|detected)|xml-rpc|"
+                                    r"source map|\.git reconstructed|source tree",
      "name": "Web exposure (VCS / config / status endpoint)",
      "pre": ["The resource is reachable and returns the sensitive content"],
      "finish": "curl -sk <url>/<path> to re-read it; for a .git repo: git-dumper <url>/.git ./loot "

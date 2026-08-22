@@ -936,6 +936,94 @@ def _scan_js(ip: str, port: Port, base: str, body: str, auth) -> list[Vuln]:
     return out
 
 
+_SOURCEMAP_RE = re.compile(r"//[#@]\s*sourceMappingURL\s*=\s*(\S+)")
+
+
+def _resolve(js_path: str, rel: str) -> str:
+    if rel.startswith("/"):
+        return rel
+    d = js_path.rsplit("/", 1)[0]
+    return f"{d}/{rel}"
+
+
+def _scan_sourcemaps(ip: str, port: Port, base: str, body: str, auth) -> tuple[list, list]:
+    """Recover original front-end source from exposed .js.map files (webpack/vite ship
+    the original source inline in `sourcesContent`) and mine it for secrets/credentials.
+    Returns (findings, [Credential]). Read-only GETs."""
+    from . import gitdump
+    from .models import Credential
+    findings: list = []
+    creds: list = []
+    srcs = [s for s in _SCRIPT_SRC.findall(body)
+            if "://" not in s and not s.startswith("//")][:8]
+    map_urls: list = []
+    for src in srcs:
+        p = src if src.startswith("/") else "/" + src
+        if p + ".map" not in map_urls:
+            map_urls.append(p + ".map")
+        r = _fetch(ip, port, p, auth=auth, read=262144)
+        if r and r[0] == 200:
+            m = _SOURCEMAP_RE.search(r[2][-4096:])       # the comment sits at the file end
+            if m and not m.group(1).startswith("data:"):
+                mu = _resolve(p, m.group(1))
+                if mu not in map_urls:
+                    map_urls.append(mu)
+    recovered = 0
+    files: list = []
+    secrets: list = []
+    seen_sec: set = set()
+    for mu in map_urls[:12]:
+        raw = _fetch_raw(ip, port, mu, auth=auth, read=8_000_000)
+        if not raw:
+            continue
+        try:
+            sm = json.loads(raw.decode("utf-8", "replace"))
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(sm, dict):
+            continue
+        sources = sm.get("sources") or []
+        contents = sm.get("sourcesContent") or []
+        if not isinstance(contents, list) or not contents:
+            continue
+        recovered += 1
+        for i, content in enumerate(contents[:80]):
+            if not isinstance(content, str):
+                continue
+            spath = str(sources[i]) if i < len(sources) else f"src{i}"
+            files.append(spath.replace("webpack://", ""))
+            s, c = gitdump._mine(spath, content.encode("utf-8", "replace"))
+            for pair in s:
+                if pair not in seen_sec:
+                    seen_sec.add(pair)
+                    secrets.append(pair)
+            for cred in c:
+                secret = cred.get("secret", "")
+                if secret and secret != "(aws-access-key-id)":
+                    creds.append(Credential(
+                        username=cred.get("username", ""), secret=secret, kind="password",
+                        source="web-sourcemap-loot", origin_ip=ip,
+                        notes=f"recovered from source map {mu} on {ip}:{port.portid} "
+                              "(sprayable)"))
+    if recovered:
+        detail = (f"Recovered original source from {recovered} source map(s): "
+                  f"{len(files)} file(s) incl. "
+                  + ", ".join(f for f in files[:6] if f) + (" …" if len(files) > 6 else "")
+                  + ".")
+        if secrets:
+            detail += "\n\nSecrets in recovered source: " + "; ".join(secrets[:8])
+        if creds:
+            detail += (f"\n\nCAPTURED {len(creds)} credential(s) -> credential store "
+                       "(sprayable): " + ", ".join(c.label for c in creds[:6]))
+        findings.append(_mk(
+            ip, port, "web-sourcemap", "medium",
+            "Exposed JavaScript source map - original source recovered",
+            ["CWE-540", "CWE-200"], detail,
+            "Do not deploy .map files to production (or gate them behind auth); strip "
+            "sourcesContent and rotate any leaked secret."))
+    return findings, creds
+
+
 # --- WordPress plugin / version enum (wpscan-lite) ------------------------------
 _WP_PLUGINS = ["contact-form-7", "woocommerce", "elementor", "wordpress-seo", "wordfence",
                "akismet", "jetpack", "wpforms-lite", "revslider", "wp-file-manager",
@@ -1714,6 +1802,10 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     findings.extend(_scan_backups(ip, port, base, auth))
     findings.extend(_scan_reflection(ip, port, base, auth))
     findings.extend(_scan_js(ip, port, base, body, auth))
+    if active:
+        sm_findings, sm_creds = _scan_sourcemaps(ip, port, base, body, auth)
+        findings.extend(sm_findings)
+        looted_creds.extend(sm_creds)
     if any("wordpress" in t.lower() for t in fp["tech"]):
         findings.extend(_scan_wordpress(ip, port, base, body, auth))
     if creds:

@@ -147,3 +147,39 @@ class GitDumpReconstruction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------- source-map reconstruction ---------------------------
+
+class SourceMapReconstruction(unittest.TestCase):
+    """An exposed .js.map ships the original source inline -> recover it + mine secrets."""
+
+    def test_scan_endpoint_recovers_source_from_map(self):
+        import json as _json
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        (d / "index.html").write_text('<html><script src="/app.js"></script></html>')
+        (d / "app.js").write_text("console.log(1);\n//# sourceMappingURL=app.js.map\n")
+        (d / "app.js.map").write_text(_json.dumps({
+            "version": 3,
+            "sources": ["webpack://src/config.js"],
+            "sourcesContent": [
+                "const API_KEY = 'sk_live_abc123def456';\n"
+                "const DB_PASSWORD = 'S3cr3tMapPw';\n"
+                "const url = 'mysql://root:maproot123@db.internal:3306/app';\n"],
+        }))
+        srv = _serve(d)
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            profile, findings = web.scan_endpoint("127.0.0.1", p, active=True)
+        finally:
+            srv.shutdown()
+        self.assertTrue(any(f.script_id == "web-sourcemap" for f in findings),
+                        "no web-sourcemap finding")
+        dump = next(f for f in findings if f.script_id == "web-sourcemap")
+        self.assertIn("config.js", dump.output)
+        looted = {c.secret for c in profile.get("credentials", [])}
+        self.assertIn("S3cr3tMapPw", looted)             # from recovered source
+        self.assertIn("maproot123", looted)              # connection string in source
+        self.assertTrue(any(c.source == "web-sourcemap-loot" for c in profile["credentials"]))
