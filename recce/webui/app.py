@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -236,7 +237,16 @@ def create_app(eng_dir: str) -> FastAPI:
     from ..cli import _open_paths
     db_path = _open_paths(eng_dir)["db"]
 
-    app = FastAPI(title="recce workbench", version=__version__)
+    broker = _Broker()
+
+    @asynccontextmanager
+    async def _lifespan(_app):
+        # Bind the SSE broker to the serving event loop on startup (replaces the
+        # deprecated @app.on_event("startup") hook).
+        broker.bind(asyncio.get_running_loop())
+        yield
+
+    app = FastAPI(title="recce workbench", version=__version__, lifespan=_lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                        allow_headers=["*"])
 
@@ -251,13 +261,8 @@ def create_app(eng_dir: str) -> FastAPI:
         return await call_next(request)
 
     jobs = JobManager()
-    broker = _Broker()
     from . import collab
     presence = collab.Presence()
-
-    @app.on_event("startup")
-    async def _bind():
-        broker.bind(asyncio.get_running_loop())
 
     def _hosts():
         from ..store import Store
