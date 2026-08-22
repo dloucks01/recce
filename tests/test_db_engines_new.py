@@ -372,6 +372,136 @@ class PostgresDeepRce(unittest.TestCase):
         self.assertIn("plpython3u", lt["extensions"])
 
 
+class ScramVector(unittest.TestCase):
+    """The SCRAM client must match the RFC 5802 published test vector."""
+
+    def test_rfc5802_sha1(self):
+        from recce import scram
+        c = scram.ScramClient("user", "pencil", "SCRAM-SHA-1",
+                              nonce="fyko+d2lbbFgONRv9qkxdawL")
+        self.assertEqual(c.first_message(), "n,,n=user,r=fyko+d2lbbFgONRv9qkxdawL")
+        sf = "r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,s=QSXCR+Q6sek8bf92,i=4096"
+        self.assertEqual(
+            c.final_message(sf),
+            "c=biws,r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,"
+            "p=v0X8v3Bz2T0CJGbJQyF0X+HI4Ts=")
+        self.assertTrue(c.verify("v=rmF9pqV8S7suAoZWja4dJRkFsKQ="))
+
+
+import base64 as _b64
+import hashlib as _hl
+import hmac as _hm
+
+
+def _scram_server(password, salt=b"recce-salt-16byt", iters=4096):
+    """A minimal server-side SCRAM-SHA-256 verifier for the fake Postgres/Mongo servers:
+    given the client-first-bare + client-final, confirm the proof and return the server
+    signature (proving the client computed a correct proof against the real password)."""
+    def server_first(client_nonce):
+        snonce = client_nonce + "SRVnonce123"
+        return f"r={snonce},s={_b64.b64encode(salt).decode()},i={iters}", snonce
+
+    def verify_and_sign(cfb, sf, client_final):
+        proof_b64 = dict(f.split("=", 1) for f in client_final.split(",") if "=" in f)["p"]
+        cf_noproof = client_final.rsplit(",p=", 1)[0]
+        auth = f"{cfb},{sf},{cf_noproof}"
+        salted = _hl.pbkdf2_hmac("sha256", password.encode(), salt, iters)
+        client_key = _hm.new(salted, b"Client Key", "sha256").digest()
+        stored = _hl.sha256(client_key).digest()
+        csig = _hm.new(stored, auth.encode(), "sha256").digest()
+        recovered = bytes(a ^ b for a, b in zip(_b64.b64decode(proof_b64), csig))
+        ok = _hl.sha256(recovered).digest() == stored
+        server_key = _hm.new(salted, b"Server Key", "sha256").digest()
+        ssig = _hm.new(server_key, auth.encode(), "sha256").digest()
+        return ok, _b64.b64encode(ssig).decode()
+    return server_first, verify_and_sign
+
+
+class PostgresScramCredentialed(unittest.TestCase):
+    """Credentialed follow-through: SCRAM-SHA-256 login with a supplied credential, then
+    the full loot + RCE-capability read - all over a real handshake."""
+
+    def setUp(self):
+        server_first, verify_and_sign = _scram_server("Hunter2!")
+
+        def msg(t, body):
+            return t + struct.pack("!I", len(body) + 4) + body
+
+        def datarow(vals):
+            b = struct.pack("!H", len(vals))
+            for v in vals:
+                bb = v.encode()
+                b += struct.pack("!i", len(bb)) + bb
+            return msg(b"D", b)
+
+        def result(rows):
+            return b"".join(datarow(r) for r in rows) + msg(b"C", b"SELECT\x00") \
+                + msg(b"Z", b"I")
+
+        answers = [
+            [["app_prod"]],                                  # databases
+            [["postgres", "SCRAM-SHA-256$x", "t"]],          # pg_shadow
+            [["app_svc", "on", "PostgreSQL 16.2"]],          # ident (superuser)
+            [["t", "f", "f"]],                               # pg_has_role
+            [["plpython3u"]],                                # extensions
+        ]
+
+        def read_msg(conn):
+            hdr = conn.recv(1)
+            if not hdr:
+                return None, b""
+            ln = struct.unpack("!I", conn.recv(4))[0]
+            return hdr, conn.recv(ln - 4)
+
+        def handle(conn):
+            # startup (no type byte)
+            ln = struct.unpack("!I", conn.recv(4))[0]
+            conn.recv(ln - 4)
+            conn.sendall(msg(b"R", struct.pack("!I", 10) + b"SCRAM-SHA-256\x00\x00"))
+            _t, body = read_msg(conn)                        # SASLInitialResponse
+            if not body or b"\x00" not in body:              # probe disconnected (unauth check)
+                return
+            mech, rest = body.split(b"\x00", 1)
+            first = rest[4:].decode()
+            cfb = first[3:] if first.startswith("n,,") else first
+            client_nonce = dict(f.split("=", 1) for f in cfb.split(",") if "=" in f)["r"]
+            sf, _snonce = server_first(client_nonce)
+            conn.sendall(msg(b"R", struct.pack("!I", 11) + sf.encode()))
+            _t, body = read_msg(conn)                        # SASLResponse (client-final)
+            ok, ssig = verify_and_sign(cfb, sf, body.decode())
+            if not ok:
+                conn.sendall(msg(b"E", b"SFATAL\x00Cinvalid\x00Mbad proof\x00\x00"))
+                return
+            conn.sendall(msg(b"R", struct.pack("!I", 12) + f"v={ssig}".encode()))
+            conn.sendall(msg(b"R", struct.pack("!I", 0)))    # AuthenticationOk
+            conn.sendall(msg(b"S", b"server_version\x0016.2\x00"))
+            conn.sendall(msg(b"Z", b"I"))
+            n = 0
+            while n < len(answers):
+                t, _b = read_msg(conn)
+                if t is None:
+                    return
+                if t == b"Q":
+                    conn.sendall(result(answers[n])); n += 1
+        self.port = _tcp_once(handle)
+
+    def test_authenticate_and_loot(self):
+        from recce import postgres
+        self.assertTrue(postgres.authenticate("127.0.0.1", self.port, "app_svc", "Hunter2!"))
+        self.assertFalse(postgres.authenticate("127.0.0.1", self.port, "app_svc", "wrong"))
+
+    def test_credentialed_analyze_emits_rce(self):
+        from recce import postgres
+        h = _host(self.port, "postgresql")
+        # probe() will see SASL -> auth_required; analyze sprays the supplied credential.
+        analysis = postgres.analyze([h], creds=[{"username": "app_svc", "secret": "Hunter2!"}])
+        kinds = {f["kind"] for f in analysis["findings"]}
+        self.assertIn("pg_cred_access", kinds)
+        self.assertIn("pg_rce", kinds)                       # is_superuser -> COPY FROM PROGRAM
+        # the pg_shadow hash was captured as a credential
+        self.assertTrue(any(c.username == "postgres" for c in analysis["credentials"]))
+
+
 class RedisDeepPrimitives(unittest.TestCase):
     """Deep probe surfaces which RCE primitives are actually reachable."""
 
@@ -649,6 +779,128 @@ class ElasticDeep(unittest.TestCase):
         detail = fs[0]["detail"]
         self.assertIn("Ubuntu 20.04", detail)
         self.assertIn("Snapshot repositories", detail)
+
+
+class MongoScramCredentialed(unittest.TestCase):
+    """SCRAM login + hashcat-format extraction of MongoDB SCRAM credentials."""
+
+    def test_hashcat_format(self):
+        from recce import mongodb as M
+        line = M._scram_hashcat("admin", "SCRAM-SHA-256",
+                                {"iterationCount": 15000, "salt": "c2FsdA==",
+                                 "serverKey": "c2s=", "storedKey": "c3Q="})
+        self.assertTrue(line.startswith("$mongodb-scram$*1*"))   # *1* = SHA-256 (24200)
+        self.assertIn("*15000*", line)
+        self.assertIn("c2FsdA==", line)
+        line1 = M._scram_hashcat("u", "SCRAM-SHA-1",
+                                 {"iterationCount": 10000, "salt": "s", "serverKey": "k"})
+        self.assertTrue(line1.startswith("$mongodb-scram$*0*"))  # *0* = SHA-1 (24100)
+        self.assertEqual(M._scram_hashcat("u", "SCRAM-SHA-1", {}), "")  # missing material
+
+    def _server(self, password, want_creds=True):
+        from recce import mongodb as M
+        server_first, verify_and_sign = _scram_server(password)
+
+        def e_double(n, v):
+            return b"\x01" + M._cstr(n) + struct.pack("<d", v)
+
+        def e_doc(n, d):
+            return b"\x03" + M._cstr(n) + d
+
+        def e_array(n, docs):
+            return b"\x04" + M._cstr(n) + M.bson_doc(*[e_doc(str(i), d)
+                                                       for i, d in enumerate(docs)])
+        unauth_err = M.bson_doc(e_double("ok", 0.0), M._e_int32("code", 13),
+                                M._e_str("errmsg", "command requires authentication"))
+
+        def handle(conn):
+            st = {"authed": False, "cfb": None, "snonce": None}   # per-connection
+
+            def reply_for(doc):
+                cmd = next(iter(doc), "")
+                if cmd == "hello":
+                    return M.bson_doc(M._e_int32("maxWireVersion", 17), e_double("ok", 1.0))
+                if cmd == "buildInfo":
+                    return M.bson_doc(M._e_str("version", "6.0.1"), e_double("ok", 1.0))
+                if cmd == "saslStart":
+                    cf = doc["payload"].decode()
+                    cfb = cf[3:] if cf.startswith("n,,") else cf
+                    cnonce = dict(f.split("=", 1) for f in cfb.split(",") if "=" in f)["r"]
+                    sf, _sn = server_first(cnonce)
+                    st["snonce"], st["cfb"] = sf, cfb
+                    return M.bson_doc(M._e_int32("conversationId", 1),
+                                      M._e_bool("done", False),
+                                      M._e_binary("payload", sf.encode()), e_double("ok", 1.0))
+                if cmd == "saslContinue":
+                    cfinal = doc["payload"].decode()
+                    if not cfinal:
+                        return M.bson_doc(M._e_bool("done", True), e_double("ok", 1.0))
+                    ok, ssig = verify_and_sign(st["cfb"], st["snonce"], cfinal)
+                    if not ok:
+                        return M.bson_doc(e_double("ok", 0.0),
+                                          M._e_str("errmsg", "auth failed"))
+                    st["authed"] = True
+                    return M.bson_doc(M._e_int32("conversationId", 1),
+                                      M._e_bool("done", True),
+                                      M._e_binary("payload", f"v={ssig}".encode()),
+                                      e_double("ok", 1.0))
+                # everything below requires authentication (this instance has auth on).
+                if not st["authed"]:
+                    return unauth_err
+                if cmd == "listDatabases":
+                    return M.bson_doc(e_array("databases",
+                        [M.bson_doc(M._e_str("name", "prod"), e_double("sizeOnDisk", 9.0))]),
+                        e_double("ok", 1.0))
+                if cmd == "usersInfo":
+                    cred = M.bson_doc(M._e_int32("iterationCount", 15000),
+                                      M._e_str("salt", "c2FsdA=="),
+                                      M._e_str("serverKey", "c2VydmVyS2V5"),
+                                      M._e_str("storedKey", "c3RvcmVk")) if want_creds \
+                        else M.bson_doc()
+                    user = M.bson_doc(M._e_str("user", "admin"), M._e_str("db", "admin"),
+                                      e_array("roles", [M.bson_doc(M._e_str("role", "root"),
+                                                                   M._e_str("db", "admin"))]),
+                                      e_doc("credentials",
+                                            M.bson_doc(e_doc("SCRAM-SHA-256", cred))))
+                    return M.bson_doc(e_array("users", [user]), e_double("ok", 1.0))
+                return M.bson_doc(M._e_str("errmsg", "no such command"), e_double("ok", 0.0))
+
+            while True:
+                hdr = M._recvn(conn, 16)
+                if len(hdr) < 16:
+                    return
+                length = struct.unpack("<i", hdr[:4])[0]
+                rid = struct.unpack("<i", hdr[4:8])[0]
+                body = M._recvn(conn, length - 16)
+                doc, _ = M.bson_parse(hdr + body, 16 + 4 + 1)
+                conn.sendall(M.op_msg(rid, reply_for(doc)))
+        return _tcp_once(handle)
+
+    def test_authenticate(self):
+        from recce import mongodb as M
+        port = self._server("Secret1!")
+        self.assertTrue(M.authenticate("127.0.0.1", port, "admin", "Secret1!"))
+        self.assertFalse(M.authenticate("127.0.0.1", port, "admin", "wrong"))
+
+    def test_credentialed_probe_extracts_hashcat(self):
+        from recce import mongodb as M
+        port = self._server("Secret1!")
+        cp = M.probe_creds("127.0.0.1", port, "admin", "Secret1!")
+        self.assertTrue(cp["cred_access"])
+        self.assertEqual([u["user"] for u in cp["users"]], ["admin"])
+        self.assertTrue(cp["hashes"])
+        self.assertTrue(cp["hashes"][0]["hashcat"].startswith("$mongodb-scram$*1*"))
+
+    def test_analyze_credentialed_finding_and_loot(self):
+        from recce import mongodb as M
+        port = self._server("Secret1!")
+        # probe() (unauth listDatabases) will fail auth -> analyze sprays the credential.
+        h = _host(port, "mongodb")
+        analysis = M.analyze([h], creds=[{"username": "admin", "secret": "Secret1!"}])
+        kinds = {f["kind"] for f in analysis["findings"]}
+        self.assertIn("mongo_cred_access", kinds)
+        self.assertTrue(any(c.kind == "hash" and "24200" in (c.notes or "")
+                            for c in analysis["credentials"]))
 
 
 class DbPocRecipes(unittest.TestCase):

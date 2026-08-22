@@ -627,6 +627,30 @@ def _creds_of(args) -> dict | None:
     return {"username": user, "password": args.password, "domain": domain}
 
 
+def _db_login_creds(args, store) -> list[dict]:
+    """Login credentials to try against auth-required DB instances: the command's own
+    -u/-p first, then every cleartext-password credential already captured in the
+    datastore (looted / sprayed) - so a protected DB is auto-tried with what we have."""
+    out: list[dict] = []
+    seen = set()
+
+    def add(user, secret):
+        if user and secret is not None and (user, secret) not in seen:
+            seen.add((user, secret))
+            out.append({"username": user, "secret": secret})
+
+    if getattr(args, "username", None) and getattr(args, "password", None) is not None:
+        add(args.username, args.password)
+    try:
+        for c in store.all_credentials():
+            # password-shaped secrets only; hashes aren't usable for a SCRAM/md5 login.
+            if getattr(c, "kind", "") in ("password", "plaintext", "cleartext", ""):
+                add(c.username, c.secret)
+    except Exception:      # noqa: BLE001 - a datastore hiccup must not abort the scan
+        pass
+    return out
+
+
 def _admin_creds_of(args) -> dict | None:
     """The optional privileged/superuser account (domain defaults to -d)."""
     if not getattr(args, "admin_username", None):
@@ -4738,7 +4762,10 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
     _import_excel_tracking(store, paths)
     hosts = _selected_hosts(store.all_hosts(), args)
     active = not args.no_probe
-    analysis = mod.analyze(hosts, active=active, **_probe_kwargs(args, source))
+    # DB engines that support credentialed follow-through spray -u/-p plus the looted
+    # password credentials from the datastore against auth-required instances.
+    db_creds = _db_login_creds(args, store) if source in ("postgres", "mongodb") else None
+    analysis = mod.analyze(hosts, active=active, creds=db_creds, **_probe_kwargs(args, source))
     tgts = analysis["targets"]
     if not tgts:
         print(no_targets)
@@ -6781,6 +6808,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "MongoDB hosts in the datastore)")
     mp.add_argument("--no-probe", action="store_true",
                     help="skip the live probe; just write the commands")
+    mp.add_argument("-u", "--username", help="credential to try on auth-required "
+                    "instances (also sprays looted creds from the datastore)")
+    mp.add_argument("-p", "--password", help="password for -u")
     _add_io(mp)
     _add_budget(mp)
     mp.set_defaults(func=cmd_mongodb)
@@ -6820,6 +6850,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "PostgreSQL hosts in the datastore)")
     pgp.add_argument("--no-probe", action="store_true",
                      help="skip the live probe; just write the commands")
+    pgp.add_argument("-u", "--username", help="credential to try on auth-required "
+                     "instances (also sprays looted creds from the datastore)")
+    pgp.add_argument("-p", "--password", help="password for -u")
     _add_io(pgp)
     _add_budget(pgp)
     pgp.set_defaults(func=cmd_postgres)

