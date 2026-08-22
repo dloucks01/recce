@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Finding, Host, Overview, fetchAll, postTick, postNote, postScan, postImport,
+  Finding, Host, Overview, fetchAll, postTick, postNote, postImport,
   fetchPlaybook, Playbook as PlaybookData,
+  getCommands, postCommand, CmdCatalog,
 } from "./api";
 import { Dashboard, Findings, Hosts, Act, Loot, Playbook, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
@@ -233,12 +234,20 @@ export default function App() {
     localStorage.setItem("recce.tester", n); setWho(n);
   }
 
-  // scan job state
+  // scan / command-runner state
   const [targets, setTargets] = useState("");
   const [profile, setProfile] = useState("quick");
+  const [command, setCommand] = useState("scan");
+  const [catalog, setCatalog] = useState<CmdCatalog>({});
+  const [cUser, setCUser] = useState("");
+  const [cPass, setCPass] = useState("");
+  const [cDomain, setCDomain] = useState("");
+  const [cLhost, setCLhost] = useState("");
+  const [cFlags, setCFlags] = useState<Record<string, boolean>>({});
   const [log, setLog] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { getCommands().then(setCatalog).catch(() => {}); }, []);
 
   const [showImport, setShowImport] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
@@ -340,8 +349,21 @@ export default function App() {
   }, [refresh]);
 
   async function runScan() {
-    if (!targets.trim() || running) return;
-    try { const { id } = await postScan(targets, profile); streamJob(id); }
+    const spec = catalog[command];
+    if (running) return;
+    if (spec?.targets === "required" && !targets.trim()) return;
+    const flags = Object.keys(cFlags).filter((k) => cFlags[k]);
+    try {
+      const { id } = await postCommand({
+        command, targets, profile,
+        username: spec?.creds ? cUser : undefined,
+        password: spec?.creds ? cPass : undefined,
+        domain: spec?.creds ? cDomain : undefined,
+        lhost: spec?.lhost ? cLhost : undefined,
+        flags,
+      });
+      streamJob(id);
+    }
     catch (e) { setLog([`error: ${e}`]); }
   }
 
@@ -419,15 +441,56 @@ export default function App() {
             {scanOpen && !running && (
               <>
                 <div className="exp-backdrop" onClick={() => setScanOpen(false)} />
-                <div className="scanpop">
-                  <input className="scan-in" autoFocus placeholder="targets — 10.0.0.0/24, host.corp.local …"
-                         value={targets} onChange={(e) => setTargets(e.target.value)}
-                         onKeyDown={(e) => { if (e.key === "Enter" && targets.trim()) { runScan(); setScanOpen(false); } }} />
+                <div className="scanpop wide">
+                  <select className="scan-cmd" value={command}
+                          onChange={(e) => { setCommand(e.target.value); setCFlags({}); }}>
+                    {[...new Set(Object.values(catalog).map((v) => v.group))].map((group) => (
+                      <optgroup key={group} label={group}>
+                        {Object.entries(catalog).filter(([, v]) => v.group === group)
+                          .map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                      </optgroup>
+                    ))}
+                  </select>
+                  {catalog[command]?.targets !== "none" && (
+                    <input className="scan-in" autoFocus
+                           placeholder={`targets${catalog[command]?.targets === "required" ? " (required)" : " (optional)"} — 10.0.0.0/24, host …`}
+                           value={targets} onChange={(e) => setTargets(e.target.value)}
+                           onKeyDown={(e) => { if (e.key === "Enter") { runScan(); setScanOpen(false); } }} />
+                  )}
+                  {catalog[command]?.creds && (
+                    <div className="scanpop-row">
+                      <input className="scan-in" placeholder="user" value={cUser}
+                             onChange={(e) => setCUser(e.target.value)} />
+                      <input className="scan-in" type="password" placeholder="pass" value={cPass}
+                             onChange={(e) => setCPass(e.target.value)} />
+                      <input className="scan-in" placeholder="domain" value={cDomain}
+                             onChange={(e) => setCDomain(e.target.value)} />
+                    </div>
+                  )}
+                  {catalog[command]?.lhost && (
+                    <input className="scan-in" placeholder="LHOST (e.g. 10.10.14.5)" value={cLhost}
+                           onChange={(e) => setCLhost(e.target.value)} />
+                  )}
+                  {(catalog[command]?.flags?.length ?? 0) > 0 && (
+                    <div className="scanpop-flags">
+                      {catalog[command].flags.map((f) => (
+                        <label key={f.name} className={f.active ? "flag active" : "flag"}
+                               title={f.active ? "active / intrusive" : ""}>
+                          <input type="checkbox" checked={!!cFlags[f.name]}
+                                 onChange={(e) => setCFlags((s) => ({ ...s, [f.name]: e.target.checked }))} />
+                          {f.label}{f.active ? " ⚡" : ""}
+                        </label>
+                      ))}
+                    </div>
+                  )}
                   <div className="scanpop-row">
-                    <select value={profile} onChange={(e) => setProfile(e.target.value)}>
-                      <option value="quick">quick</option><option value="standard">standard</option><option value="thorough">thorough</option>
-                    </select>
-                    <button className="btn primary" onClick={() => { runScan(); setScanOpen(false); }} disabled={!targets.trim()}>Run</button>
+                    {catalog[command]?.profile && (
+                      <select value={profile} onChange={(e) => setProfile(e.target.value)}>
+                        <option value="quick">quick</option><option value="standard">standard</option><option value="thorough">thorough</option>
+                      </select>
+                    )}
+                    <button className="btn primary" onClick={() => { runScan(); setScanOpen(false); }}
+                            disabled={catalog[command]?.targets === "required" && !targets.trim()}>Run</button>
                   </div>
                 </div>
               </>

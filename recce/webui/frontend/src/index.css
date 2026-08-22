@@ -500,6 +500,15 @@ body { background: var(--ground); color: var(--text); }
 .scanpop-row select { flex: 1; font-family: var(--sans); font-size: 13px; font-weight: 600; padding: 8px 10px;
   border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface2); color: var(--text); }
 .scanpop-row .btn { flex: none; }
+.scanpop.wide { width: min(520px, 94vw); max-height: 82vh; overflow-y: auto; }
+.scan-cmd { width: 100%; font-family: var(--sans); font-size: 13px; font-weight: 700; padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface2); color: var(--text); }
+.scanpop-row .scan-in { flex: 1; width: auto; min-width: 0; }
+.scanpop-flags { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 2px 2px 0; }
+.scanpop-flags .flag { display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
+  font-weight: 600; color: var(--muted); cursor: pointer; }
+.scanpop-flags .flag input { accent-color: var(--accent); }
+.scanpop-flags .flag.active { color: var(--danger, #d9534f); }
 
 /* ---- compact triage tag control + OS truncation (Hosts density) ---- */
 .tagctl { display: inline-flex; align-items: center; gap: 4px; position: relative; }

@@ -161,3 +161,48 @@ def test_scan_input_is_allowlisted(client):
     assert client.post("/api/scan", json={"phase": "rm-rf", "targets": "10.0.0.1"}).status_code == 400
     # flag-shaped tokens are stripped, so an injection attempt leaves no targets -> 400
     assert client.post("/api/scan", json={"phase": "scan", "targets": "--script=vuln"}).status_code == 400
+
+
+def test_command_catalog_exposes_the_full_surface(client):
+    cat = client.get("/api/commands").json()
+    # every capability is reachable from the browser now
+    for cmd in ("postgres", "mongodb", "mysql", "web", "api", "couchdb", "influxdb",
+                "cassandra", "oracle", "db2", "credsweep", "exploitplan", "attackpath",
+                "prove", "poc", "credenum"):
+        assert cmd in cat, f"{cmd} missing from the web command catalog"
+    assert cat["postgres"]["creds"] is True
+    assert any(f["name"] == "prove" for f in cat["postgres"]["flags"])
+    assert any(f["name"] == "autologin" for f in cat["web"]["flags"])
+    assert cat["exploitplan"]["lhost"] is True
+    assert cat["attackpath"]["targets"] == "none"
+
+
+def test_scan_builds_safe_argv_with_creds_and_flags(client):
+    # a credentialed DB command with a flag -> the exact argv (no shell; pw is one token)
+    r = client.post("/api/scan", json={
+        "command": "postgres", "targets": "10.0.0.5",
+        "username": "alice", "password": "p@ss w0rd!", "domain": "corp",
+        "flags": ["prove"]})
+    assert r.status_code == 200
+    cmd = r.json()["cmd"]
+    assert "postgres" in cmd and "-u alice" in cmd and "-d corp" in cmd
+    assert "--prove" in cmd and "10.0.0.5" in cmd
+    # web autologin
+    r2 = client.post("/api/scan", json={"command": "web", "targets": "10.0.0.5",
+                                        "flags": ["autologin", "crawl"]})
+    assert "--autologin" in r2.json()["cmd"] and "--crawl" in r2.json()["cmd"]
+
+
+def test_scan_guards(client):
+    # unknown command rejected
+    assert client.post("/api/scan", json={"command": "rm"}).status_code == 400
+    # a targets-required command with none -> 400
+    assert client.post("/api/scan", json={"command": "enum"}).status_code == 400
+    # a bogus flag is silently dropped (not passed through)
+    cmd = client.post("/api/scan", json={"command": "vulns", "targets": "10.0.0.5",
+                                         "flags": ["evil"]}).json()["cmd"]
+    assert "evil" not in cmd
+    # creds are NOT passed to a non-cred command
+    cmd2 = client.post("/api/scan", json={"command": "redis", "targets": "10.0.0.5",
+                                          "username": "x", "password": "y"}).json()["cmd"]
+    assert "-u x" not in cmd2

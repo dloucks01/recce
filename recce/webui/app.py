@@ -21,7 +21,82 @@ from fastapi.staticfiles import StaticFiles
 from .jobs import JobManager, recce_argv
 
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-_PHASES = {"run", "scan", "enum", "vulns", "sweep"}
+def _cmd(label, group, targets="optional", profile=False, creds=False, lhost=False,
+         flags=()):
+    return {"label": label, "group": group, "targets": targets, "profile": profile,
+            "creds": creds, "lhost": lhost, "flags": list(flags)}
+
+
+def _f(name, flag, label, active=False):
+    return {"name": name, "flag": flag, "label": label, "active": active}
+
+
+# The full command surface the workbench can run. Each entry declares what the UI
+# should offer (targets requirement, --profile, credential fields, flags, --lhost) and
+# the server builds a safe argv from it - no shell, every value a separate argv token.
+_COMMANDS: dict = {
+    # --- scan phases ---
+    "run": _cmd("Run — guided full flow", "Scan", "required", profile=True,
+                flags=[_f("deep", "--deep", "deep")]),
+    "scan": _cmd("Scan — enum + vulns", "Scan", "required", profile=True,
+                 flags=[_f("deep", "--deep", "deep"), _f("fast", "--fast", "fast")]),
+    "enum": _cmd("Enumerate", "Scan", "required", profile=True,
+                 flags=[_f("fast", "--fast", "masscan"), _f("all-ports", "--all-ports", "all ports")]),
+    "vulns": _cmd("Vuln scan", "Scan", "optional",
+                  flags=[_f("fast", "--fast", "fast"), _f("aggressive", "--aggressive", "aggressive NSE", True),
+                         _f("offline", "--offline", "offline")]),
+    "sweep": _cmd("Deep sweep — every credential-free module", "Scan", "optional"),
+    "credsweep": _cmd("Credentialed sweep", "Scan", "optional", creds=True),
+    "db": _cmd("Database scan (NSE inventory)", "Databases", "optional", creds=True,
+               flags=[_f("aggressive", "--aggressive", "aggressive (brute/xp_cmdshell)", True)]),
+    # --- databases (native deep modules) ---
+    "postgres": _cmd("PostgreSQL", "Databases", "optional", creds=True,
+                     flags=[_f("prove", "--prove", "prove RCE (benign id, active)", True)]),
+    "mysql": _cmd("MySQL / MariaDB", "Databases", "optional", creds=True),
+    "mongodb": _cmd("MongoDB", "Databases", "optional", creds=True),
+    "mssql": _cmd("MSSQL", "Databases", "optional", creds=True),
+    "redis": _cmd("Redis", "Databases", "optional"),
+    "elasticsearch": _cmd("Elasticsearch", "Databases", "optional"),
+    "memcached": _cmd("memcached", "Databases", "optional"),
+    "couchdb": _cmd("CouchDB", "Databases", "optional"),
+    "influxdb": _cmd("InfluxDB", "Databases", "optional"),
+    "cassandra": _cmd("Cassandra", "Databases", "optional"),
+    "oracle": _cmd("Oracle TNS", "Databases", "optional"),
+    "db2": _cmd("IBM Db2", "Databases", "optional"),
+    # --- web / web-app ---
+    "web": _cmd("Web deep-enum", "Web", "optional",
+                flags=[_f("crawl", "--crawl", "crawl + inject"),
+                       _f("autologin", "--autologin", "auto-login w/ looted creds (active)", True),
+                       _f("sqli-time", "--sqli-time", "time-based SQLi", True)]),
+    "api": _cmd("API — OpenAPI enum / IDOR / BOLA", "Web", "optional"),
+    # --- other services ---
+    "smb": _cmd("SMB", "Services", "optional", creds=True),
+    "ftp": _cmd("FTP", "Services", "optional", creds=True),
+    "snmp": _cmd("SNMP", "Services", "optional"),
+    "ldap": _cmd("LDAP", "Services", "optional", creds=True),
+    "nfs": _cmd("NFS", "Services", "optional"),
+    "rsync": _cmd("rsync", "Services", "optional"),
+    "kerberos": _cmd("Kerberos (AS-REP roast)", "Services", "optional"),
+    "docker": _cmd("Docker API", "Services", "optional"),
+    "kubernetes": _cmd("Kubernetes", "Services", "optional"),
+    "dns": _cmd("DNS", "Services", "optional"),
+    "smtp": _cmd("SMTP", "Services", "optional"),
+    # --- AD / credentialed ---
+    "credenum": _cmd("Credentialed enum (SMB/AD/SSH)", "Credentialed", "optional", creds=True),
+    "deploy": _cmd("Deploy on-target enum", "Credentialed", "optional", creds=True),
+    "privesc": _cmd("Priv-esc playbook", "Exploitation", "optional",
+                    flags=[_f("scan", "--scan", "remote NSE checks")]),
+    # --- exploitation / reporting ---
+    "exploitplan": _cmd("Exploit plan (msf .rc + commands)", "Exploitation", "optional", lhost=True),
+    "poc": _cmd("PoC dossiers (per-CVE)", "Exploitation", "optional"),
+    "prove": _cmd("Prove findings (verdicts)", "Exploitation", "none"),
+    "attackpath": _cmd("Attack path", "Exploitation", "none"),
+    "report": _cmd("Rebuild report", "Reporting", "none"),
+    "status": _cmd("Status / coverage", "Reporting", "none"),
+    "services": _cmd("Per-service commands", "Reporting", "none"),
+    "writeups": _cmd("Word write-ups", "Reporting", "optional"),
+}
+_PHASES = set(_COMMANDS)      # back-compat: any catalog command is a valid phase
 # downloadable deliverables: kind -> (paths-key, download filename, media type)
 _REPORTS = {
     "xlsx": ("xlsx", "enumeration.xlsx",
@@ -1238,26 +1313,59 @@ def create_app(eng_dir: str) -> FastAPI:
 
     # --- scan jobs + live progress ------------------------------------------------
 
+    @app.get("/api/commands")
+    def list_commands():
+        """The command surface the UI renders its runner from (grouped, with the fields/
+        flags each command accepts)."""
+        return {k: {kk: v[kk] for kk in
+                    ("label", "group", "targets", "profile", "creds", "lhost", "flags")}
+                for k, v in _COMMANDS.items()}
+
     @app.post("/api/scan")
     def start_scan(body: dict = Body(...), x_tester: str = Header(default="someone")):
-        phase = str(body.get("phase", "run"))
-        if phase not in _PHASES:
-            raise HTTPException(400, f"phase must be one of {sorted(_PHASES)}")
+        # `command` (any catalog entry); `phase` kept for older clients.
+        command = str(body.get("command") or body.get("phase") or "run")
+        spec = _COMMANDS.get(command)
+        if spec is None:
+            raise HTTPException(400, f"unknown command {command!r}")
+        # Targets: whitespace-split, drop any token starting with '-' (no flag injection).
         targets = [t for t in str(body.get("targets", "")).split() if not t.startswith("-")]
-        if not targets:
-            raise HTTPException(400, "no targets")
-        argv = [phase, "-o", eng_dir]
-        profile = str(body.get("profile", "")).lower()
-        if profile in ("quick", "standard", "thorough"):
-            argv += ["--profile", profile]
+        if spec["targets"] == "required" and not targets:
+            raise HTTPException(400, "this command needs targets")
+        argv = [command, "-o", eng_dir]
+        if spec["profile"]:
+            profile = str(body.get("profile", "")).lower()
+            if profile in ("quick", "standard", "thorough"):
+                argv += ["--profile", profile]
+        if spec["creds"]:
+            user = str(body.get("username", "")).strip()
+            if user:
+                argv += ["-u", user]
+                pw = body.get("password")
+                if pw not in (None, ""):
+                    argv += ["-p", str(pw)]
+                dom = str(body.get("domain", "")).strip()
+                if dom:
+                    argv += ["-d", dom]
+        if spec["lhost"]:
+            lh = str(body.get("lhost", "")).strip()
+            if lh:
+                argv += ["--lhost", lh]
+        # Only pass flags this command declares (silently drop anything else).
+        allowed = {f["name"]: f["flag"] for f in spec["flags"]}
+        for name in (body.get("flags") or []):
+            if name in allowed and allowed[name] not in argv:
+                argv.append(allowed[name])
+        if spec["targets"] != "none":
+            argv += targets
+        label = f"{command} {' '.join(targets)}".strip()
 
         def _done(job):
             broker.publish({"type": "scan", "status": job.status, "tester": x_tester,
-                            "targets": " ".join(targets)})
+                            "targets": label})
 
-        job = jobs.start(recce_argv(*argv, *targets), on_done=_done)
-        broker.publish({"type": "scan_started", "tester": x_tester,
-                        "targets": " ".join(targets)})
+        job = jobs.start(recce_argv(*argv), on_done=_done)
+        broker.publish({"type": "scan_started", "tester": x_tester, "targets": label})
         return {"id": job.id, "status": job.status, "cmd": job.cmd}
 
     @app.get("/api/jobs")

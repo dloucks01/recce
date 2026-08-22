@@ -83,13 +83,37 @@ export async function postNote(key: string, note: string) {
   });
 }
 
-export async function postScan(targets: string, profile: string): Promise<{ id: string }> {
+export type CmdFlag = { name: string; flag: string; label: string; active?: boolean };
+export type CmdSpec = {
+  label: string; group: string;
+  targets: "required" | "optional" | "none";
+  profile: boolean; creds: boolean; lhost: boolean; flags: CmdFlag[];
+};
+export type CmdCatalog = Record<string, CmdSpec>;
+
+export async function getCommands(): Promise<CmdCatalog> {
+  const r = await fetch("/api/commands");
+  if (!r.ok) throw new Error(r.statusText);
+  return r.json();
+}
+
+export type RunReq = {
+  command: string; targets?: string; profile?: string;
+  username?: string; password?: string; domain?: string;
+  lhost?: string; flags?: string[];
+};
+
+export async function postCommand(req: RunReq): Promise<{ id: string }> {
   const r = await fetch("/api/scan", {
-    method: "POST", headers: jsonHeaders(),
-    body: JSON.stringify({ targets, phase: "scan", profile }),
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify(req),
   });
   if (!r.ok) throw new Error((await r.json()).detail ?? r.statusText);
   return r.json();
+}
+
+// back-compat convenience
+export async function postScan(targets: string, profile: string): Promise<{ id: string }> {
+  return postCommand({ command: "scan", targets, profile });
 }
 
 export type ImportResult =
