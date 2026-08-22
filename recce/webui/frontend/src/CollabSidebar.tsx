@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { useCollab } from "./collab";
+import { ChatPanel } from "./ChatPanel";
+import { AssignmentsPanel } from "./AssignmentsPanel";
+import { CredentialsPanel } from "./CredentialsPanel";
 
 interface Job {
   id: string;
@@ -21,7 +24,7 @@ interface Activity {
 export function CollabSidebar({ hosts, nav }: { hosts: any[]; nav?: any }) {
   const { c, me } = useCollab();
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [tab, setTab] = useState<"status" | "activity" | "chat">("status");
+  const [tab, setTab] = useState<"status" | "assign" | "activity" | "creds" | "chat">("status");
   const [autoScroll, setAutoScroll] = useState(true);
   const activityRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -69,11 +72,25 @@ export function CollabSidebar({ hosts, nav }: { hosts: any[]; nav?: any }) {
             ▌
           </button>
           <button
+            className={`tab-btn ${tab === "assign" ? "active" : ""}`}
+            onClick={() => setTab("assign")}
+            title="host assignments"
+          >
+            👤
+          </button>
+          <button
             className={`tab-btn ${tab === "activity" ? "active" : ""}`}
             onClick={() => setTab("activity")}
             title="activity log"
           >
             ⚡
+          </button>
+          <button
+            className={`tab-btn ${tab === "creds" ? "active" : ""}`}
+            onClick={() => setTab("creds")}
+            title="shared credentials"
+          >
+            🔑
           </button>
           <button
             className={`tab-btn ${tab === "chat" ? "active" : ""}`}
@@ -203,15 +220,24 @@ export function CollabSidebar({ hosts, nav }: { hosts: any[]; nav?: any }) {
         </div>
       )}
 
+      {/* Assignments Tab */}
+      {tab === "assign" && (
+        <div className="sidebar-content">
+          <AssignmentsPanel hosts={hosts} />
+        </div>
+      )}
+
+      {/* Credentials Tab */}
+      {tab === "creds" && (
+        <div className="sidebar-content">
+          <CredentialsPanel />
+        </div>
+      )}
+
       {/* Chat Tab */}
       {tab === "chat" && (
-        <div className="sidebar-content chat-panel">
-          <div className="chat-scroll" ref={chatRef}>
-            <div className="chat-placeholder">
-              💬 Team chat here<br />
-              <span style={{ fontSize: "11px", color: "var(--faint)" }}>Click chat button above to message</span>
-            </div>
-          </div>
+        <div className="sidebar-content">
+          <ChatPanel tester={me} />
         </div>
       )}
     </div>
