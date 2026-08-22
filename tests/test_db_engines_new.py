@@ -291,6 +291,236 @@ class VulnDbSignatures(unittest.TestCase):
                             for t in self._titles("redis", "7.0.0")))
 
 
+class PostgresDeepRce(unittest.TestCase):
+    """Trust-auth + superuser/COPY-FROM-PROGRAM capability -> a critical RCE finding."""
+
+    def test_findings_emit_pg_rce_when_capable(self):
+        from recce import postgres
+        h = _host(5432, "postgresql")
+        probes = {("127.0.0.1", 5432): {
+            "unauth": True, "version": "16.2",
+            "loot": {"databases": ["app"], "roles": [{"name": "postgres", "super": True}],
+                     "hashes": [], "current_user": "postgres", "is_superuser": True,
+                     "can_rce": True, "can_write_files": True,
+                     "extensions": ["plpython3u"]}}}
+        fs = postgres.findings([h], probes)
+        kinds = {f["kind"] for f in fs}
+        self.assertIn("pg_trust_auth", kinds)
+        self.assertIn("pg_rce", kinds)
+        rce = [f for f in fs if f["kind"] == "pg_rce"][0]
+        self.assertEqual(rce["severity"], "critical")
+        self.assertIn("COPY", rce["title"])
+
+    def test_no_rce_finding_when_not_superuser(self):
+        from recce import postgres
+        h = _host(5432, "postgresql")
+        probes = {("127.0.0.1", 5432): {"unauth": True, "version": "16.2",
+                  "loot": {"databases": ["app"], "roles": [], "hashes": [],
+                           "can_rce": False}}}
+        fs = postgres.findings([h], probes)
+        self.assertNotIn("pg_rce", {f["kind"] for f in fs})
+
+    def test_loot_reads_rce_capability_over_the_wire(self):
+        # Full v3 server: trust auth, then answer loot()'s queries in order so the
+        # superuser / COPY-FROM-PROGRAM / extension capability is read live.
+        from recce import postgres
+
+        def msg(t, body):
+            return t + struct.pack("!I", len(body) + 4) + body
+
+        def datarow(vals):
+            b = struct.pack("!H", len(vals))
+            for v in vals:
+                bb = v.encode()
+                b += struct.pack("!i", len(bb)) + bb
+            return msg(b"D", b)
+
+        def result(rows):
+            return b"".join(datarow(r) for r in rows) + msg(b"C", b"SELECT\x00") + msg(b"Z", b"I")
+
+        # loot() query order: databases, pg_shadow, ident, pg_has_role, pg_extension.
+        answers = [
+            [["app_prod"], ["billing"]],
+            [["postgres", "SCRAM-SHA-256$x", "t"]],
+            [["postgres", "on", "PostgreSQL 16.2"]],
+            [["t", "f", "t"]],                       # exec_program=t, read=f, write=t
+            [["plpython3u"]],
+        ]
+
+        state = {"n": 0}
+
+        def handle(conn):
+            conn.recv(4096)                          # StartupMessage
+            conn.sendall(msg(b"R", struct.pack("!I", 0)))
+            conn.sendall(msg(b"S", b"server_version\x0016.2\x00"))
+            conn.sendall(msg(b"Z", b"I"))
+            while state["n"] < len(answers):
+                data = conn.recv(65536)
+                if not data:
+                    return
+                for _q in data.split(b"Q")[1:]:
+                    if state["n"] < len(answers):
+                        conn.sendall(result(answers[state["n"]]))
+                        state["n"] += 1
+        port = _tcp_once(handle)
+        lt = postgres.loot("127.0.0.1", port)
+        self.assertEqual(lt["databases"], ["app_prod", "billing"])
+        self.assertTrue(lt["is_superuser"])
+        self.assertTrue(lt["can_rce"])
+        self.assertTrue(lt["can_copy_program"])
+        self.assertTrue(lt["can_write_files"])
+        self.assertIn("plpython3u", lt["extensions"])
+
+
+class RedisDeepPrimitives(unittest.TestCase):
+    """Deep probe surfaces which RCE primitives are actually reachable."""
+
+    def _resp_read(self, conn):
+        buf = b""
+        while b"\r\n" not in buf:
+            d = conn.recv(1024)
+            if not d:
+                return None
+            buf += d
+        line, rest = buf.split(b"\r\n", 1)
+        n = int(line[1:])
+        args = []
+        while len(args) < n:
+            while rest.count(b"\r\n") < 2:
+                rest += conn.recv(1024)
+            _len, rest = rest.split(b"\r\n", 1)
+            val, rest = rest.split(b"\r\n", 1)
+            args.append(val.decode())
+        return args
+
+    def test_module_load_and_replication_surface(self):
+        from recce import redis
+        info = ("# Server\r\nredis_version:6.2.7\r\nos:Linux\r\n"
+                "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n"
+                "# Keyspace\r\ndb0:keys=3,expires=0\r\n")
+
+        def handle(conn):
+            while True:
+                cmd = self._resp_read(conn)
+                if not cmd:
+                    return
+                name = cmd[0].upper()
+                sub = cmd[1].upper() if len(cmd) > 1 else ""
+                if name == "PING":
+                    conn.sendall(b"+PONG\r\n")
+                elif name == "INFO":
+                    b = info.encode()
+                    conn.sendall(b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n")
+                elif name == "CONFIG" and sub == "GET":
+                    val = {"dir": "/var/lib/redis", "dbfilename": "dump.rdb",
+                           "appendonly": "no", "save": "3600 1"}.get(cmd[2], "")
+                    conn.sendall(b"*2\r\n$" + str(len(cmd[2])).encode() + b"\r\n"
+                                 + cmd[2].encode() + b"\r\n$" + str(len(val)).encode()
+                                 + b"\r\n" + val.encode() + b"\r\n")
+                elif name == "MODULE" and sub == "LIST":
+                    # one loaded module, RESP array-of-array
+                    conn.sendall(b"*1\r\n*4\r\n$4\r\nname\r\n$6\r\nsearch\r\n"
+                                 b"$3\r\nver\r\n:20000\r\n")
+                elif name == "ACL" and sub == "WHOAMI":
+                    conn.sendall(b"$7\r\ndefault\r\n")
+                elif name == "ACL" and sub == "LIST":
+                    conn.sendall(b"*1\r\n$28\r\nuser default on nopass ~* +@all\r\n")
+                else:
+                    conn.sendall(b"+OK\r\n")
+        port = _tcp_once(handle)
+        pr = redis.probe("127.0.0.1", port)
+        self.assertTrue(pr["unauth"])
+        self.assertTrue(pr["module_load"])
+        self.assertIn("search", pr["modules"])
+        self.assertEqual(pr["acl_user"], "default")
+        self.assertTrue(pr["acl_default_nopass"])
+        self.assertTrue(pr["persistence"])           # save = "3600 1"
+        fs = redis.findings([_host(port, "redis")], {("127.0.0.1", port): pr})
+        detail = [f for f in fs if f["kind"] == "redis_unauth"][0]["detail"]
+        self.assertIn("MODULE LOAD", detail)
+        self.assertIn("SLAVEOF", detail)
+        self.assertIn("search", detail)
+
+
+class MongoDeepLoot(unittest.TestCase):
+    """Unauth MongoDB deep pass: captured users, replica-set members, config leak."""
+
+    def setUp(self):
+        from recce import mongodb as M
+
+        def e_double(n, v):
+            return b"\x01" + M._cstr(n) + struct.pack("<d", v)
+
+        def e_bool(n, v):
+            return b"\x08" + M._cstr(n) + bytes([1 if v else 0])
+
+        def e_doc(n, d):
+            return b"\x03" + M._cstr(n) + d
+
+        def e_array(n, docs):
+            inner = M.bson_doc(*[e_doc(str(i), d) for i, d in enumerate(docs)])
+            return b"\x04" + M._cstr(n) + inner
+
+        hello = M.bson_doc(e_bool("isWritablePrimary", True),
+                           M._e_int32("maxWireVersion", 17), e_double("ok", 1.0))
+        build = M.bson_doc(M._e_str("version", "6.0.1"),
+                           M._e_str("javascriptEngine", "mozjs"), e_double("ok", 1.0))
+        listdbs = M.bson_doc(
+            e_array("databases", [M.bson_doc(M._e_str("name", "prod"),
+                                             e_double("sizeOnDisk", 9990.0))]),
+            e_double("totalSize", 9990.0), e_double("ok", 1.0))
+        admin_user = M.bson_doc(
+            M._e_str("user", "admin"), M._e_str("db", "admin"),
+            e_array("roles", [M.bson_doc(M._e_str("role", "root"),
+                                         M._e_str("db", "admin"))]),
+            e_doc("credentials", M.bson_doc(e_doc("SCRAM-SHA-256", M.bson_doc(
+                M._e_int32("iterationCount", 15000))))))
+        usersinfo = M.bson_doc(e_array("users", [admin_user]), e_double("ok", 1.0))
+        replstatus = M.bson_doc(
+            M._e_str("set", "rs0"),
+            e_array("members", [M.bson_doc(M._e_str("name", "mongo1:27017")),
+                                M.bson_doc(M._e_str("name", "mongo2:27017"))]),
+            e_double("ok", 1.0))
+        cmdlineopts = M.bson_doc(
+            e_doc("parsed", M.bson_doc(e_doc("net", M.bson_doc(
+                M._e_str("bindIp", "0.0.0.0"))))), e_double("ok", 1.0))
+        self._replies = {"hello": hello, "buildInfo": build, "listDatabases": listdbs,
+                         "usersInfo": usersinfo, "replSetGetStatus": replstatus,
+                         "getCmdLineOpts": cmdlineopts}
+
+        def handle(conn):
+            while True:
+                hdr = M._recvn(conn, 16)
+                if len(hdr) < 16:
+                    return
+                length = struct.unpack("<i", hdr[:4])[0]
+                rid = struct.unpack("<i", hdr[4:8])[0]
+                body = M._recvn(conn, length - 16)
+                doc, _ = M.bson_parse(hdr + body, 16 + 4 + 1)
+                cmd = next(iter(doc), "")
+                reply = self._replies.get(cmd) or M.bson_doc(
+                    M._e_str("errmsg", "no such command"), e_double("ok", 0.0))
+                conn.sendall(M.op_msg(rid, reply))
+        self.port = _tcp_once(handle)
+
+    def test_deep_fields_captured(self):
+        from recce import mongodb as M
+        pr = M.probe("127.0.0.1", self.port)
+        self.assertTrue(pr["unauth"])
+        self.assertEqual(pr["js_engine"], "mozjs")
+        self.assertEqual([u["user"] for u in pr["users"]], ["admin"])
+        self.assertIn("SCRAM-SHA-256", pr["users"][0]["mechanisms"])
+        self.assertIn("root", pr["users"][0]["roles"])
+        self.assertEqual(pr["replset"], "rs0")
+        self.assertIn("mongo2:27017", pr["replset_members"])
+        self.assertFalse(pr["auth_configured"])
+        fs = M.findings([_host(self.port, "mongodb")], {("127.0.0.1", self.port): pr})
+        detail = fs[0]["detail"]
+        self.assertIn("CAPTURED 1 user", detail)
+        self.assertIn("Replica set 'rs0'", detail)
+        self.assertIn("mozjs", detail)
+
+
 class DbPocRecipes(unittest.TestCase):
     """Confirmed DB findings must scaffold an initial-PoC harness (the poc phase)."""
 

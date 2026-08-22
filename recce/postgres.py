@@ -178,6 +178,35 @@ def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres") 
             out["roles"].append({"name": name, "super": sup in ("t", "true", True)})
             if pw:
                 out["hashes"].append({"user": name, "hash": pw})
+        # RCE capability of the connected role: a superuser (or a member of
+        # pg_execute_server_program on PG 11+) can run `COPY t FROM PROGRAM 'cmd'` for
+        # OS command execution. pg_read/write_server_files give arbitrary file R/W.
+        ident = _simple_query(sock, "SELECT current_user, "
+                              "current_setting('is_superuser'), version()")
+        if ident and ident[0]:
+            row = (ident[0] + [None, None, None])[:3]
+            out["current_user"] = row[0] or user
+            out["is_superuser"] = str(row[1] or "").lower() in ("on", "true", "t", "yes")
+            out["server_version"] = row[2] or ""
+        # Role memberships (PG 11+; errors -> [] on older, harmless).
+        priv = _simple_query(
+            sock, "SELECT "
+            "pg_has_role(current_user,'pg_execute_server_program','USAGE'),"
+            "pg_has_role(current_user,'pg_read_server_files','USAGE'),"
+            "pg_has_role(current_user,'pg_write_server_files','USAGE')")
+
+        def _t(v):
+            return str(v or "").lower() in ("t", "true", "on", "yes")
+        if priv and priv[0]:
+            p = (priv[0] + [None, None, None])[:3]
+            out["can_copy_program"] = _t(p[0])
+            out["can_read_files"] = _t(p[1])
+            out["can_write_files"] = _t(p[2])
+        out["can_rce"] = bool(out.get("is_superuser") or out.get("can_copy_program"))
+        # RCE-relevant procedural-language extensions already installed.
+        out["extensions"] = [r[0] for r in _simple_query(
+            sock, "SELECT extname FROM pg_extension WHERE extname IN "
+            "('plpythonu','plpython3u','plperlu','pltclu','plsh') ORDER BY 1")]
         try:
             sock.sendall(b"X" + struct.pack("!I", 4))   # Terminate, politely
         except OSError:
@@ -246,6 +275,33 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Replace `trust` in pg_hba.conf with scram-sha-256 (or md5); bind to "
                     "localhost / a private interface; require TLS for remote access.",
                     ["CWE-306", "CWE-287"], kind="pg_trust_auth"))
+                # Deeper: if that trust login is a superuser (or can COPY FROM PROGRAM),
+                # it is a CONFIRMED unauthenticated RCE, not just data access.
+                if lt.get("can_rce"):
+                    role = lt.get("current_user", "postgres")
+                    how = ("superuser" if lt.get("is_superuser")
+                           else "member of pg_execute_server_program")
+                    exts = lt.get("extensions") or []
+                    ext_txt = (f" Untrusted PL extensions installed: {', '.join(exts)}."
+                               if exts else "")
+                    filecap = []
+                    if lt.get("can_read_files"):
+                        filecap.append("arbitrary file read")
+                    if lt.get("can_write_files"):
+                        filecap.append("arbitrary file write")
+                    fc_txt = (" Also: " + " + ".join(filecap) + "." if filecap else "")
+                    out.append(_finding(
+                        "critical",
+                        "PostgreSQL unauthenticated RCE (trust-auth superuser -> COPY FROM PROGRAM)",
+                        tgt,
+                        f"The trust-auth role '{role}' is a {how}, so `COPY t FROM "
+                        "PROGRAM 'cmd'` executes OS commands as the postgres service "
+                        "account - unauthenticated remote code execution." + ext_txt + fc_txt,
+                        f"psql 'host={h.ip} port={p.portid} user={role} dbname=postgres' "
+                        "-c \"CREATE TABLE r(o text); COPY r FROM PROGRAM 'id'; TABLE r;\"",
+                        "Never expose 5432; remove trust auth; run the app as a "
+                        "non-superuser; revoke pg_execute_server_program.",
+                        ["CWE-78", "CWE-306"], kind="pg_rce"))
     return out
 
 

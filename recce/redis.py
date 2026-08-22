@@ -158,10 +158,57 @@ def _config_value(reply) -> str:
 
 # --- live probe -----------------------------------------------------------------
 
+def _deep(sock, out: dict, info: dict, timeout: float) -> None:
+    """Read-only deep enumeration on an unauthenticated Redis: which RCE primitives are
+    actually reachable (MODULE LOAD, replication, write-to-disk), the ACL identity, and
+    replication topology. Populates out[modules|module_load|acl_user|acl_default_nopass|
+    replication|connected_slaves|master_host|persistence]. Never raises."""
+    try:
+        # role/replication topology (from INFO replication section already in `info`).
+        out["role"] = info.get("role", out.get("role", ""))
+        out["connected_slaves"] = info.get("connected_slaves", "")
+        out["master_host"] = info.get("master_host", "")
+        # MODULE LIST: if it returns (even an empty array) the MODULE command is enabled
+        # -> MODULE LOAD of a malicious .so is a direct RCE primitive. A loaded 3rd-party
+        # module is itself worth surfacing.
+        _command(sock, "MODULE", "LIST")
+        ml = _read_reply(sock, timeout)
+        if isinstance(ml, list):
+            out["module_load"] = True
+            mods = []
+            for entry in ml:
+                if isinstance(entry, list):
+                    for i in range(0, len(entry) - 1, 2):
+                        if entry[i] == "name":
+                            mods.append(str(entry[i + 1]))
+            out["modules"] = mods
+        elif isinstance(ml, _Err):
+            out["module_load"] = False       # renamed/disabled (hardened)
+        # ACL identity (Redis 6+): who are we, and does the default user need no password?
+        _command(sock, "ACL", "WHOAMI")
+        who = _read_reply(sock, timeout)
+        if isinstance(who, str):
+            out["acl_user"] = who
+        _command(sock, "ACL", "LIST")
+        acl = _read_reply(sock, timeout)
+        if isinstance(acl, list):
+            for line in acl:
+                s = str(line)
+                if s.startswith("user default") and "nopass" in s:
+                    out["acl_default_nopass"] = True
+        # Persistence: RDB (save) or AOF (appendonly) enabled means the CONFIG-rewrite
+        # file-write actually flushes to disk.
+        out["persistence"] = bool((out.get("save") or "").strip()) or \
+            (out.get("appendonly", "").lower() == "yes")
+    except OSError:
+        pass
+
+
 def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     """Connect and (read-only) fingerprint a Redis endpoint. Returns
     {reachable, unauth, version, os, role, keys, dir, dbfilename, protected_mode,
-     requirepass, ssl, error} - empty dict if not Redis / unreachable."""
+     requirepass, ssl, modules, module_load, replication, acl_user, persistence,
+     error} - empty dict if not Redis / unreachable."""
     out: dict = {"reachable": False, "unauth": False}
     try:
         sock = socket.create_connection((ip, port), timeout=timeout)
@@ -209,9 +256,11 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
             # Config preconditions for the write-primitive (read-only GETs).
             for name, key in (("dir", "dir"), ("dbfilename", "dbfilename"),
                               ("requirepass", "requirepass"),
-                              ("protected-mode", "protected_mode")):
+                              ("protected-mode", "protected_mode"),
+                              ("save", "save"), ("appendonly", "appendonly")):
                 _command(sock, "CONFIG", "GET", name)
                 out[key] = _config_value(_read_reply(sock, timeout))
+            _deep(sock, out, d, timeout)
         return out
     except OSError as e:
         out["error"] = str(e)
@@ -297,25 +346,39 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             ver = pr.get("version", "")
             if pr.get("unauth"):
                 keys = pr.get("keys", 0)
-                rce = ""
+                # Enumerate which RCE primitives are ACTUALLY reachable on this instance
+                # (recce read the config read-only; it never invoked them).
+                paths = []
                 if pr.get("dir") or pr.get("dbfilename"):
-                    rce = (f" Write primitive available (dir={pr.get('dir', '?')}, "
-                           f"dbfilename={pr.get('dbfilename', '?')}) -> arbitrary file "
-                           "write / RCE.")
+                    persist = " and persistence is on" if pr.get("persistence") else ""
+                    paths.append(f"CONFIG-rewrite file write (dir={pr.get('dir', '?')}, "
+                                 f"dbfilename={pr.get('dbfilename', '?')}{persist}) -> "
+                                 "SSH key / cron / webshell")
+                if pr.get("module_load"):
+                    paths.append("MODULE LOAD of a malicious .so (module command enabled)")
+                if str(pr.get("role", "")).lower() == "master":
+                    paths.append("SLAVEOF/replication payload (role=master)")
+                rce = ""
+                if paths:
+                    rce = " Reachable RCE primitive(s): " + "; ".join(paths) + "."
+                mods = pr.get("modules") or []
+                mod_txt = (f" Loaded modules: {', '.join(mods[:6])}." if mods else "")
                 out.append(_finding(
                     "critical", "Redis exposed without authentication", tgt,
                     "recce read INFO with no credential"
                     + (f" (version {ver})" if ver else "")
                     + (f"; keyspace holds {keys} key(s)" if keys else "")
+                    + (f"; ACL identity '{pr.get('acl_user')}'" if pr.get("acl_user") else "")
                     + ". Full unauthenticated read/write access to every key."
-                    + rce,
+                    + rce + mod_txt,
                     "redis-cli",
                     f"redis-cli -h {h.ip} -p {p.portid} INFO ; "
                     f"redis-cli -h {h.ip} -p {p.portid} KEYS '*'   # then the "
-                    "CONFIG SET dir + dbfilename + SAVE file-write chain for RCE",
+                    "CONFIG SET dir + dbfilename + SAVE file-write chain, MODULE LOAD, or "
+                    "the SLAVEOF replication payload for RCE",
                     "Set a strong requirepass / ACL, enable protected-mode, disable or "
-                    "rename CONFIG/SAVE for untrusted clients, and bind to a trusted "
-                    "interface only.",
+                    "rename CONFIG/SAVE/MODULE/SLAVEOF for untrusted clients, and bind to "
+                    "a trusted interface only.",
                     ["CWE-306", "CWE-284"], kind="redis_unauth"))
             if ver and _old_version(ver):
                 out.append(_finding(

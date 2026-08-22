@@ -173,6 +173,45 @@ def _list_databases(sock, rid, timeout):
                    rid, timeout)
 
 
+def _cmd(sock, name, rid, timeout, db="admin"):
+    return command(sock, bson_doc(_e_int32(name, 1), _e_str("$db", db)), rid, timeout)
+
+
+def _deep_mongo(sock, out: dict, timeout: float) -> None:
+    """Read-only deep enumeration on an unauthenticated MongoDB: captured user accounts
+    (+ credential mechanisms), replica-set members (lateral targets), and the on-disk
+    config (whether auth is even configured). Populates out[users|replset|replset_members
+    |auth_configured|bind_ip|js_engine]. Never raises."""
+    # usersInfo on admin: dump account names, roles and credential mechanisms (loot).
+    ui = _cmd(sock, "usersInfo", 10, timeout)
+    users = []
+    if isinstance(ui, dict) and isinstance(ui.get("users"), list):
+        for u in ui["users"]:
+            if not isinstance(u, dict):
+                continue
+            creds = u.get("credentials")
+            mechs = list(creds.keys()) if isinstance(creds, dict) else []
+            roles = [r.get("role", "") for r in u.get("roles", [])
+                     if isinstance(r, dict)]
+            users.append({"user": u.get("user", ""), "db": u.get("db", ""),
+                          "roles": roles, "mechanisms": mechs})
+    out["users"] = users
+    # replSetGetStatus: replica-set members are additional lateral targets.
+    rs = _cmd(sock, "replSetGetStatus", 11, timeout)
+    if isinstance(rs, dict) and rs.get("ok") == 1.0:
+        out["replset"] = rs.get("set", "")
+        out["replset_members"] = [m.get("name", "") for m in rs.get("members", [])
+                                  if isinstance(m, dict)]
+    # getCmdLineOpts: is authentication even configured? what interface is it bound to?
+    opts = _cmd(sock, "getCmdLineOpts", 12, timeout)
+    if isinstance(opts, dict) and isinstance(opts.get("parsed"), dict):
+        parsed = opts["parsed"]
+        sec = parsed.get("security") if isinstance(parsed.get("security"), dict) else {}
+        out["auth_configured"] = bool(sec.get("authorization") == "enabled")
+        net = parsed.get("net") if isinstance(parsed.get("net"), dict) else {}
+        out["bind_ip"] = str(net.get("bindIp", ""))
+
+
 # --- probe ----------------------------------------------------------------------
 
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict | None:
@@ -189,6 +228,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
                    "max_wire": hello.get("maxWireVersion")}
             bi = _build_info(s, 2, timeout)
             out["version"] = (bi or {}).get("version", "")
+            out["js_engine"] = (bi or {}).get("javascriptEngine", "")
             ld = _list_databases(s, 3, timeout)
             if isinstance(ld, dict) and ld.get("ok") == 1.0 and "databases" in ld:
                 out["unauth"] = True
@@ -196,6 +236,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
                                      "size": d.get("sizeOnDisk", 0)}
                                     for d in ld["databases"] if isinstance(d, dict)]
                 out["total_size"] = ld.get("totalSize", 0)
+                _deep_mongo(s, out, timeout)
             else:
                 out["unauth"] = False
                 out["auth_error"] = (ld or {}).get("errmsg", "") if isinstance(ld, dict) else ""
@@ -274,14 +315,36 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             if pr.get("unauth"):
                 dbs = pr.get("databases") or []
                 names = ", ".join(d["name"] for d in dbs[:12])
+                # Deeper: accounts, replica-set topology and config captured read-only.
+                extra = ""
+                users = pr.get("users") or []
+                if users:
+                    named = ", ".join(u["user"] for u in users[:8] if u.get("user"))
+                    extra += (f"\n\nCAPTURED {len(users)} user account(s) via usersInfo"
+                              + (f": {named}" if named else "")
+                              + " (roles + credential mechanisms readable = crackable "
+                                "SCRAM material / privilege map).")
+                members = pr.get("replset_members") or []
+                if members:
+                    extra += (f"\n\nReplica set '{pr.get('replset', '')}' - "
+                              f"{len(members)} member(s) (lateral targets): "
+                              + ", ".join(members[:6]) + ".")
+                if pr.get("auth_configured") is False:
+                    extra += ("\n\ngetCmdLineOpts confirms authentication is NOT "
+                              "configured (security.authorization absent)"
+                              + (f"; bound to {pr.get('bind_ip')}" if pr.get("bind_ip") else "")
+                              + ".")
+                if pr.get("js_engine"):
+                    extra += (f"\n\nServer-side JavaScript engine: {pr['js_engine']} "
+                              "($where / mapReduce available for query-side code exec).")
                 out.append(_finding(
                     "critical", "MongoDB exposed without authentication", tgt,
                     f"recce listed {len(dbs)} database(s) with no credential"
                     + (f" (version {ver})" if ver else "") + f": {names}. Full "
-                    "unauthenticated read/write access to all data.",
+                    "unauthenticated read/write access to all data." + extra,
                     "mongosh / mongodump",
                     f"mongosh mongodb://{h.ip}:{p.portid}/ --eval 'db.adminCommand("
-                    "{listDatabases:1})'   # then mongodump --host "
+                    "{usersInfo:1})'   # then mongodump --host "
                     f"{h.ip} --port {p.portid} --out loot/",
                     "Enable authentication (security.authorization: enabled), create "
                     "admin users, and bind the listener to a trusted interface only.",
