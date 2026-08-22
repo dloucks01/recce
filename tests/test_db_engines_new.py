@@ -502,6 +502,181 @@ class PostgresScramCredentialed(unittest.TestCase):
         self.assertTrue(any(c.username == "postgres" for c in analysis["credentials"]))
 
 
+def _pg_trust_server(dispatch):
+    """A trust-auth Postgres server that answers each simple query via dispatch(sql) ->
+    list-of-rows (each row a list of str). Used for datamine / prove-RCE tests."""
+    def msg(t, body):
+        return t + struct.pack("!I", len(body) + 4) + body
+
+    def datarow(vals):
+        b = struct.pack("!H", len(vals))
+        for v in vals:
+            bb = str(v).encode()
+            b += struct.pack("!i", len(bb)) + bb
+        return msg(b"D", b)
+
+    def result(rows):
+        return b"".join(datarow(r) for r in rows) + msg(b"C", b"SELECT\x00") + msg(b"Z", b"I")
+
+    def read_msg(conn):
+        hdr = conn.recv(1)
+        if not hdr:
+            return None, b""
+        ln = struct.unpack("!I", conn.recv(4))[0]
+        return hdr, conn.recv(ln - 4)
+
+    def handle(conn):
+        ln = struct.unpack("!I", conn.recv(4))[0]             # StartupMessage length
+        conn.recv(ln - 4)                                     # StartupMessage body
+        conn.sendall(msg(b"R", struct.pack("!I", 0)))         # AuthenticationOk (trust)
+        conn.sendall(msg(b"S", b"server_version\x0016.2\x00"))
+        conn.sendall(msg(b"Z", b"I"))
+        while True:
+            t, body = read_msg(conn)
+            if t is None or t == b"X":
+                return
+            if t == b"Q":
+                sql = body.rstrip(b"\x00").decode("utf-8", "replace")
+                conn.sendall(result(dispatch(sql)))
+    return _tcp_once(handle)
+
+
+class PostgresDatamine(unittest.TestCase):
+    """Exfil: mine sensitive columns, sample redacted rows, harvest connection strings."""
+
+    def _dispatch(self, sql):
+        s = sql.lower()
+        if "pg_database" in s:
+            return [["app_prod"]]
+        if "pg_shadow" in s:
+            return [["postgres", "SCRAM-SHA-256$x", "t"]]
+        if "current_user" in s:
+            return [["postgres", "on", "PostgreSQL 16.2"]]
+        if "pg_has_role" in s:
+            return [["t", "f", "f"]]
+        if "pg_extension" in s:
+            return [["plpython3u"]]
+        if "information_schema.columns" in s:
+            return [["public", "users", "password"], ["public", "users", "email"],
+                    ["public", "config", "conn_str"], ["public", "orders", "qty"]]
+        if 'from "public"."users"' in s:
+            return [["Sup3rSecret!", "alice@corp.example"]]
+        if 'from "public"."config"' in s:
+            return [["postgres://svc:hunter2@db2.internal:5432/app"]]
+        return []
+
+    def test_datamine_extracts_and_harvests(self):
+        from recce import postgres
+        port = _pg_trust_server(self._dispatch)
+        dm = postgres.datamine("127.0.0.1", port, ["app_prod"], user="postgres")
+        tables = {c["table"] for c in dm["secret_columns"]}
+        self.assertIn("public.users", tables)
+        self.assertIn("public.config", tables)
+        # 'qty' is not sensitive
+        self.assertFalse(any(c["column"] == "qty" for c in dm["secret_columns"]))
+        # a sample was pulled and the value is REDACTED (not the full secret)
+        self.assertTrue(dm["samples"])
+        flat = str(dm["samples"])
+        self.assertNotIn("Sup3rSecret!", flat)
+        # the embedded connection string was harvested
+        self.assertIn("postgres://svc:hunter2@db2.internal:5432/app", dm["harvested"])
+
+    def test_analyze_emits_datamine_finding_and_cred(self):
+        from recce import postgres
+        port = _pg_trust_server(self._dispatch)
+        h = _host(port, "postgresql")
+        analysis = postgres.analyze([h])
+        kinds = {f["kind"] for f in analysis["findings"]}
+        self.assertIn("pg_datamine", kinds)
+        dmf = [f for f in analysis["findings"] if f["kind"] == "pg_datamine"][0]
+        self.assertIn("sensitive", dmf["title"].lower())
+        # harvested connection string became a sprayable credential
+        self.assertTrue(any(c.source == "postgres-datamine" for c in analysis["credentials"]))
+
+
+class PostgresRceProof(unittest.TestCase):
+    """Foothold: opt-in benign COPY-FROM-PROGRAM `id` proof confirms RCE."""
+
+    def _dispatch(self, sql):
+        s = sql.lower()
+        if "select o from recce_rce" in s:
+            return [["uid=114(postgres) gid=120(postgres) groups=120(postgres)"]]
+        if "pg_database" in s:
+            return [["app_prod"]]
+        if "pg_shadow" in s:
+            return [["postgres", "x", "t"]]
+        if "current_user" in s:
+            return [["postgres", "on", "PostgreSQL 16.2"]]
+        if "pg_has_role" in s:
+            return [["t", "f", "f"]]
+        if "pg_extension" in s or "information_schema" in s:
+            return []
+        return []
+
+    def test_prove_rce_runs_id(self):
+        from recce import postgres
+        port = _pg_trust_server(self._dispatch)
+        out = postgres.prove_rce("127.0.0.1", port, user="postgres")
+        self.assertIn("uid=114(postgres)", out)
+
+    def test_analyze_prove_confirms_rce(self):
+        from recce import postgres
+        port = _pg_trust_server(self._dispatch)
+        h = _host(port, "postgresql")
+        analysis = postgres.analyze([h], prove=True, datamine_data=False)
+        rce = [f for f in analysis["findings"] if f["kind"] == "pg_rce"]
+        self.assertTrue(rce)
+        self.assertIn("RCE CONFIRMED", rce[0]["detail"])
+        self.assertIn("uid=114(postgres)", rce[0]["detail"])
+
+    def test_default_analyze_does_not_prove(self):
+        # RCE proof is OPT-IN: a plain analyze() must NOT execute COPY FROM PROGRAM.
+        from recce import postgres
+        port = _pg_trust_server(self._dispatch)
+        h = _host(port, "postgresql")
+        analysis = postgres.analyze([h], datamine_data=False)   # prove defaults False
+        rce = [f for f in analysis["findings"] if f["kind"] == "pg_rce"]
+        self.assertTrue(rce)                                    # capability still reported
+        self.assertNotIn("RCE CONFIRMED", rce[0]["detail"])     # but not executed
+
+
+class PostgresProveEngine(unittest.TestCase):
+    """The prove/verify engine recognizes the postgres RCE / datamine / access findings."""
+
+    def _verdict(self, title, output=""):
+        from recce import proofs
+        from recce.models import Vuln
+        v = Vuln(ip="1.1.1.1", port=5432, protocol="tcp", script_id="postgres",
+                 title=title, output=output)
+        r = proofs.recipe_for(v)
+        self.assertIsNotNone(r, f"no recipe for {title!r}")
+        verdict, lines = r["fn"](None, 5432, v)
+        return r["id"], verdict, " ".join(lines)
+
+    def test_rce_recipe_confirms_and_mentions_proof(self):
+        rid, verdict, text = self._verdict(
+            "PostgreSQL unauthenticated RCE (trust-auth superuser -> COPY FROM PROGRAM)",
+            "RCE CONFIRMED (recce ran a benign `id` ...): uid=114(postgres)")
+        self.assertEqual(rid, "postgres-rce")
+        self.assertEqual(verdict, proofs_CONFIRMED())
+        self.assertIn("RCE CONFIRMED", text)
+
+    def test_datamine_recipe(self):
+        rid, verdict, text = self._verdict(
+            "PostgreSQL sensitive data exposed (PII / secrets / credentials)")
+        self.assertEqual(rid, "postgres-datamine")
+        self.assertIn("sampled rows", text)
+
+    def test_access_recipe(self):
+        rid, _v, _t = self._verdict("PostgreSQL trust authentication (no password required)")
+        self.assertEqual(rid, "postgres-access")
+
+
+def proofs_CONFIRMED():
+    from recce import proofs
+    return proofs.CONFIRMED
+
+
 class RedisDeepPrimitives(unittest.TestCase):
     """Deep probe surfaces which RCE primitives are actually reachable."""
 

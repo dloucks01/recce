@@ -4765,7 +4765,9 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
     # DB engines that support credentialed follow-through spray -u/-p plus the looted
     # password credentials from the datastore against auth-required instances.
     db_creds = _db_login_creds(args, store) if source in ("postgres", "mongodb") else None
-    analysis = mod.analyze(hosts, active=active, creds=db_creds, **_probe_kwargs(args, source))
+    extra_kw = {"prove": True} if source == "postgres" and getattr(args, "prove_rce", False) else {}
+    analysis = mod.analyze(hosts, active=active, creds=db_creds,
+                           **extra_kw, **_probe_kwargs(args, source))
     tgts = analysis["targets"]
     if not tgts:
         print(no_targets)
@@ -6853,6 +6855,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     pgp.add_argument("-u", "--username", help="credential to try on auth-required "
                      "instances (also sprays looted creds from the datastore)")
     pgp.add_argument("-p", "--password", help="password for -u")
+    pgp.add_argument("--prove", dest="prove_rce", action="store_true",
+                     help="ACTIVE: on a superuser/COPY-capable instance, run a benign "
+                          "`id` via COPY FROM PROGRAM to CONFIRM RCE (opt-in; ROE only)")
     _add_io(pgp)
     _add_budget(pgp)
     pgp.set_defaults(func=cmd_postgres)
