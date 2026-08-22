@@ -42,7 +42,7 @@ def _is_real(f: "Finding") -> bool:
 _CIA = "Confidentiality, Integrity, Availability"
 _CWE_TYPE = [
     (("CWE-78", "CWE-77", "CWE-88", "CWE-94", "CWE-95", "CWE-134", "CWE-74", "CWE-917",
-      "CWE-1336"),
+      "CWE-1336", "CWE-943"),
      "Injection / Remote Code Execution", _CIA),
     (("CWE-89",), "SQL Injection", "Confidentiality, Integrity"),
     (("CWE-79",), "Cross-Site Scripting", "Integrity"),
@@ -145,6 +145,7 @@ _CWE_NAME = {
     "CWE-538": "Insertion of Sensitive Information into Externally-Accessible File",
     "CWE-540": "Inclusion of Sensitive Information in Source Code",
     "CWE-489": "Active Debug Code",
+    "CWE-943": "Improper Neutralization in Data Query Logic (NoSQL Injection)",
     "CWE-611": "Improper Restriction of XML External Entity Reference",
     "CWE-640": "Weak Password Recovery Mechanism",
     "CWE-650": "Trusting HTTP Permission Methods on the Server Side",

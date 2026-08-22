@@ -482,3 +482,69 @@ class SstiEngineId(unittest.TestCase):
         fs = web._reflect_via("1.1.1.1", p, "query 'q'", send)
         self.assertEqual(fs[0].severity, "high")
         self.assertNotIn("—", fs[0].title)
+
+
+# --------------------------- NoSQL auth bypass -----------------------------------
+
+class NoSqlAuthBypass(unittest.TestCase):
+    """MongoDB-style operator injection on a login form logs in without credentials."""
+
+    _FORM = ('<form method="post" action="/login">'
+             '<input type="text" name="username">'
+             '<input type="password" name="password"><button>Login</button></form>')
+
+    def _make(self, vulnerable):
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(200); self.end_headers()
+                self.wfile.write(outer._FORM.encode())
+
+            def do_POST(self):
+                import json as _j
+                n = int(self.headers.get("content-length", 0))
+                raw = self.rfile.read(n).decode()
+                hit = False
+                if vulnerable and "json" in self.headers.get("content-type", ""):
+                    try:
+                        d = _j.loads(raw)
+                        hit = isinstance(d.get("username"), dict) or isinstance(d.get("password"), dict)
+                    except Exception:
+                        hit = False
+                if hit:
+                    self.send_response(302); self.send_header("Location", "/home")
+                    self.send_header("Set-Cookie", "sess=OK"); self.end_headers()
+                else:
+                    self.send_response(200); self.end_headers()
+                    self.wfile.write((outer._FORM + "<p>Invalid credentials</p>").encode())
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    def test_json_operator_bypass_confirmed(self):
+        srv = self._make(vulnerable=True)
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            body = web._fetch("127.0.0.1", p, "/")[2]
+            fs = web._scan_nosql("127.0.0.1", p, f"http://127.0.0.1:{port}", body, None)
+        finally:
+            srv.shutdown()
+        self.assertTrue(fs)
+        self.assertEqual(fs[0].script_id, "web-nosqli")
+        self.assertEqual(fs[0].severity, "critical")
+
+    def test_non_vulnerable_not_flagged(self):
+        srv = self._make(vulnerable=False)
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            body = web._fetch("127.0.0.1", p, "/")[2]
+            self.assertEqual(web._scan_nosql("127.0.0.1", p, "http://x", body, None), [])
+        finally:
+            srv.shutdown()

@@ -689,6 +689,19 @@ def _v_debug(host, port, vuln):
         "FP only if the page is a static error template, not the real debug view."]
 
 
+def _v_authbypass_nosql(host, port, vuln):
+    # recce submitted a NoSQL operator payload and got an authenticated response the
+    # wrong-credential baseline did not - directly observed auth bypass -> CONFIRMED.
+    return CONFIRMED, [
+        "recce submitted a NoSQL operator payload ($ne/$gt) to the login form and "
+        "received an authenticated response that a wrong credential did not - the app "
+        "passes objects/operators into a NoSQL auth query (directly observed).",
+        "Log in as the first/admin account with the same payload; enumerate other users "
+        "via a $regex / $where injection to pull every account (within ROE).",
+        "FP only if the 'success' response wasn't truly authenticated (a wrong-credential "
+        "baseline was compared to guard against that)."]
+
+
 def _v_cmdi(host, port, vuln):
     # recce injected a shell payload and the RESPONSE carried a shell-computed marker
     # (or scaled the delay) - direct command execution, observed -> CONFIRMED.
@@ -1318,6 +1331,15 @@ _RECIPES: list[dict] = [
                "SECRET_KEY / DB creds / source (within ROE).",
      "fp": "A static error template rather than the live debug view.",
      "fn": _v_debug},
+    {"id": "web-nosqli",
+     "match": r"nosql injection authentication bypass",
+     "name": "NoSQL injection authentication bypass",
+     "pre": ["A login form", "Operator payloads logged in without valid credentials"],
+     "finish": "Log in as the first/admin user with the operator payload; enumerate other "
+               "users with a regex/`$where` injection (within ROE).",
+     "fp": "The 'success' response wasn't actually authenticated (recce baselined a wrong "
+           "credential to guard this).",
+     "fn": _v_authbypass_nosql},
     {"id": "web-cmdi",
      "match": r"os command injection in ",
      "name": "OS command injection (RCE)",
