@@ -595,3 +595,42 @@ class XxeFileRead(unittest.TestCase):
             self.assertEqual(web._scan_xxe("127.0.0.1", p, "http://x", None), [])
         finally:
             srv.shutdown()
+
+
+# --------------------------- CSP + subdomain takeover ----------------------------
+
+class CspAnalysis(unittest.TestCase):
+    def test_weak_csp_flagged_medium(self):
+        p = Port(portid=80, service="http", state="open")
+        fs = web._csp_findings("1.1.1.1", p, {
+            "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' *"})
+        self.assertTrue(fs and fs[0].script_id == "web-csp")
+        self.assertEqual(fs[0].severity, "medium")
+        self.assertIn("unsafe-inline", fs[0].output)
+        self.assertIn("wildcard", fs[0].output)
+
+    def test_strong_csp_clean(self):
+        p = Port(portid=80, service="http", state="open")
+        self.assertEqual(web._csp_findings("1.1.1.1", p, {
+            "content-security-policy":
+            "default-src 'none'; script-src 'self' 'nonce-x'; object-src 'none'; base-uri 'self'"}), [])
+
+    def test_missing_csp_not_here(self):
+        p = Port(portid=80, service="http", state="open")
+        self.assertEqual(web._csp_findings("1.1.1.1", p, {}), [])   # handled by header audit
+
+
+class SubdomainTakeover(unittest.TestCase):
+    def test_fingerprints(self):
+        self.assertEqual(web._takeover_service("There isn't a GitHub Pages site here."),
+                         "GitHub Pages")
+        self.assertEqual(web._takeover_service("<Error><Code>NoSuchBucket</Code></Error>"),
+                         "AWS S3")
+        self.assertEqual(web._takeover_service("<h1>Welcome to my blog</h1>"), "")
+
+    def test_takeover_finding_shape(self):
+        p = Port(portid=80, service="http", state="open")
+        f = web._takeover_finding("1.1.1.1", p, "http://x", "sub.acme.com", "Heroku")
+        self.assertEqual(f.script_id, "web-takeover")
+        self.assertEqual(f.severity, "high")
+        self.assertIn("sub.acme.com", f.output)

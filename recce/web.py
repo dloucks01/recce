@@ -937,6 +937,83 @@ def _security_headers(ip: str, port: Port, headers: dict) -> list[Vuln]:
                 "nosniff, Referrer-Policy, Permissions-Policy.")]
 
 
+# Subdomain-takeover fingerprints: a dangling CNAME to a third-party service whose
+# resource is unclaimed serves one of these distinctive error pages -> claimable.
+_TAKEOVER = [
+    ("AWS S3", re.compile(r"NoSuchBucket|The specified bucket does not exist")),
+    ("GitHub Pages", re.compile(r"There isn't a GitHub Pages site here|"
+                                r"For root URLs \(like http://example\.com/\)")),
+    ("Heroku", re.compile(r"No such app|herokucdn\.com/error-pages/no-such-app")),
+    ("Fastly", re.compile(r"Fastly error: unknown domain")),
+    ("Shopify", re.compile(r"Sorry, this shop is currently unavailable")),
+    ("Tumblr", re.compile(r"Whatever you were looking for doesn't currently exist at "
+                          r"this address")),
+    ("Bitbucket", re.compile(r"Repository not found")),
+    ("Ghost", re.compile(r"The thing you were looking for is no longer here")),
+    ("Surge.sh", re.compile(r"project not found")),
+    ("Pantheon", re.compile(r"The gods are wise, but do not know of the site which you seek")),
+    ("Azure", re.compile(r"404 Web Site not found|azurewebsites")),
+    ("Netlify", re.compile(r"Not Found - Request ID")),
+    ("Zendesk", re.compile(r"Help Center Closed")),
+    ("Read the Docs", re.compile(r"unknown to Read the Docs")),
+    ("Cargo", re.compile(r"<title>404 &mdash; File not found</title>.*cargo", re.S)),
+]
+
+
+def _takeover_service(body: str) -> str:
+    if not body:
+        return ""
+    head = body[:8000]
+    for svc, rx in _TAKEOVER:
+        if rx.search(head):
+            return svc
+    return ""
+
+
+def _takeover_finding(ip: str, port: Port, base: str, host: str, service: str) -> Vuln:
+    return _mk(ip, port, "web-takeover", "high",
+               f"Potential subdomain takeover ({service})", ["CWE-16"],
+               f"{host or base} served the {service} 'unclaimed resource' error page - the "
+               f"DNS record points at {service} but the resource isn't claimed, so an "
+               "attacker can register it and serve arbitrary content on this domain "
+               "(phishing, cookie theft, OAuth-redirect abuse).",
+               f"Remove the dangling DNS record, or (re)claim the {service} resource it "
+               "points to.", confidence="confirmed")
+
+
+def _csp_findings(ip: str, port: Port, headers: dict) -> list[Vuln]:
+    """Analyse a PRESENT Content-Security-Policy for bypasses (a missing CSP is handled
+    by the security-headers audit). A weak CSP doesn't stop the XSS it's meant to."""
+    csp = headers.get("content-security-policy", "")
+    if not csp:
+        return []
+    low = csp.lower()
+    m = re.search(r"script-src\s+([^;]*)", low) or re.search(r"default-src\s+([^;]*)", low)
+    script_src = m.group(1) if m else ""
+    weak: list[str] = []
+    high = False
+    if "'unsafe-inline'" in script_src or ("'unsafe-inline'" in low and not m):
+        weak.append("'unsafe-inline' in script-src (inline-script XSS is not blocked)")
+        high = True
+    if "'unsafe-eval'" in low:
+        weak.append("'unsafe-eval' (eval()-based script execution allowed)")
+    if re.search(r"(^|\s)\*(\s|$)", script_src) or "http:" in script_src \
+            or "data:" in script_src or script_src.strip() in ("https:", "*"):
+        weak.append("a wildcard / scheme source in script-src (any-origin script load)")
+        high = True
+    if "object-src" not in low:
+        weak.append("no object-src 'none' (plugin/embed XSS vector)")
+    if "base-uri" not in low:
+        weak.append("no base-uri (a <base> tag can hijack relative script URLs)")
+    if not weak:
+        return []
+    return [_mk(ip, port, "web-csp", "medium" if high else "low",
+                "Weak Content-Security-Policy (bypassable)", ["CWE-693"],
+                "The CSP is present but weak: " + "; ".join(weak) + ".",
+                "Drop 'unsafe-inline'/'unsafe-eval' (use nonces/hashes), remove wildcard/"
+                "scheme sources, and set object-src 'none' + base-uri 'self'.")]
+
+
 def _cookie_findings(ip: str, port: Port, set_cookie_blob: str) -> list[Vuln]:
     """Per-cookie hygiene from the Set-Cookie header(s): HttpOnly, Secure, SameSite,
     __Host-/__Secure- prefix, cleartext-session transport, and over-broad Domain scope.
@@ -2177,20 +2254,25 @@ def _discover_vhosts(ip: str, port: Port, base: str, host_hint: str,
         return [], []
     default = _page_shape(_fetch(ip, port, "/", auth={**(auth or {}), "Host": ip}) or _fetch(ip, port, "/", auth=auth))
     found: list[tuple[str, int, str]] = []
+    extra: list[Vuln] = []
     for name in sorted(cands)[:20]:
-        st, title, blen = _page_shape(_fetch(ip, port, "/", auth={**(auth or {}), "Host": name}))
+        r = _fetch(ip, port, "/", auth={**(auth or {}), "Host": name})
+        st, title, blen = _page_shape(r)
         if st is None:
             continue
+        tko = _takeover_service(r[2] if r else "")     # dangling-CNAME takeover on this vhost
+        if tko:
+            extra.append(_takeover_finding(ip, port, base, name, tko))
         if st != default[0] or title != default[1] or abs(blen - default[2]) > 256:
             found.append((name, st, title))
     if not found:
-        return [], []
+        return extra, []
     listing = "; ".join(f"{n} [{s}] {t}".strip() for n, s, t in found)
     f = _mk(ip, port, "web-vhost", "info", f"Virtual host(s) discovered: {len(found)}", ["CWE-200"],
             f"Host-header probing on {base} surfaced distinct site(s) vs. the default response: "
             f"{listing}. These serve different content and should be enumerated by name.",
             "Confirm each virtual host is intended to be reachable here; scan the named sites explicitly.")
-    return [f], [n for n, _, _ in found]
+    return [f, *extra], [n for n, _, _ in found]
 
 
 def scan_endpoint(ip: str, port: Port, active: bool = True,
@@ -2242,6 +2324,10 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     # Cookie hardening (per Set-Cookie): HttpOnly / Secure / SameSite / prefix / scope.
     findings.extend(_cookie_findings(ip, port, headers.get("set-cookie", "")))
     findings.extend(_security_headers(ip, port, headers))
+    findings.extend(_csp_findings(ip, port, headers))
+    _tko = _takeover_service(body)
+    if _tko:
+        findings.append(_takeover_finding(ip, port, base, host_hint, _tko))
     # Dangerous HTTP methods. When PUT is advertised AND active, we don't just
     # trust the Allow header - we prove it: PUT a marker, GET it back, DELETE it.
     opt = _fetch(ip, port, "/", method="OPTIONS", auth=auth)

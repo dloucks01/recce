@@ -689,6 +689,30 @@ def _v_debug(host, port, vuln):
         "FP only if the page is a static error template, not the real debug view."]
 
 
+def _v_takeover(host, port, vuln):
+    b = _blob(vuln)
+    svc = next((s for s in ("s3", "github", "heroku", "fastly", "shopify", "azure",
+                            "netlify", "surge", "pantheon") if s in b), "the service")
+    return CONFIRMED, [
+        "recce received the third-party service's 'unclaimed resource' error page on "
+        f"this domain - the DNS points at {svc} but nothing is claimed there (directly "
+        "observed).",
+        f"Claim the {svc} resource (bucket/app/page/site) for this exact name and serve "
+        "your content on the domain: phish, steal cookies scoped to the parent domain, "
+        "or abuse OAuth redirect_uri allow-lists (within ROE).",
+        "FP only if the DNS record was just removed between recce's fetch and now."]
+
+
+def _v_csp(host, port, vuln):
+    return CONFIRMED, [
+        "recce read the Content-Security-Policy header and it is bypassable (the listed "
+        "weakness is present) - it will not stop the XSS it is meant to mitigate.",
+        "It is not directly exploitable on its own; pair it with any reflected/stored "
+        "input (see the reflected-XSS / SSTI findings) - the weak CSP lets that payload "
+        "execute.",
+        "Not applicable - a policy header, verified by reading it."]
+
+
 def _v_xxe(host, port, vuln):
     # recce POSTed an external-entity XML body and the referenced file's content came
     # back - the parser resolved the entity, directly observed -> CONFIRMED.
@@ -1344,6 +1368,22 @@ _RECIPES: list[dict] = [
                "SECRET_KEY / DB creds / source (within ROE).",
      "fp": "A static error template rather than the live debug view.",
      "fn": _v_debug},
+    {"id": "web-takeover",
+     "match": r"potential subdomain takeover",
+     "name": "Subdomain takeover (dangling DNS)",
+     "pre": ["A dangling DNS record", "The pointed service's unclaimed-resource page"],
+     "finish": "Claim the resource at the third-party service for this exact name; serve "
+               "content on the domain (phishing / cookie theft / OAuth abuse) in ROE.",
+     "fp": "The DNS record was removed between the fetch and now.",
+     "fn": _v_takeover},
+    {"id": "web-csp",
+     "match": r"weak content-security-policy",
+     "name": "Weak Content-Security-Policy",
+     "pre": ["A CSP header is present", "It contains a bypass (unsafe-inline / wildcard)"],
+     "finish": "Chain with any reflected/stored input - the weak CSP lets the payload "
+               "execute (see the XSS/SSTI findings).",
+     "fp": "The policy is actually adequate for the app's needs.",
+     "fn": _v_csp},
     {"id": "web-xxe",
      "match": r"xml external entity \(xxe\)",
      "name": "XML External Entity (XXE) file read",
