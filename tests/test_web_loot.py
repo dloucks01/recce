@@ -548,3 +548,50 @@ class NoSqlAuthBypass(unittest.TestCase):
             self.assertEqual(web._scan_nosql("127.0.0.1", p, "http://x", body, None), [])
         finally:
             srv.shutdown()
+
+
+# --------------------------------- XXE -------------------------------------------
+
+class XxeFileRead(unittest.TestCase):
+    """XXE is confirmed only when the referenced file's content comes back (zero-FP)."""
+
+    def _make(self, vulnerable):
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(200); self.end_headers(); self.wfile.write(b"<html/>")
+
+            def do_POST(self):
+                n = int(self.headers.get("content-length", 0))
+                raw = self.rfile.read(n).decode()
+                self.send_response(200); self.end_headers()
+                if vulnerable and "file:///etc/passwd" in raw and self.path == "/api":
+                    self.wfile.write(b"<r>root:x:0:0:root:/root:/bin/bash</r>")
+                else:
+                    self.wfile.write(b"<ok/>")            # entity NOT resolved (echoes nothing)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    def test_confirmed_file_read(self):
+        srv = self._make(vulnerable=True)
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            fs = web._scan_xxe("127.0.0.1", p, f"http://127.0.0.1:{port}", None)
+        finally:
+            srv.shutdown()
+        self.assertTrue(fs)
+        self.assertEqual(fs[0].script_id, "web-xxe")
+        self.assertEqual(fs[0].severity, "critical")
+
+    def test_no_entity_resolution_not_flagged(self):
+        srv = self._make(vulnerable=False)
+        try:
+            p = Port(portid=srv.server_address[1], service="http", state="open")
+            self.assertEqual(web._scan_xxe("127.0.0.1", p, "http://x", None), [])
+        finally:
+            srv.shutdown()

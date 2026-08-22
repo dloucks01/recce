@@ -689,6 +689,19 @@ def _v_debug(host, port, vuln):
         "FP only if the page is a static error template, not the real debug view."]
 
 
+def _v_xxe(host, port, vuln):
+    # recce POSTed an external-entity XML body and the referenced file's content came
+    # back - the parser resolved the entity, directly observed -> CONFIRMED.
+    return CONFIRMED, [
+        "recce POSTed an XML body with an external entity (file:///etc/passwd) and the "
+        "response returned the file content - the XML parser resolves external entities "
+        "(XXE, directly observed).",
+        "Read app config / secrets / source via file://; pivot to SSRF "
+        "(<!ENTITY xxe SYSTEM \"http://169.254.169.254/...\">) and internal services; "
+        "use a parameter/OOB entity to exfiltrate non-text files (within ROE).",
+        "FP: none - the file content in the response proves entity resolution."]
+
+
 def _v_authbypass_nosql(host, port, vuln):
     # recce submitted a NoSQL operator payload and got an authenticated response the
     # wrong-credential baseline did not - directly observed auth bypass -> CONFIRMED.
@@ -1331,6 +1344,14 @@ _RECIPES: list[dict] = [
                "SECRET_KEY / DB creds / source (within ROE).",
      "fp": "A static error template rather than the live debug view.",
      "fn": _v_debug},
+    {"id": "web-xxe",
+     "match": r"xml external entity \(xxe\)",
+     "name": "XML External Entity (XXE) file read",
+     "pre": ["An XML endpoint that resolves external entities", "The file content returned"],
+     "finish": "Read config/secrets/source via file://; pivot to SSRF (metadata/internal); "
+               "OOB-exfiltrate non-text files (within ROE).",
+     "fp": "None - the returned file content proves entity resolution.",
+     "fn": _v_xxe},
     {"id": "web-nosqli",
      "match": r"nosql injection authentication bypass",
      "name": "NoSQL injection authentication bypass",
