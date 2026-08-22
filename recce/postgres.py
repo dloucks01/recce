@@ -22,7 +22,7 @@ from .models import Host, Port
 _SECRET_COL = re.compile(
     r"pass|pwd|secret|token|api[_-]?key|apikey|ssn|social|credit|card|cvv|iban|routing|"
     r"salary|passport|licen|priv(ate)?[_-]?key|seckey|session|birth|dob|\bpin\b|"
-    r"security|mfa|otp|cookie|bearer|conn(ection)?[_-]?str", re.I)
+    r"security|mfa|otp|cookie|bearer|conn(ection)?[_-]?str|e[-_]?mail|phone|mobile", re.I)
 # Connection strings / embedded credentials to harvest out of sampled data.
 _CONNSTR = re.compile(
     r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|ftp|ldap|https?)://"

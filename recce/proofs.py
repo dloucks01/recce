@@ -311,6 +311,21 @@ def _v_mongodb(host, port, vuln):
     # recce spoke the wire protocol and listDatabases returned the database list with
     # no credential, so the no-auth exposure is directly observed -> CONFIRMED.
     b = _blob(vuln)
+    if "sensitive data" in b or "pii" in b or "datamine" in b:
+        return CONFIRMED, [
+            "recce read the database, sampled documents, and found fields whose names "
+            "denote secrets/PII - real data was returned (directly observed; the finding "
+            "shows redacted samples).",
+            "Dump the full documents within ROE: mongosh mongodb://<ip>:<port>/ --eval "
+            "'db.getSiblingDB(\"<db>\").<coll>.find().limit(100)'; spray harvested creds.",
+            "FP only if the fields hold non-sensitive data despite their names."]
+    if "credentialed access" in b:
+        return CONFIRMED, [
+            "recce authenticated with a credential from the engagement (SCRAM) and read "
+            "the databases (directly observed).",
+            "mongosh 'mongodb://<u>:<pass>@<ip>:<port>/?authSource=admin' then enumerate "
+            "/ dump within ROE.",
+            "FP only if the credential no longer works."]
     if "end-of-life" in b or "legacy" in b:
         return CONFIRMED, [
             "recce read the running MongoDB version via buildInfo and it is past "
@@ -937,6 +952,16 @@ _RECIPES: list[dict] = [
      "finish": "mongosh mongodb://<ip>:<port>/ --eval 'db.adminCommand({listDatabases:1})' "
                "then mongodump --host <ip> --port <port> --out loot/  (recce already read it).",
      "fp": "The server actually enforced auth and returned an error.",
+     "fn": _v_mongodb},
+    {"id": "mongodb-datamine",
+     "match": r"mongodb sensitive data|mongodb.*(pii|secrets|credentials)|"
+              r"mongodb credentialed access",
+     "name": "MongoDB sensitive data / credentialed access",
+     "pre": ["MongoDB reachable", "Read access to collections with sensitive fields"],
+     "finish": "mongosh mongodb://<ip>:<port>/ --eval "
+               "'db.getSiblingDB(\"<db>\").<coll>.find().limit(100)' to pull full docs; "
+               "spray harvested connection strings (ROE).",
+     "fp": "The flagged fields hold non-sensitive data despite their names.",
      "fn": _v_mongodb},
     {"id": "redis-unauth",
      "match": r"redis exposed without authentication|redis.*(no auth|unauth)|"

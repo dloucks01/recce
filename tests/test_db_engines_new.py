@@ -1078,6 +1078,77 @@ class MongoScramCredentialed(unittest.TestCase):
                             for c in analysis["credentials"]))
 
 
+class MongoDatamine(unittest.TestCase):
+    """Exfil: sample documents, flag sensitive fields, harvest connection strings."""
+
+    def setUp(self):
+        from recce import mongodb as M
+
+        def e_double(n, v):
+            return b"\x01" + M._cstr(n) + struct.pack("<d", v)
+
+        def e_doc(n, d):
+            return b"\x03" + M._cstr(n) + d
+
+        def e_array(n, docs):
+            return b"\x04" + M._cstr(n) + M.bson_doc(*[e_doc(str(i), d)
+                                                       for i, d in enumerate(docs)])
+
+        def cursor(docs):
+            return M.bson_doc(e_doc("cursor", M.bson_doc(e_array("firstBatch", docs))),
+                              e_double("ok", 1.0))
+
+        hello = M.bson_doc(M._e_int32("maxWireVersion", 17), e_double("ok", 1.0))
+        listdbs = M.bson_doc(e_array("databases", [M.bson_doc(M._e_str("name", "prod"),
+                             e_double("sizeOnDisk", 9.0))]), e_double("ok", 1.0))
+        collections = cursor([M.bson_doc(M._e_str("name", "customers")),
+                              M.bson_doc(M._e_str("name", "system.indexes"))])
+        doc = M.bson_doc(
+            M._e_str("email", "alice@corp.example"),
+            M._e_str("ssn", "123-45-6789"),
+            e_doc("meta", M.bson_doc(M._e_str("api_token", "SEKRET-TOKEN-9999"))),
+            M._e_str("note", "backup at mongodb://svc:hunter2@m2.internal:27017/prod"))
+        find = cursor([doc])
+
+        def handle(conn):
+            while True:
+                hdr = M._recvn(conn, 16)
+                if len(hdr) < 16:
+                    return
+                length = struct.unpack("<i", hdr[:4])[0]
+                rid = struct.unpack("<i", hdr[4:8])[0]
+                body = M._recvn(conn, length - 16)
+                d, _ = M.bson_parse(hdr + body, 16 + 4 + 1)
+                cmd = next(iter(d), "")
+                reply = {"hello": hello, "buildInfo": M.bson_doc(
+                            M._e_str("version", "6.0.1"), e_double("ok", 1.0)),
+                         "listDatabases": listdbs, "listCollections": collections,
+                         "find": find}.get(cmd) or M.bson_doc(
+                             M._e_str("errmsg", "no"), e_double("ok", 0.0))
+                conn.sendall(M.op_msg(rid, reply))
+        self.port = _http_or_tcp = _tcp_once(handle)
+
+    def test_datamine_fields_and_harvest(self):
+        from recce import mongodb as M
+        dm = M.datamine("127.0.0.1", self.port, ["prod"])
+        fields = {f["field"] for f in dm["secret_fields"]}
+        self.assertIn("email", fields)
+        self.assertIn("ssn", fields)
+        self.assertIn("meta.api_token", fields)          # nested field flattened
+        self.assertNotIn("note", fields)                 # name not sensitive...
+        self.assertIn("mongodb://svc:hunter2@m2.internal:27017/prod", dm["harvested"])
+        # values are redacted, not dumped in full
+        self.assertNotIn("SEKRET-TOKEN-9999", str(dm["samples"]))
+
+    def test_analyze_emits_datamine_finding_and_cred(self):
+        from recce import mongodb as M
+        h = _host(self.port, "mongodb")
+        analysis = M.analyze([h])
+        kinds = {f["kind"] for f in analysis["findings"]}
+        self.assertIn("mongo_datamine", kinds)
+        self.assertTrue(any(c.source == "mongodb-datamine" for c in analysis["credentials"]))
+
+
 class DbPocRecipes(unittest.TestCase):
     """Confirmed DB findings must scaffold an initial-PoC harness (the poc phase)."""
 

