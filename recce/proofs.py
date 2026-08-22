@@ -638,6 +638,20 @@ def _v_web_exposure(host, port, vuln):
                        "(whatweb / nikto / nuclei). For .git, dump it: git-dumper <url>/.git ./loot."]
 
 
+def _v_authsession(host, port, vuln):
+    # recce submitted a harvested credential to the login form and got an authenticated
+    # session back - directly observed -> CONFIRMED credential reuse / valid login.
+    return CONFIRMED, [
+        "recce logged into the web app's form with a credential harvested elsewhere in "
+        "the engagement (.git/.env/DB/spec) and received an authenticated session - "
+        "credential reuse confirmed (directly observed).",
+        "Operate as that user within ROE: the authenticated surface (post-login pages, "
+        "admin functions, APIs) was scanned with the session; escalate via any "
+        "authenticated finding, and reuse the credential against SSH/SMB/other apps.",
+        "FP only if the 'session' isn't actually authenticated (recce required a login "
+        "form + a success signal, so this is unlikely)."]
+
+
 def _v_ssrf(host, port, vuln):
     # recce pointed a URL param at the metadata service / file:// and the content came
     # back in the response - the server-side fetch is directly observed -> CONFIRMED.
@@ -1218,6 +1232,14 @@ _RECIPES: list[dict] = [
      "finish": "impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass  ->  hashcat -m 18200.",
      "fp": "Existence is confirmed by the query; the only question is whether the hash cracks.",
      "fn": _v_asrep},
+    {"id": "web-auth-session",
+     "match": r"authenticated web session obtained",
+     "name": "Authenticated web session via harvested credential (reuse)",
+     "pre": ["A harvested credential", "A login form that accepted it"],
+     "finish": "Operate as the user; escalate via authenticated findings; reuse the "
+               "credential against SSH/SMB/other apps (within ROE).",
+     "fp": "The session isn't actually authenticated (unlikely given the success signal).",
+     "fn": _v_authsession},
     {"id": "web-ssrf",
      "match": r"server-side request forgery via",
      "name": "Server-Side Request Forgery (SSRF)",

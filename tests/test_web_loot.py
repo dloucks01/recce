@@ -272,3 +272,94 @@ class JwtHmacCrack(unittest.TestCase):
         crit = [f for f in fs if f.severity == "critical" and "cracked" in f.title]
         self.assertTrue(crit)
         self.assertEqual(crit[0].confidence, "confirmed")
+
+
+# --------------------------- authenticated auto-login ----------------------------
+
+_LOGIN_FORM = (
+    '<html><body><form method="post" action="/login">'
+    '<input type="hidden" name="csrf" value="tok123">'
+    '<input type="text" name="username">'
+    '<input type="password" name="password">'
+    '<button type="submit">Login</button></form></body></html>')
+
+
+class _LoginHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path.startswith("/dashboard"):
+            self.send_response(200); self.end_headers()
+            self.wfile.write(b"<html>Welcome admin - dashboard</html>")
+        else:
+            self.send_response(200); self.end_headers()
+            self.wfile.write(_LOGIN_FORM.encode())
+
+    def do_POST(self):
+        n = int(self.headers.get("content-length", 0))
+        import urllib.parse as up
+        data = up.parse_qs(self.rfile.read(n).decode())
+        u = (data.get("username") or [""])[0]
+        p = (data.get("password") or [""])[0]
+        csrf = (data.get("csrf") or [""])[0]
+        if u == "admin" and p == "Hunter2map" and csrf == "tok123":
+            self.send_response(302)
+            self.send_header("Location", "/dashboard")
+            self.send_header("Set-Cookie", "session=SESSION123; Path=/")
+            self.end_headers()
+        else:
+            self.send_response(200); self.end_headers()
+            self.wfile.write((_LOGIN_FORM + "<p>Invalid credentials</p>").encode())
+
+
+class AuthenticatedAutoLogin(unittest.TestCase):
+    """Auto-login: a harvested credential is submitted to the login form; on success
+    the session is used to scan the authenticated surface."""
+
+    def _serve(self):
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _LoginHandler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    def test_form_login_finds_session_with_harvested_cred(self):
+        srv = self._serve()
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            r = web._fetch("127.0.0.1", p, "/")
+            # a wrong cred first, then the real harvested one
+            creds = [("wrong", "nope"), ("admin", "Hunter2map")]
+            auth, used = web._form_login("127.0.0.1", p, r[2], creds)
+        finally:
+            srv.shutdown()
+        self.assertIsNotNone(auth)
+        self.assertEqual(used, ("admin", "Hunter2map"))
+        self.assertIn("session=SESSION123", auth.get("Cookie", ""))
+
+    def test_no_login_when_all_creds_wrong(self):
+        srv = self._serve()
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            r = web._fetch("127.0.0.1", p, "/")
+            auth, used = web._form_login("127.0.0.1", p, r[2],
+                                         [("admin", "wrongpw"), ("root", "x")])
+        finally:
+            srv.shutdown()
+        self.assertIsNone(auth)
+
+    def test_autologin_host_helper(self):
+        from recce.models import Host
+        srv = self._serve()
+        try:
+            port = srv.server_address[1]
+            h = Host(ip="127.0.0.1", up_reason="syn-ack",
+                     ports=[Port(portid=port, service="http", state="open")])
+            sess = web.autologin(h, [("admin", "Hunter2map")])
+        finally:
+            srv.shutdown()
+        self.assertIsNotNone(sess)
+        self.assertEqual(sess["user"], "admin")
+        self.assertIn("session=SESSION123", sess["auth"].get("Cookie", ""))

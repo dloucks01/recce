@@ -511,6 +511,120 @@ def _form_login_defaults(ip: str, port: Port, base_url: str, tech: list[str]) ->
     return out
 
 
+# --- generic form auto-login (feed harvested creds into an authenticated scan) ---
+_VALUE_RE = re.compile(r'value\s*=\s*["\']([^"\']*)["\']', re.I)
+_USERFIELD_RE = re.compile(r"user|email|login|account|uid|\bname\b", re.I)
+_LOGIN_PATHS = ["/login", "/signin", "/sign-in", "/admin/login", "/user/login",
+                "/auth/login", "/account/login", "/users/sign_in", "/wp-login.php"]
+_LOGIN_FAIL = re.compile(
+    r"invalid|incorrect|failed|wrong|denied|try again|bad credential|unauthor|"
+    r"not recogn; ?|does not match", re.I)
+
+
+def _form_values(html: str) -> dict:
+    """name -> value for every input carrying a value (hidden CSRF tokens etc.)."""
+    out: dict = {}
+    for inp in _INPUT_RE.findall(html):
+        nm = _NAME_RE.search(inp)
+        vm = _VALUE_RE.search(inp)
+        if nm and vm:
+            out[nm.group(1)] = vm.group(1)
+    return out
+
+
+def _login_fields(form: dict) -> tuple:
+    passf = next((n for n, t in form["fields"] if t == "password"), None)
+    userf = next((n for n, t in form["fields"]
+                  if t in ("text", "email") and not _SKIP_NAME.search(n)
+                  and _USERFIELD_RE.search(n)), None)
+    if not userf:
+        userf = next((n for n, t in form["fields"]
+                      if t in ("text", "email") and not _SKIP_NAME.search(n)), None)
+    return userf, passf
+
+
+def _session_cookie(headers: dict) -> str:
+    """Build a Cookie header from a response's Set-Cookie lines (name=value only)."""
+    cookies = []
+    for line in headers.get("set-cookie", "").split("\n"):
+        m = re.match(r"\s*([^=;\s]+)=([^;]+)", line)
+        if m:
+            cookies.append(f"{m.group(1)}={m.group(2).strip()}")
+    return "; ".join(cookies)
+
+
+def _looks_logged_out(resp) -> bool:
+    """A response that still shows the login form / an auth error / a 401-403 means the
+    login did NOT succeed."""
+    if not resp:
+        return True
+    if resp[0] in (401, 403):
+        return True
+    b = resp[2][:6000].lower()
+    return bool(_LOGIN_FAIL.search(b)) or 'type="password"' in b or "type=password" in b
+
+
+def _form_login(ip: str, port: Port, body: str, creds: list, auth=None) -> tuple:
+    """Find a login form (root page or a common login path) and try each harvested
+    credential. Returns ({Cookie: ...}, (user, pw)) on a successful login, else
+    (None, None). One POST per credential (bounded, lockout-aware)."""
+    form = page = None
+    for cand_body, cand_path in [(body, "/")] + [(None, p) for p in _LOGIN_PATHS]:
+        html = cand_body
+        if html is None:
+            r = _fetch(ip, port, cand_path, auth=auth)
+            if not r or r[0] != 200:
+                continue
+            html = r[2]
+        if "password" not in html.lower():
+            continue
+        f = _parse_form(html, cand_path)
+        if f.get("password"):
+            f["values"] = _form_values(html)
+            form, page = f, cand_path
+            break
+    if not form:
+        return None, None
+    userf, passf = _login_fields(form)
+    if not userf or not passf:
+        return None, None
+    action = form.get("action") or page
+    action = action if action.startswith("/") else "/" + action.lstrip("./")
+
+    def _submit(u, p):
+        data = dict(form.get("values") or {})
+        data[userf], data[passf] = u, p
+        return _fetch(ip, port, action, method="POST", body=urlencode(data),
+                      auth={"Content-Type": "application/x-www-form-urlencoded"})
+
+    bad = _submit("recce_zz_nouser", "recce_zz_nopass")     # wrong-cred baseline
+    for u, p in creds[:8]:
+        r = _submit(u, p)
+        if not r:
+            continue
+        redirected = r[0] in (301, 302, 303) and (not bad or bad[0] not in (301, 302, 303))
+        cleared = _looks_logged_out(bad) and not _looks_logged_out(r)
+        if redirected or cleared:
+            ck = _session_cookie(r[1])
+            return ({"Cookie": ck} if ck else {"X-Recce-Auth": "1"}), (u, p)
+    return None, None
+
+
+def autologin(host: Host, creds: list, active: bool = True) -> dict | None:
+    """Try to obtain an authenticated session on any of a host's web ports using the
+    engagement's harvested credentials. Returns {auth, user, port} on success."""
+    if not active or not creds:
+        return None
+    for p in host.open_ports:
+        if not is_web(p):
+            continue
+        r = _fetch(host.ip, p, "/")
+        a, used = _form_login(host.ip, p, r[2] if r else "", creds)
+        if a is not None:
+            return {"auth": a, "user": used[0], "port": p.portid}
+    return None
+
+
 # --- high-signal exposure paths (GET, confirmed only on positive content) -------
 # (path, severity, script_id, title, cwes, remediation, confirm(status, body))
 _PATHS = [

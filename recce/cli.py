@@ -651,6 +651,28 @@ def _db_login_creds(args, store) -> list[dict]:
     return out
 
 
+def _web_login_creds(args, store) -> list[tuple]:
+    """(user, password) pairs for web form auto-login: any -u/-p, then every harvested
+    cleartext-password credential in the datastore."""
+    out: list[tuple] = []
+    seen: set = set()
+
+    def add(u, p):
+        if u and p is not None and (u, p) not in seen:
+            seen.add((u, p))
+            out.append((u, p))
+
+    if getattr(args, "username", None) and getattr(args, "password", None) is not None:
+        add(args.username, args.password)
+    try:
+        for c in store.all_credentials():
+            if getattr(c, "kind", "") in ("password", "plaintext", "cleartext", ""):
+                add(c.username, c.secret)
+    except Exception:      # noqa: BLE001
+        pass
+    return out
+
+
 def _admin_creds_of(args) -> dict | None:
     """The optional privileged/superuser account (domain defaults to -d)."""
     if not getattr(args, "admin_username", None):
@@ -2423,11 +2445,30 @@ def cmd_web(args: argparse.Namespace) -> int:
     do_crawl = getattr(args, "crawl", False)
     sqli_time = getattr(args, "sqli_time", False)
     fuzz_risky = getattr(args, "fuzz_risky_forms", False)
+    # Authenticated crawl: auto-login with the engagement's harvested credentials.
+    autologin = getattr(args, "autologin", False) and not auth
+    login_creds = _web_login_creds(args, store) if autologin else []
 
     def _scan(h):
-        profiles = web.scan_host(h, active, auth, creds)
+        h_auth = auth
+        if autologin and login_creds:
+            sess = web.autologin(h, login_creds, active=active)
+            if sess:
+                h_auth = sess["auth"]
+                h.vulns.append(web._mk(
+                    h.ip, next(p for p in h.open_ports if p.portid == sess["port"]),
+                    "web-auth-session", "high",
+                    "Authenticated web session obtained with a harvested credential",
+                    ["CWE-522", "CWE-287"],
+                    f"A login form accepted the harvested credential '{sess['user']}' - "
+                    "recce scanned the AUTHENTICATED attack surface (post-login pages, "
+                    "forms and APIs) with the resulting session.",
+                    "Rotate the credential; enforce MFA; monitor for credential reuse.",
+                    confidence="confirmed"))
+                print(f"    [{h.ip}] auto-login OK as '{sess['user']}' -> authenticated scan")
+        profiles = web.scan_host(h, active, h_auth, creds)
         if do_crawl:
-            pages, added = web.scan_crawl(h, auth, time_based=sqli_time,
+            pages, added = web.scan_crawl(h, h_auth, time_based=sqli_time,
                                           fuzz_risky=fuzz_risky)
             print(f"    [{h.ip}] crawled {pages} page(s), +{added} finding(s)")
         return profiles
@@ -6382,6 +6423,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wb.add_argument("--sqli-time", action="store_true",
                     help="with --crawl, also run the slower TIME-based blind SQLi probe "
                          "(sends deliberate DB sleeps; confirms by scaling the delay)")
+    wb.add_argument("--autologin", action="store_true",
+                    help="ACTIVE: try to log into each site's form with the engagement's "
+                         "harvested credentials (looted from .git/.env/DBs/specs), then "
+                         "scan the AUTHENTICATED surface. One login POST per credential "
+                         "(lockout-aware). Ignored if --cookie/--header is set.")
     wb.add_argument("--fuzz-risky-forms", action="store_true",
                     help="with --crawl, ALSO submit forms whose action/fields signal a "
                          "side effect (delete / pay / send / post / ...). Off by default "
