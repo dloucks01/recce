@@ -638,6 +638,27 @@ def _v_web_exposure(host, port, vuln):
                        "(whatweb / nikto / nuclei). For .git, dump it: git-dumper <url>/.git ./loot."]
 
 
+def _v_api_access(host, port, vuln):
+    # recce enumerated the OpenAPI spec, then GET the endpoints itself - the broken
+    # auth / IDOR is directly observed (200 with no credential) -> CONFIRMED.
+    t = (vuln.title or "").lower()
+    if "idor" in t or "bola" in t:
+        return CONFIRMED, [
+            "recce requested the object-by-id endpoint with two different ids and got "
+            "two DIFFERENT objects back, unauthenticated - the id is not "
+            "authorization-checked (BOLA, directly observed).",
+            "Enumerate every record: for i in $(seq 1 1000); do curl -s <base>/<path "
+            "with i>; done  (within ROE); mine the dumped objects for PII / secrets.",
+            "FP only if the differing bodies were error pages, not real objects."]
+    return CONFIRMED, [
+        "recce GET spec-declared-secured API endpoints with NO credential and they "
+        "returned 200 with data - broken authentication / missing access control "
+        "(directly observed).",
+        "Call the full surface unauthenticated (the spec maps every path/param); pull "
+        "data and look for state-changing endpoints reachable the same way.",
+        "FP only if the endpoints legitimately allow anonymous access despite the spec."]
+
+
 def _v_web_app(host, port, vuln):
     # Tier-1 niche-app exposures: recce fetched/authenticated the endpoint itself, so
     # each is directly observed -> CONFIRMED, with the app-specific escalation.
@@ -1167,6 +1188,15 @@ _RECIPES: list[dict] = [
      "finish": "impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass  ->  hashcat -m 18200.",
      "fp": "Existence is confirmed by the query; the only question is whether the hash cracks.",
      "fn": _v_asrep},
+    {"id": "api-access",
+     "match": r"idor / bola|reachable without authentication \(broken auth|"
+              r"broken object level|api endpoints reachable without",
+     "name": "API broken auth / IDOR (BOLA)",
+     "pre": ["An OpenAPI/Swagger spec was enumerated", "Endpoints answered unauthenticated"],
+     "finish": "Call the full surface with no token (the spec maps it); enumerate objects "
+               "by id and mine the returned data (within ROE).",
+     "fp": "The endpoints legitimately allow anonymous access despite the spec.",
+     "fn": _v_api_access},
     {"id": "web-app-unauth",
      "match": r"jenkins script console|keycloak admin console|grafana.*(traversal|file read)|"
               r"elasticsearch readable|vault reachable|kibana status endpoint|"

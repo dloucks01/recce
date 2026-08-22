@@ -66,3 +66,52 @@ class AnalyzeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpecEnumerationTest(unittest.TestCase):
+    """Full spec enumeration: broken-auth, IDOR/BOLA, and embedded-credential harvest."""
+
+    def setUp(self):
+        self._orig = web._fetch
+
+    def tearDown(self):
+        web._fetch = self._orig
+
+    def _host(self):
+        return Host(ip="10.0.0.1", up_reason="syn-ack",
+                    ports=[Port(portid=80, protocol="tcp", state="open", service="http")])
+
+    def test_broken_auth_idor_and_cred_harvest(self):
+        spec = ('{"openapi":"3.0.0",'
+                '"components":{"securitySchemes":{"bearer":{"type":"http"}}},'
+                '"servers":[{"url":"https://svc:apikey123@api.internal/"}],'
+                '"security":[{"bearer":[]}],'
+                '"paths":{'
+                '"/users/{id}":{"get":{"security":[{"bearer":[]}]}},'
+                '"/health":{"get":{"security":[]}}}}')
+        web._fetch = _mock_fetch({
+            "/openapi.json": (200, {}, spec),
+            "/users/1": (200, {}, '{"id":1,"name":"alice","email":"alice@corp"}'),
+            "/users/2": (200, {}, '{"id":2,"name":"bob","email":"bob@corp"}'),
+            "/health": (200, {}, '{"status":"ok"}'),
+        })
+        analysis = api.analyze([self._host()], active=True)
+        titles = " || ".join(f["title"] for f in analysis["findings"])
+        self.assertIn("OpenAPI/Swagger spec exposed", titles)
+        self.assertIn("without authentication", titles)          # broken auth
+        self.assertIn("IDOR / BOLA on /users/{id}", titles)      # object enumeration
+        # embedded spec credential harvested to the store
+        self.assertTrue(any(c.secret == "apikey123" for c in analysis["credentials"]))
+
+    def test_no_idor_when_bodies_identical(self):
+        # same object for every id (or a static page) must NOT be flagged IDOR.
+        spec = ('{"openapi":"3.0.0",'
+                '"components":{"securitySchemes":{"x":{"type":"http"}}},'
+                '"paths":{"/items/{id}":{"get":{}}}}')
+        web._fetch = _mock_fetch({
+            "/openapi.json": (200, {}, spec),
+            "/items/1": (200, {}, '{"same":"page"}'),
+            "/items/2": (200, {}, '{"same":"page"}'),
+        })
+        analysis = api.analyze([self._host()], active=True)
+        self.assertNotIn("IDOR", " ".join(f["title"] for f in analysis["findings"]))

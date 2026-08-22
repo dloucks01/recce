@@ -4723,6 +4723,12 @@ def cmd_api(args: argparse.Namespace) -> int:
           f"{len(analysis['findings'])} finding(s).")
     for f in analysis["findings"]:
         print(f"      {f['target']}  {f['title']}  ({f['severity']})")
+    looted = 0
+    for c in analysis.get("credentials", []):
+        if store.add_credential(c):
+            looted += 1
+    if looted:
+        print(f"      [+] {looted} credential(s) harvested from API specs -> store.")
     _fold_service_findings(store, hosts, analysis, "api", api.findings_to_vulns, "API")
     _mark_capability_scanned(store, tgts)
     _final_report(store, paths, store.get_meta("engagement")
