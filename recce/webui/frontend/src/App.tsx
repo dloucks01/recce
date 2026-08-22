@@ -5,11 +5,12 @@ import {
 } from "./api";
 import { Dashboard, Findings, Hosts, Act, Loot, Playbook, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
-import { PresenceBar, ActivityButton, ChatButton, AddMenu, MyQueue, useCollab } from "./collab";
+import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
 import { useEscape } from "./ui";
 import { TabBar, TabId } from "./TabBar";
 import { ScanTab } from "./ScanTab";
 import { ReportTab } from "./ReportTab";
+import { CollabSidebar } from "./CollabSidebar";
 
 const POLL_MS = 20000; // constantly-updating analysis: re-pull on a slow heartbeat
 
@@ -452,7 +453,7 @@ export default function App() {
 
         {/* Right sidebar: collab */}
         <div className="sidebar-collab">
-          <MyQueue />
+          <CollabSidebar hosts={hosts} nav={nav} />
         </div>
       </div>
 
