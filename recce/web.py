@@ -1553,6 +1553,56 @@ def _sqli_via(ip: str, port: Port, where: str, send, time_based: bool = False) -
     return []
 
 
+# --- OS command injection -------------------------------------------------------
+# Output-based proof uses shell arithmetic ($((a*b))) so the confirming marker
+# (cmdi<product>) can ONLY appear if a shell evaluated our input - plain reflection of
+# the literal payload can't produce the computed number, so it's a zero-FP signal.
+_CMDI_A, _CMDI_B = 1009, 1013
+_CMDI_MARK = f"cmdi{_CMDI_A * _CMDI_B}"                  # cmdi1022117
+_CMDI_OUT = [
+    f"; echo cmdi$(({_CMDI_A}*{_CMDI_B}))",
+    f"| echo cmdi$(({_CMDI_A}*{_CMDI_B}))",
+    f"$(echo cmdi$(({_CMDI_A}*{_CMDI_B})))",
+    f"`echo cmdi$(({_CMDI_A}*{_CMDI_B}))`",
+    f"%0aecho cmdi$(({_CMDI_A}*{_CMDI_B}))",
+    f"; echo cmdi`expr {_CMDI_A} \\* {_CMDI_B}`",
+    f"& set /a cmdi=cmdi{_CMDI_A}*{_CMDI_B}",           # (best-effort Windows arithmetic)
+]
+_CMDI_SLEEP = ["; sleep §", "| sleep §", "$(sleep §)", "`sleep §`", "&& sleep §",
+               "& ping -n § 127.0.0.1", "%0asleep §"]
+
+
+def _cmdi_via(ip: str, port: Port, where: str, param: str, send,
+              time_based: bool = False) -> list[Vuln]:
+    """OS command injection. Output-based (a shell-computed marker reflection can't fake)
+    plus, opt-in, time-based (a sleep that scales the response delay)."""
+    def mk(tech, detail):
+        return [_mk(ip, port, "web-cmdi", "critical",
+                    f"OS command injection in {where} ({tech})", ["CWE-78"], detail,
+                    "Never pass user input to a shell; call the program directly with an "
+                    "argument array / a safe library API; allow-list + validate input.",
+                    confidence="confirmed")]
+
+    for p in _CMDI_OUT:
+        b = _body(send(p))
+        if b and _CMDI_MARK in b:
+            return mk("output-based",
+                      f"{where} set to {p!r} made the response contain {_CMDI_MARK!r} - the "
+                      "shell evaluated our arithmetic, so the app runs our input in a shell.")
+    if time_based:
+        samples = [send("1")[1], send("1")[1]]
+        base_t = min(samples) if samples else 0.0
+        for tmpl in _CMDI_SLEEP:
+            _, e5 = send(tmpl.replace("§", "5"))
+            if e5 >= base_t + 4.0:
+                _, e2 = send(tmpl.replace("§", "2"))        # must scale with the sleep arg
+                if (e5 - e2) >= 1.5:
+                    return mk("time-based",
+                              "A sleep payload delayed the response ~5s (and ~2s for the 2s "
+                              "variant), so our input controls a shell's execution time.")
+    return []
+
+
 # --- open redirect --------------------------------------------------------------
 _REDIR_HOST = "recce-oob.example"                       # a host we'll never legitimately host
 _REDIR_PAYLOADS = (f"https://{_REDIR_HOST}/x", f"//{_REDIR_HOST}/x", f"/\\{_REDIR_HOST}/x")
@@ -1710,6 +1760,7 @@ def _inject_param(ip, port, where, param, send, sqli, time_based):
     fs += _open_redirect_via(ip, port, where, send)
     fs += _traversal_via(ip, port, where, param, send)
     fs += _ssrf_via(ip, port, where, param, send)
+    fs += _cmdi_via(ip, port, where, param, send, time_based)
     return fs
 
 

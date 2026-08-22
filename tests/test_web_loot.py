@@ -363,3 +363,33 @@ class AuthenticatedAutoLogin(unittest.TestCase):
         self.assertIsNotNone(sess)
         self.assertEqual(sess["user"], "admin")
         self.assertIn("session=SESSION123", sess["auth"].get("Cookie", ""))
+
+
+# ------------------------------ OS command injection -----------------------------
+
+class CommandInjection(unittest.TestCase):
+    """Output-based cmdi is confirmed by a shell-COMPUTED marker reflection can't fake."""
+
+    def test_output_based_confirmed(self):
+        import re
+
+        def send(payload):                                    # a fake shell-backed endpoint
+            body = payload
+            m = re.search(r"cmdi\$\(\((\d+)\*(\d+)\)\)", payload)
+            if m:
+                body = payload.replace(m.group(0), "cmdi" + str(int(m.group(1)) * int(m.group(2))))
+            return ((200, {}, f"out: {body}"), 0.05)
+        p = Port(portid=80, service="http", state="open")
+        fs = web._cmdi_via("1.1.1.1", p, "query 'cmd'", "cmd", send)
+        self.assertTrue(fs)
+        self.assertEqual(fs[0].script_id, "web-cmdi")
+        self.assertEqual(fs[0].severity, "critical")
+        self.assertEqual(fs[0].confidence, "confirmed")
+
+    def test_reflection_is_not_flagged(self):
+        # an endpoint that echoes the LITERAL payload (no shell) must NOT be flagged -
+        # the computed marker can only come from real execution.
+        def send(payload):
+            return ((200, {}, f"echo: {payload}"), 0.05)
+        p = Port(portid=80, service="http", state="open")
+        self.assertEqual(web._cmdi_via("1.1.1.1", p, "query 'cmd'", "cmd", send), [])

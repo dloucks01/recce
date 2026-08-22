@@ -662,6 +662,28 @@ def _v_authsession(host, port, vuln):
         "form + a success signal, so this is unlikely)."]
 
 
+def _v_cmdi(host, port, vuln):
+    # recce injected a shell payload and the RESPONSE carried a shell-computed marker
+    # (or scaled the delay) - direct command execution, observed -> CONFIRMED.
+    b = _blob(vuln)
+    if "time-based" in b:
+        return CONFIRMED, [
+            "recce injected a `sleep` payload and the response delay scaled with the "
+            "sleep argument (~5s vs ~2s) - the app runs our input in a shell (blind OS "
+            "command injection, directly observed).",
+            "Confirm + escalate within ROE: swap the sleep for `id`/`whoami` via an "
+            "out-of-band channel (curl to your listener, or a DNS/HTTP exfil), then a "
+            "reverse shell. This is RCE as the web service account.",
+            "FP only if an unrelated slow path coincidentally matched both timings."]
+    return CONFIRMED, [
+        "recce injected a shell payload with computed arithmetic and the response "
+        "contained the COMPUTED product (which plain reflection can't produce) - the "
+        "app executes our input in a shell (OS command injection, directly observed).",
+        "Escalate within ROE: replace the echo with `id`/`whoami`, then a reverse shell "
+        "- this is RCE as the web service account. Pivot from there.",
+        "FP: none - a shell-computed value in the response is proof of execution."]
+
+
 def _v_ssrf(host, port, vuln):
     # recce pointed a URL param at the metadata service / file:// and the content came
     # back in the response - the server-side fetch is directly observed -> CONFIRMED.
@@ -1259,6 +1281,14 @@ _RECIPES: list[dict] = [
                "credential against SSH/SMB/other apps (within ROE).",
      "fp": "The session isn't actually authenticated (unlikely given the success signal).",
      "fn": _v_authsession},
+    {"id": "web-cmdi",
+     "match": r"os command injection in ",
+     "name": "OS command injection (RCE)",
+     "pre": ["A parameter is passed to a shell", "A computed marker / scaled delay observed"],
+     "finish": "Swap the echo/sleep for `id` then a reverse shell - RCE as the web "
+               "service account; pivot from there (within ROE).",
+     "fp": "None for the output-based case (a shell-computed value proves execution).",
+     "fn": _v_cmdi},
     {"id": "web-ssrf",
      "match": r"server-side request forgery via",
      "name": "Server-Side Request Forgery (SSRF)",
