@@ -634,3 +634,70 @@ class SubdomainTakeover(unittest.TestCase):
         self.assertEqual(f.script_id, "web-takeover")
         self.assertEqual(f.severity, "high")
         self.assertIn("sub.acme.com", f.output)
+
+
+# --------------------- JWT RS256->HS256 algorithm confusion ----------------------
+
+class JwtAlgConfusion(unittest.TestCase):
+    """From an RS256 JWT + the server's JWKS, mint a forged HS256 token that uses the
+    RSA public key as the HMAC secret (RS256->HS256 confusion)."""
+
+    _N = ("0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFx"
+          "uhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_"
+          "RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQv"
+          "RL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_"
+          "xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw")
+
+    def _jwt_rs256(self):
+        import base64 as _b, json as _j
+        def b64(x): return _b.urlsafe_b64encode(x).rstrip(b"=").decode()
+        h = b64(_j.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+        p = b64(_j.dumps({"sub": "bob", "admin": False}).encode())
+        return f"{h}.{p}.fakesignature"
+
+    class _JwksHandler(http.server.BaseHTTPRequestHandler):
+        N = None
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if "jwks" in self.path:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json"); self.end_headers()
+                self.wfile.write(('{"keys":[{"kty":"RSA","kid":"1","n":"%s","e":"AQAB"}]}'
+                                  % self.N).encode())
+            else:
+                self.send_response(404); self.end_headers()
+
+    def _serve(self):
+        handler = type("H", (self._JwksHandler,), {"N": self._N})
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    def test_forge_signs_with_reconstructed_pubkey(self):
+        import base64 as _b, hashlib as _h, hmac as _hm, json as _j
+        pem = web._rsa_pubkey_pem(web._b64url_uint(self._N), web._b64url_uint("AQAB"))
+        forged = web._forge_alg_confusion(self._jwt_rs256(), pem)
+        h, p, s = forged.split(".")
+        exp = _b.urlsafe_b64encode(_hm.new(pem.encode(), f"{h}.{p}".encode(),
+                                           _h.sha256).digest()).rstrip(b"=").decode()
+        self.assertEqual(s, exp)                                  # signed with the pubkey PEM
+        self.assertTrue(_j.loads(_b.urlsafe_b64decode(p + "==="))["admin"])   # escalated
+
+    def test_scan_mints_forged_token(self):
+        srv = self._serve()
+        try:
+            port = srv.server_address[1]
+            p = Port(portid=port, service="http", state="open")
+            tok = self._jwt_rs256()
+            fs = web._scan_jwts("127.0.0.1", p, {"set-cookie": f"jwt={tok}"}, "",
+                                active=False)
+        finally:
+            srv.shutdown()
+        conf = [f for f in fs if "algorithm-confusion" in f.title.lower()
+                or "algorithm confusion" in f.title.lower()]
+        self.assertTrue(conf, "no alg-confusion finding emitted")
+        self.assertIn("orged", conf[0].output)                   # forged token in evidence

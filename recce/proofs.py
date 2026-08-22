@@ -906,6 +906,22 @@ def _v_ssti(host, port, vuln):
 def _v_jwt(host, port, vuln):
     t = (vuln.title or "").lower()
     blob = f"{t} {(vuln.output or '').lower()}"
+    if "algorithm confusion" in t or "algorithm-confusion" in t:
+        if "accepted" in t:
+            return CONFIRMED, [
+                "recce recovered the RSA public key from the server's JWKS, forged an "
+                "HS256 token signed with that public key, and replayed it - the server "
+                "returned the SAME authenticated response as the real token (RS256->HS256 "
+                "confusion, directly proven).",
+                "Use the forged token in the finding as any user/admin (set sub/role); "
+                "mint tokens at will for full auth bypass / privilege escalation (in ROE).",
+                "FP: none - the server accepted a token we signed with only the public key."]
+        return LIKELY, [
+            "recce recovered the RSA public key from JWKS and minted an HS256 token signed "
+            "with it (RS256->HS256 confusion). Whether it's accepted depends on the "
+            "verifier.",
+            "Prove: replay the forged token (in the finding) on a token-gated endpoint; a "
+            "200/authorized response = real (jwt_tool -X k -pk public.pem)."]
     if "hmac secret cracked" in t or "secret cracked" in t:
         return CONFIRMED, [
             "recce recovered the JWT's HMAC signing secret by offline brute force - the "
@@ -1486,7 +1502,7 @@ _RECIPES: list[dict] = [
      "fp": "Very low - the engine already evaluated 7*7 to 49. Confirm the engine for the RCE payload.",
      "fn": _v_ssti},
     {"id": "web-jwt", "match": r"jwt (accepts|uses|hmac secret cracked)|alg:none|"
-                               r"algorithm-confusion|json web token|hmac secret cracked",
+                               r"algorithm-confusion|algorithm confusion|json web token|hmac secret cracked",
      "name": "JWT weakness (alg:none / weak secret / confusion)",
      "pre": ["The app trusts a JWT whose signature can be forged or cracked"],
      "finish": "jwt_tool <token> -X a (alg:none) / -C -d rockyou.txt (crack HS256) / -X k (RS256->HS256), "

