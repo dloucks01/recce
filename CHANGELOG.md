@@ -39,6 +39,15 @@ proof is opt-in), and feeds one sprayable credential store + the prove engine.
   forge any token).
 - **Authenticated crawl (`recce web --autologin`)** — logs into each site's form with
   harvested credentials and scans the authenticated surface.
+- **Deeper web-app class coverage** — **JWT RS256→HS256 algorithm confusion** (recovers
+  the RSA public key from the site's JWKS, forges an HS256 token, and — in active mode —
+  replays it to CONFIRM acceptance); **CSP** weakness analysis and **subdomain
+  takeover** detection; **CORS** null-Origin acceptance (on top of arbitrary-Origin
+  reflection); **GraphQL** query batching + field-suggestion schema leak (beyond
+  introspection); **insecure-deserialization** markers in cookies/hidden fields (Java
+  `rO0AB`, PHP `O:…`, unencrypted .NET ViewState); and **web cache poisoning** via an
+  unkeyed Host-family header reflected into a cacheable response. Each carries a
+  prove-engine verdict; the poisoning/confusion probes stay detection-only unless active.
 - Every new exploitable finding has a **prove-engine** verdict; the service-modules and
   command references document the full kill-chain, and `commands.md` notes exactly which
   capabilities the **web workbench** exposes vs. which are CLI-only.

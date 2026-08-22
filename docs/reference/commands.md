@@ -64,7 +64,13 @@ automatically on any accessible instance.
 testing on discovered params; `--autologin` logs into each site's form with the
 engagement's harvested credentials and scans the **authenticated** surface;
 `--sqli-time` / `--fuzz-risky-forms` gate the slower/side-effecting probes. `recce api`
-enumerates the OpenAPI/Swagger surface for broken-auth + IDOR/BOLA.
+enumerates the OpenAPI/Swagger surface for broken-auth + IDOR/BOLA. The deep web scan
+also covers JWT RS256→HS256 algorithm confusion (JWKS pubkey → forged token, replayed
+to confirm when active), CSP weaknesses, subdomain takeover, CORS arbitrary/null-Origin,
+GraphQL introspection/batching/field-suggestion, insecure-deserialization markers
+(Java/PHP/.NET ViewState), and web cache poisoning via unkeyed Host-family headers —
+each with a prove-engine verdict; the poisoning/confusion probes stay detection-only
+unless `--active`/active mode is set.
 
 Credentials passed to `enum`/`vulns` (`-u/-p/-d`) also feed the SMB/LDAP NSE
 scripts during the scan. Run `recce <command> -h` for the full list.
