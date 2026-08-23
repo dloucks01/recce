@@ -16,15 +16,18 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
     db_path = ctx.db_path
     broker = ctx.broker
 
-    # --- engagement hook: caught shell → its host -------------------------------
+    # --- engagement hook: caught shell → its host + the activity feed ------------
     def _link_host(session):
         from ...store import Store
+        from .. import collab
         st = Store(db_path)
         try:
             host = next((h for h in st.all_hosts() if h.ip == session.host_ip), None)
+            label = (host.hostname or session.host_ip) if host is not None else session.host_ip
             if host is not None and not getattr(host, "access_gained", False):
                 host.access_gained = True
                 st.upsert_host(host)
+            collab.add_activity(st, "recce", "session", f"shell caught from {label}")
         except Exception:  # noqa: BLE001 — a hook must never break adoption
             pass
         finally:

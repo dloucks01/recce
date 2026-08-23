@@ -35,6 +35,20 @@ class Session:
         self._buffer = bytearray()             # scrollback ring
         self._subs: set[asyncio.Queue] = set() # fan-out to attached WebSockets
 
+    @classmethod
+    def restore(cls, meta: dict, transcript: bytes) -> "Session":
+        """Rebuild a session from persisted state on startup — detached (`stale`) but with
+        its id/token/host and full scrollback, so it's browsable and can be rebound."""
+        s = cls(host_ip=meta["host_ip"], host_port=meta["host_port"] or 0,
+                kind=meta.get("kind", "reverse-shell"))
+        s.id = meta["id"]
+        s.token = meta["token"]
+        s.created = meta.get("opened") or s.created
+        s.status = "stale"
+        if transcript:
+            s._buffer = bytearray(transcript[-_BUFFER_CAP:])
+        return s
+
     # --- connection binding (the resilience core) --------------------------------
     def bind(self, transport: Transport) -> None:
         """Attach a live connection. Called on first catch and on every re-adoption."""

@@ -18,16 +18,54 @@ from .transport import Transport
 class SessionManager:
     """Registry of listeners + sessions. Single-threaded on the serving asyncio loop."""
 
-    def __init__(self) -> None:
+    def __init__(self, store=None) -> None:
         self.sessions: dict[str, Session] = {}
         self.listeners: dict[str, Listener] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         # engagement hooks: callables(session) run on adoption (host link, activity, …).
         # Kept as callbacks so this module stays free of webui/store imports.
         self.hooks: list = []
+        self.store = store                          # optional SessionStore for durability
+        self._pending: dict[str, bytearray] = {}    # per-session transcript, batched
+        self._flush_task = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
+        if self.store is not None and self._flush_task is None:
+            self._flush_task = loop.create_task(self._flush_loop())
+
+    def load_persisted(self) -> None:
+        """Reload past sessions from the store as stale — call once before serving."""
+        if self.store is None:
+            return
+        for meta, transcript in self.store.load_sessions():
+            if meta["id"] not in self.sessions:
+                self.sessions[meta["id"]] = Session.restore(meta, transcript)
+
+    # --- transcript persistence (batched so we don't hit sqlite per chunk) -------
+    async def _flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            self._flush_all()
+
+    def _flush_all(self) -> None:
+        if self.store is None:
+            return
+        for sid, buf in list(self._pending.items()):
+            if buf:
+                self.store.append(sid, bytes(buf))
+                buf.clear()
+
+    def _record(self, session_id: str, data: bytes) -> None:
+        buf = self._pending.setdefault(session_id, bytearray())
+        buf.extend(data)
+        if len(buf) >= 8192:                        # flush a big burst promptly
+            self.store.append(session_id, bytes(buf))
+            buf.clear()
+
+    def _save(self, sess: Session) -> None:
+        if self.store is not None:
+            self.store.save_session(sess)
 
     # --- listeners ---------------------------------------------------------------
     async def start_listener(self, port: int, host: str = "0.0.0.0") -> Listener:
@@ -54,6 +92,7 @@ class SessionManager:
             sess = Session(host_ip=ip, host_port=port)
             self.sessions[sess.id] = sess
         sess.bind(transport)
+        self._save(sess)                            # persist metadata (status → live)
         # pump target → session output in the background
         asyncio.ensure_future(self._pump(sess, transport))
         for hook in list(self.hooks):
@@ -82,11 +121,16 @@ class SessionManager:
                 if not data:                      # EOF: the shell dropped
                     break
                 sess.feed(data)
+                if self.store is not None:
+                    self._record(sess.id, data)   # persist output (batched)
         except (ConnectionError, OSError):
             pass
         finally:
             if sess._transport is transport:      # only unbind if still the live one
                 sess.unbind()
+                if self.store is not None:
+                    self._flush_all()             # flush remaining transcript
+                    self._save(sess)              # persist status → stale
 
     # --- access ------------------------------------------------------------------
     def get(self, session_id: str) -> Session | None:

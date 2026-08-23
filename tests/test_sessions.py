@@ -106,6 +106,67 @@ def test_catch_stream_drive_and_rebind(client):
     target2.close()
 
 
+def test_transcript_persists_across_restart(tmp_path):
+    """A caught shell's transcript survives a `recce serve` restart, comes back browsable
+    as stale, and a reconnect from the same host rebinds and resumes."""
+    import asyncio
+
+    from recce.sessions import SessionManager
+    from recce.sessions.store import SessionStore
+    from recce.sessions.transport import Transport
+
+    db = str(tmp_path / "s.db")
+
+    class FakeTransport(Transport):
+        kind = "tcp"
+
+        def __init__(self, chunks, peer=("10.0.0.9", 4444)):
+            self._c = list(chunks)
+            self._p = peer
+
+        async def read(self):
+            await asyncio.sleep(0)
+            return self._c.pop(0) if self._c else b""   # b"" == EOF
+
+        async def write(self, d): pass
+        async def close(self): pass
+
+        @property
+        def peer(self):
+            return self._p
+
+    async def run():
+        store = SessionStore(db)
+        mgr = SessionManager(store=store)
+        mgr.bind_loop(asyncio.get_running_loop())
+        sess = await mgr.adopt(FakeTransport([b"root@x:~# ", b"whoami\r\nroot\r\n"]))
+        sid = sess.id
+        await asyncio.sleep(0.2)                      # pump drains -> EOF -> unbind -> flush
+        assert mgr.get(sid).status == "stale"
+        if mgr._flush_task:
+            mgr._flush_task.cancel()
+        store.close()
+
+        # --- restart: brand-new manager + store on the same db ------------------
+        store2 = SessionStore(db)
+        mgr2 = SessionManager(store=store2)
+        mgr2.load_persisted()
+        got = mgr2.get(sid)
+        assert got is not None, "session must survive a restart"
+        assert got.status == "stale"
+        assert got.scrollback() == b"root@x:~# whoami\r\nroot\r\n", "transcript intact"
+
+        # a reconnect from the same host rebinds to the SAME session and resumes
+        mgr2.bind_loop(asyncio.get_running_loop())
+        resumed = await mgr2.adopt(FakeTransport([b"back\r\n"], peer=("10.0.0.9", 5555)))
+        assert resumed.id == sid and resumed.status == "live", "reconnect resumes the session"
+        if mgr2._flush_task:
+            mgr2._flush_task.cancel()
+        store2.close()
+
+    asyncio.run(run())
+
+
 def test_input_ignored_from_non_driver(client):
     lst = client.post("/api/listeners", json={"port": 0}).json()
     target = socket.create_connection(("127.0.0.1", lst["port"]))

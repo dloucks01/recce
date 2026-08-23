@@ -43,7 +43,9 @@ def create_app(eng_dir: str) -> FastAPI:
 
     broker = _Broker()
     from ..sessions import SessionManager
-    session_manager = SessionManager()
+    from ..sessions.store import SessionStore
+    session_manager = SessionManager(store=SessionStore(db_path))
+    session_manager.load_persisted()          # past sessions come back as stale, browsable
 
     @asynccontextmanager
     async def _lifespan(_app):

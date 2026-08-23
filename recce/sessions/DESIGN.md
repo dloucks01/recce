@@ -126,9 +126,11 @@ REST: `GET/POST /api/listeners`, `DELETE /api/listeners/{id}`, `GET /api/session
 ## Build phases (this wedge)
 
 - **P0** — one listener → catch one shell → xterm.js over one WebSocket, built on the
-  seams above. De-risks WS + terminal. (in progress)
-- **P1** — listener manager, transcript persistence + scrollback replay, host link.
-- **P2** — multi-attach, driver/wheel handoff, presence + activity feed.
-- **engagement hooks** — creds fold, transcript → writeup.
+  seams above. De-risks WS + terminal. ✅ done (browser-verified)
+- **P1** — listener manager, transcript persistence (survives restart) + scrollback
+  replay, host link. ✅ done
+- **P2** — multi-attach, driver/wheel handoff, presence + activity feed. ✅ done
+  (fan-out + soft driver lock + "caught shell" → activity feed)
+- **engagement hooks** — creds fold, transcript → writeup. ← next
 
 Deferred (C2 growth, not this wedge): implants, encrypted transports, beacons, evasion.
