@@ -21,6 +21,7 @@ NAMES: dict[str, str] = {
     "CWE-79": "Cross-site Scripting (XSS)",
     "CWE-88": "Argument Injection",
     "CWE-89": "SQL Injection",
+    "CWE-90": "Improper Neutralization of Special Elements used in an LDAP Query",
     "CWE-91": "XML Injection",
     "CWE-94": "Code Injection",
     "CWE-95": "Eval Injection",
@@ -131,6 +132,7 @@ NAMES: dict[str, str] = {
     "CWE-1104": "Use of Unmaintained Third Party Components",
     "CWE-1188": "Insecure Default Initialization of Resource",
     "CWE-1275": "Sensitive Cookie with Improper SameSite Attribute",
+    "CWE-1321": "Improperly Controlled Modification of Object Prototype Attributes",
     "CWE-1336": "Server-Side Template Injection (Improper Template Neutralization)",
     "CWE-1392": "Use of Default Credentials",
 }

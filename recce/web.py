@@ -2845,6 +2845,71 @@ def _check_session_fixation(ip: str, port: Port, auth: dict | None) -> list[Vuln
     return []
 
 
+def _check_prototype_pollution(ip: str, port: Port, auth: dict | None) -> list[Vuln]:
+    """Prototype pollution detection via __proto__ / constructor / prototype chains."""
+    payloads = [
+        ("/?__proto__[polluted]=true", "polluted"),
+        ("/?constructor[prototype][polluted]=true", "polluted"),
+        ("/?data[__proto__][admin]=true", "admin"),
+    ]
+    for payload, marker in payloads:
+        try:
+            r = _fetch(ip, port, payload, auth=auth, read=2048)
+            if r and marker in r[2]:
+                return [_mk(ip, port, "web-proto-pollution", "high",
+                    "Prototype Pollution via query parameters", ["CWE-1321"],
+                    f"Query string parameter reflected prototype chain: {payload}",
+                    "Never trust user input for object property assignment; use Object.assign with frozen objects",
+                    confidence="potential")]
+        except:
+            pass
+    return []
+
+
+def _check_ldap_injection(ip: str, port: Port, auth: dict | None) -> list[Vuln]:
+    """LDAP injection detection via wildcard and filter operators."""
+    probes = [
+        ("/?search=*", "*", "LDAP wildcard bypass"),
+        ("/?search=admin*", "admin", "LDAP filter injection"),
+    ]
+    for payload, marker, desc in probes:
+        try:
+            r = _fetch(ip, port, payload, auth=auth, read=2048)
+            if r and r[0] == 200 and marker in r[2].lower():
+                return [_mk(ip, port, "web-ldap-injection", "high",
+                    "LDAP Injection", ["CWE-90"],
+                    f"LDAP filter accepted wildcard/filter operators: {payload}",
+                    "Use LDAP escaping; parameterize all filter inputs",
+                    confidence="potential")]
+        except:
+            pass
+    return []
+
+
+def _check_header_injection(ip: str, port: Port, auth: dict | None) -> list[Vuln]:
+    """HTTP Header Injection via CRLF in custom headers."""
+    payloads = {
+        "X-Custom": "test\r\nX-Injected: hacked",
+        "X-Original-URL": "http://evil.com",
+        "X-Forwarded-For": "127.0.0.1, attacker.com",
+    }
+    for header, value in payloads.items():
+        try:
+            hdrs = {header: value}
+            if auth:
+                hdrs.update(auth)
+            r = _fetch(ip, port, "/", auth=hdrs, read=2048)
+            if r and ("injected" in r[1].lower() or "attacker" in r[2].lower()):
+                return [_mk(ip, port, "web-header-injection", "high",
+                    f"HTTP Header Injection via {header}", ["CWE-113"],
+                    f"Custom header {header} was reflected or processed: {value[:40]}",
+                    "Never reflect user input into response headers; use safe header APIs",
+                    confidence="potential")]
+        except:
+            pass
+    return []
+
+
 def _extract_api_keys(ip: str, port: Port, body: str) -> list[Vuln]:
     """Scan JavaScript for hardcoded API keys, tokens, secrets."""
     findings = []
@@ -2994,6 +3059,9 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     findings.extend(_check_blind_sqli(ip, port))
     findings.extend(_check_oauth_redirect(ip, port, auth))
     findings.extend(_check_ssti(ip, port, "q", base, auth))
+    findings.extend(_check_prototype_pollution(ip, port, auth))
+    findings.extend(_check_ldap_injection(ip, port, auth))
+    findings.extend(_check_header_injection(ip, port, auth))
     # Form auth brute: try weak creds against login forms (if creds enabled)
     if creds and body:
         for form_str in _FORM_RE.findall(body):

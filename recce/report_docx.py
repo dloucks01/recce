@@ -42,7 +42,7 @@ def _is_real(f: "Finding") -> bool:
 _CIA = "Confidentiality, Integrity, Availability"
 _CWE_TYPE = [
     (("CWE-78", "CWE-77", "CWE-88", "CWE-94", "CWE-95", "CWE-134", "CWE-74", "CWE-917",
-      "CWE-1336", "CWE-943"),
+      "CWE-1336", "CWE-943", "CWE-90", "CWE-113"),
      "Injection / Remote Code Execution", _CIA),
     (("CWE-89",), "SQL Injection", "Confidentiality, Integrity"),
     (("CWE-79",), "Cross-Site Scripting", "Integrity"),
@@ -70,7 +70,7 @@ _CWE_TYPE = [
       "CWE-615", "CWE-489"),
      "Information / Credential Disclosure", "Confidentiality"),
     (("CWE-693", "CWE-1021", "CWE-16", "CWE-650", "CWE-441", "CWE-284", "CWE-1004",
-      "CWE-614", "CWE-942", "CWE-799", "CWE-1275", "CWE-349"),
+      "CWE-614", "CWE-942", "CWE-799", "CWE-1275", "CWE-349", "CWE-1321"),
      "Security Misconfiguration", "Integrity"),
     (("CWE-364",), "Race Condition", "Integrity, Availability"),
     (("CWE-406", "CWE-400"), "Resource Exhaustion / Denial of Service", "Availability"),
@@ -84,7 +84,8 @@ _CWE_NAME = {
     "CWE-16": "Configuration", "CWE-20": "Improper Input Validation",
     "CWE-22": "Path Traversal", "CWE-74": "Injection", "CWE-77": "Command Injection",
     "CWE-78": "OS Command Injection", "CWE-79": "Cross-site Scripting",
-    "CWE-88": "Argument Injection", "CWE-89": "SQL Injection", "CWE-94": "Code Injection",
+    "CWE-88": "Argument Injection", "CWE-89": "SQL Injection", "CWE-90": "LDAP Injection",
+    "CWE-94": "Code Injection", "CWE-113": "HTTP Response Splitting",
     "CWE-95": "Eval Injection", "CWE-98": "PHP Remote File Inclusion",
     "CWE-119": "Improper Restriction of Memory Bounds", "CWE-120": "Buffer Overflow",
     "CWE-121": "Stack-based Buffer Overflow",
@@ -161,6 +162,7 @@ _CWE_NAME = {
     "CWE-1021": "Improper Restriction of Rendered UI Layers (Clickjacking)",
     "CWE-1104": "Use of Unmaintained Third Party Components",
     "CWE-1188": "Insecure Default Initialization of Resource",
+    "CWE-1321": "Prototype Pollution",
     "CWE-1392": "Use of Default Credentials",
 }
 
