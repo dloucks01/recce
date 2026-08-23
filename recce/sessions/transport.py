@@ -41,6 +41,18 @@ class SocketTransport(Transport):
         self._w = writer
         peer = writer.get_extra_info("peername") or ("?", 0)
         self._peer = (str(peer[0]), int(peer[1]))
+        # TCP keepalive: a half-open connection (target yanked, cable pulled) is detected
+        # and torn down instead of lingering as a falsely-"live" shell.
+        sock = writer.get_extra_info("socket")
+        if sock is not None:
+            try:
+                import socket as _s
+                sock.setsockopt(_s.SOL_SOCKET, _s.SO_KEEPALIVE, 1)
+                for opt, val in (("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
+                    if hasattr(_s, opt):
+                        sock.setsockopt(_s.IPPROTO_TCP, getattr(_s, opt), val)
+            except OSError:
+                pass
 
     async def read(self) -> bytes:
         return await self._r.read(65536)

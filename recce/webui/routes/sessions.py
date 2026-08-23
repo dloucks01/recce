@@ -78,8 +78,13 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         sess = mgr.get(session_id)
         if sess is None:
             raise HTTPException(404, "no such session")
+        # the COMPLETE history from disk (not just the live ring) so nothing is ever lost;
+        # flush pending first so the very latest bytes are included
+        mgr.flush_pending(session_id)
+        full = mgr.store.load_transcript(session_id) if mgr.store else b""
+        data = full or sess.scrollback()
         return {"id": session_id, "host_ip": sess.host_ip,
-                "data": base64.b64encode(sess.scrollback()).decode()}
+                "data": base64.b64encode(data).decode()}
 
     @app.post("/api/sessions/{session_id}/cred")
     def loot_cred(session_id: str, body: dict = Body(...),

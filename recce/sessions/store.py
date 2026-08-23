@@ -12,7 +12,7 @@ import time
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS shell_sessions (
   id TEXT PRIMARY KEY, host_ip TEXT, host_port INTEGER, kind TEXT,
-  status TEXT, token TEXT, opened REAL, closed REAL
+  status TEXT, token TEXT, opened REAL, closed REAL, pty INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS shell_transcript (
   session_id TEXT, seq INTEGER, ts REAL, data BLOB
@@ -39,10 +39,12 @@ class SessionStore:
     def save_session(self, s) -> None:
         closed = None if s.status == "live" else time.time()
         self._conn.execute(
-            "INSERT INTO shell_sessions(id,host_ip,host_port,kind,status,token,opened,closed) "
-            "VALUES(?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET status=excluded.status, closed=excluded.closed",
-            (s.id, s.host_ip, s.host_port, s.kind, s.status, s.token, s.created, closed))
+            "INSERT INTO shell_sessions(id,host_ip,host_port,kind,status,token,opened,closed,pty) "
+            "VALUES(?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET status=excluded.status, closed=excluded.closed, "
+            "pty=excluded.pty",
+            (s.id, s.host_ip, s.host_port, s.kind, s.status, s.token, s.created, closed,
+             1 if s.pty else 0))
         self._conn.commit()
 
     def append(self, session_id: str, data: bytes) -> None:
@@ -58,7 +60,7 @@ class SessionStore:
     def load_sessions(self) -> list[tuple[dict, bytes]]:
         """Every persisted session with its concatenated transcript, oldest first."""
         rows = self._conn.execute(
-            "SELECT id,host_ip,host_port,kind,status,token,opened FROM shell_sessions "
+            "SELECT id,host_ip,host_port,kind,status,token,opened,pty FROM shell_sessions "
             "ORDER BY opened").fetchall()
         out: list[tuple[dict, bytes]] = []
         for r in rows:
@@ -68,8 +70,16 @@ class SessionStore:
             data = b"".join(bytes(c[1]) for c in chunks)
             self._seq[r[0]] = (chunks[-1][0] + 1) if chunks else 0   # continue the seq
             out.append(({"id": r[0], "host_ip": r[1], "host_port": r[2], "kind": r[3],
-                         "token": r[5], "opened": r[6]}, data))
+                         "token": r[5], "opened": r[6], "pty": r[7]}, data))
         return out
+
+    def load_transcript(self, session_id: str, limit: int = 0) -> bytes:
+        """The COMPLETE transcript for one session (optionally just the last `limit` bytes)."""
+        chunks = self._conn.execute(
+            "SELECT data FROM shell_transcript WHERE session_id=? ORDER BY seq",
+            (session_id,)).fetchall()
+        data = b"".join(bytes(c[0]) for c in chunks)
+        return data[-limit:] if limit else data
 
     def close(self) -> None:
         try:

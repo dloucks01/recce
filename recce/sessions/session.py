@@ -11,10 +11,14 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections import deque
 
 from .transport import Transport
 
-_BUFFER_CAP = 256 * 1024   # scrollback ring: last ~256 KB of output replayed on attach
+# Deep scrollback so a tester never worries about losing recent history in the terminal;
+# the COMPLETE transcript is always on disk (store) and downloadable — this is just the
+# live in-memory window replayed on attach. Held as a deque of chunks so trimming is O(1).
+_BUFFER_CAP = 1024 * 1024   # 1 MB of live scrollback
 
 
 class Session:
@@ -31,8 +35,10 @@ class Session:
         self.pty = False
         self.driver: str | None = None         # tester id currently allowed to type
         self.attached: set[str] = set()        # presence — who's watching
+        self.last_seen = time.time()           # last byte from the target (liveness)
         self._transport: Transport | None = None
-        self._buffer = bytearray()             # scrollback ring
+        self._chunks: deque[bytes] = deque()   # scrollback ring (O(1) trim)
+        self._blen = 0                         # running byte length of the ring
         self._subs: set[asyncio.Queue] = set() # fan-out to attached WebSockets
 
     @classmethod
@@ -44,9 +50,12 @@ class Session:
         s.id = meta["id"]
         s.token = meta["token"]
         s.created = meta.get("opened") or s.created
+        s.pty = bool(meta.get("pty"))
         s.status = "stale"
         if transcript:
-            s._buffer = bytearray(transcript[-_BUFFER_CAP:])
+            tail = transcript[-_BUFFER_CAP:]
+            s._chunks.append(tail)
+            s._blen = len(tail)
         return s
 
     # --- connection binding (the resilience core) --------------------------------
@@ -74,14 +83,17 @@ class Session:
 
     # --- output fan-out + scrollback --------------------------------------------
     def feed(self, data: bytes) -> None:
-        """Output from the target: append to scrollback and push to every attached UI."""
-        self._buffer += data
-        if len(self._buffer) > _BUFFER_CAP:
-            del self._buffer[:-_BUFFER_CAP]
+        """Output from the target: append to scrollback (O(1) trim) and fan out to every UI."""
+        if data:
+            self.last_seen = time.time()
+            self._chunks.append(data)
+            self._blen += len(data)
+            while self._blen > _BUFFER_CAP and len(self._chunks) > 1:
+                self._blen -= len(self._chunks.popleft())
         self._broadcast({"t": "out", "data": data})
 
     def scrollback(self) -> bytes:
-        return bytes(self._buffer)
+        return b"".join(self._chunks)
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
@@ -121,4 +133,4 @@ class Session:
         return {"id": self.id, "host_ip": self.host_ip, "host_port": self.host_port,
                 "kind": self.kind, "status": self.status, "pty": self.pty,
                 "driver": self.driver, "attached": sorted(self.attached),
-                "created": self.created, "bytes": len(self._buffer)}
+                "created": self.created, "last_seen": self.last_seen, "bytes": self._blen}

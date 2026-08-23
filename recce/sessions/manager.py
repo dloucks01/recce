@@ -56,6 +56,15 @@ class SessionManager:
                 self.store.append(sid, bytes(buf))
                 buf.clear()
 
+    def flush_pending(self, session_id: str) -> None:
+        """Flush one session's un-persisted transcript bytes to disk right now."""
+        if self.store is None:
+            return
+        buf = self._pending.get(session_id)
+        if buf:
+            self.store.append(session_id, bytes(buf))
+            buf.clear()
+
     def _record(self, session_id: str, data: bytes) -> None:
         buf = self._pending.setdefault(session_id, bytearray())
         buf.extend(data)
