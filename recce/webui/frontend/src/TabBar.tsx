@@ -1,19 +1,20 @@
 import { useState, useEffect } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "report" | "act" | "loot" | "playbook";
+export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "sessions" | "report" | "act" | "loot" | "playbook";
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
   scan: "Scan",
   findings: "Findings",
   hosts: "Hosts",
+  sessions: "Sessions",
   report: "Report",
   act: "Act",
   loot: "Loot",
   playbook: "Playbook",
 };
 
-const DEFAULT_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "report", "act"];
+const DEFAULT_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "sessions", "report", "act"];
 
 interface TabBarProps {
   active: TabId;

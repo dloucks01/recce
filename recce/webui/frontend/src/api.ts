@@ -226,3 +226,22 @@ export type Playbook = {
   branches: PbBranch[]; path: string[];
 };
 export async function fetchPlaybook(): Promise<Playbook> { return getJSON<Playbook>("/api/playbook"); }
+
+// --- shell sessions ---------------------------------------------------------
+export interface SessionInfo {
+  id: string; host_ip: string; host_port: number; kind: string;
+  status: "live" | "stale" | "dead"; pty: boolean;
+  driver: string | null; attached: string[]; created: number; bytes: number;
+}
+export interface ListenerInfo { id: string; host: string; port: number; kind: string; status: string; }
+
+export async function getSessions(): Promise<SessionInfo[]> { return getJSON<SessionInfo[]>("/api/sessions"); }
+export async function getListeners(): Promise<ListenerInfo[]> { return getJSON<ListenerInfo[]>("/api/listeners"); }
+export async function startListener(port: number): Promise<ListenerInfo> {
+  const r = await fetch("/api/listeners", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ port }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function stopListener(id: string): Promise<void> {
+  await fetch(`/api/listeners/${encodeURIComponent(id)}`, { method: "DELETE" });
+}

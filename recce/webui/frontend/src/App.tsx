@@ -8,6 +8,7 @@ import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
 import { useEscape } from "./ui";
 import { TabBar, TabId } from "./TabBar";
+import { Sessions } from "./Sessions";
 import { ScanTab } from "./ScanTab";
 import { ReportTab } from "./ReportTab";
 import { CollabSidebar } from "./CollabSidebar";
@@ -378,6 +379,7 @@ export default function App() {
     scan: scanRunning ? 1 : undefined,
     findings: findings.filter((f) => f.tier !== "lead").length || undefined,
     hosts: hosts.length || undefined,
+    sessions: undefined,
     report: undefined,
     act: undefined,
     loot: undefined,
@@ -451,6 +453,7 @@ export default function App() {
               nav={nav}
             />
           ) : <div className="loading">Loading…</div>)}
+          {tab === "sessions" && <Sessions tester={tester} />}
           {tab === "report" && <ReportTab onRefresh={() => refresh().catch(() => {})} />}
           {tab === "act" && <Act nav={nav} />}
           {tab === "loot" && <Loot />}

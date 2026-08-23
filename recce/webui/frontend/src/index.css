@@ -850,3 +850,28 @@ body { background: var(--ground); color: var(--text); }
 .cred-hash { max-width: 140px; }
 .cred-footer { display: flex; gap: 8px; font-size: 9px; color: var(--faint); margin-top: 4px; }
 .cred-source, .cred-by { font-style: italic; }
+
+/* ---- shell sessions ---- */
+.sessions-view { display: flex; flex-direction: column; gap: 16px; }
+.listener-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.listener-list { display: flex; flex-direction: column; gap: 6px; }
+.listener-item { display: flex; gap: 10px; align-items: center; padding: 8px 10px;
+  background: var(--surface2); border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+.listener-item .payload { flex: 1; overflow-x: auto; white-space: nowrap; color: var(--muted);
+  background: var(--ground); padding: 3px 8px; border-radius: 5px; font-size: 12px; }
+.session-list { display: flex; flex-direction: column; gap: 6px; }
+.session-item { display: flex; gap: 10px; align-items: center; text-align: left; width: 100%;
+  padding: 10px 12px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 9px; cursor: pointer; font-size: 13px; }
+.session-item:hover { border-color: var(--accent); }
+.session-item.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.session-item .host { font-weight: 600; }
+.sess-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.sess-dot.live { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+.sess-dot.stale { background: var(--muted); }
+.shell-term { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #0b0f16; }
+.shell-term-bar { display: flex; gap: 12px; align-items: center; padding: 8px 12px;
+  background: var(--surface2); border-bottom: 1px solid var(--line); font-size: 13px; }
+.shell-term-driver { color: var(--accent); font-weight: 600; }
+.shell-term-watchers { margin-left: auto; color: var(--muted); font-size: 12px; }
+.shell-term-screen { padding: 8px; height: 420px; }
