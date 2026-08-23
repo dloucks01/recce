@@ -35,7 +35,8 @@ async def _read_handshake(transport):
     line, _, rest = bytes(buf).partition(b"\n")
     parts = line.split()
     token = parts[1].decode("ascii", "replace") if len(parts) >= 2 else None
-    return token, rest, True
+    is_pty = len(parts) >= 3 and parts[2] == b"pty"   # a bash fallback reconnects but has no PTY
+    return token, rest, is_pty
 
 
 class Listener:

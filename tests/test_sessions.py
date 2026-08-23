@@ -200,7 +200,7 @@ def test_stager_handshake_pty_and_token_reconnect(client):
     token = "tok_robust_1"
 
     s = socket.create_connection(("127.0.0.1", port))
-    s.sendall(b"RECCE1 " + token.encode() + b"\nrobust@dc01:~# ")
+    s.sendall(b"RECCE1 " + token.encode() + b" pty\nrobust@dc01:~# ")
     sess = _wait(lambda: next((x for x in client.get("/api/sessions").json()
                                if x["status"] == "live" and x["pty"]), None))
     assert sess is not None, "stager handshake should create a PTY session"
@@ -213,7 +213,7 @@ def test_stager_handshake_pty_and_token_reconnect(client):
     _wait(lambda: next((x for x in client.get("/api/sessions").json()
                         if x["id"] == sid and x["status"] == "stale"), None))
     s2 = socket.create_connection(("127.0.0.1", port))
-    s2.sendall(b"RECCE1 " + token.encode() + b"\n")
+    s2.sendall(b"RECCE1 " + token.encode() + b" pty\n")
     live = _wait(lambda: next((x for x in client.get("/api/sessions").json()
                                if x["id"] == sid and x["status"] == "live"), None))
     assert live and live["pty"], "reconnect with the token rebinds the SAME pty session"
@@ -238,7 +238,7 @@ def test_tls_listener_encrypted_handshake(client):
     assert lst["kind"] == "tls" and lst["port"] > 0
     raw = socket.create_connection(("127.0.0.1", lst["port"]))
     s = _ssl._create_unverified_context().wrap_socket(raw, server_hostname="127.0.0.1")
-    s.sendall(b"RECCE1 tok_tls_1\nencrypted@dc01:~# ")
+    s.sendall(b"RECCE1 tok_tls_1 pty\nencrypted@dc01:~# ")
     sess = _wait(lambda: next((x for x in client.get("/api/sessions").json()
                                if x["status"] == "live" and x["pty"]), None))
     assert sess is not None, "an encrypted stager handshake should create a live PTY session"
