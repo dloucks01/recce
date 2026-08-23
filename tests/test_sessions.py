@@ -278,6 +278,33 @@ def test_loot_cred_transcript_and_host_filter(client):
         target.close()
 
 
+def test_persistence_guards_and_store(client, tmp_path):
+    # endpoint guards (fast paths — no shell interaction)
+    assert client.post("/api/sessions/nope/persist", json={"mechanism": "cron"}).status_code == 404
+    assert client.post("/api/persistence/nope/remove").status_code == 404
+    assert isinstance(client.get("/api/persistence").json(), list)
+    lst = client.post("/api/listeners", json={"port": 0}).json()
+    raw = socket.create_connection(("127.0.0.1", lst["port"]))
+    raw.sendall(b"$ ")
+    sess = _wait(lambda: next((s for s in client.get("/api/sessions").json()
+                               if s["status"] == "live"), None))
+    # unsupported mechanism rejected before any target interaction
+    assert client.post(f"/api/sessions/{sess['id']}/persist",
+                       json={"mechanism": "systemd"}).status_code == 400
+    raw.close()
+
+    # store round-trip: install recorded with its remove_cmd, then marked removed
+    from recce.sessions.store import SessionStore
+    st = SessionStore(str(tmp_path / "p.db"))
+    st.add_persistence({"id": "p1", "host_ip": "10.0.0.5", "mechanism": "cron",
+                        "artifact_path": "/root/.cache/.rcabc", "remove_cmd": "crontab ...; rm ...",
+                        "installed_by": "bob", "installed_at": 1.0, "removed_at": None})
+    assert st.list_persistence(active_only=True)[0]["remove_cmd"].startswith("crontab")
+    st.mark_persistence_removed("p1", 2.0)
+    assert st.list_persistence(active_only=True) == []
+    assert st.get_persistence("p1")["removed_at"] == 2.0
+
+
 def test_file_transfer_and_enum_guards(client):
     # unknown session → 404 on every new endpoint
     assert client.post("/api/sessions/nope/download", json={"path": "/etc/passwd"}).status_code == 404

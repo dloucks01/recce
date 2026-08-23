@@ -936,3 +936,11 @@ body { background: var(--ground); color: var(--text); }
 .session-actions .scan-in { max-width: 220px; }
 .enum-btn { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .upload-lbl { cursor: pointer; }
+
+/* persistence — intrusive, flagged */
+.persist-btn { border-color: var(--crit); color: var(--crit); font-weight: 600; }
+.persist-list { display: flex; flex-direction: column; gap: 6px; }
+.persist-item { display: flex; gap: 9px; align-items: center; padding: 7px 9px; background: color-mix(in srgb, var(--crit) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--crit) 30%, transparent); border-radius: 7px; font-size: 12px; }
+.badge.intrusive { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 45%, transparent); font-weight: 700; }
+.linkish.danger { color: var(--crit); margin-left: auto; }

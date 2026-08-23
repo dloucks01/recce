@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS shell_transcript (
   session_id TEXT, seq INTEGER, ts REAL, data BLOB
 );
 CREATE INDEX IF NOT EXISTS ix_shell_transcript ON shell_transcript(session_id, seq);
+CREATE TABLE IF NOT EXISTS persistence (
+  id TEXT PRIMARY KEY, host_ip TEXT, mechanism TEXT, artifact_path TEXT,
+  remove_cmd TEXT, installed_by TEXT, installed_at REAL, removed_at REAL
+);
 """
 
 
@@ -88,6 +92,38 @@ class SessionStore:
             (session_id,)).fetchall()
         data = b"".join(bytes(c[0]) for c in chunks)
         return data[-limit:] if limit else data
+
+    # --- persistence tracking: every backdoor recce drops is recorded so it can be removed
+    def add_persistence(self, p: dict) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO persistence"
+            "(id,host_ip,mechanism,artifact_path,remove_cmd,installed_by,installed_at,removed_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (p["id"], p["host_ip"], p["mechanism"], p["artifact_path"], p["remove_cmd"],
+             p.get("installed_by", ""), p["installed_at"], p.get("removed_at")))
+        self._conn.commit()
+
+    def list_persistence(self, host_ip: str = "", active_only: bool = False) -> list[dict]:
+        q = "SELECT id,host_ip,mechanism,artifact_path,remove_cmd,installed_by,installed_at,removed_at FROM persistence"
+        cond, args = [], []
+        if host_ip:
+            cond.append("host_ip=?"); args.append(host_ip)
+        if active_only:
+            cond.append("removed_at IS NULL")
+        if cond:
+            q += " WHERE " + " AND ".join(cond)
+        q += " ORDER BY installed_at DESC"
+        cols = ("id", "host_ip", "mechanism", "artifact_path", "remove_cmd",
+                "installed_by", "installed_at", "removed_at")
+        return [dict(zip(cols, r)) for r in self._conn.execute(q, args).fetchall()]
+
+    def get_persistence(self, pid: str) -> dict | None:
+        rows = self.list_persistence()
+        return next((r for r in rows if r["id"] == pid), None)
+
+    def mark_persistence_removed(self, pid: str, ts: float) -> None:
+        self._conn.execute("UPDATE persistence SET removed_at=? WHERE id=?", (ts, pid))
+        self._conn.commit()
 
     def close(self) -> None:
         try:

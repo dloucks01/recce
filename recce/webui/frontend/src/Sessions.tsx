@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener,
-  lootCred, getTranscript, upgradeSession, runEnum, downloadFromShell, uploadToShell } from "./api";
+  lootCred, getTranscript, upgradeSession, runEnum, downloadFromShell, uploadToShell,
+  persistSession } from "./api";
 import { ShellTerminal } from "./Terminal";
 import { PayloadCatalog } from "./Payloads";
 
@@ -189,6 +190,20 @@ function SessionTools({ session }: { session: SessionInfo }) {
     } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
     finally { setBusy(false); }
   }
+  async function persist() {
+    if (!window.confirm(
+      `INTRUSIVE — writes a backdoor to ${session.host_ip}.\n\n` +
+      `Installs a cron @reboot + watchdog that relaunches the reconnecting stager, so the ` +
+      `shell survives a reboot or a kill. recce tracks it and can remove it, and it shows in ` +
+      `the host view + report.\n\nOnly do this if your rules of engagement allow persistence. Continue?`)) return;
+    setBusy(true); setMsg("installing persistence…");
+    try {
+      const r = await persistSession(session.id);
+      setMsg(r.ok ? `🔒 persistence installed (cron) on ${session.host_ip} — tracked; remove it from the host drawer`
+                  : `⚠ ${r.reason || "install failed"}`);
+    } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
   return (
     <div className="session-tools">
       {!session.pty && session.status === "live" && (
@@ -209,6 +224,10 @@ function SessionTools({ session }: { session: SessionInfo }) {
         <button className="toggle" onClick={download} disabled={busy || !dlPath.trim()}>⭳ Download</button>
         <label className="toggle upload-lbl">⭱ Upload<input type="file" hidden
                onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); }} /></label>
+        <button className="toggle persist-btn" onClick={persist} disabled={busy}
+                title="INTRUSIVE — install cron persistence so the shell survives reboot/kill (tracked + removable)">
+          🔒 Persist
+        </button>
       </div>
       <div className="loot-cred">
         <span className="muted small">Loot a credential from this shell:</span>

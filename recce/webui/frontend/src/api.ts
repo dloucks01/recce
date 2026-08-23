@@ -293,3 +293,24 @@ export async function uploadToShell(sessionId: string, path: string, dataB64: st
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
   return r.json();
 }
+
+// --- persistence (intrusive; tracked + removable) -----------------------------
+export interface Persistence {
+  id: string; host_ip: string; mechanism: string; artifact_path: string;
+  installed_by: string; installed_at: number; removed_at: number | null;
+}
+export async function persistSession(sessionId: string): Promise<{ ok: boolean; id?: string; reason?: string }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/persist`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify({ mechanism: "cron" }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function getPersistence(host?: string): Promise<Persistence[]> {
+  return getJSON<Persistence[]>("/api/persistence" + (host ? `?host=${encodeURIComponent(host)}` : ""));
+}
+export async function removePersistence(id: string): Promise<{ ok: boolean; reason?: string }> {
+  const r = await fetch(`/api/persistence/${encodeURIComponent(id)}/remove`, { method: "POST", headers: jsonHeaders() });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { HostDetail, VulnDetail, SessionInfo, Credential, getHost, getSessions, getCredentials } from "./api";
+import { HostDetail, VulnDetail, SessionInfo, Credential, Persistence,
+  getHost, getSessions, getCredentials, getPersistence, removePersistence } from "./api";
 import { SevTag, NoteCell, useEscape, useResizableDrawer } from "./ui";
 import { FindingDetail } from "./FindingDetail";
 import { PortStatus } from "./collab";
@@ -16,18 +17,25 @@ export function HostDrawer(
   const [openV, setOpenV] = useState<string | null>(null);
   const [shells, setShells] = useState<SessionInfo[]>([]);
   const [creds, setCreds] = useState<Credential[]>([]);
+  const [persist, setPersist] = useState<Persistence[]>([]);
 
-  // this host's caught shells + looted creds — the engagement-native tie-in
+  // this host's caught shells + looted creds + installed persistence — engagement-native
   useEffect(() => {
-    if (!ip) { setShells([]); setCreds([]); return; }
+    if (!ip) { setShells([]); setCreds([]); setPersist([]); return; }
     const load = () => {
       getSessions(ip).then(setShells).catch(() => {});
       getCredentials().then((cs) => setCreds(cs.filter((c) => c.origin_ip === ip))).catch(() => {});
+      getPersistence(ip).then((ps) => setPersist(ps.filter((p) => !p.removed_at))).catch(() => {});
     };
     load();
     const t = window.setInterval(load, 3000);
     return () => window.clearInterval(t);
   }, [ip]);
+  async function pullPersist(id: string) {
+    const r = await removePersistence(id).catch((e) => ({ ok: false, reason: String(e) }));
+    if (!r.ok) alert("Could not remove: " + (r.reason || "unknown") + "\nVerify by hand.");
+    getPersistence(ip!).then((ps) => setPersist(ps.filter((p) => !p.removed_at))).catch(() => {});
+  }
 
   useEffect(() => {
     if (!ip) return;
@@ -87,6 +95,21 @@ export function HostDrawer(
             <Section title="What's been done">
               <HostActivity d={d} shells={shells} creds={creds} />
             </Section>
+
+            {persist.length > 0 && (
+              <Section title={`⚠ Persistence (${persist.length})`} extra="backdoors you installed — remove before you leave">
+                <div className="persist-list">
+                  {persist.map((p) => (
+                    <div key={p.id} className="persist-item">
+                      <span className="badge intrusive">{p.mechanism}</span>
+                      <span className="mono small">{p.artifact_path}</span>
+                      <span className="muted small">by {p.installed_by}</span>
+                      <button className="linkish danger" onClick={() => pullPersist(p.id)}>remove</button>
+                    </div>
+                  ))}
+                </div>
+              </Section>
+            )}
 
             {shells.length > 0 && (
               <Section title={`Shells (${shells.length})`}
