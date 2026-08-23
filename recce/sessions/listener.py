@@ -44,17 +44,22 @@ class Listener:
 
     kind = "tcp"
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, tls: bool = False) -> None:
         self.id = uuid.uuid4().hex[:8]
         self.host = host
         self.port = port                 # 0 = ephemeral; real port filled in after start
+        self.kind = "tls" if tls else "tcp"
+        self.tls = tls
         self.status = "starting"
         self._server: asyncio.AbstractServer | None = None
         self._manager = None
 
-    async def start(self, manager) -> None:
+    async def start(self, manager, ssl_ctx=None) -> None:
         self._manager = manager
-        self._server = await asyncio.start_server(self._on_conn, self.host, self.port)
+        # ssl_ctx wraps every accepted connection in TLS; the RECCE1 handshake and the whole
+        # relay then run over the encrypted stream transparently.
+        self._server = await asyncio.start_server(self._on_conn, self.host, self.port,
+                                                  ssl=ssl_ctx)
         # reflect the actually-bound port back (matters for port 0 / tests)
         sock = self._server.sockets[0]
         self.port = sock.getsockname()[1]

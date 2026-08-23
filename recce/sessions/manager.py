@@ -77,9 +77,10 @@ class SessionManager:
             self.store.save_session(sess)
 
     # --- listeners ---------------------------------------------------------------
-    async def start_listener(self, port: int, host: str = "0.0.0.0") -> Listener:
-        lst = Listener(host, port)
-        await lst.start(self)
+    async def start_listener(self, port: int, host: str = "0.0.0.0",
+                             tls: bool = False, ssl_ctx=None) -> Listener:
+        lst = Listener(host, port, tls=tls)
+        await lst.start(self, ssl_ctx=ssl_ctx)
         self.listeners[lst.id] = lst
         return lst
 

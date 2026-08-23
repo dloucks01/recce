@@ -927,3 +927,6 @@ body { background: var(--ground); color: var(--text); }
 .upgrade-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
 .upgrade-btn { background: var(--ok); }
 .upgrade-btn:hover { filter: brightness(1.1); }
+
+/* TLS toggle */
+.tls-tog { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; cursor: pointer; }

@@ -11,6 +11,7 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
   const [listeners, setListeners] = useState<ListenerInfo[]>([]);
   const [open, setOpen] = useState<string | null>(null);
   const [port, setPort] = useState("4444");
+  const [tls, setTls] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [payloadsFor, setPayloadsFor] = useState<string | null>(null);
 
@@ -33,7 +34,7 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
   async function addListener() {
     setErr(null);
     try {
-      await startListener(parseInt(port, 10) || 0);
+      await startListener(parseInt(port, 10) || 0, tls);
       refresh();
     } catch (e) {
       setErr(String(e instanceof Error ? e.message : e));
@@ -52,6 +53,9 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
         <div className="listener-row">
           <input className="scan-in" value={port} onChange={(e) => setPort(e.target.value)}
                  placeholder="port" style={{ maxWidth: 100 }} />
+          <label className="tls-tog" title="TLS-encrypted channel (defeats on-wire sniffing / IDS)">
+            <input type="checkbox" checked={tls} onChange={(e) => setTls(e.target.checked)} /> TLS
+          </label>
           <button className="run" onClick={addListener}>▶ Open listener</button>
         </div>
         {err && <div className="ranmsg warn-msg">{err}</div>}
@@ -61,13 +65,13 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
             <div key={l.id} className="listener-block">
               <div className="listener-item">
                 <span className="mono">:{l.port}</span>
-                <span className="badge">{l.kind}</span>
+                <span className={"badge" + (l.kind === "tls" ? " pty" : "")}>{l.kind === "tls" ? "🔒 tls" : l.kind}</span>
                 <button className="linkish" onClick={() => setPayloadsFor(payloadsFor === l.id ? null : l.id)}>
                   {payloadsFor === l.id ? "hide payloads" : "payloads ▾"}
                 </button>
                 <button className="linkish" onClick={() => { stopListener(l.id).then(refresh); }}>stop</button>
               </div>
-              {payloadsFor === l.id && <PayloadCatalog port={l.port} />}
+              {payloadsFor === l.id && <PayloadCatalog port={l.port} tls={l.kind === "tls"} />}
             </div>
           ))}
         </div>

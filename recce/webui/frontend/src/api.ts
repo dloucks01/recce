@@ -239,8 +239,8 @@ export async function getSessions(host?: string): Promise<SessionInfo[]> {
   return getJSON<SessionInfo[]>("/api/sessions" + (host ? `?host=${encodeURIComponent(host)}` : ""));
 }
 export async function getListeners(): Promise<ListenerInfo[]> { return getJSON<ListenerInfo[]>("/api/listeners"); }
-export async function startListener(port: number): Promise<ListenerInfo> {
-  const r = await fetch("/api/listeners", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ port }) });
+export async function startListener(port: number, tls = false): Promise<ListenerInfo> {
+  const r = await fetch("/api/listeners", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ port, tls }) });
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
   return r.json();
 }

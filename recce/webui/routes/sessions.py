@@ -52,8 +52,17 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "port must be an integer")
         if not (0 <= port <= 65535):
             raise HTTPException(400, "port out of range")
+        tls = bool(body.get("tls", False))
+        ssl_ctx = None
+        if tls:
+            try:
+                from ...sessions.tlscert import server_ssl_context
+                ssl_ctx = server_ssl_context(ctx.eng_dir)
+            except Exception as e:  # noqa: BLE001 — openssl missing / cert failure
+                raise HTTPException(500, f"could not set up TLS (is openssl installed?): {e}")
         try:
-            lst = await mgr.start_listener(port, host=str(body.get("host", "0.0.0.0")))
+            lst = await mgr.start_listener(port, host=str(body.get("host", "0.0.0.0")),
+                                           tls=tls, ssl_ctx=ssl_ctx)
         except OSError as e:
             raise HTTPException(409, f"could not bind: {e}")
         broker.publish({"type": "session", "event": "listener", "port": lst.port})

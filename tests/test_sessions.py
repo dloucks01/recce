@@ -227,6 +227,24 @@ def test_stager_handshake_pty_and_token_reconnect(client):
     raw.close()
 
 
+def test_tls_listener_encrypted_handshake(client):
+    """A TLS listener wraps the channel in encryption; a stager handshake over TLS still
+    lands as a normal PTY session."""
+    import shutil
+    import ssl as _ssl
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl not available to generate a self-signed cert")
+    lst = client.post("/api/listeners", json={"port": 0, "tls": True}).json()
+    assert lst["kind"] == "tls" and lst["port"] > 0
+    raw = socket.create_connection(("127.0.0.1", lst["port"]))
+    s = _ssl._create_unverified_context().wrap_socket(raw, server_hostname="127.0.0.1")
+    s.sendall(b"RECCE1 tok_tls_1\nencrypted@dc01:~# ")
+    sess = _wait(lambda: next((x for x in client.get("/api/sessions").json()
+                               if x["status"] == "live" and x["pty"]), None))
+    assert sess is not None, "an encrypted stager handshake should create a live PTY session"
+    s.close()
+
+
 def test_loot_cred_transcript_and_host_filter(client):
     lst = client.post("/api/listeners", json={"port": 0}).json()
     target = socket.create_connection(("127.0.0.1", lst["port"]))
