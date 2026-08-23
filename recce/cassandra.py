@@ -97,7 +97,7 @@ def _read_frame(sock: socket.socket):
         return None, b""
     _ver, _flags, _stream, opcode, length = struct.unpack(">BBhBI", head)
     if length > _MAX_BODY:
-        length = _MAX_BODY
+        raise ValueError(f"CQL frame length {length} exceeds max {_MAX_BODY}")
     body = _recv_exact(sock, length)
     return opcode, body
 
@@ -161,6 +161,8 @@ def _parse_system_local(body: bytes) -> dict:
             if vlen < 0:                        # NULL
                 out[name] = ""
                 continue
+            if i + vlen > len(body):            # malformed: value extends past frame
+                break
             val = body[i:i + vlen]; i += vlen
             out[name] = val.decode("utf-8", "replace")
     except (struct.error, IndexError, UnicodeDecodeError):

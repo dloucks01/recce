@@ -226,7 +226,8 @@ def _mongo_scram(sock, user: str, password: str, mechanism: str, rid: int,
             _e_binary("payload", final), _e_str("$db", "admin")), rid + 1, timeout)
         if not isinstance(r2, dict) or r2.get("ok") != 1.0:
             return False
-        client.verify((r2.get("payload") or b"").decode("utf-8", "replace"))
+        if not client.verify((r2.get("payload") or b"").decode("utf-8", "replace")):
+            return False
         if r2.get("done"):
             return True
         r3 = command(sock, bson_doc(

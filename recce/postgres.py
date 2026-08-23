@@ -134,7 +134,8 @@ def _do_auth(sock: socket.socket, user: str, password: str | None) -> bool:
             return False
         code = struct.unpack("!I", body[:4])[0]
         if code == 12:
-            client.verify(body[4:].decode("utf-8", "replace"))
+            if not client.verify(body[4:].decode("utf-8", "replace")):
+                return False
             typ, body = _read_message(sock)
             if typ != b"R" or len(body) < 4:
                 return False
