@@ -30,6 +30,200 @@ from . import probes, proxy
 _TIMEOUT = 6.0
 _UA = "recce-web/1.0"
 
+# --- GOBUSTER & WEB SPIDERING WORDLISTS ---
+# Curated for high-fidelity findings in airgapped pentests (no external sources).
+# Prioritized by attack surface: admin/config → info disclosure → RCE/lateral.
+
+_WORDLIST_ADMIN = [
+    "admin", "administrator", "admin-login", "admin_login", "admin/login",
+    "adminpanel", "admin-panel", "admin_panel", "adm", "admins", "admin.php",
+    "wp-admin", "wp-login", "wp-login.php", "wp-admin/", "wp-json",
+    "administrator/", "admin.asp", "admin.html", "admin.aspx",
+    "manager", "management", "console", "control", "dashboard",
+    "master", "operator", "supervisor", "root", "superuser",
+]
+
+_WORDLIST_CONFIG = [
+    ".env", ".env.local", ".env.example", "config.php", "config.json",
+    "settings.php", "settings.xml", "settings.py", "settings.ini",
+    "app.config", "web.config", "web.xml", ".htaccess", ".htpasswd",
+    "config/", "conf/", ".git", ".git/config", ".gitignore",
+    "dockerfile", "docker-compose.yml", ".dockerignore",
+    ".github/", ".gitlab-ci.yml", ".travis.yml", "jenkinsfile",
+    "package.json", "package-lock.json", "yarn.lock", "composer.json",
+    "requirements.txt", "Pipfile", "Gemfile", "pom.xml", "build.gradle",
+    ".env.production", ".env.staging", ".env.development",
+    "credentials.json", "secrets.json", "apikeys.json",
+]
+
+_WORDLIST_INFO_DISCLOSURE = [
+    "robots.txt", "sitemap.xml", "humans.txt", ".well-known/",
+    "readme.md", "readme.txt", "readme.html", "changelog", "changelog.txt",
+    "license", "license.txt", "AUTHORS", "CONTRIBUTORS", "HISTORY",
+    ".DS_Store", "thumbs.db", ".swp", ".swo", "*.bak", "*.tmp",
+    "test", "staging", "dev", "development", "demo", "debug",
+    "backup", "backups", "old", "archive", "previous", "legacy",
+    "temp", "tmp", "cache", ".cache", "logs", "log", ".log",
+    "version", "VERSION", "version.txt", "build", "build.txt",
+]
+
+_WORDLIST_SOURCE_CODE = [
+    "src/", "source/", "sources/", "code/", "codes/",
+    "lib/", "libs/", "library/", "libraries/", "modules/",
+    "views/", "models/", "controllers/", "components/",
+    "assets/", "static/", "public/", "resources/",
+    "app/", "application/", "main/", "core/",
+    "utils/", "helpers/", "includes/", "functions/",
+    "js/", "css/", "images/", "fonts/", "media/",
+]
+
+_WORDLIST_AUTH_ENDPOINTS = [
+    "login", "signin", "auth", "authenticate", "auth/login",
+    "user/login", "account/login", "session/new",
+    "logout", "signout", "logoff", "exit",
+    "register", "signup", "join", "register.php",
+    "forgot", "forgot-password", "reset-password", "password-reset",
+    "profile", "user/profile", "account/profile", "settings",
+    "change-password", "update-password", "security",
+]
+
+_WORDLIST_API = [
+    "api", "api/", "api/v1", "api/v2", "api/v3",
+    "v1/", "v2/", "v3/", "v4/", "v5/",
+    "graphql", "api/graphql", "graph",
+    "rest", "soap", "rpc",
+    "webhook", "webhooks",
+    "client", "clients", "customers", "users", "accounts",
+    "products", "items", "posts", "articles", "data",
+    "endpoint", "endpoints", "action", "method",
+]
+
+_WORDLIST_DATA_EXPOSURE = [
+    "database", "databases", "db/", "data/", "dataset/",
+    "export", "download", "backup", "dump",
+    "credentials", "secrets", "keys", "tokens",
+    "user", "users", "profile", "profiles",
+    "admin", "superuser", "root",
+    "email", "password", "hash", "salt",
+    "config", "setting", "option",
+    "sql", "db", "postgres", "mysql", "mongodb",
+]
+
+_WORDLIST_TRAVERSAL = [
+    "../", "../../", "../../../",
+    "..%2f", "..%252f", "..%5c",
+    "....//", "..%5c%5c", "..%c0%af",
+    "%2e%2e%2f", "%252e%252e%252f",
+    "etc/passwd", "etc/shadow", "etc/hosts",
+    "proc/self/environ", "proc/self/cwd",
+    "windows/win.ini", "windows/system32/drivers/etc/hosts",
+    "bootini", "boot.ini",
+]
+
+_WORDLIST_UPLOAD = [
+    "upload", "uploads", "upload/", "upload.php",
+    "file", "files", "file/", "file_upload",
+    "media", "image", "images", "photo", "photos",
+    "document", "documents", "attachment", "attachments",
+    "archive", "archives", "zip", "archive.php",
+    "form", "forms", "form_upload", "form.php",
+]
+
+_WORDLIST_FRAMEWORK_PATHS = {
+    "wordpress": ["wp-content", "wp-includes", "wp-json", "wp-admin", "wp-login.php"],
+    "drupal": ["sites/", "modules/", "themes/", "admin/", "node/", "user/"],
+    "joomla": ["administrator", "components", "modules", "plugins", "templates", "media"],
+    "laravel": ["app/", "bootstrap/", "config/", "storage/", "routes/", "artisan"],
+    "django": ["admin/", "api/", "static/", "media/", "templates/", "migrations/"],
+    "rails": ["app/", "config/", "db/", "public/", "vendor/", "assets/"],
+    "asp.net": ["App_Data/", "App_Code/", "Bin/", "Content/", "Scripts/", "Views/"],
+    "php": ["index.php", "admin.php", "config.php", "includes/", "classes/"],
+    "nodejs": ["node_modules/", "public/", "routes/", "views/", "server.js", "app.js"],
+}
+
+_WORDLIST_VCS = [
+    ".git", ".git/", ".git/config", ".git/HEAD", ".git/objects",
+    ".gitignore", ".github/", ".gitlab-ci.yml",
+    ".svn", ".svn/", ".hg", ".hg/", ".bzr", ".bzr/",
+    "CVS", "CVS/",
+]
+
+_WORDLIST_DEBUG = [
+    "debug", "debug.php", "debug.asp", "test.php", "test.asp",
+    "phpinfo.php", "info.php", "test.html", "trace.php",
+    "status", "status.php", "health", "health.php", "ping", "ping.php",
+    "metrics", "stats", "statistics",
+]
+
+# --- DOMAIN SPIDERING (DNS/VHOST ENUMERATION) ---
+_WORDLIST_SUBDOMAINS = [
+    "www", "mail", "ftp", "localhost", "webmail", "smtp", "pop",
+    "ns", "ns1", "ns2", "dns", "api", "v1", "v2", "v3",
+    "admin", "test", "dev", "staging", "production", "prod",
+    "app", "apps", "console", "control", "cpanel", "webmin",
+    "blog", "news", "shop", "store", "cart", "checkout",
+    "cdn", "static", "assets", "download", "download-server",
+    "cache", "proxy", "vpn", "gateway", "tunnel",
+    "db", "database", "mysql", "postgres", "mongodb", "redis",
+    "smtp", "mail", "pop3", "imap", "exchange",
+    "ldap", "ad", "active-directory", "directory",
+    "vpn", "wireguard", "openvpn", "ssh", "telnet",
+    "jenkins", "ci", "cd", "build", "deploy",
+    "git", "gitlab", "github", "bitbucket", "svn",
+    "sonarqube", "artifactory", "nexus", "jira", "confluence",
+    "grafana", "prometheus", "kibana", "elasticsearch", "logstash",
+    "vault", "consul", "etcd", "zookeeper",
+    "kubernetes", "k8s", "docker", "swarm",
+    "rabbitmq", "kafka", "redis", "memcached",
+    "influxdb", "timeseries", "metrics",
+    "analytics", "tracking", "telemetry",
+    "internal", "private", "local", "intranet",
+]
+
+
+def wordlist_for_gobuster(category: str = "all") -> list[str]:
+    """Export wordlist(s) for gobuster/dirbuster dir enumeration.
+    Categories: admin, config, api, auth, upload, source, debug, traversal, all."""
+    if category == "all":
+        return (_WORDLIST_ADMIN + _WORDLIST_CONFIG + _WORDLIST_AUTH_ENDPOINTS +
+                _WORDLIST_API + _WORDLIST_DATA_EXPOSURE + _WORDLIST_SOURCE_CODE +
+                _WORDLIST_UPLOAD + _WORDLIST_DEBUG + _WORDLIST_INFO_DISCLOSURE)
+    elif category == "admin":
+        return _WORDLIST_ADMIN
+    elif category == "config":
+        return _WORDLIST_CONFIG
+    elif category == "api":
+        return _WORDLIST_API
+    elif category == "auth":
+        return _WORDLIST_AUTH_ENDPOINTS
+    elif category == "upload":
+        return _WORDLIST_UPLOAD
+    elif category == "source":
+        return _WORDLIST_SOURCE_CODE
+    elif category == "debug":
+        return _WORDLIST_DEBUG
+    elif category == "traversal":
+        return _WORDLIST_TRAVERSAL
+    else:
+        return _WORDLIST_ADMIN
+
+
+def wordlist_for_domain_enum() -> list[str]:
+    """Export subdomain wordlist for DNS enumeration (ffuf, massdns, etc)."""
+    return _WORDLIST_SUBDOMAINS
+
+
+def wordlist_for_vcs_disclosure() -> list[str]:
+    """Export VCS/source control paths."""
+    return _WORDLIST_VCS
+
+
+def wordlist_get_framework_paths(framework: str = None) -> dict[str, list[str]] | list[str]:
+    """Get framework-specific paths. If framework is None, return all; else return specific."""
+    if framework:
+        return _WORDLIST_FRAMEWORK_PATHS.get(framework.lower(), [])
+    return _WORDLIST_FRAMEWORK_PATHS
+
 
 def is_web(port: Port) -> bool:
     return port.is_open and probes._is_http(port)
@@ -2910,6 +3104,247 @@ def _check_header_injection(ip: str, port: Port, auth: dict | None) -> list[Vuln
     return []
 
 
+def _check_method_override(ip: str, port: Port, auth: dict | None) -> list[Vuln]:
+    """HTTP method override via headers or parameters: X-HTTP-Method-Override, _method, etc."""
+    tests = [
+        ("X-HTTP-Method-Override", "DELETE"),
+        ("X-Method-Override", "DELETE"),
+        ("X-HTTP-Method", "DELETE"),
+        ("_method", "DELETE", "/?_method=DELETE"),  # param not header
+    ]
+    for test in tests:
+        try:
+            if len(test) == 3:  # param test
+                header, method, path = None, None, test[2]
+                r = _fetch(ip, port, path, method="POST", auth=auth, read=2048)
+            else:
+                header, method = test
+                hdrs = {**(auth or {}), header: method}
+                r = _fetch(ip, port, "/", method="POST", auth=hdrs, read=2048)
+            if r and r[0] in (200, 204, 405):  # 405 = method not allowed by DELETE
+                return [_mk(ip, port, "web-method-override", "high",
+                    f"HTTP Method Override via {test[0] if len(test) == 2 else test[2].split('=')[0]}", ["CWE-20"],
+                    f"Server processed {method or 'alternate'} method via {test[0]}. Can bypass auth/ACLs.",
+                    "Never trust HTTP method from headers/params; use only HTTP verb",
+                    confidence="potential")]
+        except:
+            pass
+    return []
+
+
+def _check_error_stack_trace(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
+    """Stack trace disclosure via error conditions: 500 errors, exceptions, debug info."""
+    probes = [
+        ("/?_invalid_param_!@#$%", "PHP/Java/Python stack trace"),
+        ("/?action=nonexistent", "action parameter"),
+        ("/?id=abc", "type mismatch (string for int)"),
+    ]
+    for path, desc in probes:
+        try:
+            r = _fetch(ip, port, path, auth=auth, read=8192)
+            if r and r[0] >= 400:
+                body_lower = r[2].lower()
+                if re.search(r"traceback|stacktrace|exception|at line|file \"|error_code|fatal error", body_lower):
+                    return [_mk(ip, port, "web-error-trace", "medium",
+                        "Stack trace / Debug info disclosure in error responses", ["CWE-209"],
+                        f"Error response included stack trace or debug info: {desc}",
+                        "Use generic error messages in production; log details server-side only",
+                        confidence="confirmed")]
+        except:
+            pass
+    return []
+
+
+def _check_admin_panels(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
+    """Discover common admin/management panels."""
+    admin_paths = [
+        "/admin", "/administrator", "/admin/login", "/admin/index.php",
+        "/wp-admin", "/wp-login.php",
+        "/phpmyadmin", "/pma", "/mysqladmin",
+        "/cpanel", "/whm", "/webhost", "/cPanel",
+        "/plesk", "/ispsconfig",
+        "/console", "/manager", "/jenkins", "/grafana",
+        "/api/admin", "/api-admin", "/api/dashboard",
+        "/dev", "/development", "/staging", "/test",
+        "/.well-known/admin", "/.well-known/security.txt",
+    ]
+    findings = []
+    for path in admin_paths:
+        try:
+            r = _fetch(ip, port, path, auth=auth, read=4096)
+            if r and r[0] in (200, 301, 302, 401, 403):
+                title = r[2][r[2].find("<title>")+7:r[2].find("</title>")] if "<title>" in r[2] else ""
+                status_desc = "redirected" if r[0] in (301, 302) else "found"
+                findings.append(_mk(ip, port, "web-admin-panel", "medium",
+                    f"Admin/Management panel discovered at {path}", ["CWE-200"],
+                    f"GET {path} -> HTTP {r[0]} {status_desc}. Title: {title[:50]}",
+                    "Restrict admin panels to internal IPs; require MFA",
+                    confidence="confirmed" if r[0] == 200 else "potential"))
+        except:
+            pass
+    return findings[:3]  # Limit to top 3 to avoid noise
+
+
+def _check_race_condition(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
+    """Race condition detection via timing analysis (concurrent requests)."""
+    import threading
+    timing = []
+    path = "/?account_balance"
+
+    def probe():
+        try:
+            t0 = time.monotonic()
+            _fetch(ip, port, path, auth=auth, read=512)
+            timing.append(time.monotonic() - t0)
+        except:
+            pass
+
+    # Fire 5 concurrent requests and measure variance
+    threads = [threading.Thread(target=probe) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    if timing and len(timing) >= 3:
+        avg = sum(timing) / len(timing)
+        variance = max(timing) - min(timing)
+        if variance > avg * 0.5:  # >50% variance suggests timing-dependent logic
+            return [_mk(ip, port, "web-race-condition", "medium",
+                "Potential race condition (timing variance detected)", ["CWE-362"],
+                f"Request timing variance {variance:.3f}s on {path} suggests concurrent state mutations. "
+                f"Manual testing needed (concurrent withdrawals, duplicate submissions).",
+                "Use atomic transactions; test concurrent access; implement idempotency",
+                confidence="potential")]
+    return []
+
+
+def _check_dom_xss(ip: str, port: Port, body: str, auth: dict | None) -> list[Vuln]:
+    """Detect DOM XSS sinks: document.write, innerHTML, eval in JavaScript."""
+    dangerous_sinks = [
+        r"document\.write\s*\(",
+        r"\.innerHTML\s*=",
+        r"\.outerHTML\s*=",
+        r"eval\s*\(",
+        r"Function\s*\(",
+        r"setTimeout\s*\(\s*['\"].*['\"]",
+        r"\.insertAdjacentHTML\s*\(",
+    ]
+    for sink in dangerous_sinks:
+        if re.search(sink, body, re.I):
+            return [_mk(ip, port, "web-dom-xss", "high",
+                f"DOM-based XSS sink detected: {sink.split(chr(92))[0]}", ["CWE-79"],
+                f"JavaScript contains dangerous sink pattern. If source is user-controlled, DOM XSS possible.",
+                "Use textContent instead of innerHTML; avoid eval; use Content Security Policy",
+                confidence="potential")]
+    return []
+
+
+def _check_type_confusion(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
+    """Type confusion attacks: string vs int, truthy logic abuse."""
+    probes = [
+        ("/?id=0", "/?id=false", "falsy string vs zero"),
+        ("/?id=1", "/?id=true", "truthy string vs one"),
+        ("/?admin=0", "/?admin=false", "false vs \"0\" check"),
+    ]
+    for p1, p2, desc in probes:
+        try:
+            r1 = _fetch(ip, port, p1, auth=auth, read=2048)
+            r2 = _fetch(ip, port, p2, auth=auth, read=2048)
+            if r1 and r2 and r1[0] == r2[0] and r1[2] != r2[2]:
+                if len(r1[2]) > len(r2[2]) * 1.5 or len(r2[2]) > len(r1[2]) * 1.5:
+                    return [_mk(ip, port, "web-type-confusion", "medium",
+                        f"Type confusion / Logic error via {desc}", ["CWE-1025"],
+                        f"Parameters {p1} and {p2} produced different responses. "
+                        f"May indicate type-coercion logic error (0 == false).",
+                        "Explicitly check types; use strict equality (=== not ==)",
+                        confidence="potential")]
+        except:
+            pass
+    return []
+
+
+def _check_rate_limits(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
+    """Rate limit detection: fire rapid requests and check for 429/throttle."""
+    findings = []
+    t0 = time.monotonic()
+    responses = []
+    for i in range(10):
+        try:
+            r = _fetch(ip, port, f"/?burst={i}", auth=auth, read=512)
+            if r:
+                responses.append(r[0])
+        except:
+            pass
+        time.sleep(0.05)  # 50ms between requests = 200 req/sec
+
+    elapsed = time.monotonic() - t0
+    rate = len(responses) / elapsed if elapsed > 0 else 0
+
+    if 429 not in responses and rate > 100:  # >100 req/sec and no 429 = no rate limit
+        findings.append(_mk(ip, port, "web-no-rate-limit", "medium",
+            "No rate limiting detected", ["CWE-770"],
+            f"Rapid requests ({rate:.0f} req/sec) not throttled. Enables brute-force, DoS, scraping.",
+            "Implement per-IP rate limiting; use CAPTCHA; exponential backoff",
+            confidence="potential"))
+    elif 429 in responses:
+        findings.append(_mk(ip, port, "web-rate-limit-present", "info",
+            "Rate limiting detected (good)", ["CWE-770"],
+            f"HTTP 429 received after {responses.index(429)} requests.",
+            "Rate limiting is properly implemented.",
+            confidence="confirmed"))
+    return findings
+
+
+def _check_null_byte_injection(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
+    """Null byte injection: path traversal bypass via %00 termination."""
+    probes = [
+        "/?file=../../etc/passwd%00.jpg",
+        "/?file=../../etc/shadow%00.txt",
+        "/?page=admin%00.php",
+    ]
+    for probe in probes:
+        try:
+            r = _fetch(ip, port, probe, auth=auth, read=4096)
+            if r and r[0] == 200 and ("root:" in r[2] or "bin:" in r[2] or "nobody:" in r[2]):
+                return [_mk(ip, port, "web-null-byte", "high",
+                    "Null byte injection (file disclosure)", ["CWE-22"],
+                    f"Null byte terminator {probe.split('=')[1][:30]}... bypassed extension check",
+                    "Validate and canonicalize paths; reject %00; use allow-lists",
+                    confidence="confirmed")]
+        except:
+            pass
+    return []
+
+
+def _check_bot_detection_bypass(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
+    """Bot detection bypass fingerprints: missing User-Agent, headless detection."""
+    findings = []
+    test_headers = [
+        ({}, "no User-Agent"),
+        ({"User-Agent": ""}, "empty User-Agent"),
+        ({"User-Agent": "curl/7.0"}, "curl User-Agent"),
+        ({"User-Agent": "python-requests"}, "python User-Agent"),
+    ]
+
+    for hdrs, desc in test_headers:
+        try:
+            if auth:
+                hdrs.update(auth)
+            r = _fetch(ip, port, "/", auth=hdrs, read=2048)
+            if r and r[0] == 200:
+                # Check for bot-detection bypass: missing headers bypassed detection
+                if "please enable javascript" not in r[2].lower() and "bot" not in r[2].lower():
+                    findings.append(_mk(ip, port, "web-bot-bypass", "low",
+                        f"Bot detection possible bypass: {desc}", ["CWE-200"],
+                        f"Request with {desc} was not challenged by bot detection (if present).",
+                        "Require JavaScript execution; validate headless detection; use CAPTCHA",
+                        confidence="potential"))
+        except:
+            pass
+    return findings[:1]  # Return first hit
+
+
 def _extract_api_keys(ip: str, port: Port, body: str) -> list[Vuln]:
     """Scan JavaScript for hardcoded API keys, tokens, secrets."""
     findings = []
@@ -3062,6 +3497,17 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     findings.extend(_check_prototype_pollution(ip, port, auth))
     findings.extend(_check_ldap_injection(ip, port, auth))
     findings.extend(_check_header_injection(ip, port, auth))
+    findings.extend(_check_method_override(ip, port, auth))
+    findings.extend(_check_error_stack_trace(ip, port, base, auth))
+    findings.extend(_check_null_byte_injection(ip, port, base, auth))
+    findings.extend(_check_dom_xss(ip, port, body or "", auth))
+    findings.extend(_check_type_confusion(ip, port, base, auth))
+    findings.extend(_check_rate_limits(ip, port, base, auth))
+    findings.extend(_check_bot_detection_bypass(ip, port, base, auth))
+    findings.extend(_check_admin_panels(ip, port, base, auth))
+    # Concurrency: race condition detection (expensive, optional)
+    if active:
+        findings.extend(_check_race_condition(ip, port, base, auth))
     # Form auth brute: try weak creds against login forms (if creds enabled)
     if creds and body:
         for form_str in _FORM_RE.findall(body):

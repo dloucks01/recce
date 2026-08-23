@@ -67,16 +67,16 @@ _CWE_TYPE = [
      "Cryptographic / TLS Weakness", "Confidentiality, Integrity"),
     (("CWE-522", "CWE-312", "CWE-256", "CWE-257", "CWE-260", "CWE-200", "CWE-538",
       "CWE-527", "CWE-540", "CWE-532", "CWE-203", "CWE-204", "CWE-215", "CWE-548",
-      "CWE-615", "CWE-489"),
+      "CWE-615", "CWE-489", "CWE-209"),
      "Information / Credential Disclosure", "Confidentiality"),
     (("CWE-693", "CWE-1021", "CWE-16", "CWE-650", "CWE-441", "CWE-284", "CWE-1004",
       "CWE-614", "CWE-942", "CWE-799", "CWE-1275", "CWE-349", "CWE-1321"),
      "Security Misconfiguration", "Integrity"),
-    (("CWE-364",), "Race Condition", "Integrity, Availability"),
-    (("CWE-406", "CWE-400"), "Resource Exhaustion / Denial of Service", "Availability"),
+    (("CWE-364", "CWE-362"), "Race Condition", "Integrity, Availability"),
+    (("CWE-406", "CWE-400", "CWE-770"), "Resource Exhaustion / Denial of Service", "Availability"),
     (("CWE-1104", "CWE-1392", "CWE-477"), "Unmaintained / Default Components", _CIA),
     (("CWE-506",), "Embedded Malicious Code / Backdoor", _CIA),
-    (("CWE-20",), "Improper Input Validation", "Integrity"),  # generic - keep last
+    (("CWE-20", "CWE-1025"), "Improper Input Validation", "Integrity"),  # generic - keep last
 ]
 
 # CWE id -> short official name, so a finding references each CWE by name.
@@ -92,7 +92,7 @@ _CWE_NAME = {
     "CWE-125": "Out-of-bounds Read", "CWE-134": "Uncontrolled Format String",
     "CWE-190": "Integer Overflow", "CWE-193": "Off-by-one Error",
     "CWE-200": "Exposure of Sensitive Information", "CWE-203": "Observable Discrepancy",
-    "CWE-204": "Observable Response Discrepancy",
+    "CWE-204": "Observable Response Discrepancy", "CWE-209": "Information in Error Message",
     "CWE-250": "Execution with Unnecessary Privileges",
     "CWE-256": "Plaintext Storage of a Password",
     "CWE-257": "Storing Passwords in a Recoverable Format",
@@ -164,6 +164,9 @@ _CWE_NAME = {
     "CWE-1188": "Insecure Default Initialization of Resource",
     "CWE-1321": "Prototype Pollution",
     "CWE-1392": "Use of Default Credentials",
+    "CWE-362": "Race Condition",
+    "CWE-770": "Uncontrolled Resource Consumption",
+    "CWE-1025": "Type Confusion",
 }
 
 
