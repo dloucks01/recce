@@ -147,12 +147,18 @@ function SessionTools({ session }: { session: SessionInfo }) {
     a.href = url; a.download = `session-${session.host_ip}-${session.id}.log`;
     a.click(); URL.revokeObjectURL(url);
   }
+  const [upgrading, setUpgrading] = useState(false);
   async function upgrade() {
+    setUpgrading(true);
+    setMsg(`⤴ injecting stager, waiting for the shell to call back…`);
     try {
       const r = await upgradeSession(session.id);
-      setMsg(`⤴ upgrading to a robust PTY shell — reconnecting via ${r.callback}…`);
+      if (r.upgraded) setMsg("✓ upgraded — a robust, self-healing PTY session is now live for this host");
+      else setMsg("⚠ upgrade didn't complete — " + (r.reason || "no callback") + ". The raw shell still works.");
     } catch (e) {
       setMsg(String(e instanceof Error ? e.message : e));
+    } finally {
+      setUpgrading(false);
     }
   }
   const [dlPath, setDlPath] = useState("");
@@ -187,7 +193,9 @@ function SessionTools({ session }: { session: SessionInfo }) {
     <div className="session-tools">
       {!session.pty && session.status === "live" && (
         <div className="upgrade-row">
-          <button className="run upgrade-btn" onClick={upgrade}>⤴ Upgrade to robust PTY</button>
+          <button className="run upgrade-btn" onClick={upgrade} disabled={upgrading}>
+            {upgrading ? "Upgrading…" : "⤴ Upgrade to robust PTY"}
+          </button>
           <span className="muted small">auto-pivots this raw shell into a self-healing, full-PTY session</span>
         </div>
       )}

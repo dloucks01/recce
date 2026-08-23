@@ -259,7 +259,8 @@ export async function getTranscript(sessionId: string): Promise<string> {
   return atob(r.data);
 }
 
-export async function upgradeSession(sessionId: string): Promise<{ callback: string }> {
+export async function upgradeSession(sessionId: string):
+  Promise<{ upgraded?: boolean; reason?: string; session_id?: string; callback: string }> {
   const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/upgrade`, {
     method: "POST", headers: jsonHeaders(),
   });
