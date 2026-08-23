@@ -1,179 +1,103 @@
-"""FastAPI application - REFACTORED for modularity.
+"""The FastAPI application: a JSON API over a recce engagement, background scan jobs
+with live SSE progress, and (when built) the React frontend served as static files.
 
-Modular structure:
-  - Schemas: type definitions (schemas.py)
-  - Helpers: utility functions (helpers.py)
-  - Routes: feature modules (routes/)
-  - Middleware: error handling, CORS (this file)
+    from recce.webui.app import create_app
+    app = create_app("eng")          # engagement dir; `recce serve -o eng` launches it
+
+This is the modular layout: the proven, model-correct helpers live in `_common.py`
+and each handler group lives in a `routes/*.py` module. Behaviour mirrors the
+known-good reference `app_legacy.py` exactly.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .jobs import JobManager, recce_argv
+from .jobs import JobManager
+from ._common import _Broker
+# Re-exported so `from recce.webui.app import _detect_import_kind` keeps working.
+from ._common import _detect_import_kind, _import_preview, _import_signatures  # noqa: F401
 from .routes import (
-    register_engagement_routes,
-    register_scan_routes,
+    register_act_spray_routes,
     register_collab_routes,
+    register_data_exchange_routes,
+    register_engagement_routes,
     register_findings_routes,
     register_report_routes,
-    register_act_spray_routes,
-    register_data_exchange_routes,
+    register_scan_routes,
 )
-from .helpers import cmd, flag
-
-
-# ============================================================================
-# COMMAND DEFINITIONS (Moved to helpers module as cmd() factory)
-# ============================================================================
-_COMMANDS = {
-    # --- scan phases ---
-    "run": cmd("Run — guided full flow", "Scan", "required", profile=True,
-               flags=[flag("deep", "--deep", "deep")]),
-    "scan": cmd("Scan — enum + vulns", "Scan", "required", profile=True,
-                flags=[flag("deep", "--deep", "deep"), flag("fast", "--fast", "fast")]),
-    "enum": cmd("Enumerate", "Scan", "required", profile=True,
-                flags=[flag("fast", "--fast", "masscan"), flag("all-ports", "--all-ports", "all ports")]),
-    "vulns": cmd("Vuln scan", "Scan", "optional",
-                 flags=[flag("fast", "--fast", "fast"), flag("aggressive", "--aggressive", "aggressive NSE", True),
-                        flag("offline", "--offline", "offline")]),
-    "sweep": cmd("Deep sweep — every credential-free module", "Scan", "optional"),
-    "credsweep": cmd("Credentialed sweep", "Scan", "optional", creds=True),
-    "db": cmd("Database scan (NSE inventory)", "Databases", "optional", creds=True,
-              flags=[flag("aggressive", "--aggressive", "aggressive (brute/xp_cmdshell)", True)]),
-    # --- databases (native deep modules) ---
-    "postgres": cmd("PostgreSQL", "Databases", "optional", creds=True,
-                    flags=[flag("prove", "--prove", "prove RCE (benign id, active)", True)]),
-    "mysql": cmd("MySQL / MariaDB", "Databases", "optional", creds=True),
-    "mongodb": cmd("MongoDB", "Databases", "optional", creds=True),
-    "mssql": cmd("MSSQL", "Databases", "optional", creds=True),
-    "redis": cmd("Redis", "Databases", "optional"),
-    "elasticsearch": cmd("Elasticsearch", "Databases", "optional"),
-    "memcached": cmd("memcached", "Databases", "optional"),
-    "couchdb": cmd("CouchDB", "Databases", "optional"),
-    "influxdb": cmd("InfluxDB", "Databases", "optional"),
-    "cassandra": cmd("Cassandra", "Databases", "optional"),
-    "oracle": cmd("Oracle TNS", "Databases", "optional"),
-    "db2": cmd("IBM Db2", "Databases", "optional"),
-    # --- web / web-app ---
-    "web": cmd("Web deep-enum", "Web", "optional",
-               flags=[flag("crawl", "--crawl", "crawl + inject"),
-                      flag("autologin", "--autologin", "auto-login w/ looted creds (active)", True),
-                      flag("sqli-time", "--sqli-time", "time-based SQLi", True),
-                      flag("upload-shell", "--upload-shell", "upload benign webshell to prove RCE (active, writes a file)", True),
-                      flag("smuggle", "--smuggle", "CL.TE/TE.CL smuggling probe (active, may disturb proxies)", True)]),
-    "api": cmd("API — OpenAPI enum / IDOR / BOLA", "Web", "optional"),
-    # --- other services ---
-    "smb": cmd("SMB", "Services", "optional", creds=True),
-    "ftp": cmd("FTP", "Services", "optional", creds=True),
-    "snmp": cmd("SNMP", "Services", "optional"),
-    "ldap": cmd("LDAP", "Services", "optional", creds=True),
-    "nfs": cmd("NFS", "Services", "optional"),
-    "rsync": cmd("rsync", "Services", "optional"),
-    "kerberos": cmd("Kerberos (AS-REP roast)", "Services", "optional"),
-    "docker": cmd("Docker API", "Services", "optional"),
-    "kubernetes": cmd("Kubernetes", "Services", "optional"),
-    "dns": cmd("DNS", "Services", "optional"),
-    "smtp": cmd("SMTP", "Services", "optional"),
-    # --- AD / credentialed ---
-    "credenum": cmd("Credentialed enum (SMB/AD/SSH)", "Credentialed", "optional", creds=True),
-    "deploy": cmd("Deploy on-target enum", "Credentialed", "optional", creds=True),
-    "privesc": cmd("Priv-esc playbook", "Exploitation", "optional",
-                   flags=[flag("scan", "--scan", "remote NSE checks")]),
-    # --- exploitation / reporting ---
-    "exploitplan": cmd("Exploit plan (msf .rc + commands)", "Exploitation", "optional", lhost=True),
-    "poc": cmd("PoC dossiers (per-CVE)", "Exploitation", "optional"),
-    "prove": cmd("Prove findings (verdicts)", "Exploitation", "none"),
-    "attackpath": cmd("Attack path", "Exploitation", "none"),
-    "report": cmd("Rebuild report", "Reporting", "none"),
-    "status": cmd("Status / coverage", "Reporting", "none"),
-    "services": cmd("Per-service commands", "Reporting", "none"),
-    "writeups": cmd("CVE writeups", "Reporting", "optional"),
-}
-
-
-# ============================================================================
-# APPLICATION SETUP & MIDDLEWARE
-# ============================================================================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan hook for startup/shutdown (FastAPI 0.93+)."""
-    yield  # Application is running
-    # Cleanup on shutdown (if needed)
 
 
 def create_app(eng_dir: str) -> FastAPI:
-    """Create and configure the FastAPI application."""
-    from .collab import Collab
-    from .jobs import JobManager
-
-    # Setup paths
+    from .. import __version__
     from ..cli import _open_paths
-    try:
-        db_path = _open_paths(eng_dir)["db"]
-    except (FileNotFoundError, KeyError):
-        raise RuntimeError(f"Engagement not found: {eng_dir}")
+    db_path = _open_paths(eng_dir)["db"]
 
-    # Minimal engagement proxy (routes expect .db_path and .dir)
-    class EngagementProxy:
-        def __init__(self, dir_path: str, db: str):
-            self.dir = dir_path
-            self.db_path = db
+    broker = _Broker()
 
-    eng = EngagementProxy(eng_dir, db_path)
+    @asynccontextmanager
+    async def _lifespan(_app):
+        # Bind the SSE broker to the serving event loop on startup (replaces the
+        # deprecated @app.on_event("startup") hook).
+        broker.bind(asyncio.get_running_loop())
+        yield
 
-    # Initialize collaboration & job manager
-    collab = Collab()
-    job_manager = JobManager()
-
-    # Create FastAPI app
-    app = FastAPI(title="recce webui", lifespan=lifespan)
-
-    # ======== MIDDLEWARE ========
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    app = FastAPI(title="recce workbench", version=__version__, lifespan=_lifespan)
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
+                       allow_headers=["*"])
 
     @app.middleware("http")
-    async def log_middleware(request, call_next):
-        """Log HTTP requests."""
-        response = await call_next(request)
-        return response
+    async def _limit_body(request, call_next):
+        # Reject an oversized upload from its Content-Length before the whole body is
+        # buffered into memory (a ~25 MB decoded import is ~34 MB of base64).
+        cl = request.headers.get("content-length", "")
+        if cl.isdigit() and int(cl) > 45_000_000:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "request too large (max ~45 MB)"}, status_code=413)
+        return await call_next(request)
 
-    # ======== REGISTER ROUTE MODULES ========
-    register_engagement_routes(app, eng)
-    register_scan_routes(app, eng, job_manager, _COMMANDS)
-    register_collab_routes(app, collab)
-    register_findings_routes(app, eng)
-    register_report_routes(app, eng)
-    register_act_spray_routes(app, eng)
-    register_data_exchange_routes(app, eng, job_manager)
+    jobs = JobManager()
+    from . import collab
+    presence = collab.Presence()
 
-    # ======== STATIC FILES & FRONTEND ========
-    static_dir = os.path.join(os.path.dirname(__file__), "frontend", "dist")
-    if os.path.exists(static_dir):
-        app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
-    else:
-        # Fallback: simple health check
+    # Shared context passed to each route group. Route modules build their own tiny
+    # _hosts/_tracking/_mutate closures from ctx.db_path (same bodies as app_legacy).
+    ctx = SimpleNamespace(eng_dir=eng_dir, db_path=db_path, jobs=jobs,
+                          broker=broker, presence=presence)
+
+    register_engagement_routes(app, ctx)
+    register_scan_routes(app, ctx)
+    register_collab_routes(app, ctx)
+    register_findings_routes(app, ctx)
+    register_report_routes(app, ctx)
+    register_act_spray_routes(app, ctx)
+    register_data_exchange_routes(app, ctx)
+
+    @app.get("/api/events")
+    async def events():
+        async def gen():
+            yield "retry: 3000\n\n"                    # SSE reconnect hint
+            async for ev in broker.subscribe():
+                yield f"data: {json.dumps(ev)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    # --- the built React frontend (production / airgap bundle) ---------------------
+    dist = os.path.join(os.path.dirname(__file__), "static")
+    if os.path.isdir(dist):
+        app.mount("/assets", StaticFiles(directory=os.path.join(dist, "assets")),
+                  name="assets")
+
         @app.get("/")
-        def health():
-            return {"status": "ok", "engine": "recce-webui"}
+        def index():
+            return FileResponse(os.path.join(dist, "index.html"))
 
     return app
-
-
-if __name__ == "__main__":
-    import uvicorn
-    app = create_app(".")
-    uvicorn.run(app, host="0.0.0.0", port=8080)

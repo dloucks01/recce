@@ -1,70 +1,95 @@
-"""Routes: findings management (add, tick, note)."""
+"""Finding tracking (note/tick), manual finding add, and the credential store.
+Ported verbatim from app_legacy."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
-from ..schemas import NotePayload, TickPayload
-from ..helpers import finding_dict
+import re
+import time
 
-router = APIRouter(prefix="/api", tags=["findings"])
+from fastapi import Body, FastAPI, Header, HTTPException
+
+from .. import collab
 
 
-def register_findings_routes(app, eng):
-    """Register findings routes on the app."""
+def register_findings_routes(app: FastAPI, ctx) -> None:
+    db_path = ctx.db_path
+    broker = ctx.broker
 
-    @router.post("/note")
-    def add_note(payload: NotePayload):
-        """Add a note to a finding."""
-        notes = eng.load_notes()
-        notes.setdefault(payload.finding_id, {})["text"] = payload.text
-        eng.save_notes(notes)
-        return {"status": "ok"}
+    @app.get("/api/credentials")
+    def credentials():
+        """The credential store — looted (web/db/share) + captured (kerberoast/gpp/…).
+        This is 'what was extracted', which the UI never surfaced before."""
+        from ...store import Store
+        st = Store(db_path)
+        try:
+            creds = st.all_credentials()
+        finally:
+            st.close()
+        return [{"username": c.username, "secret": c.secret, "kind": c.kind,
+                 "domain": c.domain, "source": c.source, "origin_ip": c.origin_ip,
+                 "notes": c.notes, "label": c.label} for c in creds]
 
-    @router.post("/tick")
-    def tick_finding(payload: TickPayload):
-        """Mark a finding as reviewed."""
-        notes = eng.load_notes()
-        notes.setdefault(payload.finding_id, {})["reviewed"] = True
-        eng.save_notes(notes)
+    @app.post("/api/note")
+    def note(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        from ...store import Store
+        key = str(body.get("key", ""))
+        if not key:
+            raise HTTPException(400, "no key")
+        text = str(body.get("note", ""))
+        st = Store(db_path)
+        try:
+            # preserve the reviewed flag; only the note text changes here
+            rev = st.get_tracking().get(key, (False, ""))[0]
+            st.set_reviewed(key, bool(rev), notes=text)
+        finally:
+            st.close()
+        broker.publish({"type": "note", "key": key, "note": text, "tester": x_tester})
+        return {"ok": True}
 
-        # Add activity log
-        eng.log_activity(f"Reviewed finding {payload.finding_id[:40]}")
-        return {"status": "ok"}
+    @app.post("/api/tick")
+    def tick(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        from ...store import Store
+        key = str(body.get("key", ""))
+        if not key:
+            raise HTTPException(400, "no key")
+        reviewed = bool(body.get("reviewed", True))
+        st = Store(db_path)
+        try:
+            st.set_reviewed(key, reviewed)    # notes=None preserves any existing note
+        finally:
+            st.close()
+        broker.publish({"type": "tick", "key": key, "reviewed": reviewed,
+                        "tester": x_tester})
+        return {"ok": True}
 
-    @router.post("/add/finding")
-    def add_finding(ip: str, port: int, title: str, severity: str, output: str, cwes: list[str] = None):
-        """Manually add a finding."""
-        from ..models import Vuln, Port
-
-        port_obj = Port(portid=port, protocol="tcp", state="open")
-        vuln = Vuln(
-            ip=ip,
-            port=port_obj,
-            protocol="tcp",
-            script_id="manual",
-            state="finding",
-            title=title,
-            output=output,
-            severity=severity,
-            cwes=cwes or [],
-            source="manual",
-            remediation="",
-        )
-        eng.findings.append(vuln)
-        eng.save()
-        return {"status": "ok", "finding_id": f"{ip}:{port}:manual"}
-
-    @router.get("/credentials")
-    def get_credentials():
-        """Get all looted credentials."""
-        return [
-            {
-                "username": c.username,
-                "password": c.password or "",
-                "hash": c.hash[:40] if c.hash else "",
-                "domain": c.domain or "",
-                "source": c.source or "",
-            }
-            for c in eng.credentials
-        ]
-
-    app.include_router(router)
+    @app.post("/api/add/finding")
+    def add_finding(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        from ... import epss, kev
+        from ...models import Host, Vuln
+        from ...store import Store
+        ip = str(body.get("ip", "")).strip()
+        if not ip:
+            raise HTTPException(400, "a host IP is required")
+        title = str(body.get("title", "")).strip() or "Manual finding"
+        sev = str(body.get("severity", "medium")).lower()
+        if sev not in ("critical", "high", "medium", "low", "info"):
+            sev = "medium"
+        port = body.get("port")
+        cves = [c.strip().upper() for c in re.findall(r"CVE-\d{4}-\d+",
+                str(body.get("cve", "")), re.I)]
+        v = Vuln(ip=ip, port=int(port) if str(port).isdigit() else None, protocol="tcp",
+                 script_id=f"manual-{int(time.time())}", state="finding", title=title,
+                 severity=sev, ids=cves, output=str(body.get("output", ""))[:4000],
+                 source="manual", confidence="confirmed")
+        st = Store(db_path)
+        try:
+            host = st.get_host(ip) or Host(ip=ip)
+            host.state = "up"
+            host.vulns.append(v)
+            kev.annotate(host)
+            epss.annotate(host)
+            st.upsert_host(host, merge=True)
+            collab.add_activity(st, x_tester, "add", f"{x_tester} added finding “{title}” on {ip}")
+        finally:
+            st.close()
+        broker.publish({"type": "add", "what": "finding", "ip": ip, "by": x_tester})
+        return {"ok": True}

@@ -1,70 +1,69 @@
-"""ACT phase + credential spray routes."""
+"""The Act phase (ranked action plan), auto-run, and credential spray. Ported
+verbatim from app_legacy."""
+from __future__ import annotations
 
-from fastapi import APIRouter, Body, HTTPException
-
-router = APIRouter(prefix="/api", tags=["act-spray"])
+from fastapi import Body, FastAPI
 
 
-def register_act_spray_routes(app, eng, broker=None):
-    """Register act and spray routes on the app."""
+def register_act_spray_routes(app: FastAPI, ctx) -> None:
+    eng_dir = ctx.eng_dir
+    db_path = ctx.db_path
+    broker = ctx.broker
 
-    @router.get("/act")
+    def _card_dict(c):
+        return {"archetype": c.archetype, "title": c.title, "target": c.target,
+                "command": c.command, "yields": c.yields, "safety": c.safety,
+                "tier": c.tier, "score": c.score, "count": c.count,
+                "attack_id": c.attack_id, "attack_name": c.attack_name, "cwe": c.cwe,
+                "verify_first": c.verify_first, "why": c.why,
+                "needs": [d for d, met in c.preconditions if not met]}
+
+    @app.get("/api/act")
     def act_plan():
-        """The Act phase: findings → ranked, guided action plan."""
-        from .. import act
-        from ..store import Store
-        db_path = eng.db_path
-        eng_dir = eng.dir
+        """The Act phase: findings -> ranked, guided action plan. 'What do I do now?'."""
+        from ... import act
+        from ...store import Store
         st = Store(db_path)
         try:
             hosts, creds = st.all_hosts(), st.all_credentials()
         finally:
             st.close()
         cards = act.action_plan(hosts, creds, eng_dir)
-        tiers = {}
+        tiers: dict = {}
         for c in cards:
             tiers.setdefault(c.tier, []).append(_card_dict(c))
-        return {
-            "top": [_card_dict(c) for c in act.top_moves(cards, 5)],
-            "tiers": [
-                {"tier": t, "label": act._TIER_LABEL[t], "cards": tiers[t]}
-                for t in sorted(tiers)
-            ]
-        }
+        return {"top": [_card_dict(c) for c in act.top_moves(cards, 5)],
+                "tiers": [{"tier": t, "label": act._TIER_LABEL[t], "cards": tiers[t]}
+                          for t in sorted(tiers)]}
 
-    @router.post("/act/run")
+    @app.post("/api/act/run")
     def act_run():
-        """Execute AUTO (read-only/reversible) actions: loot unauth services."""
-        from .. import act
-        from ..store import Store
-        db_path = eng.db_path
-        eng_dir = eng.dir
+        """Execute the AUTO (read-only / reversible) links: loot the flagged unauth
+        services, refresh the spray plan, feed yields back. Intrusive actions are never
+        run. Returns what was looted so the UI can point the operator at the Loot tab."""
+        from ... import act
+        from ...store import Store
         st = Store(db_path)
         try:
             summary = act.execute_auto(st, eng_dir)
         finally:
             st.close()
         spray = summary.get("spray") or {}
-        if broker:
-            broker.publish({"type": "act_run", "looted": len(summary["looted"])})
-        return {
-            "looted": len(summary["looted"]),
-            "creds": [{"label": c.label, "source": c.source} for c in summary["looted"]],
-            "spray_files": sorted((spray.get("files") or {}).keys())
-        }
+        broker.publish({"type": "act_run", "looted": len(summary["looted"])})
+        return {"looted": len(summary["looted"]),
+                "creds": [{"label": c.label, "source": c.source} for c in summary["looted"]],
+                "spray_files": sorted((spray.get("files") or {}).keys())}
 
-    @router.post("/spray")
+    @app.post("/api/spray")
     def spray(body: dict = Body(default=None)):
-        """Run lockout-safe spray of looted creds across target scope."""
-        from .. import credentials as cr
-        from ..cli import ip_matcher
-        from ..models import Credential
-        from ..store import Store
-        db_path = eng.db_path
-        eng_dir = eng.dir
+        """Run a lockout-safe spray of the looted/stacked creds across a target scope
+        (one IP / range / all), fold the validated logins. safe=false = full user x pass."""
+        from ... import credentials as cr
+        from ...cli import ip_matcher
+        from ...models import Credential
+        from ...store import Store
         body = body or {}
         st = Store(db_path)
-        res = {"ok": False, "error": "spray not initialized", "hits": [], "new": 0}
         try:
             hosts = st.all_hosts()
             sel = (body.get("targets") or "").strip()
@@ -82,23 +81,8 @@ def register_act_spray_routes(app, eng, broker=None):
                             notes=f"validated over {h['proto']}"
                                   + (" (local admin)" if h["admin"] else ""))):
                         new += 1
-                res["new"] = new
         finally:
             st.close()
-        if broker:
-            broker.publish({"type": "spray", "hits": len(res.get("hits", []))})
-        return res
-
-    app.include_router(router)
-
-
-def _card_dict(c):
-    """Convert action card to dict."""
-    return {
-        "tier": c.tier,
-        "title": c.title,
-        "detail": c.detail,
-        "guidance": c.guidance,
-        "count": c.count,
-        "risky": c.risky,
-    }
+        broker.publish({"type": "spray", "hits": len(res.get("hits", []))})
+        return {"ok": res.get("ok", False), "error": res.get("error", ""),
+                "hits": res.get("hits", []), "new": new}

@@ -1,65 +1,36 @@
-"""Routes: reporting and export."""
+"""Report download endpoint. Ported verbatim from app_legacy."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
-import io
+import os
 
-router = APIRouter(prefix="/api", tags=["reporting"])
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+
+from .._common import _REPORTS
 
 
-def register_report_routes(app, eng):
-    """Register report routes on the app."""
+def register_report_routes(app: FastAPI, ctx) -> None:
+    eng_dir = ctx.eng_dir
+    db_path = ctx.db_path
 
-    @router.get("/report/{kind}")
-    def get_report(kind: str):
-        """Get report in specified format."""
-        from fastapi.responses import FileResponse, StreamingResponse
-
-        if kind == "html":
-            html = eng.to_html()
-            return StreamingResponse(io.BytesIO(html.encode()), media_type="text/html")
-
-        elif kind == "json":
-            import json
-            data = {
-                "hosts": [{"ip": h.ip, "ports": len(h.ports)} for h in eng.hosts],
-                "findings": [{"ip": v.ip, "title": v.title, "severity": v.severity} for v in eng.findings],
-            }
-            return StreamingResponse(
-                io.BytesIO(json.dumps(data, indent=2).encode()),
-                media_type="application/json",
-            )
-
-        elif kind == "csv":
-            csv = eng.to_csv()
-            return StreamingResponse(
-                io.BytesIO(csv.encode()),
-                media_type="text/csv",
-                headers={"Content-Disposition": "attachment; filename=findings.csv"},
-            )
-
-        elif kind == "markdown":
-            md = eng.to_markdown()
-            return StreamingResponse(
-                io.BytesIO(md.encode()),
-                media_type="text/markdown",
-                headers={"Content-Disposition": "attachment; filename=findings.md"},
-            )
-
-        elif kind == "xlsx":
-            # Word/Excel report generation
-            from recce.report_docx import docx_findings
-            doc = docx_findings(eng)
-            buf = io.BytesIO()
-            doc.save(buf)
-            buf.seek(0)
-            return StreamingResponse(
-                buf,
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                headers={"Content-Disposition": "attachment; filename=findings.docx"},
-            )
-
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown report format: {kind}")
-
-    app.include_router(router)
+    @app.get("/api/report/{kind}")
+    def report(kind: str):
+        """Regenerate the deliverables from the live datastore and hand back the
+        requested file as a download - byte-for-byte what `recce report` produces
+        (same builder), so the UI export and the CLI export never diverge."""
+        if kind not in _REPORTS:
+            raise HTTPException(404, f"unknown report kind {kind!r}")
+        from ...store import Store
+        from ...cli import _generate_reports, _open_paths
+        paths = _open_paths(eng_dir)
+        st = Store(db_path)
+        try:
+            title = st.get_meta("engagement") or "recce engagement"
+            _generate_reports(st, paths, title, quiet=True)
+        finally:
+            st.close()
+        pkey, fname, media = _REPORTS[kind]
+        path = paths[pkey]
+        if not os.path.exists(path):
+            raise HTTPException(500, "report generation produced no file")
+        return FileResponse(path, media_type=media, filename=fname)

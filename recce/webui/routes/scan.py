@@ -1,100 +1,96 @@
-"""Routes: scan jobs, commands, job streaming."""
+"""Scan jobs + live progress + the command catalog. Ported verbatim from app_legacy."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
-from ..schemas import ScanPayload, ScanJob
-
-router = APIRouter(prefix="/api", tags=["scanning"])
-
-
-def register_scan_routes(app, eng, job_manager, COMMANDS):
-    """Register scan routes on the app."""
-
-    @router.get("/commands")
-    def list_commands():
-        """Get all available commands."""
-        return {
-            cmd_name: {
-                "label": cmd.label,
-                "group": cmd.group,
-                "targets": cmd.targets,
-                "profile": cmd.profile,
-                "creds": cmd.creds,
-                "lhost": cmd.lhost,
-                "flags": [f.model_dump() for f in cmd.flags],
-            }
-            for cmd_name, cmd in COMMANDS.items()
-        }
-
-    @router.post("/scan")
-    def start_scan(payload: ScanPayload):
-        """Start a new scan job."""
-        if payload.cmd not in COMMANDS:
-            raise HTTPException(status_code=400, detail=f"Unknown command: {payload.cmd}")
-
-        # Build argv from command definition and payload
-        argv = ["recce", payload.cmd]
-
-        if payload.targets and payload.targets != "none":
-            argv.append(payload.targets)
-
-        if payload.flags:
-            argv.extend(payload.flags)
-
-        if payload.creds:
-            # Creds passed separately, will be handled by job manager
-            pass
-
-        if payload.lhost:
-            argv.extend(["-lhost", payload.lhost])
-
-        # Start the job
-        job_id = job_manager.add_job(argv, {"creds": payload.creds or {}})
-        return {"job_id": job_id, "status": "queued"}
-
-    @router.get("/jobs")
-    def list_jobs():
-        """Get all jobs (running and completed)."""
-        jobs = []
-        for jid, job in job_manager.jobs.items():
-            jobs.append({
-                "id": jid,
-                "cmd": " ".join(job["cmd"][:3]),  # First 3 tokens
-                "status": job["status"],
-                "started": job["started"],
-                "ended": job.get("ended"),
-                "tester": job.get("tester", ""),
-            })
-        return jobs
-
-    @router.get("/jobs/{jid}/events")
-    def stream_job_events(jid: str):
-        """Stream job events via SSE."""
-        if jid not in job_manager.jobs:
-            raise HTTPException(status_code=404, detail=f"Job not found: {jid}")
-
-        job = job_manager.jobs[jid]
-
-        async def event_generator():
-            last_line = 0
-            while True:
-                current_lines = len(job.get("log", []))
-                if current_lines > last_line:
-                    for i in range(last_line, current_lines):
-                        line = job["log"][i]
-                        yield f"data: {line}\n\n"
-                    last_line = current_lines
-
-                if job["status"] in ("done", "failed"):
-                    yield f"event: done\ndata: {job['status']}\n\n"
-                    break
-
-                await asyncio.sleep(0.5)
-
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-    app.include_router(router)
-
-
 import asyncio
+import json
+
+from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
+
+from ..jobs import recce_argv
+from .._common import _COMMANDS
+
+
+def register_scan_routes(app: FastAPI, ctx) -> None:
+    eng_dir = ctx.eng_dir
+    jobs = ctx.jobs
+    broker = ctx.broker
+
+    @app.get("/api/commands")
+    def list_commands():
+        """The command surface the UI renders its runner from (grouped, with the fields/
+        flags each command accepts)."""
+        return {k: {kk: v[kk] for kk in
+                    ("label", "group", "targets", "profile", "creds", "lhost", "flags")}
+                for k, v in _COMMANDS.items()}
+
+    @app.post("/api/scan")
+    def start_scan(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        # `command` (any catalog entry); `phase` kept for older clients.
+        command = str(body.get("command") or body.get("phase") or "run")
+        spec = _COMMANDS.get(command)
+        if spec is None:
+            raise HTTPException(400, f"unknown command {command!r}")
+        # Targets: whitespace-split, drop any token starting with '-' (no flag injection).
+        targets = [t for t in str(body.get("targets", "")).split() if not t.startswith("-")]
+        if spec["targets"] == "required" and not targets:
+            raise HTTPException(400, "this command needs targets")
+        argv = [command, "-o", eng_dir]
+        if spec["profile"]:
+            profile = str(body.get("profile", "")).lower()
+            if profile in ("quick", "standard", "thorough"):
+                argv += ["--profile", profile]
+        if spec["creds"]:
+            user = str(body.get("username", "")).strip()
+            if user:
+                argv += ["-u", user]
+                pw = body.get("password")
+                if pw not in (None, ""):
+                    argv += ["-p", str(pw)]
+                dom = str(body.get("domain", "")).strip()
+                if dom:
+                    argv += ["-d", dom]
+        if spec["lhost"]:
+            lh = str(body.get("lhost", "")).strip()
+            if lh:
+                argv += ["--lhost", lh]
+        # Only pass flags this command declares (silently drop anything else).
+        allowed = {f["name"]: f["flag"] for f in spec["flags"]}
+        for name in (body.get("flags") or []):
+            if name in allowed and allowed[name] not in argv:
+                argv.append(allowed[name])
+        if spec["targets"] != "none":
+            argv += targets
+        label = f"{command} {' '.join(targets)}".strip()
+
+        def _done(job):
+            broker.publish({"type": "scan", "status": job.status, "tester": x_tester,
+                            "targets": label})
+
+        job = jobs.start(recce_argv(*argv), on_done=_done)
+        broker.publish({"type": "scan_started", "tester": x_tester, "targets": label})
+        return {"id": job.id, "status": job.status, "cmd": job.cmd}
+
+    @app.get("/api/jobs")
+    def list_jobs():
+        return [{"id": j.id, "cmd": j.cmd, "status": j.status, "lines": len(j.lines),
+                 "started": j.started} for j in jobs.list()]
+
+    @app.get("/api/jobs/{jid}/events")
+    async def job_events(jid: str):
+        job = jobs.get(jid)
+        if job is None:
+            raise HTTPException(404, "no such job")
+
+        async def gen():
+            i = 0
+            while True:
+                while i < len(job.lines):
+                    yield f"data: {json.dumps({'line': job.lines[i]})}\n\n"
+                    i += 1
+                if job.status != "running":
+                    yield f"data: {json.dumps({'done': True, 'status': job.status})}\n\n"
+                    return
+                await asyncio.sleep(0.3)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
