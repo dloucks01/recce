@@ -3512,6 +3512,115 @@ def _check_null_byte_injection(ip: str, port: Port, base: str, auth: dict | None
     return []
 
 
+def _brute_wordlist_dirs(ip: str, port: Port, base: str, auth: dict | None, limit: int = 20) -> list[Vuln]:
+    """Brute-force common directories using wordlist. Returns high-value findings only."""
+    findings = []
+    tested = set()
+    # Prioritize by attack surface: admin > config > api > auth
+    priority_lists = [
+        ("admin", _WORDLIST_ADMIN),
+        ("config", _WORDLIST_CONFIG),
+        ("api", _WORDLIST_API),
+        ("auth", _WORDLIST_AUTH_ENDPOINTS),
+    ]
+
+    for category, wordlist in priority_lists:
+        for word in wordlist[:limit]:  # Limit per category
+            if word in tested:
+                continue
+            tested.add(word)
+            try:
+                path = f"/{word}" if not word.startswith("/") else word
+                r = _fetch(ip, port, path, auth=auth, read=2048)
+                if r and r[0] in (200, 301, 302, 401, 403):
+                    # High-value: admin panels, config files, APIs
+                    if category in ("admin", "config"):
+                        findings.append(_mk(ip, port, f"web-enum-{category}", "medium" if r[0] == 401 else "low",
+                            f"{category.title()} path found: {word}", ["CWE-200"],
+                            f"GET /{word} -> HTTP {r[0]}. Potential {category} endpoint.",
+                            "Restrict access; require authentication", confidence="confirmed"))
+            except:
+                pass
+    return findings[:5]  # Return top 5 to avoid noise
+
+
+def _fuzz_parameters(ip: str, port: Port, base: str, auth: dict | None, limit: int = 10) -> list[Vuln]:
+    """Fuzz common parameters for injection/logic bugs."""
+    findings = []
+    params = wordlist_get_parameters()[:limit]
+
+    # Test each parameter with simple probes
+    for param in params:
+        try:
+            # Test 1: Boolean-based logic (id=1 vs id=0, id=true vs id=false)
+            r1 = _fetch(ip, port, f"/?{param}=1", auth=auth, read=1024)
+            r2 = _fetch(ip, port, f"/?{param}=0", auth=auth, read=1024)
+            if r1 and r2 and r1[0] == 200 and r2[0] == 200:
+                if len(r1[2]) != len(r2[2]):  # Content differs
+                    findings.append(_mk(ip, port, "web-param-logic", "low",
+                        f"Parameter logic difference: {param}", ["CWE-1025"],
+                        f"Parameter {param} affects response size (1 vs 0 differ). May indicate type confusion.",
+                        "Verify logic carefully; test with various types", confidence="potential"))
+                    break
+
+            # Test 2: Injection character acceptance
+            r3 = _fetch(ip, port, f"/?{param}=test'", auth=auth, read=1024)
+            if r3 and r3[0] in (500, 400):  # Error on quote = injection possible
+                findings.append(_mk(ip, port, "web-param-injection", "medium",
+                    f"Parameter {param} triggers error on special chars", ["CWE-89"],
+                    f"GET ?{param}=test' -> HTTP {r3[0]}. Possible injection point.",
+                    "Use parameterized queries; validate input", confidence="potential"))
+                break
+        except:
+            pass
+    return findings
+
+
+def _fuzz_headers_wordlist(ip: str, port: Port, auth: dict | None, limit: int = 10) -> list[Vuln]:
+    """Test common headers for bypass/injection opportunities."""
+    findings = []
+    headers_to_test = wordlist_get_headers()[:limit]
+
+    for header in headers_to_test:
+        if "X-" not in header:  # Skip standard headers, focus on X-* custom
+            continue
+        try:
+            test_value = "test-bypass-value-123"
+            hdrs = {**(auth or {}), header: test_value}
+            r = _fetch(ip, port, "/", auth=hdrs, read=2048)
+            if r and test_value in r[2]:  # Header reflected
+                findings.append(_mk(ip, port, "web-header-reflection", "low",
+                    f"Custom header {header} reflected in response", ["CWE-79"],
+                    f"Header {header} value appears in response body. Potential XSS if unescaped.",
+                    "Never reflect user input; use sanitization", confidence="potential"))
+        except:
+            pass
+    return findings[:2]  # Limit to avoid noise
+
+
+def _fuzz_cms_if_detected(ip: str, port: Port, base: str, fp: dict, auth: dict | None) -> list[Vuln]:
+    """If a CMS is detected, test framework-specific paths."""
+    findings = []
+    if not fp.get("tech"):
+        return findings
+
+    tech_lower = [t.lower() for t in fp["tech"]]
+    for cms, paths in wordlist_get_cms_paths().items():
+        if any(cms in t for t in tech_lower):
+            for path in paths[:5]:  # Limit per CMS
+                try:
+                    r = _fetch(ip, port, f"/{path}", auth=auth, read=2048)
+                    if r and r[0] in (200, 301, 302, 401, 403):
+                        findings.append(_mk(ip, port, f"web-cms-{cms}", "low",
+                            f"{cms.upper()} path discovered: {path}", ["CWE-200"],
+                            f"GET /{path} -> HTTP {r[0]}. Confirmed {cms} usage.",
+                            "Keep framework updated; harden default paths", confidence="confirmed"))
+                except:
+                    pass
+            break
+    return findings
+
+
 def _check_bot_detection_bypass(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
     """Bot detection bypass fingerprints: missing User-Agent, headless detection."""
     findings = []
@@ -3712,6 +3821,12 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                 findings.extend(_brute_login_form(ip, port, form, base, auth, common_creds))
     # API key extraction from responses
     findings.extend(_extract_api_keys(ip, port, body or ""))
+    # Wordlist-based fuzzing (active mode only; uses curated entries to avoid noise)
+    if active:
+        findings.extend(_brute_wordlist_dirs(ip, port, base, auth, limit=15))
+        findings.extend(_fuzz_parameters(ip, port, base, auth, limit=8))
+        findings.extend(_fuzz_headers_wordlist(ip, port, auth, limit=8))
+        findings.extend(_fuzz_cms_if_detected(ip, port, base, fp, auth))
     # GraphQL: introspection, plus query batching (brute-force/DoS amplifier) and
     # field-suggestion schema leak when introspection is off.
     gql = '{"query":"query{__schema{queryType{name}}}"}'
