@@ -32,6 +32,7 @@ from .routes import (
     register_findings_routes,
     register_report_routes,
     register_scan_routes,
+    register_sessions_routes,
 )
 
 
@@ -41,12 +42,17 @@ def create_app(eng_dir: str) -> FastAPI:
     db_path = _open_paths(eng_dir)["db"]
 
     broker = _Broker()
+    from ..sessions import SessionManager
+    session_manager = SessionManager()
 
     @asynccontextmanager
     async def _lifespan(_app):
-        # Bind the SSE broker to the serving event loop on startup (replaces the
-        # deprecated @app.on_event("startup") hook).
-        broker.bind(asyncio.get_running_loop())
+        # Bind the SSE broker + session manager to the serving event loop on startup
+        # (replaces the deprecated @app.on_event("startup") hook). The session manager's
+        # listeners and adopt() all run on this loop.
+        loop = asyncio.get_running_loop()
+        broker.bind(loop)
+        session_manager.bind_loop(loop)
         yield
 
     app = FastAPI(title="recce workbench", version=__version__, lifespan=_lifespan)
@@ -80,7 +86,7 @@ def create_app(eng_dir: str) -> FastAPI:
     # Shared context passed to each route group. Route modules build their own tiny
     # _hosts/_tracking/_mutate closures from ctx.db_path (same bodies as app_legacy).
     ctx = SimpleNamespace(eng_dir=eng_dir, db_path=db_path, jobs=jobs,
-                          broker=broker, presence=presence)
+                          broker=broker, presence=presence, sessions=session_manager)
 
     register_engagement_routes(app, ctx)
     register_scan_routes(app, ctx)
@@ -89,6 +95,7 @@ def create_app(eng_dir: str) -> FastAPI:
     register_report_routes(app, ctx)
     register_act_spray_routes(app, ctx)
     register_data_exchange_routes(app, ctx)
+    register_sessions_routes(app, ctx)
 
     @app.get("/api/events")
     async def events():
