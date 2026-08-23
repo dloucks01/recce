@@ -266,3 +266,8 @@ export async function upgradeSession(sessionId: string): Promise<{ callback: str
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
   return r.json();
 }
+
+export async function getStager(tls: boolean): Promise<string> {
+  const r = await getJSON<{ template: string }>("/api/stager?tls=" + (tls ? "true" : "false"));
+  return r.template;
+}

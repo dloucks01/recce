@@ -27,6 +27,11 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
     term.loadAddon(fit);
     term.open(host.current!);
     try { fit.fit(); } catch { /* pre-layout */ }
+    // propagate terminal size to the target PTY so full-screen apps (vim/nano/less) work
+    term.onResize(({ cols, rows }) => {
+      wsRef.current?.readyState === WebSocket.OPEN &&
+        wsRef.current.send(JSON.stringify({ t: "resize", cols, rows }));
+    });
     const onResize = () => { try { fit.fit(); } catch { /* noop */ } };
     window.addEventListener("resize", onResize);
 

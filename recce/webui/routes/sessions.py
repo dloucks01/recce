@@ -74,6 +74,13 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(404, "no such listener")
         return {"ok": True}
 
+    @app.get("/api/stager")
+    def stager(tls: bool = False):
+        """The robust reconnecting-PTY stager template (single source of truth — the browser
+        fills {LHOST}/{PORT}/{TOKEN}). Same builder the auto-pivot injects, so no drift."""
+        from ...sessions.stagers import stager_template
+        return {"template": stager_template(tls)}
+
     # --- sessions ----------------------------------------------------------------
     @app.get("/api/sessions")
     def list_sessions(host: str = ""):
@@ -187,7 +194,12 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
                     await tasking.send_input(sess, data)
                 elif t == "wheel":
                     sess.take_wheel(tester)
-                # "resize" reserved for P1 (window-size propagation)
+                elif t == "resize" and sess.pty:
+                    # propagate the terminal size to the stager's PTY (vim/nano/less work)
+                    rows = int(msg.get("rows", 0) or 0)
+                    cols = int(msg.get("cols", 0) or 0)
+                    if rows and cols:
+                        await sess.send(b"\x1bW%d,%d\n" % (rows, cols))
         except WebSocketDisconnect:
             pass
         finally:
