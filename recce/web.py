@@ -2410,6 +2410,11 @@ _SSRF_PAYLOADS = [
      "/proc/self/environ via file:// (environment variables leak)"),
 ]
 
+# SSTI: parameters that could reflect/execute template code
+_SSTI_PARAM = re.compile(
+    r"template|msg|message|text|content|input|search|query|name|title|comment|feedback|email",
+    re.I)
+
 
 def _ssrf_via(ip: str, port: Port, where: str, param: str, send) -> list[Vuln]:
     """Point a URL-ish parameter at cloud-metadata / file:// and confirm SSRF when the
@@ -2741,8 +2746,108 @@ def _discover_vhosts(ip: str, port: Port, base: str, host_hint: str,
     return [f, *extra], [n for n, _, _ in found]
 
 
-def _extract_api_keys(body: str) -> list[Vuln] | None:
+def _brute_login_form(ip: str, port: Port, form: dict, base: str, auth: dict | None, creds_to_try: list) -> list[Vuln]:
+    """Try common credentials against a login form. Returns a single finding per form."""
+    if not form.get("password"):
+        return []
+    action = urljoin(base + "/", form["action"])
+    method = form.get("method", "post")
+    for username, password in creds_to_try[:3]:
+        try:
+            data = {}
+            for name in form.get("inputs", []):
+                if "pass" in name.lower():
+                    data[name] = password
+                elif "user" in name.lower() or "login" in name.lower() or "email" in name.lower():
+                    data[name] = username
+            path = urlparse(action).path or "/"
+            r = _fetch(ip, port, path, method=method, body=urlencode(data), auth=auth, read=8192)
+            if r and r[0] == 200:
+                resp_lower = r[2].lower()
+                if "password" not in resp_lower and "login" not in resp_lower and "invalid" not in resp_lower:
+                    return [_mk(ip, port, "web-weak-creds", "high",
+                        "Default/weak credentials accepted on login form", ["CWE-1391"],
+                        f"Login form at {form['action']} accepted {username}:{password}",
+                        "Enforce strong password policies; rate-limit logins",
+                        confidence="potential")]
+        except:
+            pass
+    return []
+
+
+def _check_ssti(ip: str, port: Port, param: str, base: str, auth: dict | None) -> list[Vuln]:
+    """Detect SSTI via expression evaluation (Jinja2, ERB, etc)."""
+    probes = {
+        "{{7*7}}": ("49", "jinja2"),
+        "<%= 7*7 %>": ("49", "erb"),
+    }
+    for payload, (marker, engine) in probes.items():
+        try:
+            r = _fetch(ip, port, f"/?{param}={quote(payload)}", auth=auth, read=4096)
+            if r and marker in r[2]:
+                return [_mk(ip, port, "web-ssti", "high",
+                    f"Server-Side Template Injection ({engine})", ["CWE-1336"],
+                    f"Parameter {param} evaluated math expression: {payload} → {marker}",
+                    "Never render user input in templates; use sandbox/safe rendering",
+                    confidence="confirmed")]
+        except:
+            pass
+    return []
+
+
+def _check_blind_sqli(ip: str, port: Port) -> list[Vuln]:
+    """Blind SQLi: probe for time-based delays on error-prone characters."""
+    try:
+        t0 = time.monotonic()
+        _fetch(ip, port, "/?q=' OR '1'='1", read=512)
+        t1 = time.monotonic()
+        if (t1 - t0) > 3.0:
+            return [_mk(ip, port, "web-sqli-blind", "high",
+                "Blind SQL injection (time-based)", ["CWE-89"],
+                "Query parameter caused delay with SQLi probe",
+                "Use parameterized queries; never concatenate user input into queries",
+                confidence="potential")]
+    except:
+        pass
+    return []
+
+
+def _check_oauth_redirect(ip: str, port: Port, auth: dict | None) -> list[Vuln]:
+    """OAuth redirect param validation bypass."""
+    for param in ["redirect_uri", "return_url", "callback", "next"]:
+        try:
+            r = _fetch(ip, port, f"/login?{param}=http://attacker.com/evil", auth=auth, read=4096)
+            if r and "attacker.com" in r[2]:
+                return [_mk(ip, port, "web-oauth-bypass", "high",
+                    f"Open redirect via {param}", ["CWE-601"],
+                    f"Parameter {param} reflects attacker URL without validation",
+                    "Validate redirect destinations against allow-list",
+                    confidence="confirmed")]
+        except:
+            pass
+    return []
+
+
+def _check_session_fixation(ip: str, port: Port, auth: dict | None) -> list[Vuln]:
+    """Session fixation: test if session ID is reflected."""
+    for param in ["sid", "sessionid", "phpsessid"]:
+        try:
+            test_val = "testsid123"
+            r = _fetch(ip, port, f"/?{param}={test_val}", auth=auth, read=2048)
+            if r and test_val in r[2]:
+                return [_mk(ip, port, "web-session-fixation", "medium",
+                    f"Session fixation via {param}", ["CWE-384"],
+                    f"Session parameter {param} was reflected in response",
+                    "Use random SIDs; don't accept them from user input",
+                    confidence="potential")]
+        except:
+            pass
+    return []
+
+
+def _extract_api_keys(ip: str, port: Port, body: str) -> list[Vuln]:
     """Scan JavaScript for hardcoded API keys, tokens, secrets."""
+    findings = []
     patterns = [
         (r"(?:api[_-]?)?key['\"]?\s*[:=]\s*['\"]([a-z0-9]{20,})['\"]", "API key"),
         (r"authorization['\"]?\s*[:=]\s*['\"]Bearer\s+([a-z0-9\-_.]+)['\"]", "Bearer token"),
@@ -2750,9 +2855,15 @@ def _extract_api_keys(body: str) -> list[Vuln] | None:
         (r"stripe[_-]?(?:public|secret)[_-]?key['\"]?\s*[:=]\s*['\"]([a-z]{2}_[a-z0-9]{24,})['\"]", "Stripe key"),
     ]
     for pattern, key_type in patterns:
-        if re.search(pattern, body, re.I):
-            return key_type
-    return None
+        for match in re.finditer(pattern, body, re.I):
+            val = match.group(1)
+            redacted = val[:4] + "*" * (len(val) - 8) + val[-4:] if len(val) > 8 else "***"
+            findings.append(_mk(ip, port, "web-hardcoded-secret", "critical",
+                f"Hardcoded {key_type} in JavaScript", ["CWE-798"],
+                f"Found {key_type} in response: {redacted}",
+                "Remove all credentials from client-side code",
+                confidence="confirmed"))
+    return findings
 
 
 def scan_endpoint(ip: str, port: Port, active: bool = True,
@@ -2793,15 +2904,6 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     if root:
         findings.extend(_scan_jwts(ip, port, headers, body, active=active))
         findings.extend(_scan_deserial(ip, port, headers, body))
-        # Deep: API key extraction from JS
-        key_type = _extract_api_keys(body)
-        if key_type:
-            findings.append(_mk(ip, port, "web-hardcoded-secret", "critical",
-                f"Hardcoded {key_type} in response", ["CWE-798", "CWE-215"],
-                f"Found {key_type} embedded in the page (likely JavaScript). "
-                f"This credential can be used to access the service on behalf of the application.",
-                "Remove all credentials from client-side code; use server-side token endpoints",
-                confidence="confirmed"))
     # The active HTTP checks only make sense if the port actually spoke HTTP -
     # skip them for a TLS-only non-HTTP port (LDAPS/IMAPS) so we don't waste a
     # dozen dead requests there (its TLS findings above still count).
@@ -2886,6 +2988,21 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     # HTTP request smuggling (CL.TE/TE.CL desync) - opt-in only; can disturb shared proxies.
     if smuggle:
         findings.extend(_scan_smuggle(ip, port))
+
+    # Deep auth/injection detection (read-only)
+    findings.extend(_check_session_fixation(ip, port, auth))
+    findings.extend(_check_blind_sqli(ip, port))
+    findings.extend(_check_oauth_redirect(ip, port, auth))
+    findings.extend(_check_ssti(ip, port, "q", base, auth))
+    # Form auth brute: try weak creds against login forms (if creds enabled)
+    if creds and body:
+        for form_str in _FORM_RE.findall(body):
+            form = _parse_form(form_str, "/")
+            if form.get("password"):
+                common_creds = [("admin", "admin"), ("admin", "password"), ("test", "test"), ("guest", "guest")]
+                findings.extend(_brute_login_form(ip, port, form, base, auth, common_creds))
+    # API key extraction from responses
+    findings.extend(_extract_api_keys(ip, port, body or ""))
     # GraphQL: introspection, plus query batching (brute-force/DoS amplifier) and
     # field-suggestion schema leak when introspection is off.
     gql = '{"query":"query{__schema{queryType{name}}}"}'
