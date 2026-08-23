@@ -271,3 +271,24 @@ export async function getStager(tls: boolean): Promise<string> {
   const r = await getJSON<{ template: string }>("/api/stager?tls=" + (tls ? "true" : "false"));
   return r.template;
 }
+
+// --- session file transfer + on-target enum -----------------------------------
+export async function runEnum(sessionId: string): Promise<{ id: string; bytes: number }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/enum`, { method: "POST", headers: jsonHeaders() });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function downloadFromShell(sessionId: string, path: string): Promise<{ saved: string; size: number }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/download`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify({ path }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function uploadToShell(sessionId: string, path: string, dataB64: string): Promise<{ bytes: number }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/upload`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify({ path, data: dataB64 }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}

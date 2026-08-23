@@ -930,3 +930,9 @@ body { background: var(--ground); color: var(--text); }
 
 /* TLS toggle */
 .tls-tog { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; cursor: pointer; }
+
+/* session actions (enum / file transfer) */
+.session-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.session-actions .scan-in { max-width: 220px; }
+.enum-btn { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.upload-lbl { cursor: pointer; }

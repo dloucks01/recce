@@ -37,6 +37,9 @@ class Session:
         self.attached: set[str] = set()        # presence — who's watching
         self.last_seen = time.time()           # last byte from the target (liveness)
         self.local_addr: tuple[str, int] | None = None  # addr the target reached us on
+        self._cap: bytearray | None = None     # capture buffer for run_and_capture()
+        self._cap_end: bytes = b""
+        self._cap_future: asyncio.Future | None = None
         self._transport: Transport | None = None
         self._chunks: deque[bytes] = deque()   # scrollback ring (O(1) trim)
         self._blen = 0                         # running byte length of the ring
@@ -92,7 +95,41 @@ class Session:
             self._blen += len(data)
             while self._blen > _BUFFER_CAP and len(self._chunks) > 1:
                 self._blen -= len(self._chunks.popleft())
+            if self._cap is not None:              # a run_and_capture() is collecting
+                self._cap += data
+                if self._cap_end in self._cap and self._cap_future and not self._cap_future.done():
+                    self._cap_future.set_result(True)
         self._broadcast({"t": "out", "data": data})
+
+    async def run_and_capture(self, command: bytes, timeout: float = 30.0) -> bytes:
+        """Run a command in the shell and return just its output — used for file transfer and
+        running recce's enum through the shell. Markers are printed via a split-string trick
+        (`'__RECCE''_S_..'`) so the literal marker only appears in the OUTPUT, never in the
+        echoed command line, making extraction robust on an echoing PTY."""
+        if not self.connected:
+            return b""
+        tag = uuid.uuid4().hex[:8].encode()
+        start = b"__RECCE_S_" + tag + b"__"
+        end = b"__RECCE_E_" + tag + b"__"
+        self._cap = bytearray()
+        self._cap_end = end
+        loop = asyncio.get_event_loop()
+        self._cap_future = loop.create_future()
+        # split the markers with '' so the echoed command line never contains them contiguously
+        wrapped = (b"printf '__RECCE''_S_" + tag + b"__\\n'; " + command
+                   + b"; printf '__RECCE''_E_" + tag + b"__\\n'\n")
+        try:
+            await self.send(wrapped)
+            await asyncio.wait_for(self._cap_future, timeout)
+        except (asyncio.TimeoutError, ConnectionError, OSError):
+            pass
+        data = bytes(self._cap or b"")
+        self._cap = None
+        self._cap_end = b""
+        self._cap_future = None
+        s = data.find(start)
+        e = data.find(end, s + len(start)) if s >= 0 else -1
+        return data[s + len(start):e] if (s >= 0 and e >= 0) else b""
 
     def scrollback(self) -> bytes:
         return b"".join(self._chunks)

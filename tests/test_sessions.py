@@ -278,6 +278,25 @@ def test_loot_cred_transcript_and_host_filter(client):
         target.close()
 
 
+def test_file_transfer_and_enum_guards(client):
+    # unknown session → 404 on every new endpoint
+    assert client.post("/api/sessions/nope/download", json={"path": "/etc/passwd"}).status_code == 404
+    assert client.post("/api/sessions/nope/upload", json={"path": "/tmp/x", "data": "QQ=="}).status_code == 404
+    assert client.post("/api/sessions/nope/enum").status_code == 404
+    # a live session but missing/invalid args → 400
+    lst = client.post("/api/listeners", json={"port": 0}).json()
+    raw = socket.create_connection(("127.0.0.1", lst["port"]))
+    raw.sendall(b"$ ")
+    sess = _wait(lambda: next((s for s in client.get("/api/sessions").json()
+                               if s["status"] == "live"), None))
+    sid = sess["id"]
+    assert client.post(f"/api/sessions/{sid}/download", json={}).status_code == 400
+    assert client.post(f"/api/sessions/{sid}/upload", json={"path": "/tmp/x"}).status_code == 400
+    assert client.post(f"/api/sessions/{sid}/upload",
+                       json={"path": "/tmp/x", "data": "not!base64"}).status_code == 400
+    raw.close()
+
+
 def test_input_ignored_from_non_driver(client):
     lst = client.post("/api/listeners", json={"port": 0}).json()
     target = socket.create_connection(("127.0.0.1", lst["port"]))
