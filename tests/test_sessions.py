@@ -167,6 +167,41 @@ def test_transcript_persists_across_restart(tmp_path):
     asyncio.run(run())
 
 
+def test_stager_handshake_pty_and_token_reconnect(client):
+    """A robust-shell stager announces itself with a token → a PTY session that rebinds to
+    the SAME session on reconnect (the core of a self-healing shell)."""
+    lst = client.post("/api/listeners", json={"port": 0}).json()
+    port = lst["port"]
+    token = "tok_robust_1"
+
+    s = socket.create_connection(("127.0.0.1", port))
+    s.sendall(b"RECCE1 " + token.encode() + b"\nrobust@dc01:~# ")
+    sess = _wait(lambda: next((x for x in client.get("/api/sessions").json()
+                               if x["status"] == "live" and x["pty"]), None))
+    assert sess is not None, "stager handshake should create a PTY session"
+    sid = sess["id"]
+    tr = client.get(f"/api/sessions/{sid}/transcript").json()
+    assert b"robust@dc01" in base64.b64decode(tr["data"]), "post-handshake bytes stream through"
+
+    # drop → stale; reconnect WITH THE SAME TOKEN → rebinds the same session (self-healing)
+    s.close()
+    _wait(lambda: next((x for x in client.get("/api/sessions").json()
+                        if x["id"] == sid and x["status"] == "stale"), None))
+    s2 = socket.create_connection(("127.0.0.1", port))
+    s2.sendall(b"RECCE1 " + token.encode() + b"\n")
+    live = _wait(lambda: next((x for x in client.get("/api/sessions").json()
+                               if x["id"] == sid and x["status"] == "live"), None))
+    assert live and live["pty"], "reconnect with the token rebinds the SAME pty session"
+    # a raw shell (no marker) is unaffected — still a plain, non-pty session
+    raw = socket.create_connection(("127.0.0.1", port))
+    raw.sendall(b"$ ")
+    plain = _wait(lambda: next((x for x in client.get("/api/sessions").json()
+                                if x["status"] == "live" and not x["pty"]), None))
+    assert plain is not None, "raw shells still work and are marked non-pty"
+    s2.close()
+    raw.close()
+
+
 def test_loot_cred_transcript_and_host_filter(client):
     lst = client.post("/api/listeners", json={"port": 0}).json()
     target = socket.create_connection(("127.0.0.1", lst["port"]))

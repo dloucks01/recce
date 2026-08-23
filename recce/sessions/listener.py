@@ -8,6 +8,35 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+# A robust-shell stager announces itself with this line so recce can bind it to the right
+# session by token (survives NAT + reconnects). A raw reverse shell sends no such line — its
+# first bytes are just shell output, which we must not swallow.
+_MARKER = b"RECCE1 "
+
+
+async def _read_handshake(transport):
+    """Peek the first bytes: (token, initial_bytes, is_pty). A stager sends
+    `RECCE1 <token>\\n`; anything else is a raw shell whose bytes we hand back untouched."""
+    try:
+        data = await asyncio.wait_for(transport.read(), timeout=2.0)
+    except (asyncio.TimeoutError, ConnectionError, OSError):
+        return None, b"", False                       # silent raw shell (emits on input)
+    if not data.startswith(_MARKER):
+        return None, data, False                      # raw shell — data IS shell output
+    buf = bytearray(data)                             # stager line may span reads; accumulate
+    while b"\n" not in buf and len(buf) < 512:
+        try:
+            more = await asyncio.wait_for(transport.read(), timeout=2.0)
+        except (asyncio.TimeoutError, ConnectionError, OSError):
+            break
+        if not more:
+            break
+        buf += more
+    line, _, rest = bytes(buf).partition(b"\n")
+    parts = line.split()
+    token = parts[1].decode("ascii", "replace") if len(parts) >= 2 else None
+    return token, rest, True
+
 
 class Listener:
     """An asyncio TCP listener on the shared server. `kind` is typed so tls/http/dns can
@@ -35,7 +64,9 @@ class Listener:
                        writer: asyncio.StreamWriter) -> None:
         from .transport import SocketTransport
         transport = SocketTransport(reader, writer)
-        await self._manager.adopt(transport, listener_id=self.id)
+        token, initial, pty = await _read_handshake(transport)
+        await self._manager.adopt(transport, listener_id=self.id,
+                                  token=token, initial=initial, pty=pty)
 
     async def stop(self) -> None:
         self.status = "stopped"

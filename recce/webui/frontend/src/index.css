@@ -901,3 +901,8 @@ body { background: var(--ground); color: var(--text); }
 .payload-note { flex-shrink: 0; }
 .payload-copy { font-size: 11px; padding: 3px 9px; border: 1px solid var(--line); background: var(--surface); border-radius: 5px; cursor: pointer; color: var(--muted); }
 .payload-copy:hover { border-color: var(--accent); color: var(--accent); }
+
+/* robust stager payload + PTY badge */
+.payload-group-h.robust { color: var(--ok); }
+.robust-item .payload-code { border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent); }
+.badge.pty { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); font-weight: 700; }

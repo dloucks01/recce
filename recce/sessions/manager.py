@@ -83,32 +83,48 @@ class SessionManager:
 
     # --- adoption: the single boundary ------------------------------------------
     async def adopt(self, transport: Transport, listener_id: str = "",
-                    token: str | None = None) -> Session:
+                    token: str | None = None, initial: bytes = b"",
+                    pty: bool = False) -> Session:
         """Bind a freshly-arrived connection to a Session — new, or an existing stale one
-        it should resume. Every acquisition mode ends here."""
+        it should resume. Every acquisition mode ends here. A stager presents a `token`
+        (reliable NAT-safe re-adoption) and `pty=True`; a raw reverse shell has neither and
+        its first bytes arrive as `initial`."""
         ip, port = transport.peer
         sess = self._match(ip, token)
+        new = sess is None
         if sess is None:
             sess = Session(host_ip=ip, host_port=port)
-            self.sessions[sess.id] = sess
+            if token:
+                sess.token = token          # the stager's embedded token IS the session's,
+            self.sessions[sess.id] = sess   # so every reconnect rebinds to this same session
+        if pty:
+            sess.pty = True
         sess.bind(transport)
-        self._save(sess)                            # persist metadata (status → live)
+        if initial:                          # raw shell's first output / stager leftover
+            sess.feed(initial)
+            if self.store is not None:
+                self._record(sess.id, initial)
+        self._save(sess)                     # persist metadata (status → live)
         # pump target → session output in the background
         asyncio.ensure_future(self._pump(sess, transport))
-        for hook in list(self.hooks):
-            try:
-                hook(sess)
-            except Exception:  # noqa: BLE001 — a hook must never kill adoption
-                pass
+        if new:                              # host-link + "shell caught" only once, not per reconnect
+            for hook in list(self.hooks):
+                try:
+                    hook(sess)
+                except Exception:  # noqa: BLE001 — a hook must never kill adoption
+                    pass
         return sess
 
     def _match(self, ip: str, token: str | None) -> Session | None:
-        """token (exact, NAT-safe) → a stale session for the same host → None (new)."""
+        """A tokened stager matches its exact session (NAT-safe) or starts fresh — it never
+        grabs an unrelated host's stale session. A raw shell (no token) resumes a stale
+        session from the same host."""
         if token:
             for s in self.sessions.values():
                 if s.token == token:
                     return s
-        for s in self.sessions.values():          # resume a dropped shell from this host
+            return None                           # unknown token → a new agent, not host-fallback
+        for s in self.sessions.values():          # raw shell: resume a dropped shell from this host
             if s.host_ip == ip and s.status == "stale":
                 return s
         return None

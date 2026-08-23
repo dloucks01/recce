@@ -91,6 +91,7 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
               <span className={"sess-dot " + (s.status === "live" ? "live" : "stale")} />
               <span className="mono host">{s.host_ip}</span>
               <span className="badge">{s.status}</span>
+              {s.pty && <span className="badge pty" title="robust PTY (auto-reconnect stager)">PTY</span>}
               {s.driver && <span className="muted">▸ {s.driver}</span>}
               {s.attached.length > 0 && <span className="muted">👁 {s.attached.length}</span>}
             </button>

