@@ -235,7 +235,9 @@ export interface SessionInfo {
 }
 export interface ListenerInfo { id: string; host: string; port: number; kind: string; status: string; }
 
-export async function getSessions(): Promise<SessionInfo[]> { return getJSON<SessionInfo[]>("/api/sessions"); }
+export async function getSessions(host?: string): Promise<SessionInfo[]> {
+  return getJSON<SessionInfo[]>("/api/sessions" + (host ? `?host=${encodeURIComponent(host)}` : ""));
+}
 export async function getListeners(): Promise<ListenerInfo[]> { return getJSON<ListenerInfo[]>("/api/listeners"); }
 export async function startListener(port: number): Promise<ListenerInfo> {
   const r = await fetch("/api/listeners", { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ port }) });

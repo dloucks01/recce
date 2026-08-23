@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { HostDetail, VulnDetail, getHost } from "./api";
+import { HostDetail, VulnDetail, SessionInfo, getHost, getSessions } from "./api";
 import { SevTag, NoteCell, useEscape, useResizableDrawer } from "./ui";
 import { FindingDetail } from "./FindingDetail";
 import { PortStatus } from "./collab";
@@ -14,6 +14,16 @@ export function HostDrawer(
   const [d, setD] = useState<HostDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [openV, setOpenV] = useState<string | null>(null);
+  const [shells, setShells] = useState<SessionInfo[]>([]);
+
+  // this host's caught shells — the engagement-native tie-in (shells next to findings)
+  useEffect(() => {
+    if (!ip) { setShells([]); return; }
+    const load = () => getSessions(ip).then(setShells).catch(() => {});
+    load();
+    const t = window.setInterval(load, 3000);
+    return () => window.clearInterval(t);
+  }, [ip]);
 
   useEffect(() => {
     if (!ip) return;
@@ -69,6 +79,22 @@ export function HostDrawer(
                 <Step on={d.access} label="access" ok />
               </div>
             </header>
+
+            {shells.length > 0 && (
+              <Section title={`Shells (${shells.length})`}
+                       extra="Sessions tab to drive">
+                <div className="drawer-shells">
+                  {shells.map((s) => (
+                    <div key={s.id} className="drawer-shell">
+                      <span className={"sess-dot " + (s.status === "live" ? "live" : "stale")} />
+                      <span className="mono">{s.kind}</span>
+                      <span className="badge">{s.status}</span>
+                      {s.driver && <span className="muted small">▸ {s.driver}</span>}
+                    </div>
+                  ))}
+                </div>
+              </Section>
+            )}
 
             <Section title="Note">
               <NoteCell value={d.notes} onSave={(t) => note(d.key, t, true)} />

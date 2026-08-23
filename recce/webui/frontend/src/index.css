@@ -875,3 +875,8 @@ body { background: var(--ground); color: var(--text); }
 .shell-term-driver { color: var(--accent); font-weight: 600; }
 .shell-term-watchers { margin-left: auto; color: var(--muted); font-size: 12px; }
 .shell-term-screen { padding: 8px; height: 420px; }
+
+/* host-drawer shells */
+.drawer-shells { display: flex; flex-direction: column; gap: 6px; }
+.drawer-shell { display: flex; gap: 9px; align-items: center; padding: 6px 9px;
+  background: var(--surface2); border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }

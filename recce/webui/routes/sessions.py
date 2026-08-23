@@ -67,8 +67,19 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
 
     # --- sessions ----------------------------------------------------------------
     @app.get("/api/sessions")
-    def list_sessions():
-        return [s.info() for s in mgr.list()]
+    def list_sessions(host: str = ""):
+        items = mgr.list()
+        if host:                                    # host drawer asks for one host's shells
+            items = [s for s in items if s.host_ip == host]
+        return [s.info() for s in items]
+
+    @app.get("/api/sessions/{session_id}/transcript")
+    def transcript(session_id: str):
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        return {"id": session_id, "host_ip": sess.host_ip,
+                "data": base64.b64encode(sess.scrollback()).decode()}
 
     # --- the collaborative terminal (WebSocket) ---------------------------------
     @app.websocket("/api/sessions/{session_id}/attach")
