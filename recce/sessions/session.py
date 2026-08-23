@@ -36,6 +36,7 @@ class Session:
         self.driver: str | None = None         # tester id currently allowed to type
         self.attached: set[str] = set()        # presence — who's watching
         self.last_seen = time.time()           # last byte from the target (liveness)
+        self.local_addr: tuple[str, int] | None = None  # addr the target reached us on
         self._transport: Transport | None = None
         self._chunks: deque[bytes] = deque()   # scrollback ring (O(1) trim)
         self._blen = 0                         # running byte length of the ring
@@ -62,6 +63,7 @@ class Session:
     def bind(self, transport: Transport) -> None:
         """Attach a live connection. Called on first catch and on every re-adoption."""
         self._transport = transport
+        self.local_addr = getattr(transport, "sockname", None)  # for auto-pivot callback
         self.status = "live"
         self._broadcast({"t": "status", "status": "live"})
 

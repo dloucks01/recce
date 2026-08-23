@@ -41,6 +41,10 @@ class SocketTransport(Transport):
         self._w = writer
         peer = writer.get_extra_info("peername") or ("?", 0)
         self._peer = (str(peer[0]), int(peer[1]))
+        # the local end the target actually reached us on — the ideal callback address for
+        # an auto-pivot upgrade (guaranteed routable back from the target)
+        sn = writer.get_extra_info("sockname") or ("", 0)
+        self.sockname = (str(sn[0]), int(sn[1]))
         # TCP keepalive: a half-open connection (target yanked, cable pulled) is detected
         # and torn down instead of lingering as a falsely-"live" shell.
         sock = writer.get_extra_info("socket")

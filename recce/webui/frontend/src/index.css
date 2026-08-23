@@ -906,3 +906,24 @@ body { background: var(--ground); color: var(--text); }
 .payload-group-h.robust { color: var(--ok); }
 .robust-item .payload-code { border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent); }
 .badge.pty { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); font-weight: 700; }
+
+/* host drawer — "what's been done" */
+.host-activity { display: flex; flex-direction: column; gap: 12px; }
+.phase-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.phase-row { display: flex; gap: 10px; align-items: baseline; font-size: 13px; opacity: 0.55; }
+.phase-row.done { opacity: 1; }
+.phase-ic { color: var(--muted); width: 14px; flex: none; }
+.phase-row.done .phase-ic { color: var(--ok); }
+.phase-label { font-weight: 600; min-width: 96px; }
+.phase-detail { font-size: 12px; }
+.by-source .source-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.source-chip { font-size: 12px; background: var(--surface2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; }
+.source-chip b { color: var(--accent); font-family: var(--mono); font-size: 11px; }
+.activity-tally { display: flex; flex-wrap: wrap; gap: 8px; }
+.tally { font-size: 12px; background: var(--surface2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; }
+.tally.crit { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 40%, transparent); }
+
+/* auto-pivot upgrade */
+.upgrade-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+.upgrade-btn { background: var(--ok); }
+.upgrade-btn:hover { filter: brightness(1.1); }

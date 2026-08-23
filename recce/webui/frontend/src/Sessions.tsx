@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener,
-  lootCred, getTranscript } from "./api";
+  lootCred, getTranscript, upgradeSession } from "./api";
 import { ShellTerminal } from "./Terminal";
 import { PayloadCatalog } from "./Payloads";
 
@@ -137,8 +137,22 @@ function SessionTools({ session }: { session: SessionInfo }) {
     a.href = url; a.download = `session-${session.host_ip}-${session.id}.log`;
     a.click(); URL.revokeObjectURL(url);
   }
+  async function upgrade() {
+    try {
+      const r = await upgradeSession(session.id);
+      setMsg(`⤴ upgrading to a robust PTY shell — reconnecting via ${r.callback}…`);
+    } catch (e) {
+      setMsg(String(e instanceof Error ? e.message : e));
+    }
+  }
   return (
     <div className="session-tools">
+      {!session.pty && session.status === "live" && (
+        <div className="upgrade-row">
+          <button className="run upgrade-btn" onClick={upgrade}>⤴ Upgrade to robust PTY</button>
+          <span className="muted small">auto-pivots this raw shell into a self-healing, full-PTY session</span>
+        </div>
+      )}
       <div className="loot-cred">
         <span className="muted small">Loot a credential from this shell:</span>
         <input className="scan-in" placeholder="username" value={u} onChange={(e) => setU(e.target.value)} />

@@ -258,3 +258,11 @@ export async function getTranscript(sessionId: string): Promise<string> {
   const r = await getJSON<{ data: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
   return atob(r.data);
 }
+
+export async function upgradeSession(sessionId: string): Promise<{ callback: string }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/upgrade`, {
+    method: "POST", headers: jsonHeaders(),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}

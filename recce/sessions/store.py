@@ -33,8 +33,16 @@ class SessionStore:
         except sqlite3.Error:
             pass
         self._conn.executescript(_SCHEMA)
+        self._migrate()                     # add columns to a pre-existing table (graceful upgrade)
         self._conn.commit()
         self._seq: dict[str, int] = {}      # session_id -> next transcript seq
+
+    def _migrate(self) -> None:
+        """CREATE TABLE IF NOT EXISTS won't add a column to a table an older recce already
+        made — so ADD COLUMN for anything introduced later, keeping existing engagements safe."""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(shell_sessions)")}
+        if "pty" not in cols:
+            self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN pty INTEGER DEFAULT 0")
 
     def save_session(self, s) -> None:
         closed = None if s.status == "live" else time.time()

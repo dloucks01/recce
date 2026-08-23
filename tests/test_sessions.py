@@ -106,6 +106,31 @@ def test_catch_stream_drive_and_rebind(client):
     target2.close()
 
 
+def test_auto_pivot_injects_upgrade(client):
+    """Auto-pivot: POST /upgrade pushes the reconnecting-PTY stager one-liner into a RAW
+    shell so it upgrades itself — verify the command is actually injected into the shell."""
+    lst = client.post("/api/listeners", json={"port": 0}).json()
+    raw = socket.create_connection(("127.0.0.1", lst["port"]))
+    raw.sendall(b"$ ")                                   # raw prompt, no stager marker
+    sess = _wait(lambda: next((s for s in client.get("/api/sessions").json()
+                               if s["status"] == "live" and not s["pty"]), None))
+    assert sess is not None
+    sid = sess["id"]
+    r = client.post(f"/api/sessions/{sid}/upgrade")
+    assert r.status_code == 200 and "callback" in r.json()
+    # recce injected the upgrade one-liner into the raw shell's input
+    raw.settimeout(5)
+    got = b""
+    while b"command -v python3" not in got:
+        chunk = raw.recv(4096)
+        if not chunk:
+            break
+        got += chunk
+    assert b"command -v python3" in got, "the pivot stager must be injected into the shell"
+    assert client.post("/api/sessions/nope/upgrade").status_code == 404
+    raw.close()
+
+
 def test_transcript_persists_across_restart(tmp_path):
     """A caught shell's transcript survives a `recce serve` restart, comes back browsable
     as stale, and a reconnect from the same host rebinds and resumes."""

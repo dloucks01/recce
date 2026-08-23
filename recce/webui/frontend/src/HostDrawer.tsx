@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { HostDetail, VulnDetail, SessionInfo, getHost, getSessions } from "./api";
+import { HostDetail, VulnDetail, SessionInfo, Credential, getHost, getSessions, getCredentials } from "./api";
 import { SevTag, NoteCell, useEscape, useResizableDrawer } from "./ui";
 import { FindingDetail } from "./FindingDetail";
 import { PortStatus } from "./collab";
@@ -15,11 +15,15 @@ export function HostDrawer(
   const [err, setErr] = useState<string | null>(null);
   const [openV, setOpenV] = useState<string | null>(null);
   const [shells, setShells] = useState<SessionInfo[]>([]);
+  const [creds, setCreds] = useState<Credential[]>([]);
 
-  // this host's caught shells — the engagement-native tie-in (shells next to findings)
+  // this host's caught shells + looted creds — the engagement-native tie-in
   useEffect(() => {
-    if (!ip) { setShells([]); return; }
-    const load = () => getSessions(ip).then(setShells).catch(() => {});
+    if (!ip) { setShells([]); setCreds([]); return; }
+    const load = () => {
+      getSessions(ip).then(setShells).catch(() => {});
+      getCredentials().then((cs) => setCreds(cs.filter((c) => c.origin_ip === ip))).catch(() => {});
+    };
     load();
     const t = window.setInterval(load, 3000);
     return () => window.clearInterval(t);
@@ -80,6 +84,10 @@ export function HostDrawer(
               </div>
             </header>
 
+            <Section title="What's been done">
+              <HostActivity d={d} shells={shells} creds={creds} />
+            </Section>
+
             {shells.length > 0 && (
               <Section title={`Shells (${shells.length})`}
                        extra="Sessions tab to drive">
@@ -90,6 +98,7 @@ export function HostDrawer(
                       <span className={"sess-dot " + (s.status === "live" ? "live" : "stale")} />
                       <span className="mono">{s.kind}</span>
                       <span className="badge">{s.status}</span>
+                      {s.pty && <span className="badge pty">PTY</span>}
                       {s.driver && <span className="muted small">▸ {s.driver}</span>}
                       <span className="muted small" style={{ marginLeft: "auto" }}>open →</span>
                     </button>
@@ -172,6 +181,63 @@ export function HostDrawer(
         )}
       </aside>
     </>
+  );
+}
+
+// "What's been done" — the detailed per-host account, assembled from data recce already
+// has: the full phase set (not just 4 steps), and which modules produced findings.
+function HostActivity(
+  { d, shells, creds }: { d: HostDetail; shells: SessionInfo[]; creds: Credential[] }
+) {
+  const sev = { critical: 0, high: 0, medium: 0, low: 0 } as Record<string, number>;
+  d.vulns.forEach((v) => { if (v.tier !== "lead") sev[v.severity] = (sev[v.severity] || 0) + 1; });
+  const findingN = Object.values(sev).reduce((a, b) => a + b, 0);
+
+  // group findings by the module (source) that produced them — "what each tool did"
+  const bySource: Record<string, number> = {};
+  d.vulns.forEach((v) => { if (v.tier !== "lead") bySource[v.source] = (bySource[v.source] || 0) + 1; });
+
+  const phases: { label: string; done: boolean; detail: string }[] = [
+    { label: "Port scan", done: d.ports.length > 0, detail: `${d.ports.length} port(s) open` },
+    { label: "Service enum", done: d.enumerated, detail: d.enumerated ? "services identified" : "not yet" },
+    { label: "Vuln scan", done: d.vuln_scanned, detail: d.vuln_scanned ? `${findingN} finding(s)` : "not yet" },
+    { label: "Database", done: d.db, detail: d.db ? "db enumerated" : "" },
+    { label: "Priv-esc", done: d.privesc, detail: d.privesc ? "checks run" : "" },
+    { label: "Cred enum", done: d.credenum, detail: d.credenum ? "credentialed enum" : "" },
+    { label: "Access", done: d.access, detail: d.access ? (d.access_detail || `${shells.length} shell(s)`) : "no foothold" },
+  ].filter((p) => p.done || ["Port scan", "Service enum", "Vuln scan", "Access"].includes(p.label));
+
+  return (
+    <div className="host-activity">
+      <ul className="phase-list">
+        {phases.map((p) => (
+          <li key={p.label} className={"phase-row" + (p.done ? " done" : "")}>
+            <span className="phase-ic">{p.done ? "✔" : "○"}</span>
+            <span className="phase-label">{p.label}</span>
+            <span className="phase-detail muted">{p.detail}</span>
+          </li>
+        ))}
+      </ul>
+
+      {Object.keys(bySource).length > 0 && (
+        <div className="by-source">
+          <div className="muted small">Findings by module</div>
+          <div className="source-chips">
+            {Object.entries(bySource).sort((a, b) => b[1] - a[1]).map(([src, n]) => (
+              <span key={src} className="source-chip"><b>{src}</b> {n}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(shells.length > 0 || creds.length > 0) && (
+        <div className="activity-tally">
+          {shells.length > 0 && <span className="tally">🖥 {shells.length} shell(s)</span>}
+          {creds.length > 0 && <span className="tally">🔑 {creds.length} cred(s) looted</span>}
+          {sev.critical > 0 && <span className="tally crit">{sev.critical} critical</span>}
+        </div>
+      )}
+    </div>
   );
 }
 
