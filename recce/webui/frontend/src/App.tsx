@@ -246,6 +246,7 @@ export default function App() {
   const [hostCov, setHostCov] = useState("all");
   const [hostWho, setHostWho] = useState("all");
   const [drawerIp, setDrawerIp] = useState<string | null>(null);
+  const [sessionFocus, setSessionFocus] = useState<string | null>(null);
 
   // UI state
   const [showImport, setShowImport] = useState(false);
@@ -453,7 +454,7 @@ export default function App() {
               nav={nav}
             />
           ) : <div className="loading">Loading…</div>)}
-          {tab === "sessions" && <Sessions tester={tester} />}
+          {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus} />}
           {tab === "report" && <ReportTab onRefresh={() => refresh().catch(() => {})} />}
           {tab === "act" && <Act nav={nav} />}
           {tab === "loot" && <Loot />}
@@ -489,6 +490,7 @@ export default function App() {
           onClose={() => setDrawerIp(null)}
           onTick={onTick}
           onNote={onNote}
+          onOpenShell={(id) => { setSessionFocus(id); setTab("sessions"); setDrawerIp(null); }}
         />
       )}
     </div>

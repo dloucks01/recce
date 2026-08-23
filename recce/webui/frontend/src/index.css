@@ -880,3 +880,10 @@ body { background: var(--ground); color: var(--text); }
 .drawer-shells { display: flex; flex-direction: column; gap: 6px; }
 .drawer-shell { display: flex; gap: 9px; align-items: center; padding: 6px 9px;
   background: var(--surface2); border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
+
+/* session tools (loot cred + transcript) */
+.session-tools { padding: 10px 2px 2px; }
+.loot-cred { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.loot-cred .scan-in { max-width: 150px; }
+.drawer-shell { cursor: pointer; width: 100%; text-align: left; }
+.drawer-shell:hover { border-color: var(--accent); }

@@ -247,3 +247,14 @@ export async function startListener(port: number): Promise<ListenerInfo> {
 export async function stopListener(id: string): Promise<void> {
   await fetch(`/api/listeners/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
+
+export async function lootCred(sessionId: string, c: { username: string; secret: string; kind: string }): Promise<void> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/cred`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify(c),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+}
+export async function getTranscript(sessionId: string): Promise<string> {
+  const r = await getJSON<{ data: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
+  return atob(r.data);
+}

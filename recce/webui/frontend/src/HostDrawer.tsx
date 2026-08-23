@@ -7,8 +7,8 @@ import { PortStatus } from "./collab";
 // Slide-in panel with everything about one host: posture, services, full findings
 // (each expandable to raw output + remediation + QoD), AD accounts, and a note.
 export function HostDrawer(
-  { ip, onClose, onTick, onNote }:
-  { ip: string | null; onClose: () => void;
+  { ip, onClose, onTick, onNote, onOpenShell }:
+  { ip: string | null; onClose: () => void; onOpenShell?: (id: string) => void;
     onTick: (k: string, r: boolean) => void; onNote: (k: string, t: string) => void }
 ) {
   const [d, setD] = useState<HostDetail | null>(null);
@@ -85,12 +85,14 @@ export function HostDrawer(
                        extra="Sessions tab to drive">
                 <div className="drawer-shells">
                   {shells.map((s) => (
-                    <div key={s.id} className="drawer-shell">
+                    <button key={s.id} className="drawer-shell"
+                            onClick={() => onOpenShell?.(s.id)} title="open in Sessions">
                       <span className={"sess-dot " + (s.status === "live" ? "live" : "stale")} />
                       <span className="mono">{s.kind}</span>
                       <span className="badge">{s.status}</span>
                       {s.driver && <span className="muted small">▸ {s.driver}</span>}
-                    </div>
+                      <span className="muted small" style={{ marginLeft: "auto" }}>open →</span>
+                    </button>
                   ))}
                 </div>
               </Section>

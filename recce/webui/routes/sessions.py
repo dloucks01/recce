@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import base64
 
-from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 
 from ...sessions import tasking
 
@@ -80,6 +80,37 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(404, "no such session")
         return {"id": session_id, "host_ip": sess.host_ip,
                 "data": base64.b64encode(sess.scrollback()).decode()}
+
+    @app.post("/api/sessions/{session_id}/cred")
+    def loot_cred(session_id: str, body: dict = Body(...),
+                  x_tester: str = Header(default="someone")):
+        """Fold a credential found in this shell into the store — auto-attributed to the
+        session's host, so it lands in Loot and the spray plan (feeds the Act loop)."""
+        from ...models import Credential
+        from ...store import Store
+        from .. import collab
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        user = str(body.get("username", "")).strip()
+        secret = str(body.get("secret", "")).strip()
+        if not user and not secret:
+            raise HTTPException(400, "a username or secret is required")
+        kind = str(body.get("kind", "password"))
+        if kind not in ("password", "nthash", "hash", "blank"):
+            kind = "password"
+        st = Store(db_path)
+        try:
+            added = st.add_credential(Credential(
+                username=user, secret=secret, kind=kind,
+                domain=str(body.get("domain", "")), origin_ip=sess.host_ip,
+                source="shell-session", notes=f"looted from shell on {sess.host_ip}"))
+            collab.add_activity(st, x_tester, "add",
+                                f"{x_tester} looted a credential from the shell on {sess.host_ip}")
+        finally:
+            st.close()
+        broker.publish({"type": "add", "what": "credential", "by": x_tester})
+        return {"ok": True, "added": added}
 
     # --- the collaborative terminal (WebSocket) ---------------------------------
     @app.websocket("/api/sessions/{session_id}/attach")

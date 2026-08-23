@@ -167,6 +167,39 @@ def test_transcript_persists_across_restart(tmp_path):
     asyncio.run(run())
 
 
+def test_loot_cred_transcript_and_host_filter(client):
+    lst = client.post("/api/listeners", json={"port": 0}).json()
+    target = socket.create_connection(("127.0.0.1", lst["port"]))
+    try:
+        target.sendall(b"root@x:/# cat /etc/shadow\r\n")
+        sess = _wait(lambda: next((s for s in client.get("/api/sessions").json()
+                                   if s["status"] == "live"), None))
+        sid = sess["id"]
+
+        # host filter returns this host's shells
+        assert any(s["id"] == sid for s in client.get("/api/sessions?host=127.0.0.1").json())
+        assert client.get("/api/sessions?host=10.99.99.99").json() == []
+
+        # transcript endpoint returns the scrollback (base64); may include rebound history
+        tr = client.get(f"/api/sessions/{sid}/transcript").json()
+        assert b"cat /etc/shadow" in base64.b64decode(tr["data"])
+
+        # loot a credential from the shell → store, auto-attributed to the host
+        r = client.post(f"/api/sessions/{sid}/cred",
+                        json={"username": "svc_admin", "secret": "Hunter2", "kind": "password"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        creds = client.get("/api/credentials").json()
+        looted = [c for c in creds if c.get("source") == "shell-session"]
+        assert looted and looted[0]["origin_ip"] == "127.0.0.1"
+        assert looted[0]["username"] == "svc_admin"
+
+        # a cred with neither field is rejected
+        assert client.post(f"/api/sessions/{sid}/cred", json={}).status_code == 400
+        assert client.post("/api/sessions/nope/cred", json={"username": "x"}).status_code == 404
+    finally:
+        target.close()
+
+
 def test_input_ignored_from_non_driver(client):
     lst = client.post("/api/listeners", json={"port": 0}).json()
     target = socket.create_connection(("127.0.0.1", lst["port"]))

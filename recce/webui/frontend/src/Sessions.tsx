@@ -1,15 +1,19 @@
 import { useEffect, useState } from "react";
-import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener } from "./api";
+import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener,
+  lootCred, getTranscript } from "./api";
 import { ShellTerminal } from "./Terminal";
 
 // The Sessions tab: open listeners, watch caught shells land (grouped by host), and drive
 // them collaboratively. The whole team sees the same list on the one shared server.
-export function Sessions({ tester }: { tester: string }) {
+export function Sessions({ tester, focus }: { tester: string; focus?: string | null }) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [listeners, setListeners] = useState<ListenerInfo[]>([]);
   const [open, setOpen] = useState<string | null>(null);
   const [port, setPort] = useState("4444");
   const [err, setErr] = useState<string | null>(null);
+
+  // open a specific session when jumped here from the host drawer
+  useEffect(() => { if (focus) setOpen(focus); }, [focus]);
 
   async function refresh() {
     try {
@@ -95,8 +99,52 @@ export function Sessions({ tester }: { tester: string }) {
             <button className="linkish" onClick={() => setOpen(null)}>close</button>
           </div>
           <ShellTerminal key={openSession.id} session={openSession} tester={tester} />
+          <SessionTools session={openSession} />
         </section>
       )}
+    </div>
+  );
+}
+
+// Loot a credential found in the shell (→ store + spray plan) and grab the transcript.
+function SessionTools({ session }: { session: SessionInfo }) {
+  const [u, setU] = useState("");
+  const [p, setP] = useState("");
+  const [kind, setKind] = useState("password");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function loot() {
+    if (!u && !p) return;
+    try {
+      await lootCred(session.id, { username: u, secret: p, kind });
+      setMsg(`✓ credential looted → Loot + spray plan`);
+      setU(""); setP("");
+    } catch (e) {
+      setMsg(String(e instanceof Error ? e.message : e));
+    }
+  }
+  async function saveTranscript() {
+    const text = await getTranscript(session.id);
+    const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = `session-${session.host_ip}-${session.id}.log`;
+    a.click(); URL.revokeObjectURL(url);
+  }
+  return (
+    <div className="session-tools">
+      <div className="loot-cred">
+        <span className="muted small">Loot a credential from this shell:</span>
+        <input className="scan-in" placeholder="username" value={u} onChange={(e) => setU(e.target.value)} />
+        <input className="scan-in" placeholder="secret" value={p} onChange={(e) => setP(e.target.value)} />
+        <select value={kind} onChange={(e) => setKind(e.target.value)}>
+          <option value="password">password</option>
+          <option value="nthash">NT hash</option>
+          <option value="hash">hash</option>
+        </select>
+        <button className="toggle" onClick={loot} disabled={!u && !p}>＋ Loot</button>
+        <button className="toggle" onClick={saveTranscript}>⭳ Transcript</button>
+      </div>
+      {msg && <div className="ranmsg">{msg}</div>}
     </div>
   );
 }
