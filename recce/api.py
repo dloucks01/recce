@@ -95,9 +95,11 @@ def _parse_spec(body: str) -> dict | None:
             "has_security": has_security, "secrets": secrets}
 
 
+_ID_PATTERN = re.compile(r"\{[^}]+\}")
+
 def _concrete(path: str, idval: str = "1") -> str:
     """Substitute {param} placeholders with a benign value so the path is requestable."""
-    return re.sub(r"\{[^}]+\}", idval, path)
+    return _ID_PATTERN.sub(idval, path)
 
 
 def _enumerate(ip: str, port, spec: dict) -> tuple[list, list, int]:

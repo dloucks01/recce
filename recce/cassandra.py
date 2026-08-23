@@ -23,7 +23,7 @@ import socket
 import struct
 
 from .models import Host, Port
-from .svccommon import finding_builder
+from .svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
 
 _PORTS = (9042, 9142)              # 9042 CQL, 9142 CQL-over-TLS (native SSL)
 _DEFAULT_PORT = 9042
@@ -335,14 +335,8 @@ def runbook(ip: str, port: int) -> list[dict]:
             for ph, t, c, w in steps]
 
 
-def proof_html(command, output, banner: str = "") -> str:
-    from . import mssql
-    return mssql.proof_html(command, output, prompt="cqlsh> ", banner=banner)
-
-
-def findings_to_vulns(fs: list[dict]) -> dict:
-    from .svccommon import findings_to_vulns as _f2v
-    return _f2v(fs, "cassandra", _DEFAULT_PORT)
+proof_html = make_proof_html_wrapper("cqlsh> ")
+findings_to_vulns = make_findings_to_vulns_wrapper("cassandra", _DEFAULT_PORT)
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,

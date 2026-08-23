@@ -81,3 +81,19 @@ def findings_to_vulns(fs: list[dict], source: str, default_port: int,
             output=out_text.strip(), remediation=f.get("remediation", ""),
             evidence=evidence))
     return by_ip
+
+
+def make_proof_html_wrapper(prompt: str):
+    """Factory for proof_html wrappers with a custom prompt."""
+    def proof_html(command, output, banner: str = "") -> str:
+        from . import mssql
+        return mssql.proof_html(command, output, prompt=prompt, banner=banner)
+    return proof_html
+
+
+def make_findings_to_vulns_wrapper(module_name: str, default_port: int):
+    """Factory for findings_to_vulns wrappers with a specific module name and port."""
+    _f2v = findings_to_vulns
+    def wrapper(fs: list[dict]) -> dict:
+        return _f2v(fs, module_name, default_port)
+    return wrapper

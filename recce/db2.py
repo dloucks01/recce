@@ -23,7 +23,7 @@ import socket
 import struct
 
 from .models import Host, Port
-from .svccommon import finding_builder
+from .svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
 
 _PORTS = (50000, 50001, 60000, 523, 25000)
 _DEFAULT_PORT = 50000
@@ -286,14 +286,8 @@ def runbook(ip: str, port: int) -> list[dict]:
             for ph, t, c, w in steps]
 
 
-def proof_html(command, output, banner: str = "") -> str:
-    from . import mssql
-    return mssql.proof_html(command, output, prompt="db2 => ", banner=banner)
-
-
-def findings_to_vulns(fs: list[dict]) -> dict:
-    from .svccommon import findings_to_vulns as _f2v
-    return _f2v(fs, "db2", _DEFAULT_PORT)
+proof_html = make_proof_html_wrapper("db2 => ")
+findings_to_vulns = make_findings_to_vulns_wrapper("db2", _DEFAULT_PORT)
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
