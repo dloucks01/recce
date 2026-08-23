@@ -187,3 +187,14 @@ class Presence:
         alive = {t: s for t, s in list(self._seen.items()) if now - s < self._ttl}
         self._seen = alive
         return sorted(alive)
+
+
+class Collab:
+    """In-memory collaboration state for this server session."""
+
+    def __init__(self) -> None:
+        self.assignments: dict[str, str] = {}  # ip -> tester
+        self.online: set[str] = set()  # currently online testers
+        self.activity: list[dict] = []  # activity log
+        self.credentials: dict = {}  # looted creds
+        self.messages: list[dict] = []  # chat messages

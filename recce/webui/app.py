@@ -24,6 +24,8 @@ from .routes import (
     register_collab_routes,
     register_findings_routes,
     register_report_routes,
+    register_act_spray_routes,
+    register_data_exchange_routes,
 )
 from .helpers import cmd, flag
 
@@ -112,16 +114,24 @@ def create_app(eng_dir: str) -> FastAPI:
     from .collab import Collab
     from .jobs import JobManager
 
-    # Load engagement
-    from recce.engagement import Engagement
+    # Setup paths
+    from ..cli import _open_paths
     try:
-        eng = Engagement(eng_dir)
-    except FileNotFoundError:
+        db_path = _open_paths(eng_dir)["db"]
+    except (FileNotFoundError, KeyError):
         raise RuntimeError(f"Engagement not found: {eng_dir}")
 
-    # Initialize collabor ation & job manager
+    # Minimal engagement proxy (routes expect .db_path and .dir)
+    class EngagementProxy:
+        def __init__(self, dir_path: str, db: str):
+            self.dir = dir_path
+            self.db_path = db
+
+    eng = EngagementProxy(eng_dir, db_path)
+
+    # Initialize collaboration & job manager
     collab = Collab()
-    job_manager = JobManager(eng)
+    job_manager = JobManager()
 
     # Create FastAPI app
     app = FastAPI(title="recce webui", lifespan=lifespan)
@@ -147,6 +157,8 @@ def create_app(eng_dir: str) -> FastAPI:
     register_collab_routes(app, collab)
     register_findings_routes(app, eng)
     register_report_routes(app, eng)
+    register_act_spray_routes(app, eng)
+    register_data_exchange_routes(app, eng, job_manager)
 
     # ======== STATIC FILES & FRONTEND ========
     static_dir = os.path.join(os.path.dirname(__file__), "frontend", "dist")
