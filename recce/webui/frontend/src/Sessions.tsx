@@ -27,8 +27,14 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
   }
   useEffect(() => {
     refresh();
-    const id = window.setInterval(refresh, 2000);
-    return () => window.clearInterval(id);
+    // instant updates: the broker pushes session events (caught / status / upgrading) over
+    // SSE, so a shell appears the moment it lands. A slow poll stays as a safety net.
+    const es = new EventSource("/api/events");
+    es.onmessage = (m) => {
+      try { if (JSON.parse(m.data).type === "session") refresh(); } catch { /* ignore */ }
+    };
+    const id = window.setInterval(refresh, 6000);
+    return () => { es.close(); window.clearInterval(id); };
   }, []);
 
   async function addListener() {

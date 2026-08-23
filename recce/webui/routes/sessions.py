@@ -38,6 +38,11 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
     if _link_host not in mgr.hooks:
         mgr.hooks.append(_link_host)
 
+    # push every session status change (catch / reconnect / drop) to the SSE broker so the
+    # Sessions tab updates instantly instead of waiting for a poll
+    mgr.on_change = lambda s: broker.publish(
+        {"type": "session", "event": s.status, "id": s.id})
+
     # --- listeners ---------------------------------------------------------------
     @app.get("/api/listeners")
     def list_listeners():

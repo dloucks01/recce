@@ -25,6 +25,7 @@ class SessionManager:
         # engagement hooks: callables(session) run on adoption (host link, activity, …).
         # Kept as callbacks so this module stays free of webui/store imports.
         self.hooks: list = []
+        self.on_change = None                       # callback(session, status) for live updates
         self.store = store                          # optional SessionStore for durability
         self._pending: dict[str, bytearray] = {}    # per-session transcript, batched
         self._flush_task = None
@@ -115,6 +116,7 @@ class SessionManager:
             if self.store is not None:
                 self._record(sess.id, initial)
         self._save(sess)                     # persist metadata (status → live)
+        self._changed(sess)                  # push a live update (catch / reconnect)
         # pump target → session output in the background
         asyncio.ensure_future(self._pump(sess, transport))
         if new:                              # host-link + "shell caught" only once, not per reconnect
@@ -157,6 +159,14 @@ class SessionManager:
                 if self.store is not None:
                     self._flush_all()             # flush remaining transcript
                     self._save(sess)              # persist status → stale
+                self._changed(sess)               # push a live update (dropped → stale)
+
+    def _changed(self, sess: Session) -> None:
+        if self.on_change is not None:
+            try:
+                self.on_change(sess)
+            except Exception:  # noqa: BLE001 — a listener must never break the session loop
+                pass
 
     # --- access ------------------------------------------------------------------
     def get(self, session_id: str) -> Session | None:
