@@ -35,6 +35,12 @@ class Job:
 
 
 _MAX_JOBS = 60          # cap the in-memory registry; oldest FINISHED jobs are evicted
+_MAX_RUNNING = 8        # admission cap: never let more than N scans spawn subprocesses at once
+
+
+class TooManyJobs(Exception):
+    """Raised when the concurrent-running-scan cap is hit, so the API can 429 instead
+    of letting an unauthenticated caller fork-bomb the box with recce/nmap children."""
 
 
 class JobManager:
@@ -46,9 +52,13 @@ class JobManager:
         self._lock = threading.Lock()
 
     def start(self, argv: list[str], on_done=None) -> Job:
-        jid = str(next(self._counter))
-        job = Job(jid, argv)
         with self._lock:
+            running = sum(1 for j in self._jobs.values() if j.status == "running")
+            if running >= _MAX_RUNNING:
+                raise TooManyJobs(f"{running} scans already running (max {_MAX_RUNNING}); "
+                                  "wait for one to finish")
+            jid = str(next(self._counter))
+            job = Job(jid, argv)
             self._jobs[jid] = job
             self._prune()
         threading.Thread(target=self._run, args=(job, argv, on_done), daemon=True).start()

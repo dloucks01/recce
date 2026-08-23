@@ -25,7 +25,7 @@ function useTester() {
     localStorage.setItem("recce.tester", n);
     setWho(n);
   }
-  return { tester, who, nameInput, setNameInput, saveTester };
+  return { tester, who, setWho, nameInput, setNameInput, saveTester };
 }
 
 // Theme & density preferences
@@ -250,12 +250,12 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [flash, setFlash] = useState<string | null>(null);
   const [scanRunning, setScanRunning] = useState(false);
-  const [scanLog, setScanLog] = useState<string[]>([]);
+  const [, setScanLog] = useState<string[]>([]);
   const flashTimer = useRef<number | undefined>(undefined);
 
   // Preferences & identity
   const { theme, setTheme, density, setDensity } = usePreferences();
-  const { tester, who, nameInput, setNameInput, saveTester } = useTester();
+  const { tester, who, setWho, nameInput, setNameInput, saveTester } = useTester();
   const collab = useCollab();
 
   // "/" key to focus search
@@ -376,7 +376,7 @@ export default function App() {
   const badges: Record<TabId, number | undefined> = {
     dashboard: undefined,
     scan: scanRunning ? 1 : undefined,
-    findings: findings.filter((f) => f.tier === "finding").length || undefined,
+    findings: findings.filter((f) => f.tier !== "lead").length || undefined,
     hosts: hosts.length || undefined,
     report: undefined,
     act: undefined,
@@ -393,62 +393,68 @@ export default function App() {
           <TabBar active={tab} onSwitch={setTab} badges={badges} />
         </div>
         <div className="header-right">
-          <PresenceBar tester={tester} />
+          <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
           <button className="action-btn" onClick={() => setShowImport(!showImport)} title="Import tool output">
             📥 Import
           </button>
           <ActivityButton />
           <ChatButton />
-          <AddMenu
-            tester={tester}
-            who={who}
-            nameInput={nameInput}
-            setNameInput={setNameInput}
-            saveTester={saveTester}
-            theme={theme}
-            setTheme={setTheme}
-            density={density}
-            setDensity={setDensity}
-          />
+          <AddMenu onDone={(m) => note(m)} />
+          <button className="theme-tog" onClick={() => setDensity(density === "compact" ? "comfortable" : "compact")}
+                  title={density === "compact" ? "comfortable rows" : "compact rows"} aria-label="toggle density">
+            {density === "compact" ? "☰" : "≡"}
+          </button>
+          <button className="theme-tog" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+                  title="toggle light / dark" aria-label="toggle theme">
+            {theme === "dark" ? "☀" : "☾"}
+          </button>
+          {who ? (
+            <button className="whoami" onClick={() => setWho("")} title="click to change your name">{tester}</button>
+          ) : (
+            <form className="namegate" onSubmit={(e) => { e.preventDefault(); saveTester(nameInput); }}>
+              <input placeholder="your name…" value={nameInput} onChange={(e) => setNameInput(e.target.value)} autoFocus />
+              <button type="submit" disabled={!nameInput.trim()}>Set</button>
+            </form>
+          )}
         </div>
       </div>
 
       {/* Main content */}
       <div className="app-main">
         <div className="main-content">
-          {tab === "dashboard" && <Dashboard nav={nav} hosts={hosts} findings={findings} ov={ov} />}
+          {tab === "dashboard" && (ov ? <Dashboard nav={nav} hosts={hosts} ov={ov} /> : <div className="loading">Loading…</div>)}
           {tab === "scan" && (
             <ScanTab tester={tester} onRunning={setScanRunning} onLog={setScanLog} />
           )}
           {tab === "findings" && (
             <Findings
               findings={findings}
-              filters={ff}
-              onFiltersChange={setFf}
+              f={ff}
+              setF={(o) => setFf((p) => ({ ...p, ...o }))}
               onTick={onTick}
               onNote={onNote}
               nav={nav}
             />
           )}
-          {tab === "hosts" && (
+          {tab === "hosts" && (ov ? (
             <Hosts
               hosts={hosts}
+              ov={ov}
               q={hostQ}
-              onQChange={setHostQ}
-              coverage={hostCov}
-              onCoverageChange={setHostCov}
+              setQ={setHostQ}
+              cov={hostCov}
+              setCov={setHostCov}
               who={hostWho}
-              onWhoChange={setHostWho}
-              onOpenDrawer={setDrawerIp}
+              setWho={setHostWho}
               onTick={onTick}
               onNote={onNote}
               nav={nav}
             />
-          )}
+          ) : <div className="loading">Loading…</div>)}
           {tab === "report" && <ReportTab onRefresh={() => refresh().catch(() => {})} />}
-          {tab === "act" && <Act hosts={hosts} onOpenHost={setDrawerIp} />}
-          {tab === "loot" && <Loot findings={findings} />}
-          {tab === "playbook" && pb && <Playbook pb={pb} />}
+          {tab === "act" && <Act nav={nav} />}
+          {tab === "loot" && <Loot />}
+          {tab === "playbook" && <Playbook pb={pb} nav={nav} />}
         </div>
 
         {/* Right sidebar: collab */}
@@ -465,7 +471,7 @@ export default function App() {
       {showImport && (
         <ImportModal
           onClose={() => setShowImport(false)}
-          onJob={(id) => {
+          onJob={() => {
             note("Import started");
             setTab("scan");
           }}
@@ -480,10 +486,6 @@ export default function App() {
           onClose={() => setDrawerIp(null)}
           onTick={onTick}
           onNote={onNote}
-          onOpenFinding={(f) => {
-            nav.toFindings({ host: f.ip });
-            setDrawerIp(null);
-          }}
         />
       )}
     </div>

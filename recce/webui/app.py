@@ -17,11 +17,10 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .jobs import JobManager
+from .jobs import JobManager, TooManyJobs
 from ._common import _Broker
 # Re-exported so `from recce.webui.app import _detect_import_kind` keeps working.
 from ._common import _detect_import_kind, _import_preview, _import_signatures  # noqa: F401
@@ -51,17 +50,27 @@ def create_app(eng_dir: str) -> FastAPI:
         yield
 
     app = FastAPI(title="recce workbench", version=__version__, lifespan=_lifespan)
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                       allow_headers=["*"])
+    # No permissive CORS: the SPA is served same-origin (and `npm run dev` proxies /api),
+    # so no cross-origin access is needed. A wildcard here would let any web page the
+    # tester visits read /api/credentials etc. cross-origin — there is no auth to stop it.
+
+    @app.exception_handler(TooManyJobs)
+    async def _too_many_jobs(_request, exc):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": str(exc)}, status_code=429)
 
     @app.middleware("http")
     async def _limit_body(request, call_next):
         # Reject an oversized upload from its Content-Length before the whole body is
         # buffered into memory (a ~25 MB decoded import is ~34 MB of base64).
+        from fastapi.responses import JSONResponse
         cl = request.headers.get("content-length", "")
         if cl.isdigit() and int(cl) > 45_000_000:
-            from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "request too large (max ~45 MB)"}, status_code=413)
+        # Require a declared length on the upload endpoint so a chunked / length-omitted
+        # body can't stream past the size guard before the handler's decoded-size check.
+        if request.url.path == "/api/import" and request.method == "POST" and not cl.isdigit():
+            return JSONResponse({"detail": "Content-Length required"}, status_code=411)
         return await call_next(request)
 
     jobs = JobManager()
