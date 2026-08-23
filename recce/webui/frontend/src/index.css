@@ -944,3 +944,9 @@ body { background: var(--ground); color: var(--text); }
   border: 1px solid color-mix(in srgb, var(--crit) 30%, transparent); border-radius: 7px; font-size: 12px; }
 .badge.intrusive { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 45%, transparent); font-weight: 700; }
 .linkish.danger { color: var(--crit); margin-left: auto; }
+
+/* persistence sweep banner */
+.persist-banner { display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  padding: 12px 16px; background: color-mix(in srgb, var(--crit) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--crit) 40%, transparent); border-radius: 10px; font-size: 13px; }
+.danger-btn { background: var(--crit); white-space: nowrap; }

@@ -319,6 +319,32 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             return []
         return mgr.store.list_persistence(host_ip=host)
 
+    @app.post("/api/persistence/remove-all")
+    async def remove_all_persistence():
+        """Engagement-end sweep: reverse every tracked backdoor across all hosts, and LOUDLY
+        report any it couldn't reach (host offline → needs manual cleanup)."""
+        import time
+        if mgr.store is None:
+            raise HTTPException(500, "no store")
+        removed: list[str] = []
+        failed: list[dict] = []
+        for rec in mgr.store.list_persistence(active_only=True):
+            target = next((s for s in mgr.sessions.values()
+                           if s.host_ip == rec["host_ip"] and s.connected), None)
+            if target is None:
+                failed.append({"id": rec["id"], "host_ip": rec["host_ip"],
+                               "path": rec["artifact_path"], "reason": "no live shell — MANUAL CLEANUP"})
+                continue
+            out = await target.run_and_capture(rec["remove_cmd"].encode(), timeout=10.0)
+            if b"RECCE_UNPERSIST_OK" in out:
+                mgr.store.mark_persistence_removed(rec["id"], time.time())
+                removed.append(rec["id"])
+            else:
+                failed.append({"id": rec["id"], "host_ip": rec["host_ip"],
+                               "path": rec["artifact_path"], "reason": "removal didn't confirm — verify by hand"})
+        broker.publish({"type": "session", "event": "unpersist", "id": "all"})
+        return {"removed": len(removed), "failed": failed}
+
     @app.post("/api/persistence/{pid}/remove")
     async def remove_persistence(pid: str):
         import time

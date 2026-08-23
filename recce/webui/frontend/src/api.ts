@@ -314,3 +314,8 @@ export async function removePersistence(id: string): Promise<{ ok: boolean; reas
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
   return r.json();
 }
+export async function removeAllPersistence(): Promise<{ removed: number; failed: { id: string; host_ip: string; path: string; reason: string }[] }> {
+  const r = await fetch("/api/persistence/remove-all", { method: "POST", headers: jsonHeaders() });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}

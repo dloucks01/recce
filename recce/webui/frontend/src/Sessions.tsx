@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener,
   lootCred, getTranscript, upgradeSession, runEnum, downloadFromShell, uploadToShell,
-  persistSession } from "./api";
+  persistSession, getPersistence, removeAllPersistence, Persistence } from "./api";
 import { ShellTerminal } from "./Terminal";
 import { PayloadCatalog } from "./Payloads";
 
@@ -15,16 +15,31 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
   const [tls, setTls] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [payloadsFor, setPayloadsFor] = useState<string | null>(null);
+  const [persist, setPersist] = useState<Persistence[]>([]);
 
   // open a specific session when jumped here from the host drawer
   useEffect(() => { if (focus) setOpen(focus); }, [focus]);
 
   async function refresh() {
     try {
-      const [s, l] = await Promise.all([getSessions(), getListeners()]);
+      const [s, l, p] = await Promise.all([getSessions(), getListeners(), getPersistence()]);
       setSessions(s);
       setListeners(l);
+      setPersist(p.filter((x) => !x.removed_at));
     } catch { /* transient */ }
+  }
+  async function sweepPersistence() {
+    if (!window.confirm(`Remove ALL ${persist.length} tracked persistence artifact(s) across every host?`)) return;
+    try {
+      const r = await removeAllPersistence();
+      if (r.failed.length) {
+        alert(`Removed ${r.removed}. ⚠ ${r.failed.length} COULD NOT be removed (need MANUAL cleanup):\n\n` +
+          r.failed.map((f) => `  ${f.host_ip}  ${f.path}  — ${f.reason}`).join("\n"));
+      } else {
+        alert(`✓ Removed all ${r.removed} persistence artifact(s). Nothing left behind.`);
+      }
+      refresh();
+    } catch (e) { alert(String(e instanceof Error ? e.message : e)); }
   }
   useEffect(() => {
     refresh();
@@ -52,6 +67,13 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
 
   return (
     <div className="sessions-view">
+      {persist.length > 0 && (
+        <div className="persist-banner">
+          <span>⚠ <b>{persist.length}</b> active persistence artifact(s) installed across{" "}
+            {new Set(persist.map((p) => p.host_ip)).size} host(s) — <b>remove before you leave the engagement</b></span>
+          <button className="run danger-btn" onClick={sweepPersistence}>Remove all</button>
+        </div>
+      )}
       <section className="panel">
         <div className="panel-h">
           <h3>Listeners</h3>
