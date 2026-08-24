@@ -1,20 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Finding, Host, Overview, fetchAll, postTick, postNote, postImport,
-  fetchPlaybook, Playbook as PlaybookData,
-} from "./api";
+import { postTick, postNote } from "./api";
+import { ImportModal, ShortcutHelp } from "./modals";
+import { useEngagement } from "./useEngagement";
 import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
-import { useEscape } from "./ui";
 import { TabBar, TabId } from "./TabBar";
 import { Sessions } from "./sessions";
 import { ScanTab } from "./ScanTab";
 import { ReportTab } from "./ReportTab";
 import { CollabSidebar } from "./CollabSidebar";
 import { toast, Toast } from "./toast";
-
-const POLL_MS = 20000; // constantly-updating analysis: re-pull on a slow heartbeat
 
 // Tester identity (localStorage-persisted)
 function useTester() {
@@ -48,214 +44,6 @@ function usePreferences() {
   return { theme, setTheme, density, setDensity };
 }
 
-// Import modal (DRY from existing App.tsx)
-const IMPORT_TOOLS: [string, string][] = [
-  ["auto", "Auto-detect"],
-  ["nmap", "nmap / masscan  (.xml / .gnmap / .nmap)"],
-  ["nessus", "Nessus  (.nessus export)"],
-  ["openvas", "OpenVAS / Greenbone  (GVM XML)"],
-  ["nuclei", "nuclei  (JSON / JSONL)"],
-  ["testssl", "testssl.sh  (JSON)"],
-  ["nxc", "netexec / crackmapexec  (smb / ldap / mssql / winrm)"],
-  ["kerberoast", "impacket GetUserSPNs  (Kerberoast)"],
-  ["asrep", "impacket GetNPUsers  (AS-REP)"],
-  ["secretsdump", "impacket secretsdump  (NTLM hashes)"],
-  ["creds", "Credential list  (user:password per line)"],
-  ["bloodhound", "BloodHound / Certipy  (.zip / certipy .json)"],
-  ["loot", "recce on-target enum  (recce-enum.sh/.ps1)"],
-  ["fieldkit", "fieldkit findings  (findings.json)"],
-];
-
-const isBinaryFile = (name: string) => /\.zip$/i.test(name);
-
-function ImportModal(
-  { onClose, onJob, onDone }: { onClose: () => void; onJob: (id: string) => void; onDone: (msg: string) => void }
-) {
-  const [kind, setKind] = useState("auto");
-  const [text, setText] = useState("");
-  const [filename, setFilename] = useState("");
-  const [encoding, setEncoding] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [drag, setDrag] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [prev, setPrev] = useState<
-    { kind: string; count: number; detail: string; sample: string[]; warning: string } | null
-  >(null);
-  useEscape(onClose, !busy);
-
-  function readFile(file: File) {
-    const r = new FileReader();
-    setFilename(file.name);
-    setPrev(null);
-    setErr(null);
-    r.onload = () => {
-      const url = String(r.result || "");
-      setText(url.slice(url.indexOf(",") + 1));
-      setEncoding("base64");
-    };
-    r.readAsDataURL(file);
-    if (isBinaryFile(file.name) && kind === "auto") setKind("bloodhound");
-  }
-
-  async function doPreview() {
-    if (!text.trim() || busy) return;
-    setBusy(true);
-    setErr(null);
-    setPrev(null);
-    try {
-      const res = await postImport(text, filename, kind, encoding, true);
-      if (res.mode === "preview") setPrev(res);
-    } catch (e) {
-      setErr(String(e instanceof Error ? e.message : e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function go() {
-    if (!text.trim() || busy) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      const res = await postImport(text, filename, kind, encoding);
-      if (res.mode === "job") {
-        onJob(res.id);
-        onClose();
-      } else if (res.mode === "done") {
-        onDone(res.summary || `imported ${res.added} item(s)`);
-        onClose();
-      }
-    } catch (e) {
-      setErr(String(e instanceof Error ? e.message : e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <>
-      <div className="modal-backdrop" onClick={onClose} />
-      <div className="modal" role="dialog" aria-label="Import tool output">
-        <div className="modal-h">
-          <h3>Import tool output</h3>
-          <button className="drawer-x" onClick={onClose} aria-label="close">
-            ✕
-          </button>
-        </div>
-        <p className="modal-sub">
-          Drop a file or paste output from any supported tool. recce folds it into this engagement and every open
-          browser updates — no terminal needed.
-        </p>
-        <label className="imp-field">
-          Tool
-          <select value={kind} onChange={(e) => {
-            setKind(e.target.value);
-            setPrev(null);
-          }} disabled={busy}>
-            {IMPORT_TOOLS.map(([k, label]) => (
-              <option key={k} value={k}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div
-          className={"dropzone" + (drag ? " over" : "")}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDrag(true);
-          }}
-          onDragLeave={() => setDrag(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDrag(false);
-            const f = e.dataTransfer.files[0];
-            if (f) readFile(f);
-          }}
-        >
-          <span>⭱ Drop a file here, or </span>
-          <label className="filepick">
-            browse
-            <input
-              type="file"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) readFile(f);
-              }}
-              hidden
-            />
-          </label>
-          {filename && <span className="imp-fn">· {filename}</span>}
-        </div>
-        <textarea
-          className="imp-paste"
-          placeholder="…or paste the tool output here"
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            setEncoding("");
-            setPrev(null);
-          }}
-          disabled={busy}
-        />
-        {prev && (
-          <div className={"imp-preview" + (prev.warning ? " warn" : "")}>
-            <div>
-              <b>{prev.kind}</b>
-              {prev.detail ? ` · ${prev.detail}` : ` · ${prev.count} item(s)`}
-            </div>
-            {prev.sample?.length > 0 && <ul>{prev.sample.map((s, i) => <li key={i}>{s}</li>)}</ul>}
-            {prev.warning && <div className="warn-msg">{prev.warning}</div>}
-          </div>
-        )}
-        {err && <div className="ranmsg warn-msg">{err}</div>}
-        <div className="modal-actions">
-          <button className="toggle" onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-          <button className="toggle" onClick={doPreview} disabled={busy || !text.trim()}>
-            Preview
-          </button>
-          <button className="run" onClick={go} disabled={busy || !text.trim()}>
-            {busy ? "Importing…" : "Import"}
-          </button>
-        </div>
-      </div>
-    </>
-  );
-}
-
-const SHORTCUTS: [string, string][] = [
-  ["Alt + 1-9", "Switch to Nth visible tab"],
-  ["Alt + I", "Toggle import modal"],
-  ["/", "Focus search"],
-  ["Esc", "Close panel / drawer"],
-  ["?", "Show this help"],
-];
-
-function ShortcutHelp({ onClose }: { onClose: () => void }) {
-  useEscape(onClose);
-  return (
-    <>
-      <div className="modal-backdrop" onClick={onClose} />
-      <div className="modal shortcut-help" role="dialog" aria-label="Keyboard shortcuts">
-        <div className="modal-h">
-          <h3>Keyboard shortcuts</h3>
-          <button className="drawer-x" onClick={onClose} aria-label="close">✕</button>
-        </div>
-        <div className="shortcut-list">
-          {SHORTCUTS.map(([key, desc]) => (
-            <div key={key} className="shortcut-row">
-              <kbd>{key}</kbd>
-              <span>{desc}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </>
-  );
-}
-
 // Main App
 const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "sessions", "report", "exploitation", "credentials", "playbook"];
 const isTab = (t: string): t is TabId => (VALID_TABS as string[]).includes(t);
@@ -277,11 +65,6 @@ function readUrlState() {
 
 export default function App() {
   const initialUrl = useRef(readUrlState()).current;
-  const [ov, setOv] = useState<Overview | null>(null);
-  const [findings, setFindings] = useState<Finding[]>([]);
-  const [hosts, setHosts] = useState<Host[]>([]);
-  const [pb, setPb] = useState<PlaybookData | null>(null);
-  const [err, setErr] = useState<string | null>(null);
   const [tab, setTab] = useState<TabId>(initialUrl.tab);
 
   // cross-tab filter state
@@ -380,67 +163,9 @@ export default function App() {
   // trigger one (including with an Undo action) without prop drilling.
   const note = useCallback((msg: string) => { toast.show(msg); }, []);
 
-  // Data refresh
-  const refresh = useCallback(async () => {
-    const [o, f, h] = await fetchAll();
-    setOv(o);
-    setFindings(f);
-    setHosts(h);
-    fetchPlaybook().then(setPb).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    refresh().catch((e) => setErr(String(e)));
-  }, [refresh]);
-
-  // Slow poll
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      refresh().catch(() => {});
-    }, POLL_MS);
-    return () => window.clearInterval(id);
-  }, [refresh]);
-
-  // Live cross-user events
-  useEffect(() => {
-    const es = new EventSource("/api/events");
-    es.onmessage = (m) => {
-      let d: any;
-      try {
-        d = JSON.parse(m.data);
-      } catch {
-        return;
-      }
-      if (d.type === "tick") {
-        setFindings((fs) => fs.map((f) => (f.key === d.key ? { ...f, reviewed: d.reviewed } : f)));
-        setHosts((hs) => hs.map((h) => (h.key === d.key ? { ...h, reviewed: d.reviewed } : h)));
-        if (d.tester !== tester) note(`${d.tester} ${d.reviewed ? "checked off" : "reopened"} an item`);
-      } else if (d.type === "note") {
-        setFindings((fs) => fs.map((f) => (f.key === d.key ? { ...f, notes: d.note } : f)));
-        setHosts((hs) => hs.map((h) => (h.key === d.key ? { ...h, notes: d.note } : h)));
-        if (d.tester !== tester) note(`${d.tester} left a note`);
-      } else if (d.type === "scan_started") {
-        note(`${d.tester} started a ${d.targets} scan`);
-      } else if (d.type === "scan") {
-        note(`${d.tester}'s scan ${d.status}`);
-        refresh().catch(() => {});
-      } else if (d.type === "import") {
-        if (d.tester !== tester) note(`${d.tester} imported ${d.kind} output`);
-        refresh().catch(() => {});
-      } else if (["assign", "label", "port_status", "dismiss", "add"].includes(d.type)) {
-        collab.refresh();
-        if (d.type === "add") refresh().catch(() => {});
-        if (d.by && d.by !== tester) {
-          if (d.type === "assign") note(`${d.by} ${d.tester ? "claimed" : "released"} ${d.ip}`);
-          else if (d.type === "add") note(`${d.by} added a ${d.what}`);
-        }
-      } else if (d.type === "chat" && d.msg) {
-        collab.pushChat(d.msg);
-        if (d.msg.tester !== tester) note(`💬 ${d.msg.tester}: ${d.msg.text || "sent an image"}`.slice(0, 80));
-      }
-    };
-    return () => es.close();
-  }, [tester, note, refresh, collab]);
+  // Engagement data: initial load + slow poll + live SSE. All owned by the hook.
+  const { ov, findings, hosts, pb, err, refresh, setFindings, setHosts } =
+    useEngagement(tester, note, collab);
 
   // Optimistic tick/note — with undo. On a big engagement this saves the tester
   // from hunting the row down after a misclick.
