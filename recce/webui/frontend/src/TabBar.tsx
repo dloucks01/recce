@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "sessions" | "report" | "exploitation" | "credentials" | "playbook";
 
@@ -9,12 +9,12 @@ const TAB_LABELS: Record<TabId, string> = {
   hosts: "Hosts",
   sessions: "Sessions",
   report: "Report",
-  exploitation: "Exploitation",
-  credentials: "Credentials",
+  exploitation: "Exploit",
+  credentials: "Creds",
   playbook: "Playbook",
 };
 
-const DEFAULT_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "sessions", "report", "exploitation"];
+const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "sessions", "report", "exploitation", "credentials", "playbook"];
 
 interface TabBarProps {
   active: TabId;
@@ -25,13 +25,34 @@ interface TabBarProps {
 export function TabBar({ active, onSwitch, badges }: TabBarProps) {
   const [tabs, setTabs] = useState<TabId[]>(() => {
     const saved = localStorage.getItem("recce.tabs");
-    return saved ? JSON.parse(saved) : DEFAULT_TABS;
+    if (saved) {
+      const parsed: TabId[] = JSON.parse(saved);
+      const missing = ALL_TABS.filter(t => !parsed.includes(t));
+      if (missing.length > 0) {
+        const merged = [...parsed, ...missing];
+        localStorage.setItem("recce.tabs", JSON.stringify(merged));
+        return merged;
+      }
+      return parsed;
+    }
+    return ALL_TABS;
   });
   const [dragging, setDragging] = useState<TabId | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     localStorage.setItem("recce.tabs", JSON.stringify(tabs));
   }, [tabs]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function close(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    }
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [menuOpen]);
 
   function handleDragStart(tab: TabId) {
     setDragging(tab);
@@ -63,8 +84,7 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
     }
   }
 
-  const allTabs: TabId[] = Object.keys(TAB_LABELS) as TabId[];
-  const hiddenTabs = allTabs.filter((t) => !tabs.includes(t));
+  const hiddenTabs = ALL_TABS.filter((t) => !tabs.includes(t));
 
   return (
     <div className="tabbar">
@@ -87,15 +107,16 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
           </button>
         ))}
       </div>
-      {hiddenTabs.length > 0 && (
-        <div className="tab-menu">
-          <button
-            className="tab-toggle"
-            title="Show/hide tabs"
-            aria-label="tab options"
-          >
-            ⋮
-          </button>
+      <div className="tab-menu" ref={menuRef}>
+        <button
+          className="tab-toggle"
+          title="Show/hide tabs"
+          aria-label="tab options"
+          onClick={() => setMenuOpen(!menuOpen)}
+        >
+          ⋮
+        </button>
+        {menuOpen && (
           <div className="tab-menu-popup">
             {hiddenTabs.map((tab) => (
               <button
@@ -118,8 +139,8 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
               </button>
             ))}
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

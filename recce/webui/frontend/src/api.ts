@@ -233,7 +233,7 @@ export async function fetchPlaybook(): Promise<Playbook> { return getJSON<Playbo
 // --- shell sessions ---------------------------------------------------------
 export interface SessionInfo {
   id: string; host_ip: string; host_port: number; kind: string;
-  status: "live" | "stale" | "dead"; pty: boolean;
+  status: "live" | "stale" | "dead"; pty: boolean; label: string;
   driver: string | null; attached: string[]; created: number; bytes: number;
 }
 export interface ListenerInfo { id: string; host: string; port: number; kind: string; status: string; }
@@ -251,6 +251,14 @@ export async function stopListener(id: string): Promise<void> {
   await fetch(`/api/listeners/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
+export async function patchSession(sessionId: string, patch: { label?: string }): Promise<SessionInfo> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PATCH", headers: jsonHeaders(), body: JSON.stringify(patch),
+  });
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
+
 export async function lootCred(sessionId: string, c: { username: string; secret: string; kind: string }): Promise<void> {
   const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/cred`, {
     method: "POST", headers: jsonHeaders(), body: JSON.stringify(c),
@@ -265,6 +273,15 @@ export async function getTranscript(sessionId: string): Promise<string> {
 export async function upgradeSession(sessionId: string):
   Promise<{ upgraded?: boolean; reason?: string; session_id?: string; callback: string }> {
   const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/upgrade`, {
+    method: "POST", headers: jsonHeaders(),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function spawnSession(sessionId: string):
+  Promise<{ ok: boolean; session_id?: string; pty?: boolean; reason?: string }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/spawn`, {
     method: "POST", headers: jsonHeaders(),
   });
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);

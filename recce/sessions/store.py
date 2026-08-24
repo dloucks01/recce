@@ -47,16 +47,19 @@ class SessionStore:
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(shell_sessions)")}
         if "pty" not in cols:
             self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN pty INTEGER DEFAULT 0")
+        if "label" not in cols:
+            self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN label TEXT DEFAULT ''")
+
 
     def save_session(self, s) -> None:
         closed = None if s.status == "live" else time.time()
         self._conn.execute(
-            "INSERT INTO shell_sessions(id,host_ip,host_port,kind,status,token,opened,closed,pty) "
-            "VALUES(?,?,?,?,?,?,?,?,?) "
+            "INSERT INTO shell_sessions(id,host_ip,host_port,kind,status,token,opened,closed,pty,label) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET status=excluded.status, closed=excluded.closed, "
-            "pty=excluded.pty",
+            "pty=excluded.pty, label=excluded.label",
             (s.id, s.host_ip, s.host_port, s.kind, s.status, s.token, s.created, closed,
-             1 if s.pty else 0))
+             1 if s.pty else 0, s.label))
         self._conn.commit()
 
     def append(self, session_id: str, data: bytes) -> None:
@@ -72,7 +75,7 @@ class SessionStore:
     def load_sessions(self) -> list[tuple[dict, bytes]]:
         """Every persisted session with its concatenated transcript, oldest first."""
         rows = self._conn.execute(
-            "SELECT id,host_ip,host_port,kind,status,token,opened,pty FROM shell_sessions "
+            "SELECT id,host_ip,host_port,kind,status,token,opened,pty,label FROM shell_sessions "
             "ORDER BY opened").fetchall()
         out: list[tuple[dict, bytes]] = []
         for r in rows:
@@ -82,7 +85,8 @@ class SessionStore:
             data = b"".join(bytes(c[1]) for c in chunks)
             self._seq[r[0]] = (chunks[-1][0] + 1) if chunks else 0   # continue the seq
             out.append(({"id": r[0], "host_ip": r[1], "host_port": r[2], "kind": r[3],
-                         "token": r[5], "opened": r[6], "pty": r[7]}, data))
+                         "token": r[5], "opened": r[6], "pty": r[7],
+                         "label": r[8] or ""}, data))
         return out
 
     def load_transcript(self, session_id: str, limit: int = 0) -> bytes:

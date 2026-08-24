@@ -33,6 +33,7 @@ class Session:
         self.created = time.time()
         self.status = "live"                   # live | stale | dead
         self.pty = False
+        self.label: str = ""                   # user-editable name ("initial foothold", etc.)
         self.driver: str | None = None         # tester id currently allowed to type
         self.attached: set[str] = set()        # presence — who's watching
         self.last_seen = time.time()           # last byte from the target (liveness)
@@ -55,6 +56,7 @@ class Session:
         s.token = meta["token"]
         s.created = meta.get("opened") or s.created
         s.pty = bool(meta.get("pty"))
+        s.label = meta.get("label", "")
         s.status = "stale"
         if transcript:
             tail = transcript[-_BUFFER_CAP:]
@@ -171,5 +173,5 @@ class Session:
     def info(self) -> dict:
         return {"id": self.id, "host_ip": self.host_ip, "host_port": self.host_port,
                 "kind": self.kind, "status": self.status, "pty": self.pty,
-                "driver": self.driver, "attached": sorted(self.attached),
+                "label": self.label, "driver": self.driver, "attached": sorted(self.attached),
                 "created": self.created, "last_seen": self.last_seen, "bytes": self._blen}

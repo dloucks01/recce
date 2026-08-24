@@ -1,11 +1,25 @@
 import { useEffect, useState } from "react";
 import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener,
   lootCred, getTranscript, upgradeSession, runEnum, downloadFromShell, uploadToShell,
-  persistSession, getPersistence, removeAllPersistence, Persistence,
+  persistSession, getPersistence, removeAllPersistence, Persistence, patchSession,
+  spawnSession,
   PortFwd, startPortFwd, stopPortFwd, listPortFwds,
   TunnelStatus, startTunnel, stopTunnel, tunnelStatus } from "./api";
 import { ShellTerminal } from "./Terminal";
 import { PayloadCatalog, StabilizeGuide, PostExploitRef, PivotGuide, ToolCatalog } from "./Payloads";
+
+function relTime(epoch: number): string {
+  const d = Math.floor((Date.now() / 1000) - epoch);
+  if (d < 60) return "just now";
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+}
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n}B`;
+  if (n < 1048576) return `${(n / 1024).toFixed(0)}KB`;
+  return `${(n / 1048576).toFixed(1)}MB`;
+}
 
 // The Sessions tab: open listeners, watch caught shells land (grouped by host), and drive
 // them collaboratively. The whole team sees the same list on the one shared server.
@@ -172,14 +186,17 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
                 </div>
                 {!isCollapsed && (
                   <div className="sess-group-items">
-                    {group.map((s) => (
+                    {group.map((s, idx) => (
                       <button key={s.id} className={"session-item" + (s.id === open ? " sel" : "")}
                               onClick={() => setOpen(s.id === open ? null : s.id)}>
                         <span className={"sess-dot " + (s.status === "live" ? "live" : "stale")} />
+                        <span className="mono sess-id" title={s.id}>{s.id.slice(0, 8)}</span>
                         <span className="badge">{s.status}</span>
                         {s.pty && <span className="badge pty" title="robust PTY (auto-reconnect stager)">PTY</span>}
+                        {s.label && <span className="sess-label" title={s.label}>{s.label}</span>}
                         {s.driver && <span className="muted">▸ {s.driver}</span>}
                         {s.attached.length > 0 && <span className="muted">👁 {s.attached.length}</span>}
+                        <span className="muted sess-meta">{relTime(s.created)}{s.bytes > 0 ? ` · ${fmtBytes(s.bytes)}` : ""}</span>
                       </button>
                     ))}
                   </div>
@@ -193,8 +210,18 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
       {openSession && (
         <section className="panel">
           <div className="panel-h">
-            <h3>Terminal — <span className="mono">{openSession.host_ip}</span></h3>
+            <h3>Terminal — <span className="mono">{openSession.host_ip}</span>
+              <span className="muted" style={{fontSize: "0.8em", marginLeft: 8}}>{openSession.id.slice(0, 8)}</span>
+            </h3>
             <div className="sess-host-actions">
+              <input className="sess-label-input" placeholder="label this session…"
+                     defaultValue={openSession.label}
+                     onBlur={(e) => {
+                       const v = e.target.value.trim();
+                       if (v !== openSession.label) patchSession(openSession.id, { label: v }).then(refresh);
+                     }}
+                     onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+              />
               {onViewHost && (
                 <button className="linkish" onClick={() => onViewHost(openSession.host_ip)}
                         title="open host detail drawer">host detail</button>
@@ -488,52 +515,95 @@ function SessionTools({ session }: { session: SessionInfo }) {
     } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
     finally { setBusy(false); }
   }
+  async function doSpawn() {
+    setBusy(true); setMsg("spawning a new session on the same host…");
+    try {
+      const r = await spawnSession(session.id);
+      if (r.ok) setMsg(`✓ new session spawned (${r.session_id?.slice(0, 8)})${r.pty ? " — PTY" : ""}`);
+      else setMsg(`⚠ spawn failed — ${r.reason || "unknown"}`);
+    } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
   const [openRef, setOpenRef] = useState<string | null>(null);
   const toggleRef = (key: string) => setOpenRef(openRef === key ? null : key);
 
   return (
     <div className="session-tools">
       {!session.pty && session.status === "live" && (
-        <div className="upgrade-row">
+        <div className="st-upgrade">
           <button className="run upgrade-btn" onClick={upgrade} disabled={upgrading}>
             {upgrading ? "Upgrading…" : "⤴ Upgrade to robust PTY"}
           </button>
           <span className="muted small">auto-pivots this raw shell into a self-healing, full-PTY session</span>
         </div>
       )}
-      <div className="session-actions">
-        <button className="toggle enum-btn" onClick={enumHost} disabled={busy}
-                title="run recce's on-target enumeration through this shell and fold the findings into the host">
-          🔎 Run enum → findings
-        </button>
-        <input className="scan-in" placeholder="path to download e.g. /etc/passwd" value={dlPath}
-               onChange={(e) => setDlPath(e.target.value)} />
-        <button className="toggle" onClick={download} disabled={busy || !dlPath.trim()}>⭳ Download</button>
-        <label className="toggle upload-lbl">⭱ Upload<input type="file" hidden
-               onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); }} /></label>
-        <button className="toggle persist-btn" onClick={persist} disabled={busy}
-                title="INTRUSIVE — install cron persistence so the shell survives reboot/kill (tracked + removable)">
-          🔒 Persist
-        </button>
+
+      <div className="st-section">
+        <div className="st-section-label">Actions</div>
+        <div className="st-actions-grid">
+          <button className="st-action" onClick={enumHost} disabled={busy}
+                  title="run recce's on-target enumeration through this shell and fold the findings into the host">
+            <span className="st-action-ic">🔎</span>
+            <span className="st-action-label">Enumerate</span>
+            <span className="st-action-desc">on-target recon</span>
+          </button>
+          <button className="st-action persist" onClick={persist} disabled={busy}
+                  title="INTRUSIVE — install cron persistence so the shell survives reboot/kill (tracked + removable)">
+            <span className="st-action-ic">🔒</span>
+            <span className="st-action-label">Persist</span>
+            <span className="st-action-desc">cron backdoor</span>
+          </button>
+          {session.pty && session.status === "live" && (
+            <button className="st-action" onClick={doSpawn} disabled={busy}
+                    title="Spawn an additional independent session on this host">
+              <span className="st-action-ic">＋</span>
+              <span className="st-action-label">Spawn</span>
+              <span className="st-action-desc">new session</span>
+            </button>
+          )}
+          <button className="st-action" onClick={saveTranscript}>
+            <span className="st-action-ic">📋</span>
+            <span className="st-action-label">Transcript</span>
+            <span className="st-action-desc">save session log</span>
+          </button>
+        </div>
       </div>
-      <div className="loot-cred">
-        <span className="muted small">Loot a credential from this shell:</span>
-        <input className="scan-in" placeholder="username" value={u} onChange={(e) => setU(e.target.value)} />
-        <input className="scan-in" placeholder="secret" value={p} onChange={(e) => setP(e.target.value)} />
-        <select value={kind} onChange={(e) => setKind(e.target.value)}>
-          <option value="password">password</option>
-          <option value="nthash">NT hash</option>
-          <option value="hash">hash</option>
-        </select>
-        <button className="toggle" onClick={loot} disabled={!u && !p}>＋ Loot</button>
-        <button className="toggle" onClick={saveTranscript}>⭳ Transcript</button>
+
+      <div className="st-section">
+        <div className="st-section-label">File Transfer</div>
+        <div className="st-file-row">
+          <input className="scan-in" placeholder="remote path, e.g. /etc/shadow" value={dlPath}
+                 onChange={(e) => setDlPath(e.target.value)} />
+          <button className="toggle" onClick={download} disabled={busy || !dlPath.trim()}>⭳ Download</button>
+          <label className="toggle upload-lbl">⭱ Upload<input type="file" hidden
+                 onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); }} /></label>
+        </div>
       </div>
+
+      <div className="st-section">
+        <div className="st-section-label">Loot Credential</div>
+        <div className="st-loot-row">
+          <input className="scan-in" placeholder="username" value={u} onChange={(e) => setU(e.target.value)} />
+          <input className="scan-in" placeholder="secret" value={p} onChange={(e) => setP(e.target.value)} />
+          <select className="st-loot-select" value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="password">password</option>
+            <option value="nthash">NT hash</option>
+            <option value="hash">hash</option>
+          </select>
+          <button className="toggle" onClick={loot} disabled={!u && !p}>＋ Loot</button>
+        </div>
+      </div>
+
       {msg && <div className="ranmsg">{msg}</div>}
 
-      <TunnelPanel session={session} />
-      <PortForwardPanel session={session} />
+      <div className="st-section">
+        <div className="st-section-label">Networking</div>
+        <TunnelPanel session={session} />
+        <PortForwardPanel session={session} />
+      </div>
 
       <div className="st-refs">
+        <div className="st-section-label">Reference</div>
         <div className="st-refs-bar">
           <button className={`st-ref-tab ${openRef === "stabilize" ? "active" : ""}`}
                   onClick={() => toggleRef("stabilize")}>

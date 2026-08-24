@@ -47,6 +47,9 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
       } else if (m.t === "presence") {
         setDriver(m.driver);
         setAttached(m.attached || []);
+        if (!m.driver && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ t: "wheel" }));
+        }
       } else if (m.t === "status") {
         setLive(m.status === "live");
         if (m.status !== "live") term.write("\r\n\x1b[33m[session detached — shell dropped]\x1b[0m\r\n");
@@ -58,6 +61,9 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
     term.onData((d) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: "in", data: strToB64(d) }));
     });
+
+    // focus the terminal so keyboard input works immediately
+    setTimeout(() => term.focus(), 100);
 
     return () => {
       window.removeEventListener("resize", onResize);

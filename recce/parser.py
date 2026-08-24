@@ -284,7 +284,7 @@ def _accounts_from_host_scripts(host_ip: str, script: Script) -> list[Account]:
     return accounts
 
 
-_ENTITY_DECL_RE = re.compile(rb"<!(?:DOCTYPE|ENTITY)", re.I)
+_ENTITY_DECL_RE = re.compile(rb"<!ENTITY", re.I)
 
 
 def _declares_entities(path: str) -> bool:

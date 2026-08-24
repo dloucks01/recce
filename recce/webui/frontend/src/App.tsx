@@ -262,18 +262,7 @@ export default function App() {
   const [hosts, setHosts] = useState<Host[]>([]);
   const [pb, setPb] = useState<PlaybookData | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [tab, setTab] = useState<TabId>(() => {
-    const saved = localStorage.getItem("recce.tabs");
-    if (saved) {
-      try {
-        const tabs = JSON.parse(saved) as string[];
-        if (tabs.includes("act") && !tabs.includes("exploitation")) {
-          localStorage.setItem("recce.tabs", JSON.stringify(tabs.map(t => t === "act" ? "exploitation" : t === "loot" ? "credentials" : t)));
-        }
-      } catch {}
-    }
-    return "dashboard";
-  });
+  const [tab, setTab] = useState<TabId>("dashboard");
 
   // cross-tab filter state
   const [ff, setFf] = useState<FindingFilters>({
@@ -472,20 +461,24 @@ export default function App() {
         </div>
         <div className="header-right">
           <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
-          <button className="action-btn" onClick={() => setShowImport(!showImport)} title="Import tool output">
-            📥 Import
-          </button>
-          <ActivityButton />
-          <ChatButton />
-          <AddMenu onDone={(m) => note(m)} />
-          <button className="theme-tog" onClick={() => setDensity(density === "compact" ? "comfortable" : "compact")}
-                  title={density === "compact" ? "comfortable rows" : "compact rows"} aria-label="toggle density">
-            {density === "compact" ? "☰" : "≡"}
-          </button>
-          <button className="theme-tog" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-                  title="toggle light / dark" aria-label="toggle theme">
-            {theme === "dark" ? "☀" : "☾"}
-          </button>
+          <div className="header-actions">
+            <AddMenu onDone={(m) => note(m)} />
+            <button className="hdr-btn" onClick={() => setShowImport(!showImport)} title="Import tool output (Alt+I)">
+              📥
+            </button>
+            <ActivityButton />
+            <ChatButton />
+          </div>
+          <div className="header-util">
+            <button className="theme-tog" onClick={() => setDensity(density === "compact" ? "comfortable" : "compact")}
+                    title={density === "compact" ? "comfortable rows" : "compact rows"} aria-label="toggle density">
+              {density === "compact" ? "☰" : "≡"}
+            </button>
+            <button className="theme-tog" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+                    title="toggle light / dark" aria-label="toggle theme">
+              {theme === "dark" ? "☀" : "☾"}
+            </button>
+          </div>
           {who ? (
             <button className="whoami" onClick={() => setWho("")} title="click to change your name">{tester}</button>
           ) : (

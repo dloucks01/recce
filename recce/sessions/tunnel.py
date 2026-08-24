@@ -78,6 +78,7 @@ def main():
   try:ctrl=socket.create_connection((H,P),timeout=10);break
   except:time.sleep(1)
  else:sys.exit(1)
+ ctrl.settimeout(None)
  ctrl.sendall(b"RECCETUN1")
  while 1:
   hdr=rx(ctrl,9)
