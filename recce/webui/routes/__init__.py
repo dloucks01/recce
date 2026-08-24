@@ -7,6 +7,7 @@ from .report import register_report_routes
 from .act_spray import register_act_spray_routes
 from .data_exchange import register_data_exchange_routes
 from .sessions import register_sessions_routes
+from .manage import register_manage_routes
 
 __all__ = [
     "register_engagement_routes",
@@ -17,4 +18,5 @@ __all__ = [
     "register_act_spray_routes",
     "register_data_exchange_routes",
     "register_sessions_routes",
+    "register_manage_routes",
 ]

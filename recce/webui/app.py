@@ -30,6 +30,7 @@ from .routes import (
     register_data_exchange_routes,
     register_engagement_routes,
     register_findings_routes,
+    register_manage_routes,
     register_report_routes,
     register_scan_routes,
     register_sessions_routes,
@@ -98,6 +99,7 @@ def create_app(eng_dir: str) -> FastAPI:
     register_act_spray_routes(app, ctx)
     register_data_exchange_routes(app, ctx)
     register_sessions_routes(app, ctx)
+    register_manage_routes(app, ctx)
 
     @app.get("/api/events")
     async def events():

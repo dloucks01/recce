@@ -291,6 +291,22 @@ class Store:
             self.conn.rollback()
             raise
 
+    def delete_host(self, ip: str) -> bool:
+        """Remove a host and its tracking rows. Returns True if the host existed."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            with closing(self.conn.cursor()) as cur:
+                cur.execute("DELETE FROM hosts WHERE ip=?", (ip,))
+                gone = cur.rowcount > 0
+                cur.execute("DELETE FROM tracking WHERE key LIKE ?", (f"host:{ip}",))
+                cur.execute("DELETE FROM tracking WHERE key LIKE ?", (f"%@{ip}:%",))
+                cur.execute("DELETE FROM issues WHERE ip=?", (ip,))
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+        return gone
+
     def get_host(self, ip: str) -> Host | None:
         with closing(self.conn.cursor()) as cur:
             row = cur.execute("SELECT data FROM hosts WHERE ip=?", (ip,)).fetchone()
@@ -348,6 +364,14 @@ class Store:
         self.conn.commit()
         return added
 
+    def delete_credential(self, ukey: str) -> bool:
+        """Remove a credential by its dedupe key. Returns True if it existed."""
+        with closing(self.conn.cursor()) as cur:
+            cur.execute("DELETE FROM credentials WHERE ukey=?", (ukey,))
+            gone = cur.rowcount > 0
+        self.conn.commit()
+        return gone
+
     def all_credentials(self) -> list[Credential]:
         with closing(self.conn.cursor()) as cur:
             rows = cur.execute("SELECT data FROM credentials").fetchall()
@@ -398,6 +422,39 @@ class Store:
         return n
 
     # --- scope (every subnet in the engagement, so none is missed) --------------
+
+    def remove_finding(self, ip: str, vuln_key: str) -> bool:
+        """Remove a single finding from a host by its vuln key. Loads the host,
+        filters out the matching vuln, and saves back without merge."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            host = self.get_host(ip)
+            if host is None:
+                self.conn.rollback()
+                return False
+            before = len(host.vulns)
+            host.vulns = [v for v in host.vulns if v.key != vuln_key]
+            if len(host.vulns) == before:
+                self.conn.rollback()
+                return False
+            with closing(self.conn.cursor()) as cur:
+                cur.execute(
+                    "UPDATE hosts SET data=?, updated=? WHERE ip=?",
+                    (json.dumps(host.to_json()), host.last_scanned, ip),
+                )
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+        return True
+
+    def delete_scope(self, subnet: str) -> bool:
+        """Remove a subnet from the scope table. Returns True if it existed."""
+        with closing(self.conn.cursor()) as cur:
+            cur.execute("DELETE FROM scope WHERE subnet=?", (subnet,))
+            gone = cur.rowcount > 0
+        self.conn.commit()
+        return gone
 
     def set_scope(self, subnet: str, size: int) -> None:
         with closing(self.conn.cursor()) as cur:
