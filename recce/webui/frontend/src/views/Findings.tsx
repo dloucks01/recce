@@ -101,7 +101,7 @@ export function Findings(
                   <td />
                   <td colSpan={5}>
                     {detail
-                      ? <FindingDetail v={detail} onNote={onNote} />
+                      ? <FindingDetail v={detail} onNote={onNote} onJumpToHost={nav.openHost} />
                       : <div className="muted small">loading detail…</div>}
                   </td>
                 </tr>

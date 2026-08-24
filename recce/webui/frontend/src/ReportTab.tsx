@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { Finding, SEVS } from "./api";
+import { SevTag, Chips } from "./ui";
 
 type ReportFormat = "xlsx" | "html" | "docx" | "csv" | "md";
 
@@ -11,19 +13,55 @@ const REPORTS: [ReportFormat, string, string][] = [
 ];
 
 interface ReportTabProps {
+  findings: Finding[];
   onRefresh?: () => void;
 }
 
-export function ReportTab({ onRefresh }: ReportTabProps) {
+export function ReportTab({ findings, onRefresh }: ReportTabProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastGenerated, setLastGenerated] = useState<Record<ReportFormat, number>>({} as any);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [sevFilter, setSevFilter] = useState("all");
+  const [searchQ, setSearchQ] = useState("");
+
+  const realFindings = useMemo(
+    () => findings.filter((f) => f.tier !== "lead"),
+    [findings]
+  );
+
+  const filtered = useMemo(() => {
+    const q = searchQ.toLowerCase();
+    return realFindings.filter((f) =>
+      (sevFilter === "all" || f.severity === sevFilter) &&
+      (!q || `${f.title} ${f.ip} ${f.cve} ${f.port}`.toLowerCase().includes(q))
+    );
+  }, [realFindings, sevFilter, searchQ]);
+
+  function toggleFinding(key: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    setSelected(new Set(filtered.map((f) => f.key)));
+  }
+
+  function selectNone() {
+    setSelected(new Set());
+  }
 
   async function downloadReport(format: ReportFormat) {
     setBusy(format);
     setError(null);
     try {
-      const r = await fetch(`/api/report/${format}`);
+      const params = selected.size > 0
+        ? `?findings=${Array.from(selected).join(",")}`
+        : "";
+      const r = await fetch(`/api/report/${format}${params}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const blob = await r.blob();
       const cd = r.headers.get("content-disposition") || "";
@@ -57,11 +95,63 @@ export function ReportTab({ onRefresh }: ReportTabProps) {
     <div className="report-tab">
       <div className="report-header">
         <h2>Reports</h2>
-        <p>Generate engagement reports in multiple formats. All reports are built from the live findings database.</p>
+        <p>Generate engagement reports. Select specific findings below, or leave empty to include all.</p>
       </div>
 
       {error && <div className="error-banner">{error}</div>}
 
+      {/* Finding selector */}
+      <div className="rpt-selector">
+        <div className="rpt-selector-header">
+          <h3>Finding Selection</h3>
+          <span className="rpt-sel-count">
+            {selected.size > 0
+              ? `${selected.size} of ${realFindings.length} selected`
+              : `All ${realFindings.length} findings (none selected)`}
+          </span>
+        </div>
+
+        <div className="rpt-selector-controls">
+          <Chips value={sevFilter} onChange={setSevFilter} options={["all", ...SEVS]} />
+          <input
+            className="search"
+            placeholder="Filter findings..."
+            value={searchQ}
+            onChange={(e) => setSearchQ(e.target.value)}
+            spellCheck={false}
+          />
+          <div className="rpt-sel-actions">
+            <button className="toggle" onClick={selectAll}>Select visible</button>
+            <button className="toggle" onClick={selectNone}>Clear</button>
+          </div>
+        </div>
+
+        <div className="rpt-finding-list">
+          {filtered.slice(0, 80).map((f) => (
+            <label key={f.key} className={`rpt-finding ${selected.has(f.key) ? "checked" : ""}`}>
+              <input
+                type="checkbox"
+                checked={selected.has(f.key)}
+                onChange={() => toggleFinding(f.key)}
+              />
+              <SevTag severity={f.severity} />
+              <span className="rpt-finding-title">{f.title}</span>
+              <span className="rpt-finding-host mono">{f.ip}{f.port ? `:${f.port}` : ""}</span>
+              {f.cve && <span className="rpt-finding-cve mono">{f.cve}</span>}
+            </label>
+          ))}
+          {filtered.length === 0 && (
+            <div className="muted" style={{ padding: "12px" }}>No findings match this filter</div>
+          )}
+          {filtered.length > 80 && (
+            <div className="muted" style={{ padding: "8px 12px", fontSize: "12px" }}>
+              Showing 80 of {filtered.length} &mdash; use the filter to narrow down
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Report format cards */}
       <div className="report-grid">
         {REPORTS.map(([fmt, label, desc]) => (
           <div key={fmt} className="report-card">
@@ -77,21 +167,10 @@ export function ReportTab({ onRefresh }: ReportTabProps) {
               onClick={() => downloadReport(fmt)}
               disabled={!!busy}
             >
-              {busy === fmt ? "Generating…" : "📥 Download"}
+              {busy === fmt ? "Generating…" : selected.size > 0 ? `⬇ ${selected.size} findings` : "⬇ All findings"}
             </button>
           </div>
         ))}
-      </div>
-
-      <div className="report-info">
-        <h3>About reports</h3>
-        <ul>
-          <li><strong>Excel:</strong> Primary deliverable. Includes all findings, hosts, services, and pivot tables.</li>
-          <li><strong>HTML:</strong> Interactive report for sharing via email or browser. Includes severity filters and drill-down.</li>
-          <li><strong>Word:</strong> Detailed write-ups for each real finding, with evidence, impact, and remediation guidance.</li>
-          <li><strong>CSV:</strong> Services list for pivot analysis, correlation with other datasets, or feed into SIEM.</li>
-          <li><strong>Markdown:</strong> Machine-readable findings for CI/CD integration or GitHub issue creation.</li>
-        </ul>
       </div>
     </div>
   );

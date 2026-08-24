@@ -16,9 +16,19 @@ interface ScanTabProps {
   onLog: (lines: string[]) => void;
 }
 
-const GROUP_ICONS: Record<string, string> = {
-  discovery: "🔍", enumeration: "📡", credential: "🔑", exploit: "💥",
-  bruteforce: "🔨", spray: "💧", auxiliary: "🧰", scan: "📶",
+const GROUP_META: Record<string, { icon: string; desc: string }> = {
+  scan: { icon: "\u{1F4F6}", desc: "Port & vulnerability scanning" },
+  services: { icon: "\u{1F4E1}", desc: "Service enumeration" },
+  databases: { icon: "\u{1F5C4}", desc: "Database enumeration & extraction" },
+  web: { icon: "\u{1F310}", desc: "Web application testing" },
+  credentialed: { icon: "\u{1F511}", desc: "Authenticated / credentialed checks" },
+  exploitation: { icon: "\u{1F4A5}", desc: "Exploit & attack modules" },
+  reporting: { icon: "\u{1F4CB}", desc: "Report generation & analysis" },
+  discovery: { icon: "\u{1F50D}", desc: "Network & host discovery" },
+  enumeration: { icon: "\u{1F4E1}", desc: "Protocol enumeration" },
+  credential: { icon: "\u{1F511}", desc: "Credential testing" },
+  bruteforce: { icon: "\u{1F528}", desc: "Brute-force attacks" },
+  auxiliary: { icon: "\u{1F9F0}", desc: "Utility modules" },
 };
 
 function elapsed(start: number, end?: number): string {
@@ -27,10 +37,20 @@ function elapsed(start: number, end?: number): string {
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
+function groupBy(catalog: CmdCatalog): Record<string, { key: string; spec: CmdSpec }[]> {
+  const g: Record<string, { key: string; spec: CmdSpec }[]> = {};
+  for (const [k, s] of Object.entries(catalog)) {
+    const grp = s.group || "other";
+    (g[grp] ||= []).push({ key: k, spec: s });
+  }
+  return g;
+}
+
 export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
   const [catalog, setCatalog] = useState<CmdCatalog>({});
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [command, setCommand] = useState("scan");
+  const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  const [command, setCommand] = useState<string | null>(null);
   const [targets, setTargets] = useState("");
   const [profile, setProfile] = useState("quick");
   const [cUser, setCUser] = useState("");
@@ -44,7 +64,11 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    getCommands().then(setCatalog).catch(() => {});
+    getCommands().then((c) => {
+      setCatalog(c);
+      const groups = Object.keys(groupBy(c));
+      if (groups.length > 0) setActiveGroup(groups[0]);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -61,7 +85,6 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
   }, []);
 
   useEffect(() => { onRunning(running); }, [running, onRunning]);
-
   useEffect(() => {
     onLog(log);
     logRef.current?.scrollTo(0, logRef.current.scrollHeight);
@@ -73,25 +96,28 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
     setShowLog(true);
     const es = new EventSource(`/api/jobs/${jobId}/events`);
     es.onmessage = (m) => {
-      const d = JSON.parse(m.data);
-      if (d.line !== undefined) setLog((l) => [...l, d.line]);
-      if (d.done) { es.close(); setRunning(false); }
+      try {
+        const d = JSON.parse(m.data);
+        if (d.line !== undefined) setLog((l) => [...l, d.line]);
+        if (d.done) { es.close(); setRunning(false); }
+      } catch {}
     };
     es.onerror = () => { es.close(); setRunning(false); };
   }, []);
 
   async function runScan() {
-    const spec = catalog[command];
-    if (running) return;
-    if (spec?.targets === "required" && !targets.trim()) return;
+    if (!command || running) return;
+    const s = catalog[command];
+    if (!s) return;
+    if (s.targets === "required" && !targets.trim()) return;
     const flags = Object.keys(cFlags).filter((k) => cFlags[k]);
     try {
       const { id } = await postCommand({
         command, targets, profile,
-        username: spec?.creds ? cUser : undefined,
-        password: spec?.creds ? cPass : undefined,
-        domain: spec?.creds ? cDomain : undefined,
-        lhost: spec?.lhost ? cLhost : undefined,
+        username: s.creds ? cUser : undefined,
+        password: s.creds ? cPass : undefined,
+        domain: s.creds ? cDomain : undefined,
+        lhost: s.lhost ? cLhost : undefined,
         flags,
       });
       streamJob(id);
@@ -101,216 +127,193 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
     }
   }
 
-  const grouped = useMemo(() => {
-    const g: Record<string, { key: string; spec: CmdSpec }[]> = {};
-    for (const [k, s] of Object.entries(catalog)) {
-      const grp = s.group || "other";
-      (g[grp] ||= []).push({ key: k, spec: s });
-    }
-    return g;
-  }, [catalog]);
-
-  const spec = catalog[command] || ({} as Partial<CmdSpec>);
+  const grouped = useMemo(() => groupBy(catalog), [catalog]);
+  const groups = Object.entries(grouped);
+  const currentCmds = activeGroup ? grouped[activeGroup] || [] : [];
+  const spec = command ? catalog[command] : null;
   const runningJobs = jobs.filter((j) => j.status === "running");
-  const recentJobs = jobs.filter((j) => j.status !== "running").slice(0, 15);
-  const cmdCount = Object.keys(catalog).length;
+  const recentJobs = jobs.filter((j) => j.status !== "running").slice(0, 10);
 
   return (
-    <div className="scan-tab">
-      <div className="scan-row">
-        {/* ── Command form ── */}
-        <div className="scan-form">
-          {/* Selected command header */}
-          {spec.label && (
-            <div className="scan-cmd-header">
-              <span className="scan-cmd-group">
-                {GROUP_ICONS[spec.group?.toLowerCase()] || "▸"} {spec.group || "other"}
-              </span>
-              <span className="scan-cmd-label">{spec.label}</span>
-            </div>
-          )}
-
-          <div className="scan-section">
-            <div className="scan-section-label">Command</div>
-            <select
-              className="scan-select"
-              value={command}
-              onChange={(e) => { setCommand(e.target.value); setCFlags({}); }}
-              disabled={running}
+    <div className="sv2">
+      {/* Category tabs */}
+      <div className="sv2-tabs">
+        {groups.map(([g, cmds]) => {
+          const meta = GROUP_META[g.toLowerCase()] || { icon: "▸", desc: g };
+          return (
+            <button
+              key={g}
+              className={`sv2-tab ${activeGroup === g ? "active" : ""}`}
+              onClick={() => { setActiveGroup(g); setCommand(null); setCFlags({}); }}
             >
-              {Object.entries(grouped).map(([group, cmds]) => (
-                <optgroup key={group} label={`${GROUP_ICONS[group.toLowerCase()] || "▸"} ${group}`}>
-                  {cmds.map(({ key, spec: s }) => (
-                    <option key={key} value={key}>{s.label}</option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-            <span className="scan-cmd-count">{cmdCount} commands available</span>
-          </div>
+              <span className="sv2-tab-icon">{meta.icon}</span>
+              <span className="sv2-tab-name">{g}</span>
+              <span className="sv2-tab-ct">{cmds.length}</span>
+            </button>
+          );
+        })}
+      </div>
 
-          {spec.targets !== "none" && (
-            <div className="scan-section">
-              <div className="scan-section-label">
-                Targets {spec.targets === "required" && <span className="scan-req">required</span>}
-              </div>
-              <input
-                className="scan-input"
-                type="text"
-                value={targets}
-                onChange={(e) => setTargets(e.target.value)}
-                placeholder="10.0.0.0/24, 10.0.0.5, or @targets.txt"
-                disabled={running}
-              />
-            </div>
-          )}
-
-          {(spec.profile || spec.creds || spec.lhost) && (
-            <div className="scan-options">
-              <div className="scan-section-label">Options</div>
-
-              {spec.profile && (
-                <div className="scan-option-row">
-                  <span className="scan-opt-label">Profile</span>
-                  <select className="scan-opt-select" value={profile} onChange={(e) => setProfile(e.target.value)} disabled={running}>
-                    <option value="quick">Quick</option>
-                    <option value="standard">Standard</option>
-                    <option value="thorough">Thorough</option>
-                  </select>
-                </div>
-              )}
-
-              {spec.creds && (
-                <div className="scan-creds-grid">
-                  <div className="scan-option-row">
-                    <span className="scan-opt-label">Username</span>
-                    <input className="scan-opt-input" type="text" value={cUser}
-                           onChange={(e) => setCUser(e.target.value)} disabled={running}
-                           placeholder="domain\\user or user" />
-                  </div>
-                  <div className="scan-option-row">
-                    <span className="scan-opt-label">Password</span>
-                    <input className="scan-opt-input" type="password" value={cPass}
-                           onChange={(e) => setCPass(e.target.value)} disabled={running} />
-                  </div>
-                  <div className="scan-option-row">
-                    <span className="scan-opt-label">Domain</span>
-                    <input className="scan-opt-input" type="text" value={cDomain}
-                           onChange={(e) => setCDomain(e.target.value)} disabled={running}
-                           placeholder="CORP.LOCAL" />
-                  </div>
-                </div>
-              )}
-
-              {spec.lhost && (
-                <div className="scan-option-row">
-                  <span className="scan-opt-label">LHOST</span>
-                  <input className="scan-opt-input" type="text" value={cLhost}
-                         onChange={(e) => setCLhost(e.target.value)} disabled={running}
-                         placeholder="attacker.ip:port" />
-                </div>
-              )}
-            </div>
-          )}
-
-          {spec.flags && spec.flags.length > 0 && (
-            <div className="scan-flags">
-              <div className="scan-section-label">Flags</div>
-              <div className="scan-flags-grid">
-                {spec.flags.map((f) => (
-                  <label key={f.name} className={"scan-flag" + (f.active ? " scan-flag-active" : "")}>
-                    <input
-                      type="checkbox"
-                      checked={cFlags[f.name] || false}
-                      onChange={(e) => setCFlags({ ...cFlags, [f.name]: e.target.checked })}
-                      disabled={running}
-                    />
-                    <span>{f.label}</span>
-                    {f.active && <span className="scan-flag-marker">active</span>}
-                  </label>
+      <div className="sv2-body">
+        {/* Left: command list + config */}
+        <div className="sv2-main">
+          {activeGroup && (
+            <>
+              <div className="sv2-cmds">
+                {currentCmds.map(({ key, spec: s }) => (
+                  <button
+                    key={key}
+                    className={`sv2-cmd ${command === key ? "active" : ""}`}
+                    onClick={() => { setCommand(key); setCFlags({}); }}
+                    disabled={running}
+                  >
+                    <span className="sv2-cmd-name">{s.label}</span>
+                    <span className="sv2-cmd-tags">
+                      {s.targets === "required" && <span className="sv2-tag need">target</span>}
+                      {s.creds && <span className="sv2-tag cred">creds</span>}
+                      {s.lhost && <span className="sv2-tag lhost">lhost</span>}
+                    </span>
+                  </button>
                 ))}
               </div>
-            </div>
-          )}
 
-          <button className="scan-run-btn" onClick={runScan} disabled={running || (spec.targets === "required" && !targets.trim())}>
-            {running ? (
-              <><span className="scan-run-spinner" /> Running…</>
-            ) : (
-              <>▶ Execute</>
-            )}
-          </button>
+              {spec && command && (
+                <div className="sv2-config">
+                  <div className="sv2-config-title">{spec.label}</div>
+
+                  {spec.targets !== "none" && (
+                    <label className="sv2-field">
+                      <span className="sv2-label">
+                        Targets {spec.targets === "required" && <span className="sv2-req">*</span>}
+                      </span>
+                      <input
+                        className="sv2-input"
+                        value={targets}
+                        onChange={(e) => setTargets(e.target.value)}
+                        placeholder="10.0.0.0/24, 10.0.0.5, or @targets.txt"
+                        disabled={running}
+                      />
+                    </label>
+                  )}
+
+                  {spec.profile && (
+                    <label className="sv2-field">
+                      <span className="sv2-label">Profile</span>
+                      <select className="sv2-input" value={profile} onChange={(e) => setProfile(e.target.value)} disabled={running}>
+                        <option value="quick">Quick</option>
+                        <option value="standard">Standard</option>
+                        <option value="thorough">Thorough</option>
+                      </select>
+                    </label>
+                  )}
+
+                  {spec.creds && (
+                    <div className="sv2-cred-grid">
+                      <label className="sv2-field">
+                        <span className="sv2-label">Username</span>
+                        <input className="sv2-input" value={cUser} onChange={(e) => setCUser(e.target.value)}
+                               placeholder="domain\user" disabled={running} />
+                      </label>
+                      <label className="sv2-field">
+                        <span className="sv2-label">Password</span>
+                        <input className="sv2-input" type="password" value={cPass}
+                               onChange={(e) => setCPass(e.target.value)} disabled={running} />
+                      </label>
+                      <label className="sv2-field">
+                        <span className="sv2-label">Domain</span>
+                        <input className="sv2-input" value={cDomain} onChange={(e) => setCDomain(e.target.value)}
+                               placeholder="CORP.LOCAL" disabled={running} />
+                      </label>
+                    </div>
+                  )}
+
+                  {spec.lhost && (
+                    <label className="sv2-field">
+                      <span className="sv2-label">LHOST</span>
+                      <input className="sv2-input" value={cLhost} onChange={(e) => setCLhost(e.target.value)}
+                             placeholder="attacker.ip:port" disabled={running} />
+                    </label>
+                  )}
+
+                  {spec.flags && spec.flags.length > 0 && (
+                    <div className="sv2-flags">
+                      <span className="sv2-label">Flags</span>
+                      <div className="sv2-flag-list">
+                        {spec.flags.map((f) => (
+                          <label key={f.name} className={`sv2-flag ${cFlags[f.name] ? "on" : ""}`}>
+                            <input type="checkbox" checked={cFlags[f.name] || false}
+                                   onChange={(e) => setCFlags({ ...cFlags, [f.name]: e.target.checked })}
+                                   disabled={running} />
+                            <span>{f.label}</span>
+                            {f.active && <span className="sv2-flag-hot">active</span>}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    className="sv2-exec"
+                    onClick={runScan}
+                    disabled={running || (spec.targets === "required" && !targets.trim())}
+                  >
+                    {running ? <><span className="sv2-spinner" /> Running&hellip;</> : <span>&#9654; Execute</span>}
+                  </button>
+                </div>
+              )}
+
+              {!command && (
+                <div className="sv2-hint">Select a command above to configure and run it</div>
+              )}
+            </>
+          )}
         </div>
 
-        {/* ── Job queue ── */}
-        <div className="scan-queue">
-          <div className="scan-queue-header">
-            <h3>Job Queue</h3>
-            <span className="scan-queue-counts">
-              {runningJobs.length > 0 && <span className="scan-q-live">{runningJobs.length} running</span>}
-              {recentJobs.length > 0 && <span className="scan-q-done">{recentJobs.length} completed</span>}
-              {runningJobs.length === 0 && recentJobs.length === 0 && <span className="muted">idle</span>}
-            </span>
+        {/* Right: job queue */}
+        <div className="sv2-jobs">
+          <div className="sv2-jobs-h">
+            <h3>Jobs</h3>
+            {runningJobs.length > 0 && <span className="sv2-live">{runningJobs.length} running</span>}
           </div>
 
           {runningJobs.map((j) => (
-            <div key={j.id} className="scan-job scan-job-running" onClick={() => streamJob(j.id)}>
-              <div className="scan-job-indicator">
-                <span className="scan-pulse" />
+            <div key={j.id} className="sv2-job live" onClick={() => streamJob(j.id)}>
+              <span className="sv2-job-dot" />
+              <div className="sv2-job-info">
+                <div className="sv2-job-cmd">{j.cmd}</div>
+                <div className="sv2-job-meta">{j.tester} &middot; {elapsed(j.started)}</div>
               </div>
-              <div className="scan-job-body">
-                <div className="scan-job-cmd">{j.cmd}</div>
-                <div className="scan-job-meta">
-                  <span className="scan-job-tester">{j.tester}</span>
-                  <span className="scan-job-elapsed">{elapsed(j.started)}</span>
-                </div>
-              </div>
-              <button className="scan-job-view" title="view output">▸</button>
             </div>
           ))}
 
-          {recentJobs.length > 0 && runningJobs.length > 0 && <div className="scan-queue-divider" />}
-
-          <div className="scan-history">
-            {recentJobs.map((j) => (
-              <div key={j.id} className={`scan-job scan-job-${j.status}`}>
-                <span className="scan-job-icon">
-                  {j.status === "done" ? "✓" : "✗"}
-                </span>
-                <div className="scan-job-body">
-                  <div className="scan-job-cmd">{j.cmd}</div>
-                  <div className="scan-job-meta">
-                    <span className="scan-job-tester">{j.tester}</span>
-                    <span className="scan-job-time">{new Date(j.started * 1000).toLocaleTimeString()}</span>
-                    {j.ended && <span className="scan-job-dur">{elapsed(j.started, j.ended)}</span>}
-                  </div>
+          {recentJobs.map((j) => (
+            <div key={j.id} className={`sv2-job ${j.status}`}>
+              <span className="sv2-job-icon">{j.status === "done" ? "✓" : "✗"}</span>
+              <div className="sv2-job-info">
+                <div className="sv2-job-cmd">{j.cmd}</div>
+                <div className="sv2-job-meta">
+                  {j.tester} &middot; {new Date(j.started * 1000).toLocaleTimeString()}
+                  {j.ended && <span> &middot; {elapsed(j.started, j.ended)}</span>}
                 </div>
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
 
           {runningJobs.length === 0 && recentJobs.length === 0 && (
-            <div className="scan-queue-empty">
-              <div className="scan-queue-empty-icon">📡</div>
-              <div>No jobs yet</div>
-              <div className="muted">Select a command and hit Execute</div>
-            </div>
+            <div className="sv2-jobs-empty">No jobs yet</div>
           )}
         </div>
       </div>
 
-      {/* ── Console output (full width below) ── */}
+      {/* Console output */}
       {showLog && (
         <div className="scan-console">
           <div className="scan-console-bar">
             <span className="scan-console-title">
               {running && <span className="scan-pulse-sm" />}
-              Output
+              Output &middot; {log.length} lines
             </span>
-            <span className="scan-console-meta">
-              {log.length} line{log.length !== 1 ? "s" : ""}
-            </span>
-            <button className="scan-console-close" onClick={() => setShowLog(false)} title="close">✕</button>
+            <button className="scan-console-close" onClick={() => setShowLog(false)}>&times;</button>
           </div>
           <div className="scan-console-body" ref={logRef}>
             {log.map((line, i) => (
@@ -318,7 +321,7 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
             ))}
             {running && <div className="scan-console-line scan-console-cursor">_</div>}
             {!running && log.length > 0 && (
-              <div className="scan-console-line scan-console-done">— done —</div>
+              <div className="scan-console-line scan-console-done">&mdash; done &mdash;</div>
             )}
           </div>
         </div>

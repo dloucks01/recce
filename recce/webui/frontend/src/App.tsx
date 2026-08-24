@@ -466,7 +466,7 @@ export default function App() {
             />
           ) : <div className="loading">Loading…</div>)}
           {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus} />}
-          {tab === "report" && <ReportTab onRefresh={() => refresh().catch(() => {})} />}
+          {tab === "report" && <ReportTab findings={findings} onRefresh={() => refresh().catch(() => {})} />}
           {tab === "exploitation" && <Exploitation nav={nav} />}
           {tab === "credentials" && <Credentials />}
           {tab === "playbook" && <Playbook pb={pb} nav={nav} />}
