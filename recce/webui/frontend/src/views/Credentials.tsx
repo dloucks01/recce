@@ -85,7 +85,7 @@ function HitActions({ hit }: { hit: SprayHit }) {
   );
 }
 
-export function Loot({ nav }: { nav?: Nav }) {
+export function Credentials({ nav }: { nav?: Nav }) {
   const [creds, setCreds] = useState<Credential[] | null>(null);
   const [reveal, setReveal] = useState<Set<number>>(new Set());
   const [err, setErr] = useState<string | null>(null);
