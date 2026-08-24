@@ -1,4 +1,4 @@
-"""Scan jobs + live progress + the command catalog. Ported verbatim from app_legacy."""
+"""Scan jobs + live progress + the command catalog."""
 from __future__ import annotations
 
 import asyncio

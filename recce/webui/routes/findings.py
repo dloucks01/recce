@@ -1,11 +1,10 @@
-"""Finding tracking (note/tick), manual finding add, and the credential store.
-Ported verbatim from app_legacy."""
+"""Finding tracking (note/tick), manual finding add, and the credential store."""
 from __future__ import annotations
 
 import re
 import time
 
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException, Query
 
 from .. import collab
 
@@ -15,18 +14,22 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
     broker = ctx.broker
 
     @app.get("/api/credentials")
-    def credentials():
-        """The credential store — looted (web/db/share) + captured (kerberoast/gpp/…).
+    def credentials(limit: int = Query(default=0, ge=0),
+                    offset: int = Query(default=0, ge=0)):
+        """The credential store — looted (web/db/share) + captured (kerberoast/gpp/...).
         This is 'what was extracted', which the UI never surfaced before."""
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             creds = st.all_credentials()
-        finally:
-            st.close()
-        return [{"username": c.username, "secret": c.secret, "kind": c.kind,
-                 "domain": c.domain, "source": c.source, "origin_ip": c.origin_ip,
-                 "notes": c.notes, "label": c.label} for c in creds]
+        out = [{"username": c.username, "secret": c.secret, "kind": c.kind,
+                "domain": c.domain, "source": c.source, "origin_ip": c.origin_ip,
+                "notes": c.notes, "label": c.label} for c in creds]
+        total = len(out)
+        if limit > 0:
+            out = out[offset:offset + limit]
+        elif offset > 0:
+            out = out[offset:]
+        return {"items": out, "total": total, "limit": limit, "offset": offset}
 
     @app.post("/api/note")
     def note(body: dict = Body(...), x_tester: str = Header(default="someone")):
@@ -35,13 +38,9 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
         if not key:
             raise HTTPException(400, "no key")
         text = str(body.get("note", ""))
-        st = Store(db_path)
-        try:
-            # preserve the reviewed flag; only the note text changes here
+        with Store(db_path) as st:
             rev = st.get_tracking().get(key, (False, ""))[0]
             st.set_reviewed(key, bool(rev), notes=text)
-        finally:
-            st.close()
         broker.publish({"type": "note", "key": key, "note": text, "tester": x_tester})
         return {"ok": True}
 
@@ -52,11 +51,8 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
         if not key:
             raise HTTPException(400, "no key")
         reviewed = bool(body.get("reviewed", True))
-        st = Store(db_path)
-        try:
-            st.set_reviewed(key, reviewed)    # notes=None preserves any existing note
-        finally:
-            st.close()
+        with Store(db_path) as st:
+            st.set_reviewed(key, reviewed)
         broker.publish({"type": "tick", "key": key, "reviewed": reviewed,
                         "tester": x_tester})
         return {"ok": True}
@@ -83,8 +79,7 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
                  script_id=f"manual-{int(time.time())}", state="finding", title=title,
                  severity=sev, ids=cves, output=str(body.get("output", ""))[:4000],
                  source="manual", confidence="confirmed")
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             host = st.get_host(ip) or Host(ip=ip)
             host.state = "up"
             host.vulns.append(v)
@@ -92,7 +87,5 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
             epss.annotate(host)
             st.upsert_host(host, merge=True)
             collab.add_activity(st, x_tester, "add", f"{x_tester} added finding “{title}” on {ip}")
-        finally:
-            st.close()
         broker.publish({"type": "add", "what": "finding", "ip": ip, "by": x_tester})
         return {"ok": True}

@@ -58,7 +58,7 @@ class ApiShape(unittest.TestCase):
 
     def test_credentials_endpoint_feeds_the_loot_view(self):
         with _client(self.eng) as c:
-            creds = c.get("/api/credentials").json()
+            creds = c.get("/api/credentials").json()["items"]
         self.assertTrue(creds, "no credentials for the Loot view")
         c0 = creds[0]
         for field in ("label", "secret", "kind", "source", "origin_ip"):
@@ -82,14 +82,14 @@ class ApiShape(unittest.TestCase):
         self.assertEqual(_detect_import_kind(ASREP), "asrep")
         self.assertEqual(_detect_import_kind(SECRETS), "secretsdump")
         with _client(self.eng) as c:
-            before = len(c.get("/api/credentials").json())
+            before = len(c.get("/api/credentials").json()["items"])
             r = c.post("/api/import", json={"content": NXC, "filename": "nxc.txt", "kind": "auto"})
             self.assertEqual(r.status_code, 200)
             self.assertEqual(r.json()["kind"], "nxc")
-            self.assertTrue(any(h["ip"] == "10.9.9.9" for h in c.get("/api/hosts").json()))
+            self.assertTrue(any(h["ip"] == "10.9.9.9" for h in c.get("/api/hosts").json()["items"]))
             for txt in (KRB, ASREP, SECRETS):
                 self.assertEqual(c.post("/api/import", json={"content": txt, "kind": "auto"}).status_code, 200)
-            after = c.get("/api/credentials").json()
+            after = c.get("/api/credentials").json()["items"]
             # nxc captures the validated login (eve), plus kerberoast + asrep + secretsdump
             self.assertEqual(len(after) - before, 4)
             self.assertTrue({"nxc-validated", "kerberoast", "asrep", "secretsdump"}
@@ -104,7 +104,7 @@ class ApiShape(unittest.TestCase):
             self.assertEqual(_detect_import_kind(NESSUS), "nessus")
             self.assertEqual(c.post("/api/import", json={"content": NESSUS, "kind": "auto"}).status_code, 200)
             self.assertTrue(any(f["title"] == "EternalBlue" and f["kev"]
-                                for f in c.get("/api/findings").json()))
+                                for f in c.get("/api/findings").json()["items"]))
             # an undetectable blob is rejected with guidance, not silently swallowed
             self.assertEqual(c.post("/api/import", json={"content": "hello world", "kind": "auto"}).status_code, 422)
 
@@ -113,7 +113,7 @@ class ApiShape(unittest.TestCase):
         dismiss, manual add (finding/cred/host/access), presence, activity feed."""
         H = {"X-Tester": "alice"}
         with _client(self.eng) as c:
-            ip = c.get("/api/hosts").json()[0]["ip"]
+            ip = c.get("/api/hosts").json()["items"][0]["ip"]
             self.assertEqual(c.post("/api/assign", json={"ip": ip, "tester": "alice"}, headers=H).json(), {"ok": True})
             c.post("/api/label", json={"ip": ip, "label": "interesting", "on": True}, headers=H)
             c.post("/api/port_status", json={"ip": ip, "port": 445, "status": "wip"}, headers=H)
@@ -132,8 +132,8 @@ class ApiShape(unittest.TestCase):
             self.assertTrue(state["activity"], "activity feed is empty")
             # manual finding folded + KEV-annotated; manual host + access landed
             self.assertTrue(any(f["title"] == "Manual RDP finding" and f["kev"]
-                                for f in c.get("/api/findings").json()))
-            hs = {h["ip"]: h for h in c.get("/api/hosts").json()}
+                                for f in c.get("/api/findings").json()["items"]))
+            hs = {h["ip"]: h for h in c.get("/api/hosts").json()["items"]}
             self.assertIn("10.77.0.9", hs)
             self.assertTrue(hs[ip]["access"])
             # bad input is rejected

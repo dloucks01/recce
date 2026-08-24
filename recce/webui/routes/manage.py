@@ -26,11 +26,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         NSE re-check, and which checks already ran."""
         from ... import qod, verify
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             hosts = st.all_hosts()
-        finally:
-            st.close()
         for h in hosts:
             qod.annotate(h)
         pending = []
@@ -72,14 +69,11 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         """Remove a host and all its findings/tracking from the engagement."""
         from ...store import Store
         from .. import collab
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             if not st.delete_host(ip):
                 raise HTTPException(404, f"no host with IP {ip}")
             collab.add_activity(st, x_tester, "delete",
                                 f"{x_tester} removed host {ip}")
-        finally:
-            st.close()
         broker.publish({"type": "delete", "what": "host", "ip": ip,
                         "by": x_tester})
         return {"ok": True, "ip": ip}
@@ -96,12 +90,9 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         domain = str(body.get("domain", ""))
         ukey = Credential(username=username, secret=secret, kind=kind,
                           domain=domain).dedupe_key()
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             if not st.delete_credential(ukey):
                 raise HTTPException(404, "credential not found")
-        finally:
-            st.close()
         broker.publish({"type": "delete", "what": "credential", "by": x_tester})
         return {"ok": True}
 
@@ -115,14 +106,11 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         vuln_key = str(body.get("key", "")).strip()
         if not ip or not vuln_key:
             raise HTTPException(400, "ip and key are required")
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             if not st.remove_finding(ip, vuln_key):
                 raise HTTPException(404, "finding not found on that host")
             collab.add_activity(st, x_tester, "delete",
                                 f"{x_tester} removed finding {vuln_key} from {ip}")
-        finally:
-            st.close()
         broker.publish({"type": "delete", "what": "finding", "ip": ip,
                         "by": x_tester})
         return {"ok": True, "ip": ip, "key": vuln_key}
@@ -136,11 +124,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     def get_meta():
         """Return all engagement metadata fields."""
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             data = {k: (st.get_meta(k) or "") for k in _META_KEYS}
-        finally:
-            st.close()
         return data
 
     @app.post("/api/meta")
@@ -149,9 +134,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         """Set one or more engagement metadata fields."""
         from ...store import Store
         from .. import collab
-        st = Store(db_path)
         updated = []
-        try:
+        with Store(db_path) as st:
             for key in _META_KEYS:
                 if key in body:
                     val = str(body[key])[:2000]
@@ -160,8 +144,6 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
             if updated:
                 collab.add_activity(st, x_tester, "edit",
                                     f"{x_tester} updated {', '.join(updated)}")
-        finally:
-            st.close()
         if not updated:
             raise HTTPException(400, f"no recognized fields (use: {', '.join(_META_KEYS)})")
         broker.publish({"type": "meta", "updated": updated, "by": x_tester})
@@ -173,12 +155,9 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     def list_issues():
         """Return all scan issues/warnings, newest first."""
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             issues = st.get_issues()
             counts = st.count_issues()
-        finally:
-            st.close()
         return {"issues": issues, "counts": counts}
 
     # --- scope management ----------------------------------------------------
@@ -187,11 +166,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     def get_scope():
         """Return all scope subnets."""
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             scope = st.get_scope()
-        finally:
-            st.close()
         return [{"subnet": s, "size": n} for s, n in sorted(scope.items())]
 
     @app.post("/api/scope")
@@ -208,13 +184,10 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
             size = net.num_addresses
         except ValueError:
             raise HTTPException(400, f"invalid subnet: {subnet!r}")
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             st.set_scope(str(net), size)
             collab.add_activity(st, x_tester, "add",
                                 f"{x_tester} added {net} to scope")
-        finally:
-            st.close()
         broker.publish({"type": "scope", "action": "add", "subnet": str(net),
                         "by": x_tester})
         return {"ok": True, "subnet": str(net), "size": size}
@@ -224,14 +197,11 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         """Remove a subnet from the engagement scope."""
         from ...store import Store
         from .. import collab
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             if not st.delete_scope(subnet):
                 raise HTTPException(404, f"subnet {subnet!r} not in scope")
             collab.add_activity(st, x_tester, "delete",
                                 f"{x_tester} removed {subnet} from scope")
-        finally:
-            st.close()
         broker.publish({"type": "scope", "action": "remove", "subnet": subnet,
                         "by": x_tester})
         return {"ok": True, "subnet": subnet}
@@ -243,11 +213,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         """List all findings available for write-up (id, severity, title, affected)."""
         from ...report_docx import list_findings
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             hosts = st.all_hosts()
-        finally:
-            st.close()
         return {"findings": list_findings(hosts, min_severity="info")}
 
     @app.post("/api/writeup")
@@ -260,11 +227,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         selector = str(body.get("selector", "")).strip()
         if not selector:
             raise HTTPException(400, "selector required (finding id, CVE, IP, or title substring)")
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             hosts = st.all_hosts()
-        finally:
-            st.close()
         out_dir = os.path.join(eng_dir, "writeups")
         result = build_one_writeup(hosts, out_dir, selector, overwrite=True)
         if result["written"]:
@@ -287,12 +251,9 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         from fastapi.responses import Response
         from ... import netmap
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             hosts = st.all_hosts()
             domains = st.all_domains()
-        finally:
-            st.close()
         up = [h for h in hosts if h.is_up]
         if not up:
             return Response(
@@ -336,8 +297,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         if len(keys) > 500:
             raise HTTPException(400, "max 500 keys per call")
         reviewed = bool(body.get("reviewed", True))
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             existing = st.get_tracking()
             items = {}
             for k in keys:
@@ -348,8 +308,6 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
             collab.add_activity(st, x_tester, "review",
                                 f"{x_tester} bulk-{'reviewed' if reviewed else 'unreviewed'} "
                                 f"{n} item(s)")
-        finally:
-            st.close()
         broker.publish({"type": "bulk_review", "count": n, "reviewed": reviewed,
                         "by": x_tester})
         return {"ok": True, "count": n}
@@ -367,15 +325,12 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         from fastapi.responses import Response
         from ... import fieldkit
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             hosts = [h for h in st.all_hosts() if h.is_up]
             if not hosts:
                 raise HTTPException(422, "no live hosts to export — run enum/vulns first")
             title = st.get_meta("engagement") or "recce engagement"
             creds = st.all_credentials()
-        finally:
-            st.close()
         bridge = fieldkit.build_bridge(hosts, engagement=title,
                                        generated=time.strftime("%Y-%m-%dT%H:%M:%S"),
                                        creds=creds)
@@ -443,11 +398,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         from ...store import Store
         active = _proxy.is_active()
         desc = _proxy.describe() if active else ""
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             stored = st.get_meta("proxy") or ""
-        finally:
-            st.close()
         return {"active": active, "description": desc,
                 "stored": stored,
                 "hint": ("all scan jobs route through the proxy automatically"

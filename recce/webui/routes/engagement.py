@@ -1,8 +1,7 @@
-"""Engagement / hosts / findings / overview read endpoints. Ported verbatim from
-app_legacy.py create_app closures, adjusted for the modular layout."""
+"""Engagement / hosts / findings / overview read endpoints."""
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from .._common import _SEV_ORDER, _finding_dict, _host_dict, _host_key
 
@@ -12,27 +11,18 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
 
     def _hosts():
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             return st.all_hosts(), (st.get_meta("engagement") or "recce engagement")
-        finally:
-            st.close()
 
     def _tracking() -> dict:
         from ...store import Store
-        st = Store(db_path)
-        try:
-            return st.get_tracking()          # {key: (reviewed_bool, notes)}
-        finally:
-            st.close()
+        with Store(db_path) as st:
+            return st.get_tracking()
 
     def _scope() -> dict:
         from ...store import Store
-        st = Store(db_path)
-        try:
-            return st.get_scope()             # {subnet: size}
-        finally:
-            st.close()
+        with Store(db_path) as st:
+            return st.get_scope()
 
     @app.get("/api/engagement")
     def engagement():
@@ -51,7 +41,8 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
                 "checked_pct": round(100 * checked / len(up)) if up else 0}
 
     @app.get("/api/hosts")
-    def hosts():
+    def hosts(limit: int = Query(default=0, ge=0),
+              offset: int = Query(default=0, ge=0)):
         hs, _ = _hosts()
         tr = _tracking()
         out = []
@@ -60,18 +51,24 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
                 continue
             rev, notes = tr.get(_host_key(h.ip), (False, ""))
             out.append(_host_dict(h, bool(rev), notes))
-        return out
+        total = len(out)
+        if limit > 0:
+            out = out[offset:offset + limit]
+        elif offset > 0:
+            out = out[offset:]
+        return {"items": out, "total": total, "limit": limit, "offset": offset}
 
     @app.get("/api/host/{ip}")
     def host_detail(ip: str):
         """Everything about one host — services, full findings (with output +
         remediation + QoD), AD accounts, posture — for the drill-down drawer."""
         from ... import qod, tracking
-        hs, _ = _hosts()
-        h = next((x for x in hs if x.ip == ip), None)
+        from ...store import Store
+        with Store(db_path) as st:
+            h = st.get_host(ip)
+            trk = st.get_tracking()
         if h is None:
             raise HTTPException(404, "no such host")
-        trk = _tracking()
         hrev, hnotes = trk.get(_host_key(h.ip), (False, ""))
         vulns = []
         for v in h.vulns:
@@ -106,7 +103,8 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
         return base
 
     @app.get("/api/findings")
-    def findings():
+    def findings(limit: int = Query(default=0, ge=0),
+                 offset: int = Query(default=0, ge=0)):
         from ... import tracking
         hs, _ = _hosts()
         tr = _tracking()
@@ -118,7 +116,12 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
                 rev, notes = tr.get(tracking.vuln_row_key(v), (False, ""))
                 out.append(_finding_dict(v, bool(rev), notes))
         out.sort(key=lambda f: (not f["kev"], _SEV_ORDER.get(f["severity"], 9), -f["epss"]))
-        return out
+        total = len(out)
+        if limit > 0:
+            out = out[offset:offset + limit]
+        elif offset > 0:
+            out = out[offset:]
+        return {"items": out, "total": total, "limit": limit, "offset": offset}
 
     @app.get("/api/overview")
     def overview():

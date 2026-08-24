@@ -1,7 +1,7 @@
 """Proven, model-correct helpers shared by the webui route modules.
 
-Moved VERBATIM from app_legacy.py (the known-good reference). These live in
-`recce/webui/` — the same depth as app_legacy — so their `from .. import ...`
+Shared helpers for the web workbench route modules. These live in
+`recce/webui/` so their `from .. import ...`
 imports of top-level recce modules stay TWO dots.
 """
 from __future__ import annotations

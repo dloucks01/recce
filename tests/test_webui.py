@@ -52,7 +52,7 @@ def test_overview_reflects_the_engagement(client):
 
 
 def test_hosts_carry_ad_role_and_completion(client):
-    hosts = client.get("/api/hosts").json()
+    hosts = client.get("/api/hosts").json()["items"]
     assert len(hosts) == 24
     by_ip = {h["ip"]: h for h in hosts}
     dc = by_ip["10.20.10.10"]
@@ -67,7 +67,7 @@ def test_hosts_carry_ad_role_and_completion(client):
 
 
 def test_findings_are_present_with_honest_confidence(client):
-    findings = client.get("/api/findings").json()
+    findings = client.get("/api/findings").json()["items"]
     titles = {f["title"] for f in findings}
     # deterministic archetype findings must all be present
     assert any("Zerologon" in t for t in titles)
@@ -106,7 +106,7 @@ def test_unannotated_service_finding_is_not_hidden_as_a_lead(tmp_path):
     st.close()
 
     with TestClient(create_app(str(eng))) as c:
-        rows = c.get("/api/findings").json()
+        rows = c.get("/api/findings").json()["items"]
         assert rows, "the confirmed service finding was hidden entirely"
         assert rows[0]["tier"] == "confirmed", rows[0]
         # and the drawer detail exposes a real QoD, not 0
@@ -130,18 +130,18 @@ def test_host_detail_drawer_payload(client):
 
 
 def test_tick_and_note_round_trip(client):
-    findings = client.get("/api/findings").json()
+    findings = client.get("/api/findings").json()["items"]
     key = findings[0]["key"]
     # tick reviewed
     assert client.post("/api/tick", json={"key": key, "reviewed": True},
                        headers={"X-Tester": "pytest"}).json()["ok"]
-    again = client.get("/api/findings").json()
+    again = client.get("/api/findings").json()["items"]
     assert next(f for f in again if f["key"] == key)["reviewed"] is True
     # a note on a host, keyed host:<ip>, survives and does not clobber reviewed
     hkey = "host:10.20.10.10"
     client.post("/api/note", json={"key": hkey, "note": "DC — priority remediation"},
                 headers={"X-Tester": "pytest"})
-    dc = next(h for h in client.get("/api/hosts").json() if h["key"] == hkey)
+    dc = next(h for h in client.get("/api/hosts").json()["items"] if h["key"] == hkey)
     assert dc["notes"] == "DC — priority remediation"
 
 

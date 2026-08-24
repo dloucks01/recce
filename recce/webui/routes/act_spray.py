@@ -1,5 +1,4 @@
-"""The Act phase (ranked action plan), auto-run, and credential spray. Ported
-verbatim from app_legacy."""
+"""The Act phase (ranked action plan), auto-run, and credential spray."""
 from __future__ import annotations
 
 from fastapi import Body, FastAPI
@@ -23,11 +22,8 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
         """The Act phase: findings -> ranked, guided action plan. 'What do I do now?'."""
         from ... import act
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             hosts, creds = st.all_hosts(), st.all_credentials()
-        finally:
-            st.close()
         cards = act.action_plan(hosts, creds, eng_dir)
         tiers: dict = {}
         for c in cards:
@@ -43,11 +39,8 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
         run. Returns what was looted so the UI can point the operator at the Loot tab."""
         from ... import act
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             summary = act.execute_auto(st, eng_dir)
-        finally:
-            st.close()
         spray = summary.get("spray") or {}
         broker.publish({"type": "act_run", "looted": len(summary["looted"])})
         return {"looted": len(summary["looted"]),
@@ -63,8 +56,7 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
         from ...models import Credential
         from ...store import Store
         body = body or {}
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             hosts = st.all_hosts()
             sel = (body.get("targets") or "").strip()
             if sel:
@@ -84,5 +76,3 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
             broker.publish({"type": "spray", "hits": len(res.get("hits", []))})
             return {"ok": res.get("ok", False), "error": res.get("error", ""),
                     "hits": res.get("hits", []), "new": new}
-        finally:
-            st.close()

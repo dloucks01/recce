@@ -1,4 +1,4 @@
-"""Report download endpoint. Ported verbatim from app_legacy."""
+"""Report download endpoint."""
 from __future__ import annotations
 
 import os
@@ -26,13 +26,9 @@ def register_report_routes(app: FastAPI, ctx) -> None:
         from ...store import Store
         from ...cli import _generate_reports, _open_paths
         paths = _open_paths(eng_dir)
-        with _report_lock:
-            st = Store(db_path)
-            try:
-                title = st.get_meta("engagement") or "recce engagement"
-                _generate_reports(st, paths, title, quiet=True)
-            finally:
-                st.close()
+        with _report_lock, Store(db_path) as st:
+            title = st.get_meta("engagement") or "recce engagement"
+            _generate_reports(st, paths, title, quiet=True)
         pkey, fname, media = _REPORTS[kind]
         path = paths[pkey]
         if not os.path.exists(path):

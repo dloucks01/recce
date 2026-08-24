@@ -1,5 +1,5 @@
 """External-tool import, the shared playbook, ATT&CK coverage, and the attack-path
-SVG. Ported verbatim from app_legacy."""
+SVG."""
 from __future__ import annotations
 
 import os
@@ -24,11 +24,8 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
 
     def _hosts():
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             return st.all_hosts(), (st.get_meta("engagement") or "recce engagement")
-        finally:
-            st.close()
 
     @app.post("/api/import")
     def import_output(body: dict = Body(...), x_tester: str = Header(default="someone")):
@@ -153,10 +150,9 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         from ... import credenum as ce
         from ...models import Credential, Host
         from ...store import Store
-        st = Store(db_path)
         added = 0
         summary = ""
-        try:
+        with Store(db_path) as st:
             if kind == "nxc":
                 content = importers.strip_ansi(content)      # a piped nxc log carries colour codes
                 # SMB gets the full fold (access, shares, users, local-admin finding).
@@ -290,8 +286,6 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
                            + (f"; {skipped_noip} without a host skipped" if skipped_noip else ""))
             else:
                 raise HTTPException(422, f"unsupported import kind {kind!r}")
-        finally:
-            st.close()
         if added == 0:                                   # don't let "0 rows" read as success
             summary = (summary + " — " if summary else "") + (
                 f"parsed 0 rows; check this is really {kind} output (or a variant recce "
@@ -307,12 +301,9 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         every tester and updates the instant anyone folds in a result."""
         from ... import attackpath, workflow
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             hosts = st.all_hosts()
             creds = st.all_credentials()
-        finally:
-            st.close()
         up = [h for h in hosts if h.is_up]
         findings = sum(len(h.vulns) for h in up)
         kev = sum(1 for h in up for v in h.vulns if getattr(v, "kev", False))

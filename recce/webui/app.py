@@ -6,7 +6,7 @@ with live SSE progress, and (when built) the React frontend served as static fil
 
 This is the modular layout: the proven, model-correct helpers live in `_common.py`
 and each handler group lives in a `routes/*.py` module. Behaviour mirrors the
-known-good reference `app_legacy.py` exactly.
+the modular route layout.
 """
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ def create_app(eng_dir: str) -> FastAPI:
     presence = collab.Presence()
 
     # Shared context passed to each route group. Route modules build their own tiny
-    # _hosts/_tracking/_mutate closures from ctx.db_path (same bodies as app_legacy).
+    # _hosts/_tracking/_mutate closures from ctx.db_path.
     ctx = SimpleNamespace(eng_dir=eng_dir, db_path=db_path, jobs=jobs,
                           broker=broker, presence=presence, sessions=session_manager)
 

@@ -1,5 +1,4 @@
-"""Multi-tester collaboration, team chat, and manual add endpoints. Ported verbatim
-from app_legacy, using the Store-backed collab module functions + Presence."""
+"""Multi-tester collaboration, team chat, and manual add endpoints."""
 from __future__ import annotations
 
 import os
@@ -22,13 +21,10 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
                 x_tester: str = "someone"):
         """Open the store, run fn(st), persist an activity line, broadcast, close."""
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             result = fn(st)
             if activity:
                 collab.add_activity(st, x_tester, activity[0], activity[1])
-        finally:
-            st.close()
         broker.publish(event)
         return result
 
@@ -39,16 +35,13 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
         """Everything the UI overlays on hosts/findings: who owns what, triage labels,
         per-port status, dismissed findings, the activity feed, and who's online."""
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             return {"assignments": collab.get_assignments(st),
                     "labels": collab.get_labels(st),
                     "port_status": collab.get_port_status(st),
                     "dismissed": collab.get_dismissed(st),
                     "activity": collab.get_activity(st, 100),
                     "online": presence.roster()}
-        finally:
-            st.close()
 
     @app.post("/api/presence")
     def ping_presence(body: dict = Body(default=None), x_tester: str = Header(default="")):
@@ -112,15 +105,12 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
         kind = str(body.get("kind", "password"))
         if kind not in ("password", "nthash", "hash", "blank"):
             kind = "password"
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             added = st.add_credential(Credential(
                 username=user, secret=secret, kind=kind,
                 domain=str(body.get("domain", "")), origin_ip=str(body.get("origin_ip", "")),
                 source="manual", notes=str(body.get("notes", "")) or "added by hand"))
             collab.add_activity(st, x_tester, "add", f"{x_tester} added a credential for {user or '(secret)'}")
-        finally:
-            st.close()
         broker.publish({"type": "add", "what": "credential", "by": x_tester})
         return {"ok": True, "added": added}
 
@@ -134,8 +124,7 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "give one or more IPs / ranges / CIDRs")
         ips, hostnames, subnets = load_targets(tokens)
         ips = ips[:512]                                       # sanity cap on a big CIDR
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             for ip in ips:
                 host = st.get_host(ip) or Host(ip=ip)
                 host.state = "up"
@@ -145,8 +134,6 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
                     host.hostnames.append(hostnames[ip])
                 st.upsert_host(host, merge=True)
             collab.add_activity(st, x_tester, "add", f"{x_tester} added {len(ips)} host(s) to scope")
-        finally:
-            st.close()
         broker.publish({"type": "add", "what": "host", "count": len(ips), "by": x_tester})
         return {"ok": True, "added": len(ips)}
 
@@ -158,16 +145,13 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
         if not ip:
             raise HTTPException(400, "a host IP is required")
         note = str(body.get("note", "")).strip() or "foothold recorded by hand"
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             host = st.get_host(ip) or Host(ip=ip)
             host.state = "up"
             host.access_gained = True
             host.access_detail = note
             st.upsert_host(host, merge=True)
             collab.add_activity(st, x_tester, "access", f"{x_tester} recorded access on {ip}: {note}")
-        finally:
-            st.close()
         broker.publish({"type": "add", "what": "access", "ip": ip, "by": x_tester})
         return {"ok": True}
 
@@ -187,11 +171,8 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
     @app.get("/api/chat")
     def chat_history(limit: int = 200):
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             return collab.get_chat(st, limit)
-        finally:
-            st.close()
 
     @app.post("/api/chat")
     def chat_post(body: dict = Body(...), x_tester: str = Header(default="someone")):
@@ -238,11 +219,8 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
             file_meta = {"stored": stored_name, "name": orig, "size": len(raw)}
         if not text and not image_name and not file_meta:
             raise HTTPException(400, "empty message")
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             msg = collab.add_chat(st, x_tester, text[:4000], image_name, file_meta)
-        finally:
-            st.close()
         broker.publish({"type": "chat", "msg": msg})
         return msg
 

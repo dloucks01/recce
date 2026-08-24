@@ -120,7 +120,7 @@ class Feedback(unittest.TestCase):
         self.assertEqual(r["count"], 1)
         self.assertFalse(r["warning"])                  # a real finding -> no warning
         # nothing committed
-        self.assertEqual(c.get("/api/findings").json(), [])
+        self.assertEqual(c.get("/api/findings").json()["items"], [])
 
     def test_preview_warns_on_zero_rows(self):
         c = self._client()

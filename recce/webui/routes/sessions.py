@@ -21,19 +21,17 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         import logging
         from ...store import Store
         from .. import collab
-        st = Store(db_path)
         try:
-            host = next((h for h in st.all_hosts() if h.ip == session.host_ip), None)
-            label = (host.hostname or session.host_ip) if host is not None else session.host_ip
-            if host is not None and not getattr(host, "access_gained", False):
-                host.access_gained = True
-                host.access_detail = "shell caught"
-                st.upsert_host(host, merge=True)
-            collab.add_activity(st, "recce", "session", f"shell caught from {label}")
+            with Store(db_path) as st:
+                host = next((h for h in st.all_hosts() if h.ip == session.host_ip), None)
+                label = (host.hostname or session.host_ip) if host is not None else session.host_ip
+                if host is not None and not getattr(host, "access_gained", False):
+                    host.access_gained = True
+                    host.access_detail = "shell caught"
+                    st.upsert_host(host, merge=True)
+                collab.add_activity(st, "recce", "session", f"shell caught from {label}")
         except Exception:  # noqa: BLE001 — a hook must never break adoption
             logging.getLogger("recce.webui").debug("_link_host failed for %s", session.host_ip, exc_info=True)
-        finally:
-            st.close()
         broker.publish({"type": "session", "event": "caught",
                         "ip": session.host_ip, "id": session.id})
 
@@ -310,12 +308,9 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
                 "removed_at": None})
         from .. import collab
         from ...store import Store
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             collab.add_activity(st, x_tester, "add",
                                 f"{x_tester} installed cron persistence on {sess.host_ip} (intrusive)")
-        finally:
-            st.close()
         broker.publish({"type": "session", "event": "persist", "id": sess.id})
         if not ok:
             return {"ok": False, "id": pid,
@@ -395,16 +390,13 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         kind = str(body.get("kind", "password"))
         if kind not in ("password", "nthash", "hash", "blank"):
             kind = "password"
-        st = Store(db_path)
-        try:
+        with Store(db_path) as st:
             added = st.add_credential(Credential(
                 username=user, secret=secret, kind=kind,
                 domain=str(body.get("domain", "")), origin_ip=sess.host_ip,
                 source="shell-session", notes=f"looted from shell on {sess.host_ip}"))
             collab.add_activity(st, x_tester, "add",
                                 f"{x_tester} looted a credential from the shell on {sess.host_ip}")
-        finally:
-            st.close()
         broker.publish({"type": "add", "what": "credential", "by": x_tester})
         return {"ok": True, "added": added}
 

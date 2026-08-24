@@ -46,8 +46,9 @@ def test_verify_plan_returns_structure(client):
 
 def test_delete_host_and_404_on_missing(client):
     r = client.get("/api/hosts")
-    hosts = r.json()
-    assert len(hosts) >= 24
+    data = r.json()
+    hosts = data["items"]
+    assert data["total"] >= 24
     ip = hosts[-1]["ip"]
 
     r = client.delete(f"/api/host/{ip}", headers={"X-Tester": "pytest"})
@@ -64,7 +65,8 @@ def test_delete_host_and_404_on_missing(client):
 # --- delete credential -----------------------------------------------------
 
 def test_delete_credential(client):
-    creds = client.get("/api/credentials").json()
+    data = client.get("/api/credentials").json()
+    creds = data["items"]
     assert len(creds) > 0
     c = creds[0]
     r = client.post("/api/delete/credential", json={
@@ -85,7 +87,8 @@ def test_delete_credential_404_on_missing(client):
 # --- delete finding --------------------------------------------------------
 
 def test_delete_finding(client):
-    findings = client.get("/api/findings").json()
+    data = client.get("/api/findings").json()
+    findings = data["items"]
     assert len(findings) > 0
     f = findings[-1]
     # The API's "key" is vuln_row_key (prefixed "vuln:"), but remove_finding
@@ -223,14 +226,14 @@ def test_doctor_launches_job(client):
 # --- bulk review -----------------------------------------------------------
 
 def test_bulk_review(client):
-    hosts = client.get("/api/hosts").json()
+    hosts = client.get("/api/hosts").json()["items"]
     keys = [h["key"] for h in hosts[:5]]
     r = client.post("/api/bulk-review", json={"keys": keys, "reviewed": True},
                     headers={"X-Tester": "pytest"})
     assert r.status_code == 200
     assert r.json()["count"] == 5
 
-    updated = client.get("/api/hosts").json()
+    updated = client.get("/api/hosts").json()["items"]
     for h in updated:
         if h["key"] in keys:
             assert h["reviewed"] is True
@@ -283,3 +286,40 @@ def test_proxy_status(client):
     assert "active" in data
     assert "hint" in data
     assert isinstance(data["active"], bool)
+
+
+# --- pagination ------------------------------------------------------------
+
+def test_hosts_pagination(client):
+    full = client.get("/api/hosts").json()
+    assert full["total"] >= 20
+    assert full["limit"] == 0
+
+    page = client.get("/api/hosts?limit=5&offset=0").json()
+    assert len(page["items"]) == 5
+    assert page["total"] == full["total"]
+    assert page["limit"] == 5
+    assert page["offset"] == 0
+
+    page2 = client.get("/api/hosts?limit=5&offset=5").json()
+    assert len(page2["items"]) == 5
+    assert page2["items"][0]["ip"] != page["items"][0]["ip"]
+
+
+def test_findings_pagination(client):
+    full = client.get("/api/findings").json()
+    assert full["total"] > 0
+
+    page = client.get("/api/findings?limit=3&offset=0").json()
+    assert len(page["items"]) == 3
+    assert page["total"] == full["total"]
+
+
+def test_credentials_pagination(client):
+    full = client.get("/api/credentials").json()
+    if full["total"] == 0:
+        pytest.skip("no credentials to paginate")
+
+    page = client.get("/api/credentials?limit=2&offset=0").json()
+    assert len(page["items"]) <= 2
+    assert page["total"] == full["total"]

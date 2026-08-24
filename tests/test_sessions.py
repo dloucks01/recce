@@ -266,7 +266,7 @@ def test_loot_cred_transcript_and_host_filter(client):
         r = client.post(f"/api/sessions/{sid}/cred",
                         json={"username": "svc_admin", "secret": "Hunter2", "kind": "password"})
         assert r.status_code == 200 and r.json()["ok"] is True
-        creds = client.get("/api/credentials").json()
+        creds = client.get("/api/credentials").json()["items"]
         looted = [c for c in creds if c.get("source") == "shell-session"]
         assert looted and looted[0]["origin_ip"] == "127.0.0.1"
         assert looted[0]["username"] == "svc_admin"
