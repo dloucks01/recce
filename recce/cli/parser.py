@@ -1254,6 +1254,7 @@ Run scans with sudo for SYN + OS detection.  `recce <command> -h` for options.
 
 
 def _print_quickstart() -> int:
+    from .helpers import BANNER
     print(BANNER)
     print(_QUICKSTART)
     return 0

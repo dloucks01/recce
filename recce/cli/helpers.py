@@ -1250,8 +1250,13 @@ def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
     zero_streak = 0
     ips_block_warned = False
     _IPS_ZERO_STREAK = 15
+    # Resolve _enum_worker through the cli package so tests can monkey-patch
+    # `cli._enum_worker` and see the patch take effect here (the classic
+    # Python "how monkey-patching interacts with imports" gotcha — a local
+    # reference would bypass the patch).
+    _cli = sys.modules[__package__]
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(_enum_worker, ip, profile, paths, creds, port_map,
+        futures = {ex.submit(_cli._enum_worker, ip, profile, paths, creds, port_map,
                              subnet_map, active_probe, disc_reasons.get(ip, ""),
                              hostname_map.get(ip, "")): ip
                    for ip in live_ips}
