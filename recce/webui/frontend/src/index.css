@@ -896,6 +896,22 @@ body { background: var(--ground); color: var(--text); }
 .sess-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .sess-dot.live { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
 .sess-dot.stale { background: var(--muted); }
+
+/* session groups (by host) */
+.sess-group { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.sess-group + .sess-group { margin-top: 6px; }
+.sess-group-h { display: flex; gap: 8px; align-items: center; padding: 7px 10px; cursor: pointer;
+  background: var(--surface2); font-size: 13px; user-select: none; }
+.sess-group-h:hover { background: color-mix(in srgb, var(--accent) 6%, var(--surface2)); }
+.sess-group-caret { font-size: 10px; color: var(--muted); transition: transform .15s; flex: none; }
+.sess-group-caret.closed { transform: rotate(-90deg); }
+.sess-group-action { font-size: 11px; margin-left: auto; }
+.sess-group-action + .sess-group-action { margin-left: 0; }
+.sess-group-items { padding: 4px 4px 4px 12px; display: flex; flex-direction: column; gap: 4px; }
+.sess-group-items .session-item { border: none; background: transparent; padding: 4px 8px; border-radius: var(--radius-sm); }
+.sess-group-items .session-item:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.sess-group-items .session-item.sel { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
 .shell-term { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #0b0f16; }
 .shell-term-bar { display: flex; gap: 12px; align-items: center; padding: 8px 12px;
   background: var(--surface2); border-bottom: 1px solid var(--line); font-size: 13px; }
@@ -1304,3 +1320,18 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .venom-compat { font-size: 11px; font-weight: 600; padding: 6px 12px; border-radius: var(--radius-sm); margin-bottom: 10px; }
 .venom-compat.compat-ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent); }
 .venom-compat.compat-ext { background: color-mix(in srgb, var(--high) 12%, transparent); color: var(--high); border: 1px solid color-mix(in srgb, var(--high) 30%, transparent); }
+
+/* Credential quick-connect */
+.hit-actions { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.cred-try-btn { font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--ok) 50%, transparent); background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); cursor: pointer; }
+.cred-try-btn:hover { background: color-mix(in srgb, var(--ok) 22%, transparent); border-color: var(--ok); }
+.cred-try-btn:disabled { opacity: .5; cursor: default; }
+.cred-cmd-copy { font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line); background: var(--surface2); color: var(--muted); cursor: pointer; }
+.cred-cmd-copy:hover { border-color: var(--accent); color: var(--text); }
+
+/* Keyboard shortcut help */
+.shortcut-help { max-width: 400px; }
+.shortcut-list { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
+.shortcut-row { display: flex; align-items: center; gap: 14px; }
+.shortcut-row kbd { background: var(--surface2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 10px; font-family: var(--mono); font-size: 12px; min-width: 48px; text-align: center; color: var(--text); font-weight: 600; box-shadow: 0 1px 0 var(--line); }
+.shortcut-row span { font-size: 13px; color: var(--muted); }

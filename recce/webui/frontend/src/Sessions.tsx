@@ -68,6 +68,27 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
   }
 
   const openSession = sessions.find((s) => s.id === open) || null;
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggleGroup = (ip: string) => setCollapsed(s => {
+    const n = new Set(s);
+    n.has(ip) ? n.delete(ip) : n.add(ip);
+    return n;
+  });
+
+  const hostGroups: [string, SessionInfo[]][] = (() => {
+    const m = new Map<string, SessionInfo[]>();
+    sessions.forEach(s => {
+      const arr = m.get(s.host_ip) || [];
+      arr.push(s);
+      m.set(s.host_ip, arr);
+    });
+    return [...m.entries()].sort((a, b) => {
+      const aLive = a[1].some(s => s.status === "live") ? 0 : 1;
+      const bLive = b[1].some(s => s.status === "live") ? 0 : 1;
+      if (aLive !== bLive) return aLive - bLive;
+      return a[0].localeCompare(b[0]);
+    });
+  })();
 
   return (
     <div className="sessions-view">
@@ -113,7 +134,10 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
       <section className="panel">
         <div className="panel-h">
           <h3>Sessions</h3>
-          <span className="muted">{sessions.filter((s) => s.status === "live").length} live · {sessions.length} total</span>
+          <span className="muted">
+            {sessions.filter((s) => s.status === "live").length} live · {sessions.length} total
+            {hostGroups.length > 0 && ` · ${hostGroups.length} host${hostGroups.length > 1 ? "s" : ""}`}
+          </span>
         </div>
         {sessions.length === 0 && (
           <div className="empty">
@@ -122,17 +146,45 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
           </div>
         )}
         <div className="session-list">
-          {sessions.map((s) => (
-            <button key={s.id} className={"session-item" + (s.id === open ? " sel" : "")}
-                    onClick={() => setOpen(s.id === open ? null : s.id)}>
-              <span className={"sess-dot " + (s.status === "live" ? "live" : "stale")} />
-              <span className="mono host">{s.host_ip}</span>
-              <span className="badge">{s.status}</span>
-              {s.pty && <span className="badge pty" title="robust PTY (auto-reconnect stager)">PTY</span>}
-              {s.driver && <span className="muted">▸ {s.driver}</span>}
-              {s.attached.length > 0 && <span className="muted">👁 {s.attached.length}</span>}
-            </button>
-          ))}
+          {hostGroups.map(([ip, group]) => {
+            const liveCount = group.filter(s => s.status === "live").length;
+            const isCollapsed = collapsed.has(ip);
+            return (
+              <div key={ip} className="sess-group">
+                <div className="sess-group-h" onClick={() => toggleGroup(ip)}>
+                  <span className={`sess-group-caret${isCollapsed ? " closed" : ""}`}>&#9662;</span>
+                  {liveCount > 0 && <span className="sess-dot live" />}
+                  {liveCount === 0 && <span className="sess-dot stale" />}
+                  <span className="mono">{ip}</span>
+                  <span className="muted">
+                    {liveCount > 0 ? `${liveCount} live` : "dead"}{group.length > 1 ? ` · ${group.length} total` : ""}
+                  </span>
+                  {onViewHost && (
+                    <button className="linkish sess-group-action" onClick={(e) => { e.stopPropagation(); onViewHost(ip); }}
+                            title="open host detail drawer">detail</button>
+                  )}
+                  {onScanHost && (
+                    <button className="linkish sess-group-action" onClick={(e) => { e.stopPropagation(); onScanHost(ip); }}
+                            title="jump to Scan tab with this host pre-filled">scan</button>
+                  )}
+                </div>
+                {!isCollapsed && (
+                  <div className="sess-group-items">
+                    {group.map((s) => (
+                      <button key={s.id} className={"session-item" + (s.id === open ? " sel" : "")}
+                              onClick={() => setOpen(s.id === open ? null : s.id)}>
+                        <span className={"sess-dot " + (s.status === "live" ? "live" : "stale")} />
+                        <span className="badge">{s.status}</span>
+                        {s.pty && <span className="badge pty" title="robust PTY (auto-reconnect stager)">PTY</span>}
+                        {s.driver && <span className="muted">▸ {s.driver}</span>}
+                        {s.attached.length > 0 && <span className="muted">👁 {s.attached.length}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </section>
 

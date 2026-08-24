@@ -1,15 +1,91 @@
 import { useEffect, useState } from "react";
-import { Credential, SprayHit, getCredentials, postSpray } from "../api";
+import { Credential, SprayHit, getCredentials, postSpray, postCommand } from "../api";
 import { Stat } from "../ui";
-
-// "What did we extract?" The credential store — looted (web/db/share) + captured
-// (kerberoast/gpp/secretsdump) — which the UI never surfaced before.
+import { Nav } from "./shared";
 
 const KIND_LABEL: Record<string, string> = {
   password: "password", nthash: "NT hash", hash: "hash", blank: "blank",
 };
 
-export function Loot() {
+function protoToCommand(proto: string, admin: boolean): string {
+  if (admin && (proto === "smb" || proto === "winrm")) return "deploy";
+  if (proto === "ssh") return "deploy";
+  return "credenum";
+}
+
+function protoToOneLiner(proto: string, user: string, ip: string): string {
+  switch (proto) {
+    case "smb": return `netexec smb ${ip} -u '${user}' -p 'PASSWORD'`;
+    case "ssh": return `ssh ${user}@${ip}`;
+    case "winrm": return `evil-winrm -i ${ip} -u '${user}' -p 'PASSWORD'`;
+    case "mssql": return `netexec mssql ${ip} -u '${user}' -p 'PASSWORD'`;
+    case "ldap": return `netexec ldap ${ip} -u '${user}' -p 'PASSWORD'`;
+    default: return `netexec ${proto} ${ip} -u '${user}' -p 'PASSWORD'`;
+  }
+}
+
+function credOneLiner(cred: Credential): string {
+  const user = cred.label || cred.username;
+  const ip = cred.origin_ip || "TARGET";
+  const src = cred.source.toLowerCase();
+  if (src.includes("ssh") || src.includes("linux")) return `ssh ${user}@${ip}`;
+  if (src.includes("smb") || src.includes("ntlm") || src.includes("sam")) return `netexec smb ${ip} -u '${user}' -p 'SECRET'`;
+  if (src.includes("mssql") || src.includes("sql")) return `netexec mssql ${ip} -u '${user}' -p 'SECRET'`;
+  if (src.includes("postgres")) return `psql -h ${ip} -U ${user}`;
+  if (src.includes("mysql") || src.includes("maria")) return `mysql -h ${ip} -u ${user} -p`;
+  if (src.includes("mongo")) return `mongosh ${ip} -u ${user}`;
+  if (src.includes("ftp")) return `ftp ${user}@${ip}`;
+  if (src.includes("winrm")) return `evil-winrm -i ${ip} -u '${user}' -p 'SECRET'`;
+  if (cred.kind === "nthash") return `netexec smb ${ip} -u '${user}' -H 'HASH'`;
+  return `netexec smb ${ip} -u '${user}' -p 'SECRET'`;
+}
+
+function HitActions({ hit }: { hit: SprayHit }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function tryConnect() {
+    setBusy(true); setMsg(null);
+    const cmd = protoToCommand(hit.proto, hit.admin);
+    const parts = hit.cred.split(":");
+    const user = parts[0] || "";
+    const pass = parts.slice(1).join(":") || "";
+    try {
+      await postCommand({
+        command: cmd, targets: hit.ip,
+        username: user, password: pass,
+      });
+      setMsg(`launched ${cmd}`);
+    } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+
+  function copyCmd() {
+    const parts = hit.cred.split(":");
+    const cmd = protoToOneLiner(hit.proto, parts[0] || "user", hit.ip);
+    navigator.clipboard?.writeText(cmd);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  }
+
+  return (
+    <td className="hit-actions">
+      {hit.admin && (
+        <button className="cred-try-btn" onClick={tryConnect} disabled={busy}
+                title={`run ${protoToCommand(hit.proto, hit.admin)} with these creds against ${hit.ip}`}>
+          {busy ? "…" : "⚡ Deploy enum"}
+        </button>
+      )}
+      <button className="cred-cmd-copy" onClick={copyCmd} title="copy one-liner">
+        {copied ? "✓" : "📋"}
+      </button>
+      {msg && <span className="muted small"> {msg}</span>}
+    </td>
+  );
+}
+
+export function Loot({ nav }: { nav?: Nav }) {
   const [creds, setCreds] = useState<Credential[] | null>(null);
   const [reveal, setReveal] = useState<Set<number>>(new Set());
   const [err, setErr] = useState<string | null>(null);
@@ -37,6 +113,11 @@ export function Loot() {
   const bySource: Record<string, number> = {};
   creds.forEach((c) => { bySource[c.source] = (bySource[c.source] || 0) + 1; });
   const toggle = (i: number) => setReveal((s) => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n; });
+
+  function copyCred(c: Credential) {
+    navigator.clipboard?.writeText(credOneLiner(c));
+  }
+
   return (
     <div className="lootview">
       <section className="stats">
@@ -62,11 +143,16 @@ export function Loot() {
         {!safe && <div className="ranmsg warn-msg">Full user × password — real lockout risk on a domain lockout policy. Rules of engagement only.</div>}
         {sprayMsg && <div className="ranmsg">{sprayMsg}</div>}
         {hits && hits.length > 0 && (
-          <table className="loottable"><thead><tr><th>Proto</th><th>Host</th><th>Login</th><th></th></tr></thead>
+          <table className="loottable"><thead><tr><th>Proto</th><th>Host</th><th>Login</th><th></th><th>Actions</th></tr></thead>
             <tbody>{hits.map((h, i) => (
-              <tr key={i}><td className="mono">{h.proto}</td><td className="mono">{h.ip}</td>
+              <tr key={i}><td className="mono">{h.proto}</td>
+                <td className="mono">{nav
+                  ? <span className="host-link" onClick={() => nav.openHost(h.ip)} title="host detail">{h.ip}</span>
+                  : h.ip}</td>
                 <td className="mono">{h.cred}</td>
-                <td>{h.admin && <span className="tag warn">ADMIN · Pwn3d!</span>}</td></tr>
+                <td>{h.admin && <span className="tag warn">ADMIN · Pwn3d!</span>}</td>
+                <HitActions hit={h} />
+              </tr>
             ))}</tbody>
           </table>
         )}
@@ -77,7 +163,7 @@ export function Loot() {
           <span className="muted">what recce collected / captured — or <code>recce creds --run</code> to spray</span></div>
         <div className="tablewrap">
           <table className="loottable">
-            <thead><tr><th>Account</th><th>Secret</th><th>Kind</th><th>Source</th><th>From</th><th>Notes</th></tr></thead>
+            <thead><tr><th>Account</th><th>Secret</th><th>Kind</th><th>Source</th><th>From</th><th>Notes</th><th></th></tr></thead>
             <tbody>
               {creds.map((c, i) => (
                 <tr key={i}>
@@ -89,8 +175,14 @@ export function Loot() {
                   </td>
                   <td><span className="tag">{KIND_LABEL[c.kind] || c.kind}</span></td>
                   <td className="mono">{c.source}</td>
-                  <td className="mono">{c.origin_ip}</td>
+                  <td className="mono">{nav && c.origin_ip
+                    ? <span className="host-link" onClick={() => nav.openHost(c.origin_ip)} title="host detail">{c.origin_ip}</span>
+                    : c.origin_ip}</td>
                   <td className="muted notes">{c.notes}</td>
+                  <td>
+                    <button className="cred-cmd-copy" onClick={() => copyCred(c)}
+                            title={credOneLiner(c)}>📋 cmd</button>
+                  </td>
                 </tr>
               ))}
             </tbody>

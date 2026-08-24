@@ -224,6 +224,37 @@ function ImportModal(
   );
 }
 
+const SHORTCUTS: [string, string][] = [
+  ["Alt + 1-9", "Switch to Nth visible tab"],
+  ["Alt + I", "Toggle import modal"],
+  ["/", "Focus search"],
+  ["Esc", "Close panel / drawer"],
+  ["?", "Show this help"],
+];
+
+function ShortcutHelp({ onClose }: { onClose: () => void }) {
+  useEscape(onClose);
+  return (
+    <>
+      <div className="modal-backdrop" onClick={onClose} />
+      <div className="modal shortcut-help" role="dialog" aria-label="Keyboard shortcuts">
+        <div className="modal-h">
+          <h3>Keyboard shortcuts</h3>
+          <button className="drawer-x" onClick={onClose} aria-label="close">✕</button>
+        </div>
+        <div className="shortcut-list">
+          {SHORTCUTS.map(([key, desc]) => (
+            <div key={key} className="shortcut-row">
+              <kbd>{key}</kbd>
+              <span>{desc}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
 // Main App
 export default function App() {
   const [ov, setOv] = useState<Overview | null>(null);
@@ -272,21 +303,51 @@ export default function App() {
   const { tester, who, setWho, nameInput, setNameInput, saveTester } = useTester();
   const collab = useCollab();
 
-  // "/" key to focus search
+  const [showShortcuts, setShowShortcuts] = useState(false);
+
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName || "";
-      if (e.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) {
+      const inInput = /^(INPUT|TEXTAREA|SELECT)$/.test(tag);
+
+      if (e.altKey && e.key >= "1" && e.key <= "9") {
+        e.preventDefault();
+        try {
+          const saved = localStorage.getItem("recce.tabs");
+          const visible: TabId[] = saved ? JSON.parse(saved) : [];
+          const idx = parseInt(e.key, 10) - 1;
+          if (visible[idx]) setTab(visible[idx]);
+        } catch {}
+        return;
+      }
+
+      if (e.altKey && e.key.toLowerCase() === "i") {
+        e.preventDefault();
+        setShowImport((v) => !v);
+        return;
+      }
+
+      if (e.key === "Escape") {
+        if (showShortcuts) { setShowShortcuts(false); return; }
+        if (drawerIp) { setDrawerIp(null); return; }
+        return;
+      }
+
+      if (!inInput && e.key === "/" ) {
         const s = document.querySelector<HTMLInputElement>(".search");
-        if (s) {
-          e.preventDefault();
-          s.focus();
-        }
+        if (s) { e.preventDefault(); s.focus(); }
+        return;
+      }
+
+      if (!inInput && e.key === "?") {
+        e.preventDefault();
+        setShowShortcuts((v) => !v);
+        return;
       }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, []);
+  }, [showShortcuts, drawerIp]);
 
   // Notifications
   const note = useCallback((msg: string) => {
@@ -472,7 +533,7 @@ export default function App() {
             onViewHost={(ip) => setDrawerIp(ip)} />}
           {tab === "report" && <ReportTab findings={findings} onRefresh={() => refresh().catch(() => {})} />}
           {tab === "exploitation" && <Exploitation nav={nav} />}
-          {tab === "credentials" && <Credentials />}
+          {tab === "credentials" && <Credentials nav={nav} />}
           {tab === "playbook" && <Playbook pb={pb} nav={nav} />}
         </div>
 
@@ -497,6 +558,8 @@ export default function App() {
           onDone={(msg) => note(msg)}
         />
       )}
+
+      {showShortcuts && <ShortcutHelp onClose={() => setShowShortcuts(false)} />}
 
       {/* Host detail drawer */}
       {drawerIp && (
