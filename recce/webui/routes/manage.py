@@ -235,3 +235,121 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         broker.publish({"type": "scope", "action": "remove", "subnet": subnet,
                         "by": x_tester})
         return {"ok": True, "subnet": subnet}
+
+    # --- per-finding writeup -------------------------------------------------
+
+    @app.get("/api/writeups")
+    def list_writeup_findings():
+        """List all findings available for write-up (id, severity, title, affected)."""
+        from ...report_docx import list_findings
+        from ...store import Store
+        st = Store(db_path)
+        try:
+            hosts = st.all_hosts()
+        finally:
+            st.close()
+        return {"findings": list_findings(hosts, min_severity="info")}
+
+    @app.post("/api/writeup")
+    def generate_writeup(body: dict = Body(...)):
+        """Generate a single-finding Word write-up. Returns the file as a download."""
+        import os
+        from fastapi.responses import FileResponse
+        from ...report_docx import build_one_writeup
+        from ...store import Store
+        selector = str(body.get("selector", "")).strip()
+        if not selector:
+            raise HTTPException(400, "selector required (finding id, CVE, IP, or title substring)")
+        st = Store(db_path)
+        try:
+            hosts = st.all_hosts()
+        finally:
+            st.close()
+        out_dir = os.path.join(eng_dir, "writeups")
+        result = build_one_writeup(hosts, out_dir, selector, overwrite=True)
+        if result["written"]:
+            return FileResponse(
+                result["written"],
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                filename=os.path.basename(result["written"]))
+        if result["reason"] == "none":
+            raise HTTPException(404, f"no finding matches {selector!r}")
+        if result["reason"] == "ambiguous":
+            return {"ok": False, "reason": "ambiguous",
+                    "matches": result["matched"]}
+        raise HTTPException(500, f"writeup failed: {result.get('reason', 'unknown')}")
+
+    # --- network map ---------------------------------------------------------
+
+    @app.get("/api/netmap.svg")
+    def netmap_svg():
+        """Network/architecture map as a self-contained SVG."""
+        from fastapi.responses import Response
+        from ... import netmap
+        from ...store import Store
+        st = Store(db_path)
+        try:
+            hosts = st.all_hosts()
+            domains = st.all_domains()
+        finally:
+            st.close()
+        up = [h for h in hosts if h.is_up]
+        if not up:
+            return Response(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>",
+                media_type="image/svg+xml")
+        out = netmap.svg(up, domains)
+        if "<svg " in out and 'xmlns=' not in out:
+            out = out.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+        return Response(out, media_type="image/svg+xml")
+
+    # --- doctor (health check) -----------------------------------------------
+
+    @app.post("/api/doctor")
+    def run_doctor(x_tester: str = Header(default="someone")):
+        """Run the engagement health check as a background job."""
+        full_argv = recce_argv("doctor", "-o", eng_dir)
+        full_cmd = " ".join(full_argv)
+        for j in jobs.list():
+            if j.status == "running" and j.cmd == full_cmd:
+                raise HTTPException(409, "doctor is already running")
+
+        def _done(job):
+            broker.publish({"type": "scan", "status": job.status,
+                            "tester": x_tester, "targets": "doctor"})
+
+        job = jobs.start(full_argv, on_done=_done)
+        return {"ok": True, "id": job.id, "status": job.status}
+
+    # --- bulk review ---------------------------------------------------------
+
+    @app.post("/api/bulk-review")
+    def bulk_review(body: dict = Body(...),
+                    x_tester: str = Header(default="someone")):
+        """Mark multiple items as reviewed (or unreviewed) in one call.
+        Body: {keys: ["key1", "key2", ...], reviewed: true}"""
+        from ...store import Store
+        from .. import collab
+        keys = body.get("keys", [])
+        if not isinstance(keys, list) or not keys:
+            raise HTTPException(400, "keys must be a non-empty list")
+        if len(keys) > 500:
+            raise HTTPException(400, "max 500 keys per call")
+        reviewed = bool(body.get("reviewed", True))
+        st = Store(db_path)
+        try:
+            existing = st.get_tracking()
+            items = {}
+            for k in keys:
+                sk = str(k)
+                old_notes = existing.get(sk, (False, ""))[1]
+                items[sk] = (reviewed, old_notes)
+            n = st.bulk_set_tracking(items)
+            collab.add_activity(st, x_tester, "review",
+                                f"{x_tester} bulk-{'reviewed' if reviewed else 'unreviewed'} "
+                                f"{n} item(s)")
+        finally:
+            st.close()
+        broker.publish({"type": "bulk_review", "count": n, "reviewed": reviewed,
+                        "by": x_tester})
+        return {"ok": True, "count": n}
