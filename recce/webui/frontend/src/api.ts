@@ -183,6 +183,14 @@ export type ScanDiff = {
 };
 export const getDiff = (since?: number) =>
   getJSON<ScanDiff>(`/api/diff${since != null ? `?since=${since}` : ""}`);
+
+export type LootExtracted = { username: string; kind: string; source: string; secret_preview: string };
+export type LootExtractResult = {
+  found: number; added: number; skipped_dupes: number;
+  credentials: LootExtracted[];
+};
+export const postLootExtract = (text: string, origin_ip = "", note = "") =>
+  post("/api/loot/extract", { text, origin_ip, note }) as Promise<LootExtractResult>;
 export const getCredentials = () => getJSON<Paginated<Credential>>("/api/credentials").then(r => r.items);
 export const getAttack = () => getJSON<AttackCoverage>("/api/attack");
 export type ActRunResult = { looted: number; creds: { label: string; source: string }[]; spray_files: string[] };

@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query
 
+from .. import collab
 from ..services import credentials as credentials_svc
 from ..services import findings as findings_svc
+from ..services import loot as loot_svc
 
 
 def register_findings_routes(app: FastAPI, ctx) -> None:
@@ -44,6 +46,27 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
         broker.publish({"type": "tick", "key": key, "reviewed": reviewed,
                         "tester": x_tester})
         return {"ok": True}
+
+    @app.post("/api/loot/extract")
+    def loot_extract(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        """Auto-loot: scan arbitrary text for credentials (secretsdump rows,
+        env-style KEY=VAL, user:pass lines) and add each new one to the
+        Credentials store with provenance. Idempotent — dupes are counted
+        but not re-added."""
+        text = str(body.get("text", ""))
+        if not text.strip():
+            raise HTTPException(400, "text required")
+        origin_ip = str(body.get("origin_ip", "")).strip()
+        note = str(body.get("note", "")).strip() or f"pasted by {x_tester}"
+        result = loot_svc.extract_and_persist(db_path, text, origin_ip=origin_ip, note=note)
+        if result["added"] > 0:
+            from ...store import Store
+            with Store(db_path) as st:
+                collab.add_activity(st, x_tester, "add",
+                    f"{x_tester} auto-looted {result['added']} credential(s) from pasted text")
+            broker.publish({"type": "add", "what": "credential", "by": x_tester,
+                            "count": result["added"]})
+        return result
 
     @app.post("/api/add/finding")
     def add_finding(body: dict = Body(...), x_tester: str = Header(default="someone")):

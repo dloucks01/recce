@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Credential, SprayHit, getCredentials, postSpray, postCommand } from "../api";
+import { Credential, LootExtractResult, SprayHit, getCredentials, postLootExtract, postSpray, postCommand } from "../api";
 import { Stat } from "../ui";
+import { toast } from "../toast";
 import { Nav } from "./shared";
 
 const KIND_LABEL: Record<string, string> = {
@@ -158,6 +159,8 @@ export function Credentials({ nav }: { nav?: Nav }) {
         )}
       </section>
 
+      <ExtractPanel onExtracted={load} />
+
       <section className="panel">
         <div className="panel-h"><h3>Collected credentials</h3>
           <span className="muted">what recce collected / captured — or <code>recce creds --run</code> to spray</span></div>
@@ -190,5 +193,76 @@ export function Credentials({ nav }: { nav?: Nav }) {
         </div>
       </section>
     </div>
+  );
+}
+
+// Auto-loot: paste raw tool output — secretsdump rows, .env dumps, netexec
+// output, whatever — and recce scrapes credentials from it into the store.
+function ExtractPanel({ onExtracted }: { onExtracted: () => void }) {
+  const [text, setText] = useState("");
+  const [originIp, setOriginIp] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<LootExtractResult | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function go() {
+    if (!text.trim() || busy) return;
+    setBusy(true); setErr(null); setResult(null);
+    try {
+      const r = await postLootExtract(text, originIp.trim());
+      setResult(r);
+      if (r.added > 0) {
+        toast.show(`+${r.added} credential(s) looted (${r.skipped_dupes} dupes skipped)`);
+        onExtracted();
+      } else if (r.found > 0) {
+        toast.show(`${r.found} found — all already in the store`);
+      } else {
+        toast.show("no credentials recognised in that text");
+      }
+    } catch (e) {
+      setErr(String(e instanceof Error ? e.message : e));
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <section className="panel autoloot">
+      <div className="panel-h">
+        <h3>Auto-loot from pasted text</h3>
+        <span className="muted">
+          scrapes secretsdump rows, .env-style KEY=VALUE, and user:pass lines — dupes skipped
+        </span>
+      </div>
+      <div className="autoloot-row">
+        <input className="scan-in" placeholder="origin host (optional)" value={originIp}
+               onChange={e => setOriginIp(e.target.value)} style={{maxWidth: 200}} />
+        <button className="run" onClick={go} disabled={busy || !text.trim()}>
+          {busy ? "Scanning…" : "🔓 Extract"}
+        </button>
+      </div>
+      <textarea className="imp-paste autoloot-text"
+                placeholder="paste any tool output — secretsdump dump, a .env file, netexec results, config snippets…"
+                value={text} onChange={e => setText(e.target.value)} disabled={busy} />
+      {err && <div className="ranmsg warn-msg">{err}</div>}
+      {result && result.found > 0 && (
+        <div className="autoloot-result">
+          <div className="autoloot-summary">
+            found <b>{result.found}</b> · added <b>{result.added}</b> new
+            {result.skipped_dupes > 0 && <> · skipped <b>{result.skipped_dupes}</b> dup{result.skipped_dupes > 1 ? "es" : ""}</>}
+          </div>
+          {result.credentials.length > 0 && (
+            <ul className="autoloot-list">
+              {result.credentials.map((c, i) => (
+                <li key={i}>
+                  <span className="mono">{c.username}</span>
+                  <span className="mono muted">{c.secret_preview}</span>
+                  <span className="tag">{c.kind}</span>
+                  <span className="muted small">{c.source}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </section>
   );
 }

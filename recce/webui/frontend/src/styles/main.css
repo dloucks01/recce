@@ -1029,6 +1029,15 @@ body { background: var(--ground); color: var(--text); }
 .fd-evidence-code { background: #0a0f18; border: 1px solid #1e2a3e; border-top: 0; border-radius: 0 0 8px 8px; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; color: #b9c6da; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
 .fd-remediation { margin: 12px 0; border-left: 3px solid var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--surface2)); border-radius: 0 8px 8px 0; padding: 10px 14px; }
 
+/* Auto-loot panel (Credentials tab) */
+.autoloot-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.autoloot-row .run { margin-left: auto; }
+.autoloot-text { width: 100%; min-height: 100px; font-family: var(--mono); font-size: 12px; }
+.autoloot-result { margin-top: 12px; padding: 10px 14px; background: color-mix(in srgb, var(--ok) 8%, var(--surface2)); border-left: 3px solid var(--ok); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.autoloot-summary { font-size: 13px; color: var(--text); margin-bottom: 6px; }
+.autoloot-list { list-style: none; padding: 0; margin: 6px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.autoloot-list li { display: flex; align-items: center; gap: 10px; padding: 4px 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; font-size: 12px; }
+
 /* Recent-changes card on the Dashboard */
 .recent .recent-wins { margin-left: auto; display: flex; gap: 4px; }
 .recent .recent-wins .chip { font-size: 11px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface2); color: var(--muted); cursor: pointer; }
