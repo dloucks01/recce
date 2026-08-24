@@ -3172,7 +3172,7 @@ def _brute_login_form(ip: str, port: Port, form: dict, base: str, auth: dict | N
                         f"Login form at {form['action']} accepted {username}:{password}",
                         "Enforce strong password policies; rate-limit logins",
                         confidence="potential")]
-        except:
+        except Exception:
             pass
     return []
 
@@ -3195,7 +3195,7 @@ def _check_oauth_redirect(ip: str, port: Port, auth: dict | None) -> list[Vuln]:
                     f"Parameter {param} caused a {r[0]} to attacker-controlled Location: {loc[:120]}",
                     "Validate redirect destinations against allow-list",
                     confidence="confirmed")]
-        except:
+        except Exception:
             pass
     return []
 
@@ -3212,7 +3212,7 @@ def _check_session_fixation(ip: str, port: Port, auth: dict | None) -> list[Vuln
                     f"Session parameter {param} was reflected in response",
                     "Use random SIDs; don't accept them from user input",
                     confidence="potential")]
-        except:
+        except Exception:
             pass
     return []
 
@@ -3233,7 +3233,7 @@ def _check_prototype_pollution(ip: str, port: Port, auth: dict | None) -> list[V
                     f"Query string parameter reflected prototype chain: {payload}",
                     "Never trust user input for object property assignment; use Object.assign with frozen objects",
                     confidence="potential")]
-        except:
+        except Exception:
             pass
     return []
 
@@ -3253,7 +3253,7 @@ def _check_ldap_injection(ip: str, port: Port, auth: dict | None) -> list[Vuln]:
                     f"LDAP filter accepted wildcard/filter operators: {payload}",
                     "Use LDAP escaping; parameterize all filter inputs",
                     confidence="potential")]
-        except:
+        except Exception:
             pass
     return []
 
@@ -3277,7 +3277,7 @@ def _check_header_injection(ip: str, port: Port, auth: dict | None) -> list[Vuln
                     f"Custom header {header} was reflected or processed: {value[:40]}",
                     "Never reflect user input into response headers; use safe header APIs",
                     confidence="potential")]
-        except:
+        except Exception:
             pass
     return []
 
@@ -3305,7 +3305,7 @@ def _check_method_override(ip: str, port: Port, auth: dict | None) -> list[Vuln]
                     f"Server processed {method or 'alternate'} method via {test[0]}. Can bypass auth/ACLs.",
                     "Never trust HTTP method from headers/params; use only HTTP verb",
                     confidence="potential")]
-        except:
+        except Exception:
             pass
     return []
 
@@ -3335,7 +3335,7 @@ def _check_error_stack_trace(ip: str, port: Port, base: str, auth: dict | None) 
                     f"Error response included stack trace or debug info: {desc}",
                     "Use generic error messages in production; log details server-side only",
                     confidence="potential")]
-        except:
+        except Exception:
             pass
     return []
 
@@ -3381,7 +3381,7 @@ def _check_admin_panels(ip: str, port: Port, base: str, auth: dict | None) -> li
                 f"GET {path} -> HTTP {r[0]} {status_desc}. Title: {title}",
                 "Restrict admin panels to internal IPs; require MFA",
                 confidence="confirmed" if r[0] == 200 else "potential"))
-        except:
+        except Exception:
             pass
     return findings[:3]  # Limit to top 3 to avoid noise
 
@@ -3397,7 +3397,7 @@ def _check_race_condition(ip: str, port: Port, base: str, auth: dict | None) -> 
             t0 = time.monotonic()
             _fetch(ip, port, path, auth=auth, read=512)
             timing.append(time.monotonic() - t0)
-        except:
+        except Exception:
             pass
 
     # Fire 5 concurrent requests and measure variance
@@ -3470,7 +3470,7 @@ def _check_type_confusion(ip: str, port: Port, base: str, auth: dict | None) -> 
                     f"May indicate type-coercion logic error (0 == false).",
                     "Explicitly check types; use strict equality (=== not ==)",
                     confidence="potential")]
-        except:
+        except Exception:
             pass
     return []
 
@@ -3488,7 +3488,7 @@ def _check_rate_limits(ip: str, port: Port, base: str, auth: dict | None) -> lis
             r = _fetch(ip, port, f"/?burst={i}", auth=auth, read=512)
             if r:
                 responses.append(r[0])
-        except:
+        except Exception:
             pass
 
     elapsed = time.monotonic() - t0
@@ -3529,7 +3529,7 @@ def _check_null_byte_injection(ip: str, port: Port, base: str, auth: dict | None
                     f"Null byte terminator {probe.split('=')[1][:30]}... bypassed extension check",
                     "Validate and canonicalize paths; reject %00; use allow-lists",
                     confidence="confirmed")]
-        except:
+        except Exception:
             pass
     return []
 
@@ -3561,7 +3561,7 @@ def _brute_wordlist_dirs(ip: str, port: Port, base: str, auth: dict | None, limi
                             f"{category.title()} path found: {word}", ["CWE-200"],
                             f"GET /{word} -> HTTP {r[0]}. Potential {category} endpoint.",
                             "Restrict access; require authentication", confidence="confirmed"))
-            except:
+            except Exception:
                 pass
     return findings[:5]  # Return top 5 to avoid noise
 
@@ -3593,7 +3593,7 @@ def _fuzz_parameters(ip: str, port: Port, base: str, auth: dict | None, limit: i
                     f"GET ?{param}=test' -> HTTP {r3[0]}. Possible injection point.",
                     "Use parameterized queries; validate input", confidence="potential"))
                 break
-        except:
+        except Exception:
             pass
     return findings
 
@@ -3615,7 +3615,7 @@ def _fuzz_headers_wordlist(ip: str, port: Port, auth: dict | None, limit: int = 
                     f"Custom header {header} reflected in response", ["CWE-79"],
                     f"Header {header} value appears in response body. Potential XSS if unescaped.",
                     "Never reflect user input; use sanitization", confidence="potential"))
-        except:
+        except Exception:
             pass
     return findings[:2]  # Limit to avoid noise
 
@@ -3637,7 +3637,7 @@ def _fuzz_cms_if_detected(ip: str, port: Port, base: str, fp: dict, auth: dict |
                             f"{cms.upper()} path discovered: {path}", ["CWE-200"],
                             f"GET /{path} -> HTTP {r[0]}. Confirmed {cms} usage.",
                             "Keep framework updated; harden default paths", confidence="confirmed"))
-                except:
+                except Exception:
                     pass
             break
     return findings
@@ -3666,7 +3666,7 @@ def _check_bot_detection_bypass(ip: str, port: Port, base: str, auth: dict | Non
                         f"Request with {desc} was not challenged by bot detection (if present).",
                         "Require JavaScript execution; validate headless detection; use CAPTCHA",
                         confidence="potential"))
-        except:
+        except Exception:
             pass
     return findings[:1]  # Return first hit
 

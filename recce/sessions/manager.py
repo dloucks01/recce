@@ -166,7 +166,8 @@ class SessionManager:
             try:
                 self.on_change(sess)
             except Exception:  # noqa: BLE001 — a listener must never break the session loop
-                pass
+                import logging
+                logging.getLogger("recce.sessions").debug("on_change callback failed", exc_info=True)
 
     # --- access ------------------------------------------------------------------
     def get(self, session_id: str) -> Session | None:

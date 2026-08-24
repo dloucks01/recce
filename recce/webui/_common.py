@@ -170,10 +170,12 @@ class _Broker:
 
     _MAX_SUBS = 128        # bound held-open SSE streams so publish() fan-out can't be abused
 
+    _MAX_QUEUE = 1024
+
     async def subscribe(self):
         if len(self._subs) >= self._MAX_SUBS:
             return                                # refuse past the cap; stream closes at once
-        q: asyncio.Queue = asyncio.Queue()
+        q: asyncio.Queue = asyncio.Queue(maxsize=self._MAX_QUEUE)
         self._subs.add(q)
         try:
             while True:
@@ -187,6 +189,11 @@ class _Broker:
 
         def _emit():
             for q in list(self._subs):
+                if q.full():
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
                 q.put_nowait(event)
 
         self._loop.call_soon_threadsafe(_emit)

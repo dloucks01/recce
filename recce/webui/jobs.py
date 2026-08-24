@@ -37,6 +37,7 @@ class Job:
 
 _MAX_JOBS = 60          # cap the in-memory registry; oldest FINISHED jobs are evicted
 _MAX_RUNNING = 8        # admission cap: never let more than N scans spawn subprocesses at once
+_MAX_LINES = 10_000     # cap per-job stdout buffer; oldest lines dropped when exceeded
 
 
 class TooManyJobs(Exception):
@@ -87,6 +88,8 @@ class JobManager:
             assert proc.stdout is not None
             for line in proc.stdout:
                 job.lines.append(line.rstrip("\n"))
+                if len(job.lines) > _MAX_LINES:
+                    job.lines = job.lines[-_MAX_LINES:]
                 if time.time() - job.started > self._JOB_TIMEOUT:
                     proc.terminate()
                     job.lines.append(f"[job timeout] killed after {self._JOB_TIMEOUT}s")
