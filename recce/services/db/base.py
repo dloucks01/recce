@@ -73,16 +73,18 @@ def finding(tool: str, sev: str, title: str, target: str, detail: str,
 class DbEngine(Protocol):
     """The shape every services/db/<engine>.py module conforms to.
 
-    A caller (e.g. cli.cmd_db, cli.cmd_credenum, the workbook builder)
-    picks the module by dispatch and calls these functions. Not every
-    engine implements every optional method; the required set is
-    `probe` + `analyze` + `<engine>_targets` + `findings_to_vulns`.
-    """
+    A caller (cli.cmd_db, cli.cmd_credenum, the workbook builder) picks
+    the module by dispatch and calls these functions. Only the DISPATCHED
+    surface is required; each engine also has read-only probes / auth /
+    loot / datamine functions used internally, but their names vary
+    (probe / probe_target / probe_creds), so they're not part of the
+    Protocol.
 
-    def probe(self, ip: str, port: int, timeout: float = DEFAULT_TIMEOUT) -> dict:
-        """Read-only detection. Returns a fact-bag (version, banner, auth
-        state, capabilities, …). Empty dict when nothing is reachable."""
-        ...
+    Required (walked by tests/test_db_engine_contract.py):
+      analyze(hosts, creds=None, active=True) -> dict
+      findings(hosts, probes=None) -> list[dict]
+      findings_to_vulns(fs) -> dict
+    """
 
     def analyze(self, hosts: list[Host], creds: Any = None,
                 active: bool = True) -> dict:
