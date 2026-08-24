@@ -76,7 +76,10 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
         port = body.get("port")
         cves = [c.strip().upper() for c in re.findall(r"CVE-\d{4}-\d+",
                 str(body.get("cve", "")), re.I)]
-        v = Vuln(ip=ip, port=int(port) if str(port).isdigit() else None, protocol="tcp",
+        port_int = int(port) if str(port).isdigit() else None
+        if port_int is not None and not (1 <= port_int <= 65535):
+            raise HTTPException(400, "port must be 1–65535")
+        v = Vuln(ip=ip, port=port_int, protocol="tcp",
                  script_id=f"manual-{int(time.time())}", state="finding", title=title,
                  severity=sev, ids=cves, output=str(body.get("output", ""))[:4000],
                  source="manual", confidence="confirmed")

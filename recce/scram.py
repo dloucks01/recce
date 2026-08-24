@@ -67,7 +67,11 @@ class ScramClient:
         if not nonce.startswith(self.client_nonce):
             raise ValueError("server nonce does not extend the client nonce")
         salt = base64.b64decode(sf["s"])
+        if len(salt) > 1024:
+            raise ValueError(f"server SCRAM salt {len(salt)}B exceeds sanity cap")
         iterations = int(sf["i"])
+        if not 1 <= iterations <= 600_000:
+            raise ValueError(f"server SCRAM i={iterations} out of range (1..600000)")
         salted = hashlib.pbkdf2_hmac(self.hashname, self.password.encode(), salt, iterations)
         client_key = hmac.new(salted, b"Client Key", self.hashname).digest()
         stored_key = hashlib.new(self.hashname, client_key).digest()

@@ -25,11 +25,26 @@ def _is_ip(s: str) -> bool:
 # an IPv6 /64 is astronomical - expanding either would exhaust memory before any scan.
 _MAX_EXPAND = 65536
 
+# A target token flows to nmap/masscan as a trailing positional. Refuse anything that
+# argparse-shaped tools would parse as a flag (`--script=...`, `-oX/tmp/x`) or that
+# carries shell metachars, so a stray line in @targets.txt can't quietly rewrite the
+# scan command. IPs, CIDRs, dash-ranges, hostnames and IPv6 (bracketed or scoped) all
+# fit this allowlist.
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9._:\[\]/%-]+$")
+
+
+def _valid_token(token: str) -> bool:
+    if not token or token.startswith("-"):
+        return False
+    return bool(_TOKEN_RE.match(token))
+
 
 def _expand_token(token: str) -> list[str]:
     token = token.strip()
     if not token or token.startswith("#"):
         return []
+    if not _valid_token(token):
+        raise ValueError(f"invalid target token {token!r} (looks like a flag or has metachars)")
     # CIDR (e.g. 10.0.0.0/24) -> all usable hosts.
     if "/" in token:
         net = ipaddress.ip_network(token, strict=False)

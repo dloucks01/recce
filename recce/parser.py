@@ -284,17 +284,20 @@ def _accounts_from_host_scripts(host_ip: str, script: Script) -> list[Account]:
     return accounts
 
 
+_ENTITY_DECL_RE = re.compile(rb"<!(?:DOCTYPE|ENTITY)", re.I)
+
+
 def _declares_entities(path: str) -> bool:
-    """True if the file declares XML entities in its prolog. Real nmap output never
-    does; a file that does could be an entity-expansion ('billion laughs') DoS,
-    which stdlib ElementTree would happily expand. Bounded head-scan: the DTD must
-    precede the root element, so a real declaration is always near the top."""
+    """True if the file declares XML entities. Real nmap output never does; a file that
+    does could be an entity-expansion ('billion laughs') DoS, which stdlib ElementTree
+    would happily expand. Scans the WHOLE file - comments and whitespace can pad a
+    DOCTYPE past any fixed head window, so a bounded prefix scan is bypassable."""
     try:
         with open(path, "rb") as fh:
-            head = fh.read(262144)
+            data = fh.read()
     except OSError:
         return False
-    return b"<!ENTITY" in head
+    return bool(_ENTITY_DECL_RE.search(data))
 
 
 def parse_nmap_xml(path: str) -> list[Host]:

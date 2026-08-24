@@ -81,8 +81,8 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
                             notes=f"validated over {h['proto']}"
                                   + (" (local admin)" if h["admin"] else ""))):
                         new += 1
+            broker.publish({"type": "spray", "hits": len(res.get("hits", []))})
+            return {"ok": res.get("ok", False), "error": res.get("error", ""),
+                    "hits": res.get("hits", []), "new": new}
         finally:
             st.close()
-        broker.publish({"type": "spray", "hits": len(res.get("hits", []))})
-        return {"ok": res.get("ok", False), "error": res.get("error", ""),
-                "hits": res.get("hits", []), "new": new}

@@ -752,11 +752,18 @@ def _impacket_target(creds: dict, at_dc: bool = False) -> tuple[str, list[str], 
     The plaintext password is NEVER placed in the target - it would sit on the
     world-readable process argv. It is returned as stdin_password so the caller can
     answer impacket's getpass() prompt over stdin instead. An NT hash has no
-    off-argv option, so it stays in `-hashes` on the argv (stdin_password is None)."""
+    off-argv option, so it stays in `-hashes` on the argv (stdin_password is None).
+
+    Refuses dash-leading domain/user/dc components: impacket parses a dash-leading
+    positional as an option (e.g. an empty domain + user='-hashes' would be picked
+    up as the -hashes flag)."""
     dom = creds.get("domain") or ""
     user = creds.get("user") or ""
     secret = creds.get("secret") or ""
     dc = creds.get("dc_ip") or ""
+    for val, name in ((dom, "domain"), (user, "user"), (dc, "dc_ip")):
+        if val.startswith("-"):
+            raise ValueError(f"refusing dash-leading {name}={val!r} (impacket would parse it as a flag)")
     base = f"{dom}/{user}" if dom else user
     flags: list[str] = []
     stdin_pw: str | None = None

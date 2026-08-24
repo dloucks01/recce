@@ -468,7 +468,19 @@ def read_sheets(path: str) -> dict[str, list[list[str]]]:
     Resolves both inline strings and shared strings, so it reads files this
     module writes AND files Excel/LibreOffice writes after the operator saves.
     """
+    import re
     import xml.etree.ElementTree as ET
+
+    # Guard every parse against DTD/entity declarations - a client-supplied .xlsx can
+    # smuggle a billion-laughs bomb in any of its XML parts, and stdlib ET expands
+    # internal entities. Scan the whole payload; a bounded prefix is bypassable.
+    _entity_re = re.compile(rb"<!(?:DOCTYPE|ENTITY)", re.I)
+
+    def _safe(name: str):
+        raw = z.read(name)
+        if _entity_re.search(raw):
+            raise ValueError(f"{name} declares XML entities - refusing to parse")
+        return ET.fromstring(raw)
 
     result: dict[str, list[list[str]]] = {}
     with zipfile.ZipFile(path) as z:
@@ -476,13 +488,13 @@ def read_sheets(path: str) -> dict[str, list[list[str]]]:
 
         shared: list[str] = []
         if "xl/sharedStrings.xml" in names:
-            root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            root = _safe("xl/sharedStrings.xml")
             for si in root.findall(f"{_NS}si"):
                 shared.append("".join(t.text or "" for t in si.iter(f"{_NS}t")))
 
         # Map sheet title -> worksheet part via workbook.xml + rels.
-        wb_root = ET.fromstring(z.read("xl/workbook.xml"))
-        rel_root = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        wb_root = _safe("xl/workbook.xml")
+        rel_root = _safe("xl/_rels/workbook.xml.rels")
         rid_to_target = {
             r.get("Id"): r.get("Target")
             for r in rel_root.findall(
@@ -501,7 +513,7 @@ def read_sheets(path: str) -> dict[str, list[list[str]]]:
             if part not in names:
                 result[title] = []
                 continue
-            sroot = ET.fromstring(z.read(part))
+            sroot = _safe(part)
             data = sroot.find(f"{_NS}sheetData")
             rows_out: list[list[str]] = []
             if data is None:

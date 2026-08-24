@@ -299,7 +299,8 @@ def _import_preview(kind: str, content: str, raw_bytes: bytes) -> dict:
             detail = f"{kind} file ({len(content.splitlines())} line(s))"
             n = 1
     except Exception:  # noqa: BLE001 — a preview must never 500
-        pass
+        import logging
+        logging.getLogger("recce.webui").debug("import preview failed for kind=%s", kind, exc_info=True)
     warning = ("" if n or kind in ("loot", "fieldkit", "bloodhound")
                else f"parsed 0 rows — this may not be {kind} output, or it's a variant recce "
                "can't read yet. Check the tool/format before importing.")

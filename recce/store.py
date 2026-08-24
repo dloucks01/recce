@@ -91,7 +91,16 @@ class Store:
         self.path = path
         self.conn = None
         try:
-            self.conn = sqlite3.connect(path)
+            # autocommit (isolation_level=None) so we can drive `BEGIN IMMEDIATE`
+            # explicitly - the sqlite3 default legacy mode auto-begins a deferred
+            # transaction before any DML, and then our explicit BEGIN raises
+            # "cannot start a transaction within a transaction" if any prior
+            # writer method left a deferred txn open. check_same_thread=False so
+            # the web workbench's threadpool handlers can share one Store safely
+            # (write access is serialised at the sqlite level by BEGIN IMMEDIATE +
+            # busy_timeout below).
+            self.conn = sqlite3.connect(path, isolation_level=None,
+                                        check_same_thread=False)
             # Ride out a transient lock (operator opened the DB, or a second recce)
             # instead of aborting a scan; WAL lets readers not block the writer.
             self.conn.execute("PRAGMA busy_timeout=15000")
@@ -101,7 +110,6 @@ class Store:
                 pass                       # non-fatal (e.g. read-only fs); keep going
             self.conn.executescript(_SCHEMA)
             self._migrate()
-            self.conn.commit()
         except sqlite3.Error as e:
             # A corrupt / partially-transferred results.sqlite must fail with a
             # clear, actionable message - not a raw sqlite traceback on the very
@@ -369,18 +377,24 @@ class Store:
             raise
 
     def bulk_set_tracking(self, items: dict[str, tuple], when: str = "") -> int:
-        """items: {key: (reviewed_bool, notes)}. Returns number of rows written."""
+        """items: {key: (reviewed_bool, notes)}. Returns number of rows written.
+        All rows commit atomically; a mid-loop failure rolls the whole batch back."""
         n = 0
-        with closing(self.conn.cursor()) as cur:
-            for key, (reviewed, notes) in items.items():
-                cur.execute(
-                    "INSERT INTO tracking(key, reviewed, notes, updated) VALUES(?,?,?,?) "
-                    "ON CONFLICT(key) DO UPDATE SET reviewed=excluded.reviewed, "
-                    "notes=excluded.notes, updated=excluded.updated",
-                    (key, 1 if reviewed else 0, notes or "", when),
-                )
-                n += 1
-        self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            with closing(self.conn.cursor()) as cur:
+                for key, (reviewed, notes) in items.items():
+                    cur.execute(
+                        "INSERT INTO tracking(key, reviewed, notes, updated) VALUES(?,?,?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET reviewed=excluded.reviewed, "
+                        "notes=excluded.notes, updated=excluded.updated",
+                        (key, 1 if reviewed else 0, notes or "", when),
+                    )
+                    n += 1
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
         return n
 
     # --- scope (every subnet in the engagement, so none is missed) --------------
@@ -413,19 +427,25 @@ class Store:
     def bulk_set_status(self, items: dict[str, tuple], when: str = "") -> int:
         """items: {key: (status_str, reviewed_bool, notes)}. Persists a per-item
         tri-state status (e.g. a per-port 'in progress') alongside the reviewed
-        flag so coverage still works (reviewed True == the port is done)."""
+        flag so coverage still works (reviewed True == the port is done). All
+        rows commit atomically."""
         n = 0
-        with closing(self.conn.cursor()) as cur:
-            for key, (status, reviewed, notes) in items.items():
-                cur.execute(
-                    "INSERT INTO tracking(key, reviewed, notes, status, updated) "
-                    "VALUES(?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
-                    "reviewed=excluded.reviewed, notes=excluded.notes, "
-                    "status=excluded.status, updated=excluded.updated",
-                    (key, 1 if reviewed else 0, notes or "", status or "", when),
-                )
-                n += 1
-        self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            with closing(self.conn.cursor()) as cur:
+                for key, (status, reviewed, notes) in items.items():
+                    cur.execute(
+                        "INSERT INTO tracking(key, reviewed, notes, status, updated) "
+                        "VALUES(?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                        "reviewed=excluded.reviewed, notes=excluded.notes, "
+                        "status=excluded.status, updated=excluded.updated",
+                        (key, 1 if reviewed else 0, notes or "", status or "", when),
+                    )
+                    n += 1
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
         return n
 
     def get_statuses(self) -> dict[str, str]:

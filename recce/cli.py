@@ -154,6 +154,9 @@ def _disproved_ports_in_xml(xml_path: str, ip: str) -> set:
     couldn't reach ('filtered'/no-response = packet loss, NOT counted here) is kept -
     masscan's positive evidence stands over nmap loss. Never raises."""
     import xml.etree.ElementTree as ET
+    from .parser import _declares_entities
+    if _declares_entities(xml_path):
+        return set()
     try:
         tree = ET.parse(xml_path)
     except (OSError, ET.ParseError):

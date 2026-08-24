@@ -216,7 +216,7 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
                 res["cluster"] = row.get("cluster_name", "")
                 res["datacenter"] = row.get("data_center", "")
                 res["partitioner"] = row.get("partitioner", "")
-    except (OSError, socket.timeout, struct.error) as e:
+    except (OSError, socket.timeout, struct.error, ValueError) as e:
         res["error"] = res["error"] or str(e)
     return res
 

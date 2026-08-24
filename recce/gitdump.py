@@ -70,10 +70,17 @@ def parse_index(data: bytes, cap: int = 500) -> list[tuple[str, str]]:
     return out
 
 
+_MAX_INFLATED = 16 * 1024 * 1024  # a hostile 4MB blob of zeros expands to ~4GB; cap it
+
+
 def inflate_object(raw: bytes) -> tuple[str, bytes] | None:
-    """Inflate a loose git object. Returns (type, content) e.g. ('blob', b'...') or None."""
+    """Inflate a loose git object. Returns (type, content) e.g. ('blob', b'...') or None.
+    Bounded to _MAX_INFLATED to defuse zlib-bomb blobs from a hostile git server."""
     try:
-        data = zlib.decompress(raw)
+        d = zlib.decompressobj()
+        data = d.decompress(raw, _MAX_INFLATED)
+        if d.unconsumed_tail:
+            return None                          # blob exceeded the cap
     except zlib.error:
         return None
     nul = data.find(b"\x00")

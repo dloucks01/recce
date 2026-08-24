@@ -988,6 +988,11 @@ def _mssqlclient_cmd(ip: str, creds: dict, port: int, windows_auth: bool) -> lis
     # Omit the password from the target: it would sit on the world-readable process
     # argv. The runners answer impacket's getpass() prompt from stdin instead.
     user, dom = creds.get("user", ""), creds.get("domain", "")
+    # impacket-mssqlclient parses a dash-leading positional as an option; refuse it
+    # (e.g. empty domain + user='-hashes' would silently become the -hashes flag).
+    for val, name in ((dom, "domain"), (user, "user"), (ip, "ip")):
+        if val.startswith("-"):
+            return None
     if windows_auth and dom:
         cmd = [tool, f"{dom}/{user}@{ip}", "-windows-auth"]
     else:

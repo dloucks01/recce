@@ -175,17 +175,18 @@ class Presence:
     def __init__(self, ttl: float = 45.0) -> None:
         self._seen: dict[str, float] = {}
         self._ttl = ttl
+        self._lock = threading.Lock()
 
     def ping(self, tester: str) -> None:
         if tester:
-            self._seen[tester] = time.time()
+            with self._lock:
+                self._seen[tester] = time.time()
 
     def roster(self) -> list[str]:
         now = time.time()
-        # snapshot items() before pruning: a concurrent ping() from another request
-        # thread must not resize the dict mid-iteration.
-        alive = {t: s for t, s in list(self._seen.items()) if now - s < self._ttl}
-        self._seen = alive
+        with self._lock:
+            alive = {t: s for t, s in self._seen.items() if now - s < self._ttl}
+            self._seen = alive
         return sorted(alive)
 
 

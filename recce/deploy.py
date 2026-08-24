@@ -180,12 +180,25 @@ def _ran_ok(out: str) -> bool:
 
 # --- SSH (Linux) ----------------------------------------------------------------
 
+def _reject_dash_lead(*vals: str) -> str | None:
+    """Refuse any value that would look like a flag to a positional arg (`ssh`,
+    `impacket-*`, `mssqlclient` all parse dash-leading positionals as options).
+    Returns an error string or None."""
+    for v in vals:
+        if v and v.startswith("-"):
+            return f"refusing dash-leading value {v!r} (would be parsed as a flag)"
+    return None
+
+
 def run_ssh(ip: str, creds: dict, script_text: str, timeout: int):
     """Run recce-enum.sh on a Linux host over SSH, script piped via stdin (no file
     dropped). Returns (output|None, error|None)."""
     user = creds.get("username")
     if not user:
         return None, "no ssh username"
+    bad = _reject_dash_lead(user, ip)
+    if bad:
+        return None, bad
     ssh = ["ssh", "-o", "StrictHostKeyChecking=no",
            "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10"]
     prefix: list = []
@@ -251,8 +264,15 @@ def _impacket_target(creds: dict, ip: str) -> str:
     # Never embed the plaintext password (it would sit on the world-readable argv):
     # a hash goes via -hashes, a password is answered to getpass() over stdin.
     dom = creds.get("domain") or ""
-    prefix = f"{dom}/" if dom else ""
     user = creds.get("username", "")
+    # impacket parses a dash-leading positional as an option (e.g. `-hashes`); an
+    # empty domain + hostile-looking user or ip therefore has to be rejected. The
+    # target string itself never starts with '-' unless dom is empty AND user starts
+    # with '-', but reject dash-lead on any component to be safe.
+    bad = _reject_dash_lead(dom, user, ip)
+    if bad:
+        raise ValueError(bad)
+    prefix = f"{dom}/" if dom else ""
     return f"{prefix}{user}@{ip}"
 
 

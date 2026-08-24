@@ -62,14 +62,25 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
         if spec["targets"] != "none":
             argv += targets
         label = f"{command} {' '.join(targets)}".strip()
+        full_argv = recce_argv(*argv)
+        full_cmd = " ".join(full_argv)
+        for j in jobs.list():
+            if j.status == "running" and j.cmd == full_cmd:
+                raise HTTPException(409, "an identical scan is already running")
 
         def _done(job):
             broker.publish({"type": "scan", "status": job.status, "tester": x_tester,
                             "targets": label})
 
-        job = jobs.start(recce_argv(*argv), on_done=_done)
+        job = jobs.start(full_argv, on_done=_done)
         broker.publish({"type": "scan_started", "tester": x_tester, "targets": label})
         return {"id": job.id, "status": job.status, "cmd": job.cmd}
+
+    @app.post("/api/jobs/{jid}/cancel")
+    def cancel_job(jid: str):
+        if not jobs.cancel(jid):
+            raise HTTPException(404, "no running job with that id")
+        return {"ok": True}
 
     @app.get("/api/jobs")
     def list_jobs():

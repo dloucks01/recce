@@ -2314,6 +2314,12 @@ def _scan_sourcemaps(ip: str, port: Port, base: str, body: str, auth) -> tuple[l
         for i, content in enumerate(contents[:80]):
             if not isinstance(content, str):
                 continue
+            # Cap per-item content: gitdump._mine's secret regex has enough greedy
+            # alternation to backtrack heavily on adversarial bytes, and 8MB of
+            # attacker-controlled sourcesContent[i] can stall the scanner for tens
+            # of seconds. A few hundred KB is enough to recover meaningful secrets.
+            if len(content) > 262144:
+                content = content[:262144]
             spath = str(sources[i]) if i < len(sources) else f"src{i}"
             files.append(spath.replace("webpack://", ""))
             s, c = gitdump._mine(spath, content.encode("utf-8", "replace"))
@@ -2807,22 +2813,29 @@ _SSTI_PARAM = re.compile(
 
 def _ssrf_via(ip: str, port: Port, where: str, param: str, send) -> list[Vuln]:
     """Point a URL-ish parameter at cloud-metadata / file:// and confirm SSRF when the
-    server fetches it and the metadata/file content comes back in the response."""
+    server fetches it and the metadata/file content comes back in the response. A
+    baseline request against a non-metadata URL rules out a server that echoes the
+    same marker string on every response - without that control a page emitting
+    'AccessKeyId' on any request produced one critical false positive per param."""
     if not _SSRF_PARAM.search(param):
         return []
+    baseline = _body(send("http://127.0.0.1:1/recce-baseline")) or ""
     for payload, marker, what in _SSRF_PAYLOADS:
         b = _body(send(payload))
-        if b and marker.search(b):
-            cloud = "metadata" in what.lower() or "imds" in what.lower()
-            sev = "critical" if cloud else "high"
-            return [_mk(ip, port, "web-ssrf", sev,
-                        f"Server-Side Request Forgery via {where}", ["CWE-918"],
-                        f"{where} set to {payload!r} caused the server to fetch it and the "
-                        f"response returned {what} - SSRF confirmed (the app requests a "
-                        "URL taken from our input).",
-                        "Allow-list outbound destinations; block link-local/metadata IPs "
-                        "(169.254.169.254); enforce IMDSv2; disable file://.",
-                        confidence="confirmed")]
+        if not (b and marker.search(b)):
+            continue
+        if marker.search(baseline):
+            continue                          # marker is baseline noise, not SSRF proof
+        cloud = "metadata" in what.lower() or "imds" in what.lower()
+        sev = "critical" if cloud else "high"
+        return [_mk(ip, port, "web-ssrf", sev,
+                    f"Server-Side Request Forgery via {where}", ["CWE-918"],
+                    f"{where} set to {payload!r} caused the server to fetch it and the "
+                    f"response returned {what} - SSRF confirmed (the app requests a "
+                    "URL taken from our input).",
+                    "Allow-list outbound destinations; block link-local/metadata IPs "
+                    "(169.254.169.254); enforce IMDSv2; disable file://.",
+                    confidence="confirmed")]
     return []
 
 
@@ -3164,52 +3177,22 @@ def _brute_login_form(ip: str, port: Port, form: dict, base: str, auth: dict | N
     return []
 
 
-def _check_ssti(ip: str, port: Port, param: str, base: str, auth: dict | None) -> list[Vuln]:
-    """Detect SSTI via expression evaluation (Jinja2, ERB, etc)."""
-    probes = {
-        "{{7*7}}": ("49", "jinja2"),
-        "<%= 7*7 %>": ("49", "erb"),
-    }
-    for payload, (marker, engine) in probes.items():
-        try:
-            r = _fetch(ip, port, f"/?{param}={quote(payload)}", auth=auth, read=4096)
-            if r and marker in r[2]:
-                return [_mk(ip, port, "web-ssti", "high",
-                    f"Server-Side Template Injection ({engine})", ["CWE-1336"],
-                    f"Parameter {param} evaluated math expression: {payload} → {marker}",
-                    "Never render user input in templates; use sandbox/safe rendering",
-                    confidence="confirmed")]
-        except:
-            pass
-    return []
-
-
-def _check_blind_sqli(ip: str, port: Port) -> list[Vuln]:
-    """Blind SQLi: probe for time-based delays on error-prone characters."""
-    try:
-        t0 = time.monotonic()
-        _fetch(ip, port, "/?q=' OR '1'='1", read=512)
-        t1 = time.monotonic()
-        if (t1 - t0) > 3.0:
-            return [_mk(ip, port, "web-sqli-blind", "high",
-                "Blind SQL injection (time-based)", ["CWE-89"],
-                "Query parameter caused delay with SQLi probe",
-                "Use parameterized queries; never concatenate user input into queries",
-                confidence="potential")]
-    except:
-        pass
-    return []
-
-
 def _check_oauth_redirect(ip: str, port: Port, auth: dict | None) -> list[Vuln]:
-    """OAuth redirect param validation bypass."""
+    """Open-redirect via a well-known redirect parameter. A real bypass 3xx-es to the
+    attacker URL (Location header), so check headers - not just the body echo, which
+    fires on any error page that reflects the request URL."""
+    marker = "recce-redirect-probe.example"
+    target = f"http://{marker}/evil"
     for param in ["redirect_uri", "return_url", "callback", "next"]:
         try:
-            r = _fetch(ip, port, f"/login?{param}=http://attacker.com/evil", auth=auth, read=4096)
-            if r and "attacker.com" in r[2]:
+            r = _fetch(ip, port, f"/login?{param}={quote(target)}", auth=auth, read=4096)
+            if not r:
+                continue
+            loc = (r[1].get("location") or r[1].get("Location") or "") if r[1] else ""
+            if r[0] in (301, 302, 303, 307, 308) and marker in loc:
                 return [_mk(ip, port, "web-oauth-bypass", "high",
                     f"Open redirect via {param}", ["CWE-601"],
-                    f"Parameter {param} reflects attacker URL without validation",
+                    f"Parameter {param} caused a {r[0]} to attacker-controlled Location: {loc[:120]}",
                     "Validate redirect destinations against allow-list",
                     confidence="confirmed")]
         except:
@@ -3327,8 +3310,17 @@ def _check_method_override(ip: str, port: Port, auth: dict | None) -> list[Vuln]
     return []
 
 
+_STACK_MARKERS = re.compile(
+    r"traceback \(most recent call last\)|at\s+[\w.]+\.\w+\([^)]*\.(?:java|kt|scala):\d+\)|"
+    r"\bat line \d+|\.php on line \d+|thrown in|"
+    r"stack trace:|<b>fatal error</b>", re.I)
+
+
 def _check_error_stack_trace(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
-    """Stack trace disclosure via error conditions: 500 errors, exceptions, debug info."""
+    """Stack-trace disclosure via error conditions. Uses tight patterns keyed to
+    real framework output (Python traceback header, Java at-line frames, PHP fatal
+    error) - a loose match on 'exception' or 'error_code' fires on any properly-
+    written error message."""
     probes = [
         ("/?_invalid_param_!@#$%", "PHP/Java/Python stack trace"),
         ("/?action=nonexistent", "action parameter"),
@@ -3337,21 +3329,20 @@ def _check_error_stack_trace(ip: str, port: Port, base: str, auth: dict | None) 
     for path, desc in probes:
         try:
             r = _fetch(ip, port, path, auth=auth, read=8192)
-            if r and r[0] >= 400:
-                body_lower = r[2].lower()
-                if re.search(r"traceback|stacktrace|exception|at line|file \"|error_code|fatal error", body_lower):
-                    return [_mk(ip, port, "web-error-trace", "medium",
-                        "Stack trace / Debug info disclosure in error responses", ["CWE-209"],
-                        f"Error response included stack trace or debug info: {desc}",
-                        "Use generic error messages in production; log details server-side only",
-                        confidence="confirmed")]
+            if r and r[0] >= 400 and _STACK_MARKERS.search(r[2]):
+                return [_mk(ip, port, "web-error-trace", "medium",
+                    "Stack trace / Debug info disclosure in error responses", ["CWE-209"],
+                    f"Error response included stack trace or debug info: {desc}",
+                    "Use generic error messages in production; log details server-side only",
+                    confidence="potential")]
         except:
             pass
     return []
 
 
 def _check_admin_panels(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
-    """Discover common admin/management panels."""
+    """Discover common admin/management panels. Compares against a random-path
+    baseline so a 'catch-all 200' SPA doesn't produce a finding for every path."""
     admin_paths = [
         "/admin", "/administrator", "/admin/login", "/admin/index.php",
         "/wp-admin", "/wp-login.php",
@@ -3361,20 +3352,35 @@ def _check_admin_panels(ip: str, port: Port, base: str, auth: dict | None) -> li
         "/console", "/manager", "/jenkins", "/grafana",
         "/api/admin", "/api-admin", "/api/dashboard",
         "/dev", "/development", "/staging", "/test",
-        "/.well-known/admin", "/.well-known/security.txt",
+        "/.well-known/admin",
     ]
+    # Baseline against a path that cannot exist; a server that answers 200 for it
+    # will answer 200 for everything, so the admin-path hits mean nothing.
+    try:
+        base_r = _fetch(ip, port, "/recce-nonexistent-baseline-a7f3", auth=auth, read=512)
+    except Exception:
+        base_r = None
+    baseline_200 = bool(base_r and base_r[0] == 200)
     findings = []
     for path in admin_paths:
         try:
             r = _fetch(ip, port, path, auth=auth, read=4096)
-            if r and r[0] in (200, 301, 302, 401, 403):
-                title = r[2][r[2].find("<title>")+7:r[2].find("</title>")] if "<title>" in r[2] else ""
-                status_desc = "redirected" if r[0] in (301, 302) else "found"
-                findings.append(_mk(ip, port, "web-admin-panel", "medium",
-                    f"Admin/Management panel discovered at {path}", ["CWE-200"],
-                    f"GET {path} -> HTTP {r[0]} {status_desc}. Title: {title[:50]}",
-                    "Restrict admin panels to internal IPs; require MFA",
-                    confidence="confirmed" if r[0] == 200 else "potential"))
+            if not r or r[0] not in (200, 301, 302, 401, 403):
+                continue
+            if r[0] == 200 and baseline_200:
+                continue                       # SPA-style catch-all - not evidence
+            raw_title = ""
+            if "<title>" in r[2] and "</title>" in r[2]:
+                raw_title = r[2][r[2].find("<title>")+7:r[2].find("</title>")]
+            # Server-controlled bytes flow into Vuln.output → CSV/XLSX exports; strip
+            # control chars and cap length so a hostile title can't corrupt a row.
+            title = re.sub(r"[\x00-\x1f\x7f]", " ", raw_title)[:80]
+            status_desc = "redirected" if r[0] in (301, 302) else "found"
+            findings.append(_mk(ip, port, "web-admin-panel", "medium",
+                f"Admin/Management panel discovered at {path}", ["CWE-200"],
+                f"GET {path} -> HTTP {r[0]} {status_desc}. Title: {title}",
+                "Restrict admin panels to internal IPs; require MFA",
+                confidence="confirmed" if r[0] == 200 else "potential"))
         except:
             pass
     return findings[:3]  # Limit to top 3 to avoid noise
@@ -3436,7 +3442,9 @@ def _check_dom_xss(ip: str, port: Port, body: str, auth: dict | None) -> list[Vu
 
 
 def _check_type_confusion(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
-    """Type confusion attacks: string vs int, truthy logic abuse."""
+    """Type confusion: string vs int, truthy logic abuse. Requires a stable size
+    delta - two probes each side, both showing the same divergence - so ordinary
+    dynamic content (timestamps, request IDs, ads) doesn't fire the check."""
     probes = [
         ("/?id=0", "/?id=false", "falsy string vs zero"),
         ("/?id=1", "/?id=true", "truthy string vs one"),
@@ -3444,39 +3452,49 @@ def _check_type_confusion(ip: str, port: Port, base: str, auth: dict | None) -> 
     ]
     for p1, p2, desc in probes:
         try:
-            r1 = _fetch(ip, port, p1, auth=auth, read=2048)
-            r2 = _fetch(ip, port, p2, auth=auth, read=2048)
-            if r1 and r2 and r1[0] == r2[0] and r1[2] != r2[2]:
-                if len(r1[2]) > len(r2[2]) * 1.5 or len(r2[2]) > len(r1[2]) * 1.5:
-                    return [_mk(ip, port, "web-type-confusion", "medium",
-                        f"Type confusion / Logic error via {desc}", ["CWE-1025"],
-                        f"Parameters {p1} and {p2} produced different responses. "
-                        f"May indicate type-coercion logic error (0 == false).",
-                        "Explicitly check types; use strict equality (=== not ==)",
-                        confidence="potential")]
+            r1a = _fetch(ip, port, p1, auth=auth, read=2048)
+            r2a = _fetch(ip, port, p2, auth=auth, read=2048)
+            r1b = _fetch(ip, port, p1, auth=auth, read=2048)
+            r2b = _fetch(ip, port, p2, auth=auth, read=2048)
+            if not (r1a and r2a and r1b and r2b):
+                continue
+            if not (r1a[0] == r2a[0] == r1b[0] == r2b[0]):
+                continue
+            def diverges(a, b) -> bool:
+                if not a or not b: return False
+                return len(a) > len(b) * 1.5 or len(b) > len(a) * 1.5
+            if diverges(r1a[2], r2a[2]) and diverges(r1b[2], r2b[2]):
+                return [_mk(ip, port, "web-type-confusion", "medium",
+                    f"Type confusion / Logic error via {desc}", ["CWE-1025"],
+                    f"Parameters {p1} and {p2} produced stably-different responses. "
+                    f"May indicate type-coercion logic error (0 == false).",
+                    "Explicitly check types; use strict equality (=== not ==)",
+                    confidence="potential")]
         except:
             pass
     return []
 
 
 def _check_rate_limits(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
-    """Rate limit detection: fire rapid requests and check for 429/throttle."""
+    """Rate-limit detection: fire rapid requests and check for 429/throttle. The
+    burst runs back-to-back with no artificial sleep; the earlier 50ms sleep put
+    the ceiling at ~20 req/s so the 'no rate limit at >100 req/s' branch was
+    unreachable and never fired."""
     findings = []
     t0 = time.monotonic()
     responses = []
-    for i in range(10):
+    for i in range(20):
         try:
             r = _fetch(ip, port, f"/?burst={i}", auth=auth, read=512)
             if r:
                 responses.append(r[0])
         except:
             pass
-        time.sleep(0.05)  # 50ms between requests = 200 req/sec
 
     elapsed = time.monotonic() - t0
     rate = len(responses) / elapsed if elapsed > 0 else 0
 
-    if 429 not in responses and rate > 100:  # >100 req/sec and no 429 = no rate limit
+    if 429 not in responses and rate > 50 and len(responses) >= 15:
         findings.append(_mk(ip, port, "web-no-rate-limit", "medium",
             "No rate limiting detected", ["CWE-770"],
             f"Rapid requests ({rate:.0f} req/sec) not throttled. Enables brute-force, DoS, scraping.",
@@ -3491,17 +3509,21 @@ def _check_rate_limits(ip: str, port: Port, base: str, auth: dict | None) -> lis
     return findings
 
 
+_PASSWD_RE = re.compile(r"^root:[^:\n]*:0:0:", re.M)
+
+
 def _check_null_byte_injection(ip: str, port: Port, base: str, auth: dict | None) -> list[Vuln]:
-    """Null byte injection: path traversal bypass via %00 termination."""
+    """Null byte injection: path traversal bypass via %00 termination. Only fires on
+    the real /etc/passwd line format (`root:...:0:0:`) - a substring check on 'root:'
+    hit every Linux docs page and produced spurious 'confirmed high' findings."""
     probes = [
         "/?file=../../etc/passwd%00.jpg",
         "/?file=../../etc/shadow%00.txt",
-        "/?page=admin%00.php",
     ]
     for probe in probes:
         try:
             r = _fetch(ip, port, probe, auth=auth, read=4096)
-            if r and r[0] == 200 and ("root:" in r[2] or "bin:" in r[2] or "nobody:" in r[2]):
+            if r and r[0] == 200 and _PASSWD_RE.search(r[2]):
                 return [_mk(ip, port, "web-null-byte", "high",
                     "Null byte injection (file disclosure)", ["CWE-22"],
                     f"Null byte terminator {probe.split('=')[1][:30]}... bypassed extension check",
@@ -3649,9 +3671,16 @@ def _check_bot_detection_bypass(ip: str, port: Port, base: str, auth: dict | Non
     return findings[:1]  # Return first hit
 
 
+_MAX_KEY_FINDINGS = 5
+
+
 def _extract_api_keys(ip: str, port: Port, body: str) -> list[Vuln]:
-    """Scan JavaScript for hardcoded API keys, tokens, secrets."""
+    """Scan JavaScript for hardcoded API keys, tokens, secrets. Emission is capped
+    (an adversarial body of `apikey=aaaa;apikey=aaaa;...` otherwise produces
+    hundreds of critical findings that pollute the store and CSV/XLSX exports).
+    Redacted output is stripped of control characters that would corrupt rows."""
     findings = []
+    seen: set[str] = set()
     patterns = [
         (r"(?:api[_-]?)?key['\"]?\s*[:=]\s*['\"]([a-z0-9]{20,})['\"]", "API key"),
         (r"authorization['\"]?\s*[:=]\s*['\"]Bearer\s+([a-z0-9\-_.]+)['\"]", "Bearer token"),
@@ -3660,8 +3689,14 @@ def _extract_api_keys(ip: str, port: Port, body: str) -> list[Vuln]:
     ]
     for pattern, key_type in patterns:
         for match in re.finditer(pattern, body, re.I):
+            if len(findings) >= _MAX_KEY_FINDINGS:
+                return findings
             val = match.group(1)
-            redacted = val[:4] + "*" * (len(val) - 8) + val[-4:] if len(val) > 8 else "***"
+            if val in seen:
+                continue
+            seen.add(val)
+            core = val[:4] + "*" * min(max(len(val) - 8, 0), 40) + val[-4:] if len(val) > 8 else "***"
+            redacted = re.sub(r"[\x00-\x1f\x7f]", "", core)[:80]
             findings.append(_mk(ip, port, "web-hardcoded-secret", "critical",
                 f"Hardcoded {key_type} in JavaScript", ["CWE-798"],
                 f"Found {key_type} in response: {redacted}",
@@ -3793,11 +3828,13 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     if smuggle:
         findings.extend(_scan_smuggle(ip, port))
 
-    # Deep auth/injection detection (read-only)
+    # Deep auth/injection detection (read-only).
+    # _check_ssti / _check_blind_sqli removed: they emit "high" from a single-shot
+    # substring match with no baseline (ssti fired on any body containing "49";
+    # blind_sqli fired on any 3-second network hiccup) - _scan_reflection covers
+    # SSTI with unique canaries and _scan_sqli covers SQLi with real payloads.
     findings.extend(_check_session_fixation(ip, port, auth))
-    findings.extend(_check_blind_sqli(ip, port))
     findings.extend(_check_oauth_redirect(ip, port, auth))
-    findings.extend(_check_ssti(ip, port, "q", base, auth))
     findings.extend(_check_prototype_pollution(ip, port, auth))
     findings.extend(_check_ldap_injection(ip, port, auth))
     findings.extend(_check_header_injection(ip, port, auth))

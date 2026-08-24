@@ -27,11 +27,12 @@ class Job:
     def __init__(self, jid: str, argv: list[str]):
         self.id = jid
         self.cmd = " ".join(argv)
-        self.status = "running"           # running | done | failed
+        self.status = "running"           # running | done | failed | cancelled
         self.lines: list[str] = []
         self.returncode: int | None = None
         self.started = time.time()
         self.ended: float | None = None
+        self._proc: subprocess.Popen | None = None
 
 
 _MAX_JOBS = 60          # cap the in-memory registry; oldest FINISHED jobs are evicted
@@ -74,29 +75,57 @@ class JobManager:
         for j in finished[: len(self._jobs) - _MAX_JOBS]:
             self._jobs.pop(j.id, None)
 
+    _JOB_TIMEOUT = 3600
+
     def _run(self, job: Job, argv: list[str], on_done=None) -> None:
         try:
-            # PYTHONUNBUFFERED so recce's progress streams live (a piped child otherwise
-            # block-buffers its stdout, and the browser sees nothing until it exits).
             import os
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
             proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+            job._proc = proc
             assert proc.stdout is not None
             for line in proc.stdout:
                 job.lines.append(line.rstrip("\n"))
-            proc.wait()
+                if time.time() - job.started > self._JOB_TIMEOUT:
+                    proc.terminate()
+                    job.lines.append(f"[job timeout] killed after {self._JOB_TIMEOUT}s")
+                    break
+            proc.wait(timeout=10)
             job.returncode = proc.returncode
-        except Exception as e:                            # never let a job kill the server
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            job.returncode = -1
+            job.lines.append("[job error] process did not exit after terminate")
+        except Exception as e:
             job.lines.append(f"[job error] {e}")
             job.returncode = -1
+        finally:
+            job._proc = None
         job.ended = time.time()
-        job.status = "done" if job.returncode == 0 else "failed"
+        if job.status == "cancelled":
+            pass
+        elif job.returncode == 0:
+            job.status = "done"
+        else:
+            job.status = "failed"
         if on_done is not None:
             try:
                 on_done(job)
             except Exception:
-                pass
+                import logging
+                logging.getLogger("recce.webui").debug("on_done callback failed for job %s", job.id, exc_info=True)
+
+    def cancel(self, jid: str) -> bool:
+        job = self._jobs.get(jid)
+        if job is None or job.status != "running":
+            return False
+        job.status = "cancelled"
+        proc = job._proc
+        if proc is not None:
+            proc.terminate()
+        return True
 
     def get(self, jid: str) -> Job | None:
         return self._jobs.get(jid)
