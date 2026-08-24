@@ -1,10 +1,11 @@
 import { useEscape } from "../ui";
 
 const SHORTCUTS: [string, string][] = [
+  ["Cmd/Ctrl + K", "Jump to anything — hosts, findings, sessions, creds, actions"],
   ["Alt + 1-9", "Switch to Nth visible tab"],
   ["Alt + I", "Toggle import modal"],
   ["/", "Focus search"],
-  ["Esc", "Close panel / drawer"],
+  ["Esc", "Close panel / drawer / palette"],
   ["?", "Show this help"],
 ];
 

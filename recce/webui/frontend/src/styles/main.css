@@ -1112,6 +1112,25 @@ body { background: var(--ground); color: var(--text); }
 .tl-event:hover .tl-actions { opacity: 1; }
 .tl-actions .linkish { font-size: 11px; padding: 2px 6px; }
 
+/* ---- Command Palette (Cmd/Ctrl-K) --------------------------------------- */
+.cp { position: fixed; top: 15vh; left: 50%; transform: translateX(-50%); width: min(720px, 92vw); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-pop); z-index: 30; display: flex; flex-direction: column; overflow: hidden; max-height: 70vh; }
+.cp-input { border: 0; border-bottom: 1px solid var(--line); padding: 14px 18px; font-family: var(--sans); font-size: 15px; background: transparent; color: var(--text); outline: none; }
+.cp-input::placeholder { color: var(--faint); }
+.cp-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+.cp-empty { padding: 24px; text-align: center; color: var(--muted); font-size: 13px; }
+.cp-row { display: grid; grid-template-columns: 56px auto 1fr; align-items: baseline; gap: 10px; padding: 8px 14px; cursor: pointer; font-size: 13px; }
+.cp-row.sel { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.cp-kind { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); text-align: right; padding: 2px 6px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface2); }
+.cp-row.cp-host .cp-kind { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.cp-row.cp-finding .cp-kind { color: var(--high); border-color: color-mix(in srgb, var(--high) 30%, var(--line)); }
+.cp-row.cp-session .cp-kind { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, var(--line)); }
+.cp-row.cp-cred .cp-kind { color: var(--kev); border-color: color-mix(in srgb, var(--kev) 30%, var(--line)); }
+.cp-row.cp-action .cp-kind { color: var(--faint); }
+.cp-label { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-sub { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-hint { padding: 8px 14px; border-top: 1px solid var(--line); background: var(--surface2); font-size: 11px; }
+.cp-hint kbd { font-family: var(--mono); font-size: 10.5px; padding: 1px 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 3px; }
+
 /* Auto-loot panel (Credentials tab) */
 .autoloot-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
 .autoloot-row .run { margin-left: auto; }

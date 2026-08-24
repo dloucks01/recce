@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { postTick, postNote } from "./api";
-import { ImportModal, ShortcutHelp } from "./modals";
+import { ImportModal, ShortcutHelp, CommandPalette } from "./modals";
+import { getSessions, getCredentials, SessionInfo, Credential } from "./api";
 import { useEngagement } from "./useEngagement";
 import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Timeline, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
@@ -114,11 +115,32 @@ export default function App() {
   const collab = useCollab();
 
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showPalette, setShowPalette] = useState(false);
+  const [paletteSessions, setPaletteSessions] = useState<SessionInfo[]>([]);
+  const [paletteCreds, setPaletteCreds] = useState<Credential[]>([]);
+
+  // Cmd/Ctrl-K opens a fuzzy-search palette over hosts, findings, sessions,
+  // creds, and static actions. Sessions + creds pulled fresh on open so a
+  // shell caught 10 seconds ago is instantly there.
+  const openPalette = useCallback(() => {
+    setShowPalette(true);
+    getSessions().then(setPaletteSessions).catch(() => {});
+    getCredentials().then(setPaletteCreds).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName || "";
       const inInput = /^(INPUT|TEXTAREA|SELECT)$/.test(tag);
+
+      // Cmd/Ctrl-K anywhere (even inside inputs) — the "jump to anything"
+      // shortcut every modern app has. Also K for Kubernetes users' muscle
+      // memory who think in "kubectl style" — same key.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        openPalette();
+        return;
+      }
 
       if (e.altKey && e.key >= "1" && e.key <= "9") {
         e.preventDefault();
@@ -138,12 +160,13 @@ export default function App() {
       }
 
       if (e.key === "Escape") {
+        if (showPalette) { setShowPalette(false); return; }
         if (showShortcuts) { setShowShortcuts(false); return; }
         if (drawerIp) { setDrawerIp(null); return; }
         return;
       }
 
-      if (!inInput && e.key === "/" ) {
+      if (!inInput && e.key === "/") {
         const s = document.querySelector<HTMLInputElement>(".search");
         if (s) { e.preventDefault(); s.focus(); }
         return;
@@ -157,7 +180,7 @@ export default function App() {
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [showShortcuts, drawerIp]);
+  }, [showShortcuts, showPalette, drawerIp, openPalette]);
 
   // Notifications — route through the shared toast module so any component can
   // trigger one (including with an Undo action) without prop drilling.
@@ -338,6 +361,20 @@ export default function App() {
       )}
 
       {showShortcuts && <ShortcutHelp onClose={() => setShowShortcuts(false)} />}
+
+      {showPalette && (
+        <CommandPalette
+          onClose={() => setShowPalette(false)}
+          hosts={hosts} findings={findings}
+          sessions={paletteSessions} credentials={paletteCreds}
+          onOpenHost={(ip) => { setDrawerIp(ip); }}
+          onOpenFinding={(ip, _key) => { nav.toFindings({ host: ip }); }}
+          onOpenSession={(id) => { setSessionFocus(id); setTab("sessions"); }}
+          onGoto={(t) => setTab(t as TabId)}
+          onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
+          onToggleImport={() => setShowImport((v) => !v)}
+        />
+      )}
 
       {/* Host detail drawer */}
       {drawerIp && (
