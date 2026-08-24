@@ -400,6 +400,42 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         broker.publish({"type": "add", "what": "credential", "by": x_tester})
         return {"ok": True, "added": added}
 
+    # --- reverse tunnel (SOCKS5 proxy through the shell) --------------------------
+    @app.post("/api/sessions/{session_id}/tunnel")
+    async def tunnel(session_id: str, body: dict = Body(...)):
+        """Start, stop, or check a reverse SOCKS5 tunnel through a session."""
+        from ...sessions.tunnel import start_tunnel, stop_tunnel, get_tunnel
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+
+        action = str(body.get("action", "start"))
+
+        if action == "status":
+            state = get_tunnel(session_id)
+            if state and state.alive:
+                return {"active": True, "socks_port": state.socks_port,
+                        "tunnel_port": state.tunnel_port, "agent_pid": state.agent_pid}
+            return {"active": False}
+
+        if action == "stop":
+            ok = await stop_tunnel(session_id, sess,
+                                   on_event=lambda e: broker.publish(e))
+            return {"ok": ok}
+
+        # action == "start"
+        if not sess.connected:
+            raise HTTPException(409, "shell not connected")
+        socks_port = int(body.get("socks_port", 1080))
+        try:
+            state = await start_tunnel(sess, _push_file, socks_port=socks_port,
+                                       on_event=lambda e: broker.publish(e))
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
+        return {"ok": True, "socks_port": state.socks_port,
+                "tunnel_port": state.tunnel_port, "agent_pid": state.agent_pid,
+                "socks_addr": f"127.0.0.1:{state.socks_port}"}
+
     # --- port forwarding through the shell ----------------------------------------
     # In-memory tracking of active forwards per session (not persisted — a forward dies
     # with the shell). Each entry: {id, lport, rhost, rport, pid, method}.

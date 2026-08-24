@@ -1214,6 +1214,19 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .tool-cmd-code { font-family: var(--mono); font-size: 11px; background: var(--bg); padding: 2px 6px; border-radius: 3px; overflow-x: auto; max-width: 400px; white-space: nowrap; }
 .tool-tip { padding: 8px 0 0; }
 
+/* reverse tunnel / SOCKS proxy */
+.tunnel-section { margin-top: 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; }
+.tunnel-start-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tunnel-btn { white-space: nowrap; }
+.tunnel-active { display: flex; flex-direction: column; gap: 8px; }
+.tunnel-status-row { display: flex; align-items: center; gap: 8px; }
+.tunnel-label { font-weight: 600; font-size: 13px; }
+.tunnel-addr { font-family: var(--mono); font-size: 13px; background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+.tunnel-usage { display: flex; flex-direction: column; gap: 3px; padding: 8px; background: var(--surface2); border-radius: var(--radius-sm); }
+.tunnel-usage-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.tunnel-usage-row .muted { min-width: 100px; text-align: right; }
+.tunnel-usage-row code { font-family: var(--mono); font-size: 11px; }
+
 /* port forwarding */
 .portfwd-section { margin-top: 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
 .portfwd-header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; user-select: none; font-weight: 600; font-size: 13px; }

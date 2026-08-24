@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener,
   lootCred, getTranscript, upgradeSession, runEnum, downloadFromShell, uploadToShell,
   persistSession, getPersistence, removeAllPersistence, Persistence,
-  PortFwd, startPortFwd, stopPortFwd, listPortFwds } from "./api";
+  PortFwd, startPortFwd, stopPortFwd, listPortFwds,
+  TunnelStatus, startTunnel, stopTunnel, tunnelStatus } from "./api";
 import { ShellTerminal } from "./Terminal";
 import { PayloadCatalog, StabilizeGuide, PostExploitRef, PivotGuide, ToolCatalog } from "./Payloads";
 
@@ -209,6 +210,96 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
           <SessionTools session={openSession} />
         </section>
       )}
+    </div>
+  );
+}
+
+// Reverse SOCKS proxy through the shell — one-button tunnel to the target's internal network.
+function TunnelPanel({ session }: { session: SessionInfo }) {
+  const [status, setStatus] = useState<TunnelStatus>({ active: false });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [socksPort, setSocksPort] = useState("1080");
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (session.status === "live") tunnelStatus(session.id).then(setStatus).catch(() => {});
+  }, [session.id, session.status]);
+
+  async function doStart() {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await startTunnel(session.id, parseInt(socksPort, 10) || 1080);
+      if (r.ok) {
+        setStatus({ active: true, socks_port: r.socks_port, socks_addr: r.socks_addr, agent_pid: r.agent_pid });
+        setMsg(null);
+      } else {
+        setMsg(r.reason || "failed to start tunnel");
+      }
+    } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+
+  async function doStop() {
+    setBusy(true); setMsg(null);
+    try {
+      await stopTunnel(session.id);
+      setStatus({ active: false });
+    } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+
+  function copyProxychains() {
+    const conf = `socks5 127.0.0.1 ${status.socks_port || 1080}`;
+    navigator.clipboard?.writeText(conf);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  return (
+    <div className="tunnel-section">
+      {!status.active ? (
+        <div className="tunnel-start">
+          <div className="tunnel-start-row">
+            <button className="run tunnel-btn" onClick={doStart}
+                    disabled={busy || session.status !== "live"}>
+              {busy ? "Deploying agent…" : "Start SOCKS Proxy"}
+            </button>
+            <input className="scan-in" placeholder="SOCKS port" value={socksPort}
+                   onChange={e => setSocksPort(e.target.value)} style={{ maxWidth: 80 }} />
+            <span className="muted small">reverse tunnel through this shell — route your tools through the target's network</span>
+          </div>
+        </div>
+      ) : (
+        <div className="tunnel-active">
+          <div className="tunnel-status-row">
+            <span className="sess-dot live" />
+            <span className="tunnel-label">SOCKS5 proxy active</span>
+            <code className="tunnel-addr">127.0.0.1:{status.socks_port}</code>
+            <button className="toggle" onClick={doStop} disabled={busy}>Stop</button>
+          </div>
+          <div className="tunnel-usage">
+            <div className="tunnel-usage-row">
+              <span className="muted">proxychains:</span>
+              <code>proxychains4 nmap -sT -Pn {session.host_ip}</code>
+            </div>
+            <div className="tunnel-usage-row">
+              <span className="muted">proxychains.conf:</span>
+              <code>socks5 127.0.0.1 {status.socks_port}</code>
+              <button className="copy" onClick={copyProxychains}>{copied ? "✓" : "copy"}</button>
+            </div>
+            <div className="tunnel-usage-row">
+              <span className="muted">browser/Burp:</span>
+              <code>SOCKS5 127.0.0.1:{status.socks_port}</code>
+            </div>
+            <div className="tunnel-usage-row">
+              <span className="muted">recce:</span>
+              <code>recce scan --proxy socks5h://127.0.0.1:{status.socks_port}</code>
+            </div>
+          </div>
+        </div>
+      )}
+      {msg && <div className="ranmsg warn-msg">{msg}</div>}
     </div>
   );
 }
@@ -439,6 +530,7 @@ function SessionTools({ session }: { session: SessionInfo }) {
       </div>
       {msg && <div className="ranmsg">{msg}</div>}
 
+      <TunnelPanel session={session} />
       <PortForwardPanel session={session} />
 
       <div className="st-refs">

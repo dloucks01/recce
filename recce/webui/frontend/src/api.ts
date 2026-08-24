@@ -297,6 +297,31 @@ export async function uploadToShell(sessionId: string, path: string, dataB64: st
   return r.json();
 }
 
+// --- reverse tunnel (SOCKS5 proxy through the shell) -------------------------
+export type TunnelStatus = { active: boolean; socks_port?: number; tunnel_port?: number; agent_pid?: string; socks_addr?: string };
+export async function startTunnel(sessionId: string, socksPort: number = 1080): Promise<{ ok: boolean; socks_port?: number; socks_addr?: string; agent_pid?: string; reason?: string }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/tunnel`, {
+    method: "POST", headers: jsonHeaders(),
+    body: JSON.stringify({ action: "start", socks_port: socksPort }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function stopTunnel(sessionId: string): Promise<{ ok: boolean }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/tunnel`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify({ action: "stop" }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function tunnelStatus(sessionId: string): Promise<TunnelStatus> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/tunnel`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify({ action: "status" }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+
 // --- port forwarding through the shell ----------------------------------------
 export type PortFwd = { id: string; lport: number; rhost: string; rport: number; pid: string; method: string };
 export async function startPortFwd(sessionId: string, listen_port: number, remote_host: string, remote_port: number): Promise<{ ok: boolean } & Partial<PortFwd> & { reason?: string }> {
