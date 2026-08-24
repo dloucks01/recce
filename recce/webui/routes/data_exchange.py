@@ -359,6 +359,23 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
                 "next": next_move, "branches": branches,
                 "path": attackpath.narrative(up)}
 
+    @app.get("/api/attackpath")
+    def attackpath_json():
+        """Structured attack-path steps grouped by kill-chain stage, plus the
+        narrative summary. Frontend renders this as clickable steps on the
+        Exploit tab (each step's ip jumps to the host drawer)."""
+        from ... import attackpath
+        hs, _ = _hosts()
+        up = [h for h in hs if h.is_up]
+        steps = attackpath.build(up)
+        by_stage: dict[str, list] = {}
+        for s in steps:
+            by_stage.setdefault(s["stage"], []).append(s)
+        stages = [{"stage": st, "steps": by_stage[st]}
+                  for st in attackpath.STAGE_ORDER if st in by_stage]
+        return {"narrative": attackpath.narrative(up, steps),
+                "stages": stages, "step_count": len(steps)}
+
     @app.get("/api/attackpath.svg")
     def attackpath_svg():
         """The projected attack-path graph as a standalone SVG, for inline display."""

@@ -4,6 +4,7 @@ import {
   postLabel, postPortStatus, postDismiss, addFinding, addCredential, addHostScope, addAccess,
 } from "./api";
 import { useEscape, useResizableDrawer } from "./ui";
+import { toast } from "./toast";
 
 const EMPTY: Collab = { assignments: {}, labels: {}, port_status: {}, dismissed: {}, activity: [], online: [] };
 
@@ -57,10 +58,23 @@ export function CollabProvider({ children }: { children: React.ReactNode }) {
   };
   const value: Ctx = {
     c, refresh, me: me(),
-    assign: (ip, tester) => opt((d) => { if (tester) d.assignments[ip] = tester; else delete d.assignments[ip]; return d; }, postAssign(ip, tester)),
+    assign: (ip, tester) => {
+      const prev = c.assignments[ip] || "";
+      opt((d) => { if (tester) d.assignments[ip] = tester; else delete d.assignments[ip]; return d; }, postAssign(ip, tester));
+      toast.show(
+        tester ? `${tester === me() ? "you" : tester} claimed ${ip}` : `${ip} released`,
+        { label: "Undo", onClick: () => value.assign(ip, prev) }
+      );
+    },
     label: (ip, l, on) => opt((d) => { const s = new Set(d.labels[ip] || []); on ? s.add(l) : s.delete(l); d.labels[ip] = [...s]; return d; }, postLabel(ip, l, on)),
     portStatus: (ip, port, status) => opt((d) => { const k = `${ip}:${port}`; if (status) d.port_status[k] = status; else delete d.port_status[k]; return d; }, postPortStatus(ip, port, status)),
-    dismiss: (key, on) => opt((d) => { if (on) d.dismissed[key] = me(); else delete d.dismissed[key]; return d; }, postDismiss(key, on)),
+    dismiss: (key, on) => {
+      opt((d) => { if (on) d.dismissed[key] = me(); else delete d.dismissed[key]; return d; }, postDismiss(key, on));
+      toast.show(on ? "dismissed" : "restored", {
+        label: "Undo",
+        onClick: () => value.dismiss(key, !on),
+      });
+    },
     chat, unread, sendChat, pushChat, markChatRead,
   };
   return <CollabCtx.Provider value={value}>{children}</CollabCtx.Provider>;

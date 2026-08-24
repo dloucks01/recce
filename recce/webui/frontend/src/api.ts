@@ -155,6 +155,12 @@ export type AttackCoverage = {
   tactics: { tactic: string; tactic_id: string; techniques: AttackTech[] }[];
 };
 export const getAct = () => getJSON<ActPlan>("/api/act");
+
+export type AttackStep = { stage: string; ip: string; hostname: string; title: string;
+  tool: string; cmd: string; why: string; key: string };
+export type AttackStageGroup = { stage: string; steps: AttackStep[] };
+export type AttackPath = { narrative: string[]; stages: AttackStageGroup[]; step_count: number };
+export const getAttackPath = () => getJSON<AttackPath>("/api/attackpath");
 export const getCredentials = () => getJSON<Paginated<Credential>>("/api/credentials").then(r => r.items);
 export const getAttack = () => getJSON<AttackCoverage>("/api/attack");
 export type ActRunResult = { looted: number; creds: { label: string; source: string }[]; spray_files: string[] };

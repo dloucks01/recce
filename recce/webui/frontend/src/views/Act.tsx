@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ActCard, ActPlan, AttackCoverage, getAct, getAttack, postActRun } from "../api";
+import { ActCard, ActPlan, AttackCoverage, AttackPath, getAct, getAttack, getAttackPath, postActRun } from "../api";
 import { Nav, ARCH_ICON, archLabel, ARCHETYPES } from "./shared";
 
 // "I found things — what do I DO?" The ranked, guided action plan, so the UI
@@ -43,12 +43,18 @@ function ActCardRow({ c, nav }: { c: ActCard; nav: Nav }) {
 export function Act({ nav }: { nav: Nav }) {
   const [plan, setPlan] = useState<ActPlan | null>(null);
   const [atk, setAtk] = useState<AttackCoverage | null>(null);
+  const [apath, setApath] = useState<AttackPath | null>(null);
+  const [showSvg, setShowSvg] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [arch, setArch] = useState<string>("all");   // archetype filter (declutter)
   const [running, setRunning] = useState(false);
   const [ranMsg, setRanMsg] = useState<string | null>(null);
   const load = () => getAct().then(setPlan).catch((e) => setErr(String(e)));
-  useEffect(() => { load(); getAttack().then(setAtk).catch(() => {}); }, []);
+  useEffect(() => {
+    load();
+    getAttack().then(setAtk).catch(() => {});
+    getAttackPath().then(setApath).catch(() => {});
+  }, []);
 
   async function runAuto() {
     setRunning(true); setRanMsg(null);
@@ -99,13 +105,60 @@ export function Act({ nav }: { nav: Nav }) {
           </section>
         );
       })}
-      {(plan.top.some((c) => c.archetype === "ad-path" || c.archetype === "exploit")) && (
+      {apath && apath.step_count > 0 && (
         <section className="panel">
-          <div className="panel-h"><h3>Attack path <span className="tag">projected</span></h3>
-            <span className="muted">route to Domain Admin, grounded in confirmed findings — not executed</span></div>
-          <div className="apath-wrap">
-            <img className="apath" src="/api/attackpath.svg" alt="Attack path" />
+          <div className="panel-h">
+            <h3>Attack path <span className="tag">projected</span></h3>
+            <span className="muted">
+              {apath.step_count} step(s) across {apath.stages.length} stage(s) — grounded in confirmed findings, not executed
+            </span>
+            <button className="linkish" style={{marginLeft: "auto"}} onClick={() => setShowSvg(v => !v)}>
+              {showSvg ? "hide graph" : "show graph"}
+            </button>
           </div>
+
+          {apath.narrative.length > 0 && (
+            <div className="apath-narrative">
+              {apath.narrative.map((line, i) => <p key={i}>{line}</p>)}
+            </div>
+          )}
+
+          <div className="apath-stages">
+            {apath.stages.map((sg) => (
+              <div className="apath-stage" key={sg.stage}>
+                <div className="apath-stage-h">
+                  <span className={"apath-stage-dot s-" + sg.stage.replace(/\s+/g, "-").toLowerCase()} />
+                  <span className="apath-stage-name">{sg.stage}</span>
+                  <span className="muted">{sg.steps.length}</span>
+                </div>
+                <div className="apath-steps">
+                  {sg.steps.map((step) => (
+                    <div key={step.key} className="apath-step">
+                      <div className="apath-step-t">
+                        <span className="apath-step-title">{step.title}</span>
+                        <button className="mono host-link" onClick={() => nav.openHost(step.ip)} title="open host detail">
+                          {step.ip}{step.hostname ? ` · ${step.hostname}` : ""}
+                        </button>
+                      </div>
+                      {step.why && <div className="apath-step-why muted">{step.why}</div>}
+                      {step.cmd && (
+                        <div className="apath-step-cmd">
+                          <code>{step.cmd}</code>
+                          <button className="copy" onClick={() => navigator.clipboard?.writeText(step.cmd)}>copy</button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {showSvg && (
+            <div className="apath-wrap">
+              <img className="apath" src="/api/attackpath.svg" alt="Attack path" />
+            </div>
+          )}
         </section>
       )}
       {atk && atk.tactics.length > 0 && (

@@ -349,6 +349,32 @@ main { padding: 22px 22px 56px; max-width: 1180px; margin: 0 auto; }
 .apath-wrap { overflow: auto; margin-top: 8px; background: var(--ground); border: 1px solid var(--line); border-radius: 9px; padding: 8px; }
 .apath { max-width: 100%; height: auto; display: block; }
 
+.apath-narrative { padding: 10px 16px; background: color-mix(in srgb, var(--accent) 5%, var(--surface2)); border-left: 3px solid var(--accent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; margin: 8px 0 16px; }
+.apath-narrative p { margin: 4px 0; font-size: 13.5px; line-height: 1.55; color: var(--text); }
+.apath-narrative p:first-child { font-weight: 600; }
+
+.apath-stages { display: flex; flex-direction: column; gap: 12px; }
+.apath-stage { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
+.apath-stage-h { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--surface2); border-bottom: 1px solid var(--line); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
+.apath-stage-name { color: var(--text); }
+.apath-stage-dot { width: 8px; height: 8px; border-radius: 2px; background: var(--muted); }
+.apath-stage-dot.s-initial-access { background: #ef4444; }
+.apath-stage-dot.s-privilege-escalation { background: #f59e0b; }
+.apath-stage-dot.s-credential-access { background: #eab308; }
+.apath-stage-dot.s-lateral-movement { background: #3b82f6; }
+.apath-stage-dot.s-domain-dominance { background: #a855f7; }
+
+.apath-steps { display: flex; flex-direction: column; }
+.apath-step { padding: 10px 14px; border-bottom: 1px dashed var(--line); }
+.apath-step:last-child { border-bottom: none; }
+.apath-step-t { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; flex-wrap: wrap; }
+.apath-step-title { font-weight: 600; color: var(--text); font-size: 13.5px; }
+.apath-step-why { font-size: 12.5px; margin-bottom: 6px; }
+.apath-step-cmd { display: flex; align-items: center; gap: 6px; background: var(--ground); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 12px; }
+.apath-step-cmd code { font-family: var(--mono); flex: 1; overflow-x: auto; white-space: nowrap; color: var(--text); }
+.apath-step-cmd .copy { font-size: 10px; padding: 2px 8px; border: 1px solid var(--line); background: var(--surface); border-radius: 4px; cursor: pointer; color: var(--muted); }
+.apath-step-cmd .copy:hover { border-color: var(--accent); color: var(--accent); }
+
 /* ---- light/dark theme toggle ---- */
 .theme-tog { margin-left: auto; background: var(--surface2); border: 1px solid var(--line); color: var(--muted); font-size: 15px; line-height: 1; width: 32px; height: 30px; border-radius: 8px; cursor: pointer; display: grid; place-items: center; }
 .theme-tog:hover { border-color: var(--accent); color: var(--text); }
@@ -693,7 +719,9 @@ body { background: var(--ground); color: var(--text); }
 .action-btn { background: none; border: none; color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; padding: 6px 12px; border-radius: 7px; transition: all .12s; }
 .action-btn:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
 .error-banner { background: var(--crit); color: #fff; padding: 12px 22px; font-size: 13px; text-align: center; }
-.flash-message { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 25; background: var(--surface); border: 1px solid var(--accent); color: var(--text); font-size: 13px; font-weight: 600; padding: 8px 18px; border-radius: 22px; box-shadow: var(--shadow-pop); animation: flash-in .2s ease; }
+.flash-message { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 25; background: var(--surface); border: 1px solid var(--accent); color: var(--text); font-size: 13px; font-weight: 600; padding: 8px 18px; border-radius: 22px; box-shadow: var(--shadow-pop); animation: flash-in .2s ease; display: inline-flex; align-items: center; gap: 12px; }
+.flash-action { background: var(--accent); color: #fff; border: 0; font-family: var(--sans); font-weight: 700; font-size: 12px; padding: 4px 12px; border-radius: 999px; cursor: pointer; letter-spacing: .04em; text-transform: uppercase; transition: filter .1s; }
+.flash-action:hover { filter: brightness(1.1); }
 @keyframes flash-in { from { opacity: 0; transform: translateX(-50%) translateY(-8px); } }
 
 /* ---- CollabSidebar ---- */

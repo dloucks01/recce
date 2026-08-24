@@ -12,6 +12,7 @@ import { Sessions } from "./Sessions";
 import { ScanTab } from "./ScanTab";
 import { ReportTab } from "./ReportTab";
 import { CollabSidebar } from "./CollabSidebar";
+import { toast, Toast } from "./toast";
 
 const POLL_MS = 20000; // constantly-updating analysis: re-pull on a slow heartbeat
 
@@ -256,36 +257,73 @@ function ShortcutHelp({ onClose }: { onClose: () => void }) {
 }
 
 // Main App
+const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "sessions", "report", "exploitation", "credentials", "playbook"];
+const isTab = (t: string): t is TabId => (VALID_TABS as string[]).includes(t);
+
+// Read the initial UI state from the URL once, so a shared link opens in
+// the state the sender left off — tab / drawer host / focused session / finding filters.
+function readUrlState() {
+  const p = new URLSearchParams(window.location.search);
+  const tabParam = p.get("tab") || "";
+  return {
+    tab: isTab(tabParam) ? tabParam : "dashboard" as TabId,
+    host: p.get("host") || null,
+    session: p.get("session") || null,
+    sev: p.get("sev") || "all",
+    fhost: p.get("fhost") || "",
+    q: p.get("q") || "",
+  };
+}
+
 export default function App() {
+  const initialUrl = useRef(readUrlState()).current;
   const [ov, setOv] = useState<Overview | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [hosts, setHosts] = useState<Host[]>([]);
   const [pb, setPb] = useState<PlaybookData | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [tab, setTab] = useState<TabId>("dashboard");
+  const [tab, setTab] = useState<TabId>(initialUrl.tab);
 
   // cross-tab filter state
   const [ff, setFf] = useState<FindingFilters>({
-    sev: "all",
-    host: "",
+    sev: initialUrl.sev,
+    host: initialUrl.fhost,
     kev: false,
     unreviewed: false,
     leads: false,
-    q: "",
+    q: initialUrl.q,
   });
   const [hostQ, setHostQ] = useState("");
   const [hostCov, setHostCov] = useState("all");
   const [hostWho, setHostWho] = useState("all");
-  const [drawerIp, setDrawerIp] = useState<string | null>(null);
-  const [sessionFocus, setSessionFocus] = useState<string | null>(null);
+  const [drawerIp, setDrawerIp] = useState<string | null>(initialUrl.host);
+  const [sessionFocus, setSessionFocus] = useState<string | null>(initialUrl.session);
 
   // UI state
   const [showImport, setShowImport] = useState(false);
-  const [flash, setFlash] = useState<string | null>(null);
+  const [activeToast, setActiveToast] = useState<Toast | null>(null);
   const [scanRunning, setScanRunning] = useState(false);
   const [, setScanLog] = useState<string[]>([]);
   const [scanPrefill, setScanPrefill] = useState<string | null>(null);
-  const flashTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => toast.subscribe(setActiveToast), []);
+
+  // Sync core UI state to the URL so a shared link opens in the same state.
+  // Uses replaceState so we don't spam browser history on every tab click.
+  useEffect(() => {
+    const p = new URLSearchParams();
+    if (tab !== "dashboard") p.set("tab", tab);
+    if (drawerIp) p.set("host", drawerIp);
+    if (sessionFocus) p.set("session", sessionFocus);
+    if (tab === "findings") {
+      if (ff.sev !== "all") p.set("sev", ff.sev);
+      if (ff.host) p.set("fhost", ff.host);
+      if (ff.q) p.set("q", ff.q);
+    }
+    const q = p.toString();
+    const url = q ? `?${q}` : window.location.pathname;
+    window.history.replaceState(null, "", url);
+  }, [tab, drawerIp, sessionFocus, ff.sev, ff.host, ff.q]);
 
   // Preferences & identity
   const { theme, setTheme, density, setDensity } = usePreferences();
@@ -338,12 +376,9 @@ export default function App() {
     return () => window.removeEventListener("keydown", h);
   }, [showShortcuts, drawerIp]);
 
-  // Notifications
-  const note = useCallback((msg: string) => {
-    setFlash(msg);
-    window.clearTimeout(flashTimer.current);
-    flashTimer.current = window.setTimeout(() => setFlash(null), 4000);
-  }, []);
+  // Notifications — route through the shared toast module so any component can
+  // trigger one (including with an Undo action) without prop drilling.
+  const note = useCallback((msg: string) => { toast.show(msg); }, []);
 
   // Data refresh
   const refresh = useCallback(async () => {
@@ -407,11 +442,20 @@ export default function App() {
     return () => es.close();
   }, [tester, note, refresh, collab]);
 
-  // Optimistic tick/note
+  // Optimistic tick/note — with undo. On a big engagement this saves the tester
+  // from hunting the row down after a misclick.
   const onTick = useCallback((key: string, reviewed: boolean) => {
     setFindings((fs) => fs.map((f) => (f.key === key ? { ...f, reviewed } : f)));
     setHosts((hs) => hs.map((h) => (h.key === key ? { ...h, reviewed } : h)));
     postTick(key, reviewed).catch(() => {});
+    toast.show(reviewed ? "marked reviewed" : "reopened", {
+      label: "Undo",
+      onClick: () => {
+        setFindings((fs) => fs.map((f) => (f.key === key ? { ...f, reviewed: !reviewed } : f)));
+        setHosts((hs) => hs.map((h) => (h.key === key ? { ...h, reviewed: !reviewed } : h)));
+        postTick(key, !reviewed).catch(() => {});
+      },
+    });
   }, []);
 
   const onNote = useCallback((key: string, text: string) => {
@@ -541,7 +585,17 @@ export default function App() {
       </div>
 
       {/* Notifications */}
-      {flash && <div className="flash-message">{flash}</div>}
+      {activeToast && (
+        <div className="flash-message">
+          <span>{activeToast.msg}</span>
+          {activeToast.action && (
+            <button className="flash-action" onClick={() => {
+              activeToast.action!.onClick();
+              toast.dismiss(activeToast.id);
+            }}>{activeToast.action.label}</button>
+          )}
+        </div>
+      )}
       {err && <div className="error-banner">{err}</div>}
 
       {/* Modals */}
