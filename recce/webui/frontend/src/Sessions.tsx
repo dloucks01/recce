@@ -7,7 +7,11 @@ import { PayloadCatalog, StabilizeGuide, PostExploitRef, PivotGuide } from "./Pa
 
 // The Sessions tab: open listeners, watch caught shells land (grouped by host), and drive
 // them collaboratively. The whole team sees the same list on the one shared server.
-export function Sessions({ tester, focus }: { tester: string; focus?: string | null }) {
+export function Sessions({ tester, focus, onScanHost, onViewHost }: {
+  tester: string; focus?: string | null;
+  onScanHost?: (ip: string) => void;
+  onViewHost?: (ip: string) => void;
+}) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [listeners, setListeners] = useState<ListenerInfo[]>([]);
   const [open, setOpen] = useState<string | null>(null);
@@ -136,7 +140,17 @@ export function Sessions({ tester, focus }: { tester: string; focus?: string | n
         <section className="panel">
           <div className="panel-h">
             <h3>Terminal — <span className="mono">{openSession.host_ip}</span></h3>
-            <button className="linkish" onClick={() => setOpen(null)}>close</button>
+            <div className="sess-host-actions">
+              {onViewHost && (
+                <button className="linkish" onClick={() => onViewHost(openSession.host_ip)}
+                        title="open host detail drawer">host detail</button>
+              )}
+              {onScanHost && (
+                <button className="linkish" onClick={() => onScanHost(openSession.host_ip)}
+                        title="jump to Scan tab with this host pre-filled">scan host</button>
+              )}
+              <button className="linkish" onClick={() => setOpen(null)}>close</button>
+            </div>
           </div>
           <ShellTerminal key={openSession.id} session={openSession} tester={tester} />
           <SessionTools session={openSession} />

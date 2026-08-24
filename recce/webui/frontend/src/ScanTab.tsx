@@ -14,6 +14,7 @@ interface ScanTabProps {
   tester: string;
   onRunning: (running: boolean) => void;
   onLog: (lines: string[]) => void;
+  prefillTarget?: string | null;
 }
 
 type Preset = {
@@ -114,13 +115,15 @@ function groupBy(catalog: CmdCatalog): Record<string, { key: string; spec: CmdSp
 
 type QueueItem = { command: string; targets: string; flags: string[]; label: string };
 
-export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
+export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProps) {
   const [catalog, setCatalog] = useState<CmdCatalog>({});
   const [hosts, setHosts] = useState<Host[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
   const [command, setCommand] = useState<string | null>(null);
   const [targets, setTargets] = useState("");
+
+  useEffect(() => { if (prefillTarget) setTargets(prefillTarget); }, [prefillTarget]);
   const [profile, setProfile] = useState("quick");
   const [cUser, setCUser] = useState("");
   const [cPass, setCPass] = useState("");
