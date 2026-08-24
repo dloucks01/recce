@@ -41,9 +41,31 @@ export function CollabProvider({ children }: { children: React.ReactNode }) {
   const [chat, setChat] = useState<ChatMsg[]>([]);
   const [unread, setUnread] = useState(0);
   useEffect(() => { getChat().then(setChat).catch(() => {}); }, []);
+
+  // Ask once for permission so mentions can fire a browser notification later.
+  // Users can decline; that's fine — the in-app flash is still there.
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+  }, []);
+
   const pushChat = useCallback((m: ChatMsg) => {
     setChat((cs) => (cs.some((x) => x.id === m.id) ? cs : [...cs, m]));
-    if (m.tester !== me()) setUnread((u) => u + 1);
+    if (m.tester !== me()) {
+      setUnread((u) => u + 1);
+      // If this message @-mentions me, escalate to a browser Notification so it
+      // lands even when the tab isn't focused. Case-insensitive whole-token match.
+      const meName = me();
+      const re = new RegExp("@" + meName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
+      if (meName && meName !== "someone" && re.test(m.text || "")) {
+        if ("Notification" in window && Notification.permission === "granted") {
+          try {
+            new Notification(`${m.tester} mentioned you`, { body: m.text, tag: "recce-mention" });
+          } catch { /* browser may block */ }
+        }
+      }
+    }
   }, []);
   const markChatRead = useCallback(() => setUnread(0), []);
   const sendChat = useCallback(async (text: string, image: string, file?: { data: string; name: string } | null) => {

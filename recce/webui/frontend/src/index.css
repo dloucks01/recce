@@ -124,6 +124,17 @@ main { padding: 22px 22px 56px; max-width: 1180px; margin: 0 auto; }
 
 /* review ticks (Phase 3) */
 .tick-col { width: 34px; text-align: center; }
+.sel-col { width: 30px; text-align: center; }
+.sel-col input[type="checkbox"] { cursor: pointer; }
+.tbl tbody tr.selected { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.tbl tbody tr.selected:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* Bulk action bar — floats above the findings table when any rows selected */
+.bulk-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; margin-bottom: 12px; background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius); box-shadow: var(--shadow-md); animation: flash-in .15s ease; }
+.bulk-count { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--accent); padding: 4px 12px; background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 999px; margin-right: 4px; }
+.bulk-bar .toggle.danger { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 30%, transparent); }
+.bulk-bar .toggle.danger:hover { background: color-mix(in srgb, var(--crit) 10%, transparent); border-color: var(--crit); }
+.bulk-bar .linkish { margin-left: auto; }
 .tbl tbody input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--ok); cursor: pointer; }
 .tbl tbody tr.done { opacity: .5; }
 .tbl tbody tr.done .t { text-decoration: line-through; text-decoration-color: var(--faint); }
@@ -817,6 +828,16 @@ body { background: var(--ground); color: var(--text); }
 .chat-send { background: var(--accent); color: #fff; border: none; border-radius: 5px; padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all .12s; }
 .chat-send:hover:not(:disabled) { background: var(--accent-ink); }
 .chat-send:disabled { opacity: .5; cursor: default; }
+
+/* @-mentions — chip in message text, autocomplete popup above input */
+.chat-mention { display: inline-block; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-ink); border-radius: 4px; padding: 0 4px; font-weight: 600; font-size: 11.5px; }
+.chat-mention.me { background: color-mix(in srgb, var(--amber) 25%, transparent); color: var(--amber); }
+.chat-input-wrap { position: relative; flex: 1; }
+.chat-input-wrap .chat-input { width: 100%; }
+.mention-popup { position: absolute; bottom: calc(100% + 4px); left: 0; right: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); box-shadow: var(--shadow-md); overflow: hidden; z-index: 20; max-height: 200px; overflow-y: auto; }
+.mention-item { width: 100%; display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: transparent; border: 0; color: var(--text); font-family: var(--sans); font-size: 12px; cursor: pointer; text-align: left; }
+.mention-item:hover, .mention-item.sel { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.mention-avatar { width: 20px; height: 20px; border-radius: 50%; color: #fff; font-size: 9px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex: none; }
 
 /* ---- CredentialsPanel ---- */
 .creds-panel { display: flex; flex-direction: column; height: 100%; }

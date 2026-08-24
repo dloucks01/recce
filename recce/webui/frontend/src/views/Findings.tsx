@@ -3,6 +3,7 @@ import { Finding, VulnDetail, SEVS, getHost } from "../api";
 import { SevTag, NoteCell, Chips, useBounded } from "../ui";
 import { FindingDetail } from "../FindingDetail";
 import { useCollab } from "../collab";
+import { toast } from "../toast";
 import { FindingFilters, Nav } from "./shared";
 
 export function Findings(
@@ -44,8 +45,62 @@ export function Findings(
   const detailFor = (x: Finding) => cache[x.ip]?.find((v) => v.key === x.key);
   const { c: cst, dismiss } = useCollab();
 
+  // Bulk selection — checkboxes appear alongside the reviewed tick.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const toggleSel = (key: string) => setSelected(s => {
+    const n = new Set(s);
+    n.has(key) ? n.delete(key) : n.add(key);
+    return n;
+  });
+  const visibleKeys = shown.map(x => x.key);
+  const allVisibleSelected = visibleKeys.length > 0 && visibleKeys.every(k => selected.has(k));
+  const someVisibleSelected = visibleKeys.some(k => selected.has(k));
+  const toggleSelectAllVisible = () => setSelected(s => {
+    if (allVisibleSelected) {
+      const n = new Set(s);
+      visibleKeys.forEach(k => n.delete(k));
+      return n;
+    }
+    return new Set([...s, ...visibleKeys]);
+  });
+  const clearSel = () => setSelected(new Set());
+
+  function bulkDismiss() {
+    const keys = [...selected];
+    const wereDismissed = keys.filter(k => !cst.dismissed[k]);
+    wereDismissed.forEach(k => dismiss(k, true));
+    // dismiss() already fires a per-item toast; suppress cascade by showing a summary
+    if (wereDismissed.length > 0) {
+      toast.show(`dismissed ${wereDismissed.length} finding(s)`, {
+        label: "Undo",
+        onClick: () => wereDismissed.forEach(k => dismiss(k, false)),
+      });
+    }
+    clearSel();
+  }
+  function bulkTick(reviewed: boolean) {
+    const keys = [...selected].filter(k => shown.find(x => x.key === k && x.reviewed !== reviewed));
+    keys.forEach(k => onTick(k, reviewed));
+    if (keys.length > 0) {
+      toast.show(`${reviewed ? "marked" : "reopened"} ${keys.length} finding(s)`, {
+        label: "Undo",
+        onClick: () => keys.forEach(k => onTick(k, !reviewed)),
+      });
+    }
+    clearSel();
+  }
+
   return (
     <>
+      {selected.size > 0 && (
+        <div className="bulk-bar">
+          <span className="bulk-count">{selected.size} selected</span>
+          <button className="toggle" onClick={() => bulkTick(true)}>✓ Mark reviewed</button>
+          <button className="toggle" onClick={() => bulkTick(false)}>↺ Reopen</button>
+          <button className="toggle danger" onClick={bulkDismiss}>✗ Dismiss</button>
+          <button className="linkish" onClick={clearSel}>clear selection</button>
+        </div>
+      )}
       <div className="controls">
         <Chips value={f.sev} onChange={(v) => setF({ sev: v })} options={["all", ...SEVS]} />
         <div className="toggles">
@@ -64,13 +119,24 @@ export function Findings(
 
       <div className="tablewrap">
         <table className="tbl">
-          <thead><tr><th className="tick-col">✓</th><th>Sev</th><th>Finding</th><th>Host</th><th>Conf.</th><th>Note</th></tr></thead>
+          <thead><tr>
+            <th className="sel-col" title="select for bulk actions">
+              <input type="checkbox" checked={allVisibleSelected}
+                     ref={el => { if (el) el.indeterminate = !allVisibleSelected && someVisibleSelected; }}
+                     onChange={toggleSelectAllVisible} />
+            </th>
+            <th className="tick-col">✓</th><th>Sev</th><th>Finding</th><th>Host</th><th>Conf.</th><th>Note</th>
+          </tr></thead>
           <tbody>
             {shown.map((x) => {
               const open = openKey === x.key;
               const detail = open ? detailFor(x) : undefined;
               return [
-              <tr key={x.key} className={(x.reviewed ? "done" : "") + (open ? " open" : "") + (cst.dismissed[x.key] ? " dismissed" : "")}>
+              <tr key={x.key} className={(x.reviewed ? "done" : "") + (open ? " open" : "") + (cst.dismissed[x.key] ? " dismissed" : "") + (selected.has(x.key) ? " selected" : "")}>
+                <td className="sel-col">
+                  <input type="checkbox" checked={selected.has(x.key)}
+                         onChange={() => toggleSel(x.key)} onClick={(e) => e.stopPropagation()} />
+                </td>
                 <td className="tick-col">
                   <input type="checkbox" checked={x.reviewed} onChange={() => onTick(x.key, !x.reviewed)} />
                 </td>
@@ -99,7 +165,7 @@ export function Findings(
               open && (
                 <tr key={x.key + ":d"} className="detail-row">
                   <td />
-                  <td colSpan={5}>
+                  <td colSpan={6}>
                     {detail
                       ? <FindingDetail v={detail} onNote={onNote} onJumpToHost={nav.openHost} />
                       : <div className="muted small">loading detail…</div>}
@@ -109,7 +175,7 @@ export function Findings(
               ];
             })}
             {rows.length === 0 && (
-              <tr><td colSpan={6} className="empty">
+              <tr><td colSpan={7} className="empty">
                 {!f.leads && leadCount > 0
                   ? `no confirmed findings match — ${leadCount} lead${leadCount > 1 ? "s" : ""} hidden (toggle “Leads” to show)`
                   : "no findings match this filter"}
