@@ -146,6 +146,21 @@ export function FindingDetail(
     finally { setPocBusy(false); }
   }
 
+  // Screenshot — offer for likely-web-port findings. Heuristic: common HTTP(S)
+  // ports OR the source/title mentions http/web/ssl. The backend probes both
+  // https and http, so a wrong guess is a 502, not silent failure.
+  const isLikelyWeb = v.port != null && (
+    [80, 81, 88, 443, 591, 593, 631, 1080, 2222, 3000, 3128, 4000, 4200, 4443,
+     5000, 5601, 6080, 6443, 7000, 7001, 7002, 7080, 7443, 7474, 8000, 8008,
+     8009, 8010, 8080, 8081, 8082, 8083, 8085, 8086, 8087, 8088, 8089, 8090,
+     8091, 8095, 8161, 8180, 8181, 8280, 8443, 8500, 8530, 8686, 8834, 8880,
+     8888, 8983, 9000, 9080, 9090, 9091, 9200, 9300, 9443, 9800, 10000, 10250,
+     10443, 15672, 16080, 18080].includes(v.port)
+    || /http|web|ssl|nginx|apache|tomcat|iis/i.test(`${v.source} ${v.title}`)
+  );
+  const [showShot, setShowShot] = useState(false);
+  const [shotStatus, setShotStatus] = useState<"idle" | "loading" | "loaded" | "error">("idle");
+
   return (
     <div className="dv-detail">
       {/* Metadata */}
@@ -210,6 +225,45 @@ export function FindingDetail(
             <CopyBtn text={v.output} label="Copy" />
           </div>
           <pre className="fd-evidence-code">{v.output}</pre>
+        </div>
+      )}
+
+      {/* Screenshot — a picture of the affected web endpoint proves it was
+          live at test time and makes the report page-turn much better. */}
+      {isLikelyWeb && (
+        <div className="fd-shot">
+          <div className="fd-shot-header">
+            <span className="fd-section-label">Screenshot</span>
+            {!showShot && (
+              <button className="fd-copy fd-shot-btn" onClick={() => { setShowShot(true); setShotStatus("loading"); }}
+                      title="capture a headless-browser screenshot of the affected endpoint">
+                📸 Capture {v.ip}:{v.port}
+              </button>
+            )}
+            {showShot && shotStatus === "loading" && <span className="fd-poc-loading">capturing… (may take a few seconds)</span>}
+            {showShot && shotStatus === "loaded" && (
+              <>
+                <a className="fd-copy" href={`/api/screenshot?ip=${encodeURIComponent(v.ip)}&port=${v.port}`}
+                   target="_blank" rel="noopener">Open full-size</a>
+                <button className="fd-copy" onClick={() => { setShowShot(false); setShotStatus("idle"); }}>✕</button>
+              </>
+            )}
+            {showShot && shotStatus === "error" && (
+              <>
+                <span className="fd-poc-err">not reachable / not a web port</span>
+                <button className="fd-copy" onClick={() => { setShowShot(false); setShotStatus("idle"); }}>✕</button>
+              </>
+            )}
+          </div>
+          {showShot && (
+            <div className="fd-shot-body">
+              <img className="fd-shot-img"
+                   src={`/api/screenshot?ip=${encodeURIComponent(v.ip)}&port=${v.port}`}
+                   alt={`${v.ip}:${v.port}`}
+                   onLoad={() => setShotStatus("loaded")}
+                   onError={() => setShotStatus("error")} />
+            </div>
+          )}
         </div>
       )}
 

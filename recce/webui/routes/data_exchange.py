@@ -376,6 +376,39 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         return {"narrative": attackpath.narrative(up, steps),
                 "stages": stages, "step_count": len(steps)}
 
+    @app.get("/api/screenshot")
+    def host_screenshot(ip: str, port: int, force: bool = False):
+        """Capture a headless-browser PNG of the http(s) service on ip:port.
+        Caches per (ip, port) under {eng_dir}/screenshots/ so repeat views
+        are instant. Returns 404 if headless browser isn't installed or the
+        port isn't a web port."""
+        import os
+        import re
+        from fastapi.responses import Response
+        from ... import screenshot as shot
+        if not shot.available():
+            raise HTTPException(503, "no headless browser installed (chromium/firefox)")
+        if not (1 <= port <= 65535):
+            raise HTTPException(400, "port out of range")
+        # Sanitise the filename — belt-and-braces even though ip/port come typed.
+        safe_ip = re.sub(r"[^0-9a-fA-F:.]+", "_", str(ip))
+        sdir = os.path.join(eng_dir, "screenshots")
+        os.makedirs(sdir, exist_ok=True)
+        cached = os.path.join(sdir, f"{safe_ip}_{port}.png")
+        if os.path.exists(cached) and not force:
+            with open(cached, "rb") as f:
+                return Response(f.read(), media_type="image/png",
+                                headers={"Cache-Control": "private, max-age=3600"})
+        # Not cached (or force=1) — capture live. Try https first, then http.
+        for scheme in ("https", "http"):
+            url = f"{scheme}://{ip}:{port}"
+            png = shot.capture(url)
+            if png:
+                with open(cached, "wb") as f:
+                    f.write(png)
+                return Response(png, media_type="image/png")
+        raise HTTPException(502, f"{ip}:{port} did not render (unreachable, non-web, or slow)")
+
     @app.get("/api/poc/{cve}")
     def poc_dossier(cve: str):
         """Per-CVE PoC dossier + harness skeleton. Renders on demand so the

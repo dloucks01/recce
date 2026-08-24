@@ -1021,6 +1021,14 @@ body { background: var(--ground); color: var(--text); }
 .fd-evidence-code { background: #0a0f18; border: 1px solid #1e2a3e; border-top: 0; border-radius: 0 0 8px 8px; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; color: #b9c6da; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
 .fd-remediation { margin: 12px 0; border-left: 3px solid var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--surface2)); border-radius: 0 8px 8px 0; padding: 10px 14px; }
 
+/* Screenshot — lazy-captured per finding, from screenshot.py */
+.fd-shot { margin: 12px 0; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface); }
+.fd-shot-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fd-shot-btn { background: color-mix(in srgb, var(--kev) 12%, transparent); color: var(--kev); border-color: color-mix(in srgb, var(--kev) 30%, transparent); font-weight: 700; }
+.fd-shot-btn:hover { background: color-mix(in srgb, var(--kev) 20%, transparent); }
+.fd-shot-body { margin-top: 10px; background: var(--ground); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+.fd-shot-img { display: block; width: 100%; max-height: 480px; object-fit: contain; border-radius: 4px; background: #fff; }
+
 /* PoC dossier — lazy-loaded per finding, from pocgen.py */
 .fd-poc { margin: 12px 0; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface); }
 .fd-poc-header { display: flex; align-items: center; gap: 8px; }
