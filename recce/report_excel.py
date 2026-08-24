@@ -1,4 +1,5 @@
-"""Backward-compat shim. Moved to recce.report.excel.
+"""Backward-compat shim: recce.report_excel is the same module object as recce.report.excel.
 Prefer `from recce.report.excel import ...` in new code."""
+import sys
 from .report import excel as _mod
-globals().update({k: v for k, v in _mod.__dict__.items() if not k.startswith("__")})
+sys.modules[__name__] = _mod

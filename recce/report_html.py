@@ -1,4 +1,5 @@
-"""Backward-compat shim. Moved to recce.report.html.
+"""Backward-compat shim: recce.report_html is the same module object as recce.report.html.
 Prefer `from recce.report.html import ...` in new code."""
+import sys
 from .report import html as _mod
-globals().update({k: v for k, v in _mod.__dict__.items() if not k.startswith("__")})
+sys.modules[__name__] = _mod

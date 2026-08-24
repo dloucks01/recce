@@ -1,4 +1,5 @@
-"""Backward-compat shim. Moved to recce.report.formats.docx.
+"""Backward-compat shim: recce.docx is the same module object as recce.report.formats.docx.
 Prefer `from recce.report.formats.docx import ...` in new code."""
+import sys
 from .report.formats import docx as _mod
-globals().update({k: v for k, v in _mod.__dict__.items() if not k.startswith("__")})
+sys.modules[__name__] = _mod
