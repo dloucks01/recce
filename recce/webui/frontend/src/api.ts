@@ -297,6 +297,31 @@ export async function uploadToShell(sessionId: string, path: string, dataB64: st
   return r.json();
 }
 
+// --- port forwarding through the shell ----------------------------------------
+export type PortFwd = { id: string; lport: number; rhost: string; rport: number; pid: string; method: string };
+export async function startPortFwd(sessionId: string, listen_port: number, remote_host: string, remote_port: number): Promise<{ ok: boolean } & Partial<PortFwd> & { reason?: string }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/portfwd`, {
+    method: "POST", headers: jsonHeaders(),
+    body: JSON.stringify({ action: "start", listen_port, remote_host, remote_port }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function stopPortFwd(sessionId: string, id: string): Promise<{ ok: boolean }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/portfwd`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify({ action: "stop", id }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function listPortFwds(sessionId: string): Promise<PortFwd[]> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/portfwd`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify({ action: "list" }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return (await r.json()).forwards;
+}
+
 // --- persistence (intrusive; tracked + removable) -----------------------------
 export interface Persistence {
   id: string; host_ip: string; mechanism: string; artifact_path: string;

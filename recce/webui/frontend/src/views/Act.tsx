@@ -17,6 +17,10 @@ function ActCardRow({ c, nav }: { c: ActCard; nav: Nav }) {
         <span className="arch">{ARCH_ICON[c.archetype] || "•"} {archLabel(c.archetype)}</span>
         <span className="acttitle">{c.title}{c.count > 1 ? ` ·+${c.count - 1}` : ""}</span>
         {host && <span className="mono host-link" onClick={() => nav.openHost(host)} title="host detail">{c.target}</span>}
+        {host && nav.toScan && (
+          <button className="linkish" onClick={() => nav.toScan!(host)}
+                  title="jump to Scan tab with this target">scan</button>
+        )}
         <span className="actscore" title="impact × confidence × leverage">{c.score}</span>
       </div>
       <div className="actyield">→ {c.yields}
@@ -76,6 +80,9 @@ export function Act({ nav }: { nav: Nav }) {
                 title="collect credentials from the read-only unauth services + refresh the spray plan (intrusive actions are never auto-run)">
           {running ? "Collecting…" : "⚡ Collect credentials (read-only)"}
         </button>
+        {nav.toSessions && (
+          <button className="toggle" onClick={nav.toSessions}>Sessions →</button>
+        )}
       </div>
       {ranMsg && <div className="ranmsg">{ranMsg}</div>}
       <section className="panel top-actions">

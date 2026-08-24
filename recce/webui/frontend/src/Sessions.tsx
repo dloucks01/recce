@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener,
   lootCred, getTranscript, upgradeSession, runEnum, downloadFromShell, uploadToShell,
-  persistSession, getPersistence, removeAllPersistence, Persistence } from "./api";
+  persistSession, getPersistence, removeAllPersistence, Persistence,
+  PortFwd, startPortFwd, stopPortFwd, listPortFwds } from "./api";
 import { ShellTerminal } from "./Terminal";
-import { PayloadCatalog, StabilizeGuide, PostExploitRef, PivotGuide } from "./Payloads";
+import { PayloadCatalog, StabilizeGuide, PostExploitRef, PivotGuide, ToolCatalog } from "./Payloads";
 
 // The Sessions tab: open listeners, watch caught shells land (grouped by host), and drive
 // them collaboratively. The whole team sees the same list on the one shared server.
@@ -212,6 +213,110 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
   );
 }
 
+// Port forward through the shell — socat or Python relay on the target.
+const COMMON_PORTS: [number, string][] = [
+  [3306, "MySQL"], [5432, "PostgreSQL"], [1433, "MSSQL"], [27017, "MongoDB"],
+  [6379, "Redis"], [8080, "HTTP alt"], [8443, "HTTPS alt"], [3389, "RDP"],
+  [5900, "VNC"], [445, "SMB"],
+];
+
+function PortForwardPanel({ session }: { session: SessionInfo }) {
+  const [fwds, setFwds] = useState<PortFwd[]>([]);
+  const [rhost, setRhost] = useState("127.0.0.1");
+  const [rport, setRport] = useState("");
+  const [lport, setLport] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [fwdMsg, setFwdMsg] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (session.status === "live") listPortFwds(session.id).then(setFwds).catch(() => {});
+  }, [session.id, session.status]);
+
+  async function start() {
+    const rp = parseInt(rport, 10);
+    const lp = parseInt(lport || rport, 10);
+    if (!rp || !lp) return;
+    setBusy(true); setFwdMsg(null);
+    try {
+      const r = await startPortFwd(session.id, lp, rhost, rp);
+      if (r.ok) {
+        setFwdMsg(`forwarding ${session.host_ip}:${lp} → ${rhost}:${rp} (${r.method})`);
+        setRport(""); setLport("");
+        listPortFwds(session.id).then(setFwds).catch(() => {});
+      } else {
+        setFwdMsg(r.reason || "failed to start forward");
+      }
+    } catch (e) { setFwdMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+
+  async function stop(id: string) {
+    try {
+      await stopPortFwd(session.id, id);
+      setFwds(f => f.filter(x => x.id !== id));
+    } catch (e) { setFwdMsg(String(e instanceof Error ? e.message : e)); }
+  }
+
+  function usePreset(port: number) {
+    setRport(String(port));
+    setLport(String(port));
+    setOpen(true);
+  }
+
+  return (
+    <div className="portfwd-section">
+      <div className="portfwd-header" onClick={() => setOpen(!open)}>
+        <span className={`sess-group-caret${open ? "" : " closed"}`}>&#9662;</span>
+        <span>Port Forwarding</span>
+        {fwds.length > 0 && <span className="badge">{fwds.length} active</span>}
+      </div>
+      {open && (
+        <div className="portfwd-body">
+          <div className="portfwd-presets">
+            {COMMON_PORTS.map(([p, label]) => (
+              <button key={p} className="portfwd-preset" onClick={() => usePreset(p)}
+                      title={`Forward ${label} (port ${p})`}>
+                {label} <span className="muted">:{p}</span>
+              </button>
+            ))}
+          </div>
+          <div className="portfwd-form">
+            <input className="scan-in" placeholder="remote host" value={rhost}
+                   onChange={e => setRhost(e.target.value)} style={{ maxWidth: 140 }} />
+            <input className="scan-in" placeholder="remote port" value={rport}
+                   onChange={e => setRport(e.target.value)} style={{ maxWidth: 90 }} />
+            <input className="scan-in" placeholder="listen port (same)" value={lport}
+                   onChange={e => setLport(e.target.value)} style={{ maxWidth: 90 }} />
+            <button className="run" onClick={start}
+                    disabled={busy || !rport || session.status !== "live"}>
+              {busy ? "Starting…" : "▶ Forward"}
+            </button>
+          </div>
+          <div className="muted small" style={{ marginTop: 4 }}>
+            Makes <code>{rhost}:{rport || "?"}</code> reachable at <code>{session.host_ip}:{lport || rport || "?"}</code> via the shell
+          </div>
+          {fwdMsg && <div className="ranmsg">{fwdMsg}</div>}
+          {fwds.length > 0 && (
+            <div className="portfwd-list">
+              {fwds.map(f => (
+                <div key={f.id} className="portfwd-item">
+                  <span className="sess-dot live" />
+                  <span className="mono">{session.host_ip}:{f.lport}</span>
+                  <span className="muted">→</span>
+                  <span className="mono">{f.rhost}:{f.rport}</span>
+                  <span className="badge">{f.method}</span>
+                  <button className="linkish" onClick={() => stop(f.id)}>stop</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Loot a credential found in the shell (→ store + spray plan) and grab the transcript.
 function SessionTools({ session }: { session: SessionInfo }) {
   const [u, setU] = useState("");
@@ -334,6 +439,8 @@ function SessionTools({ session }: { session: SessionInfo }) {
       </div>
       {msg && <div className="ranmsg">{msg}</div>}
 
+      <PortForwardPanel session={session} />
+
       <div className="st-refs">
         <div className="st-refs-bar">
           <button className={`st-ref-tab ${openRef === "stabilize" ? "active" : ""}`}
@@ -348,6 +455,10 @@ function SessionTools({ session }: { session: SessionInfo }) {
                   onClick={() => toggleRef("pivot")}>
             Pivoting &amp; Tunnels
           </button>
+          <button className={`st-ref-tab ${openRef === "tools" ? "active" : ""}`}
+                  onClick={() => toggleRef("tools")}>
+            Tool Catalog
+          </button>
         </div>
         {openRef === "stabilize" && (
           <StabilizeGuide lhost={location.hostname} port={parseInt(session.host_port?.toString() || "4444", 10)} />
@@ -358,6 +469,7 @@ function SessionTools({ session }: { session: SessionInfo }) {
         {openRef === "pivot" && (
           <PivotGuide lhost={location.hostname} port={4444} targetIp={session.host_ip} />
         )}
+        {openRef === "tools" && <ToolCatalog />}
       </div>
     </div>
   );

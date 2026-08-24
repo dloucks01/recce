@@ -8,6 +8,8 @@ export type Nav = {
   toHosts: (o?: { q?: string; owner?: string }) => void;
   toAct: () => void;
   openHost: (ip: string) => void;
+  toSessions?: () => void;
+  toScan?: (target?: string) => void;
 };
 
 export const ARCH_ICON: Record<string, string> = {

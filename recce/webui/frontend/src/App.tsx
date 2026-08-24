@@ -445,6 +445,8 @@ export default function App() {
     },
     toAct: () => setTab("exploitation"),
     openHost: (ip) => setDrawerIp(ip),
+    toSessions: () => setTab("sessions"),
+    toScan: (target) => { if (target) setScanPrefill(target); setTab("scan"); },
   };
 
   // Badge counts
