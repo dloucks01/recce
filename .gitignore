@@ -20,6 +20,5 @@ releases/
 dump.rdb
 *.rdb
 
-# web frontend build artifacts
+# web frontend dev artifacts
 recce/webui/frontend/node_modules/
-recce/webui/static/
