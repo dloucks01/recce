@@ -3,7 +3,7 @@ import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, st
   lootCred, getTranscript, upgradeSession, runEnum, downloadFromShell, uploadToShell,
   persistSession, getPersistence, removeAllPersistence, Persistence } from "./api";
 import { ShellTerminal } from "./Terminal";
-import { PayloadCatalog } from "./Payloads";
+import { PayloadCatalog, StabilizeGuide, PostExploitRef, PivotGuide } from "./Payloads";
 
 // The Sessions tab: open listeners, watch caught shells land (grouped by host), and drive
 // them collaboratively. The whole team sees the same list on the one shared server.
@@ -226,6 +226,9 @@ function SessionTools({ session }: { session: SessionInfo }) {
     } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
     finally { setBusy(false); }
   }
+  const [openRef, setOpenRef] = useState<string | null>(null);
+  const toggleRef = (key: string) => setOpenRef(openRef === key ? null : key);
+
   return (
     <div className="session-tools">
       {!session.pty && session.status === "live" && (
@@ -264,6 +267,32 @@ function SessionTools({ session }: { session: SessionInfo }) {
         <button className="toggle" onClick={saveTranscript}>⭳ Transcript</button>
       </div>
       {msg && <div className="ranmsg">{msg}</div>}
+
+      <div className="st-refs">
+        <div className="st-refs-bar">
+          <button className={`st-ref-tab ${openRef === "stabilize" ? "active" : ""}`}
+                  onClick={() => toggleRef("stabilize")}>
+            Shell Stabilization
+          </button>
+          <button className={`st-ref-tab ${openRef === "postex" ? "active" : ""}`}
+                  onClick={() => toggleRef("postex")}>
+            Post-Exploitation
+          </button>
+          <button className={`st-ref-tab ${openRef === "pivot" ? "active" : ""}`}
+                  onClick={() => toggleRef("pivot")}>
+            Pivoting &amp; Tunnels
+          </button>
+        </div>
+        {openRef === "stabilize" && (
+          <StabilizeGuide lhost={location.hostname} port={parseInt(session.host_port?.toString() || "4444", 10)} />
+        )}
+        {openRef === "postex" && (
+          <PostExploitRef hostIp={session.host_ip} />
+        )}
+        {openRef === "pivot" && (
+          <PivotGuide lhost={location.hostname} port={4444} targetIp={session.host_ip} />
+        )}
+      </div>
     </div>
   );
 }

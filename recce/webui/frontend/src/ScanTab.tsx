@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { CmdCatalog, CmdSpec, getCommands, postCommand } from "./api";
+import { CmdCatalog, CmdSpec, getCommands, postCommand, Host, getJSON } from "./api";
 
 interface Job {
   id: string;
@@ -16,19 +16,85 @@ interface ScanTabProps {
   onLog: (lines: string[]) => void;
 }
 
+type Preset = {
+  label: string;
+  desc: string;
+  icon: string;
+  cmds: { command: string; flags?: string[] }[];
+};
+
+const PRESETS: Preset[] = [
+  {
+    label: "Full Recon",
+    desc: "Enumerate + vuln scan + deep sweep",
+    icon: "🎯",
+    cmds: [
+      { command: "enum" },
+      { command: "vulns" },
+      { command: "sweep" },
+    ],
+  },
+  {
+    label: "Web App",
+    desc: "Web deep-enum + API testing",
+    icon: "🌐",
+    cmds: [
+      { command: "web" },
+      { command: "api" },
+    ],
+  },
+  {
+    label: "AD Assessment",
+    desc: "Kerberos + LDAP + SMB + DNS",
+    icon: "🏢",
+    cmds: [
+      { command: "kerberos" },
+      { command: "ldap" },
+      { command: "smb" },
+      { command: "dns" },
+    ],
+  },
+  {
+    label: "Database Sweep",
+    desc: "Hit every database protocol",
+    icon: "🗄",
+    cmds: [
+      { command: "db" },
+    ],
+  },
+  {
+    label: "Quick Vuln Scan",
+    desc: "Fast vuln scan with aggressive NSE",
+    icon: "⚡",
+    cmds: [
+      { command: "vulns", flags: ["aggressive"] },
+    ],
+  },
+  {
+    label: "Exploit Planning",
+    desc: "Attack path + exploit plan + PoC dossiers",
+    icon: "💥",
+    cmds: [
+      { command: "attackpath" },
+      { command: "exploitplan" },
+      { command: "poc" },
+    ],
+  },
+];
+
 const GROUP_META: Record<string, { icon: string; desc: string }> = {
-  scan: { icon: "\u{1F4F6}", desc: "Port & vulnerability scanning" },
-  services: { icon: "\u{1F4E1}", desc: "Service enumeration" },
-  databases: { icon: "\u{1F5C4}", desc: "Database enumeration & extraction" },
-  web: { icon: "\u{1F310}", desc: "Web application testing" },
-  credentialed: { icon: "\u{1F511}", desc: "Authenticated / credentialed checks" },
-  exploitation: { icon: "\u{1F4A5}", desc: "Exploit & attack modules" },
-  reporting: { icon: "\u{1F4CB}", desc: "Report generation & analysis" },
-  discovery: { icon: "\u{1F50D}", desc: "Network & host discovery" },
-  enumeration: { icon: "\u{1F4E1}", desc: "Protocol enumeration" },
-  credential: { icon: "\u{1F511}", desc: "Credential testing" },
-  bruteforce: { icon: "\u{1F528}", desc: "Brute-force attacks" },
-  auxiliary: { icon: "\u{1F9F0}", desc: "Utility modules" },
+  scan: { icon: "📶", desc: "Port & vulnerability scanning" },
+  services: { icon: "📡", desc: "Service enumeration" },
+  databases: { icon: "🗄", desc: "Database enumeration & extraction" },
+  web: { icon: "🌐", desc: "Web application testing" },
+  credentialed: { icon: "🔑", desc: "Authenticated / credentialed checks" },
+  exploitation: { icon: "💥", desc: "Exploit & attack modules" },
+  reporting: { icon: "📋", desc: "Report generation & analysis" },
+  discovery: { icon: "🔍", desc: "Network & host discovery" },
+  enumeration: { icon: "📡", desc: "Protocol enumeration" },
+  credential: { icon: "🔑", desc: "Credential testing" },
+  bruteforce: { icon: "🔨", desc: "Brute-force attacks" },
+  auxiliary: { icon: "🧰", desc: "Utility modules" },
 };
 
 function elapsed(start: number, end?: number): string {
@@ -46,8 +112,11 @@ function groupBy(catalog: CmdCatalog): Record<string, { key: string; spec: CmdSp
   return g;
 }
 
+type QueueItem = { command: string; targets: string; flags: string[]; label: string };
+
 export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
   const [catalog, setCatalog] = useState<CmdCatalog>({});
+  const [hosts, setHosts] = useState<Host[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
   const [command, setCommand] = useState<string | null>(null);
@@ -61,7 +130,11 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
   const [log, setLog] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [showLog, setShowLog] = useState(false);
+  const [showSuggest, setShowSuggest] = useState(false);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [chainRunning, setChainRunning] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
+  const suggestRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     getCommands().then((c) => {
@@ -69,6 +142,7 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
       const groups = Object.keys(groupBy(c));
       if (groups.length > 0) setActiveGroup(groups[0]);
     }).catch(() => {});
+    getJSON<{ items: Host[] }>("/api/hosts?limit=500").then((r) => setHosts(r.items || [])).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -89,6 +163,14 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
     onLog(log);
     logRef.current?.scrollTo(0, logRef.current.scrollHeight);
   }, [log, onLog]);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (suggestRef.current && !suggestRef.current.contains(e.target as Node)) setShowSuggest(false);
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
 
   const streamJob = useCallback((jobId: string) => {
     setLog([]);
@@ -127,6 +209,97 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
     }
   }
 
+  async function runPreset(preset: Preset) {
+    if (running || chainRunning) return;
+    const t = targets.trim();
+    const valid = preset.cmds.every((c) => {
+      const s = catalog[c.command];
+      return s && (s.targets !== "required" || t);
+    });
+    if (!valid) {
+      setLog([`⚠ preset "${preset.label}" requires targets — enter a target above first`]);
+      setShowLog(true);
+      return;
+    }
+    setChainRunning(true);
+    setShowLog(true);
+    setLog([`▶ Running preset: ${preset.label} (${preset.cmds.length} scans)`]);
+    for (const c of preset.cmds) {
+      const s = catalog[c.command];
+      if (!s) continue;
+      try {
+        setLog((l) => [...l, `\n━━━ ${s.label} ━━━`]);
+        const { id } = await postCommand({
+          command: c.command, targets: t, profile,
+          flags: c.flags || [],
+        });
+        await new Promise<void>((resolve) => {
+          const es = new EventSource(`/api/jobs/${id}/events`);
+          es.onmessage = (m) => {
+            try {
+              const d = JSON.parse(m.data);
+              if (d.line !== undefined) setLog((l) => [...l, d.line]);
+              if (d.done) { es.close(); resolve(); }
+            } catch {}
+          };
+          es.onerror = () => { es.close(); resolve(); };
+        });
+      } catch (e) {
+        setLog((l) => [...l, `error: ${e}`]);
+      }
+    }
+    setLog((l) => [...l, `\n✓ Preset "${preset.label}" complete`]);
+    setChainRunning(false);
+  }
+
+  function addToQueue() {
+    if (!command) return;
+    const s = catalog[command];
+    if (!s) return;
+    const flags = Object.keys(cFlags).filter((k) => cFlags[k]);
+    setQueue((q) => [...q, {
+      command,
+      targets: targets.trim(),
+      flags,
+      label: s.label,
+    }]);
+  }
+
+  async function runQueue() {
+    if (running || chainRunning || queue.length === 0) return;
+    setChainRunning(true);
+    setShowLog(true);
+    setLog([`▶ Running scan chain (${queue.length} commands)`]);
+    const items = [...queue];
+    setQueue([]);
+    for (const item of items) {
+      try {
+        setLog((l) => [...l, `\n━━━ ${item.label} ━━━`]);
+        const { id } = await postCommand({
+          command: item.command,
+          targets: item.targets,
+          profile,
+          flags: item.flags,
+        });
+        await new Promise<void>((resolve) => {
+          const es = new EventSource(`/api/jobs/${id}/events`);
+          es.onmessage = (m) => {
+            try {
+              const d = JSON.parse(m.data);
+              if (d.line !== undefined) setLog((l) => [...l, d.line]);
+              if (d.done) { es.close(); resolve(); }
+            } catch {}
+          };
+          es.onerror = () => { es.close(); resolve(); };
+        });
+      } catch (e) {
+        setLog((l) => [...l, `error: ${e}`]);
+      }
+    }
+    setLog((l) => [...l, `\n✓ Scan chain complete`]);
+    setChainRunning(false);
+  }
+
   const grouped = useMemo(() => groupBy(catalog), [catalog]);
   const groups = Object.entries(grouped);
   const currentCmds = activeGroup ? grouped[activeGroup] || [] : [];
@@ -134,8 +307,82 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
   const runningJobs = jobs.filter((j) => j.status === "running");
   const recentJobs = jobs.filter((j) => j.status !== "running").slice(0, 10);
 
+  const filteredHosts = useMemo(() => {
+    if (!targets.trim()) return hosts.slice(0, 10);
+    const q = targets.toLowerCase();
+    return hosts.filter((h) =>
+      h.ip.includes(q) || h.hostname?.toLowerCase().includes(q)
+    ).slice(0, 10);
+  }, [hosts, targets]);
+
+  const isBusy = running || chainRunning;
+
   return (
     <div className="sv2">
+      {/* Quick-start presets */}
+      <div className="sv2-presets">
+        <div className="sv2-presets-h">
+          <span className="sv2-presets-label">Quick Start</span>
+          <span className="muted small">{Object.keys(catalog).length} commands available</span>
+        </div>
+        <div className="sv2-presets-grid">
+          {PRESETS.map((p) => (
+            <button
+              key={p.label}
+              className="sv2-preset"
+              onClick={() => runPreset(p)}
+              disabled={isBusy}
+              title={p.desc}
+            >
+              <span className="sv2-preset-icon">{p.icon}</span>
+              <span className="sv2-preset-body">
+                <span className="sv2-preset-name">{p.label}</span>
+                <span className="sv2-preset-desc">{p.desc}</span>
+              </span>
+              <span className="sv2-preset-ct">{p.cmds.length}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Target bar */}
+      <div className="sv2-targetbar" ref={suggestRef}>
+        <label className="sv2-field sv2-target-field">
+          <span className="sv2-label">Target(s)</span>
+          <input
+            className="sv2-input"
+            value={targets}
+            onChange={(e) => setTargets(e.target.value)}
+            onFocus={() => setShowSuggest(true)}
+            placeholder="10.0.0.0/24, 10.0.0.5, hostname, or @targets.txt"
+            disabled={isBusy}
+          />
+        </label>
+        {showSuggest && filteredHosts.length > 0 && (
+          <div className="sv2-suggest">
+            <div className="sv2-suggest-h">Discovered hosts</div>
+            {filteredHosts.map((h) => (
+              <button
+                key={h.ip}
+                className="sv2-suggest-item"
+                onClick={() => {
+                  setTargets((t) => t ? `${t.replace(/,\s*$/, "")}, ${h.ip}` : h.ip);
+                  setShowSuggest(false);
+                }}
+              >
+                <span className="sv2-suggest-ip">{h.ip}</span>
+                {h.hostname && <span className="sv2-suggest-name">{h.hostname}</span>}
+                {h.os && <span className="sv2-suggest-os">{h.os.slice(0, 30)}</span>}
+                <span className="sv2-suggest-ports">
+                  {h.ports?.slice(0, 5).map((p) => p.port).join(", ")}
+                  {(h.ports?.length || 0) > 5 && "…"}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Category tabs */}
       <div className="sv2-tabs">
         {groups.map(([g, cmds]) => {
@@ -165,7 +412,7 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
                     key={key}
                     className={`sv2-cmd ${command === key ? "active" : ""}`}
                     onClick={() => { setCommand(key); setCFlags({}); }}
-                    disabled={running}
+                    disabled={isBusy}
                   >
                     <span className="sv2-cmd-name">{s.label}</span>
                     <span className="sv2-cmd-tags">
@@ -181,25 +428,10 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
                 <div className="sv2-config">
                   <div className="sv2-config-title">{spec.label}</div>
 
-                  {spec.targets !== "none" && (
-                    <label className="sv2-field">
-                      <span className="sv2-label">
-                        Targets {spec.targets === "required" && <span className="sv2-req">*</span>}
-                      </span>
-                      <input
-                        className="sv2-input"
-                        value={targets}
-                        onChange={(e) => setTargets(e.target.value)}
-                        placeholder="10.0.0.0/24, 10.0.0.5, or @targets.txt"
-                        disabled={running}
-                      />
-                    </label>
-                  )}
-
                   {spec.profile && (
                     <label className="sv2-field">
                       <span className="sv2-label">Profile</span>
-                      <select className="sv2-input" value={profile} onChange={(e) => setProfile(e.target.value)} disabled={running}>
+                      <select className="sv2-input" value={profile} onChange={(e) => setProfile(e.target.value)} disabled={isBusy}>
                         <option value="quick">Quick</option>
                         <option value="standard">Standard</option>
                         <option value="thorough">Thorough</option>
@@ -212,17 +444,17 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
                       <label className="sv2-field">
                         <span className="sv2-label">Username</span>
                         <input className="sv2-input" value={cUser} onChange={(e) => setCUser(e.target.value)}
-                               placeholder="domain\user" disabled={running} />
+                               placeholder="domain\user" disabled={isBusy} />
                       </label>
                       <label className="sv2-field">
                         <span className="sv2-label">Password</span>
                         <input className="sv2-input" type="password" value={cPass}
-                               onChange={(e) => setCPass(e.target.value)} disabled={running} />
+                               onChange={(e) => setCPass(e.target.value)} disabled={isBusy} />
                       </label>
                       <label className="sv2-field">
                         <span className="sv2-label">Domain</span>
                         <input className="sv2-input" value={cDomain} onChange={(e) => setCDomain(e.target.value)}
-                               placeholder="CORP.LOCAL" disabled={running} />
+                               placeholder="CORP.LOCAL" disabled={isBusy} />
                       </label>
                     </div>
                   )}
@@ -231,7 +463,7 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
                     <label className="sv2-field">
                       <span className="sv2-label">LHOST</span>
                       <input className="sv2-input" value={cLhost} onChange={(e) => setCLhost(e.target.value)}
-                             placeholder="attacker.ip:port" disabled={running} />
+                             placeholder="attacker.ip:port" disabled={isBusy} />
                     </label>
                   )}
 
@@ -243,7 +475,7 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
                           <label key={f.name} className={`sv2-flag ${cFlags[f.name] ? "on" : ""}`}>
                             <input type="checkbox" checked={cFlags[f.name] || false}
                                    onChange={(e) => setCFlags({ ...cFlags, [f.name]: e.target.checked })}
-                                   disabled={running} />
+                                   disabled={isBusy} />
                             <span>{f.label}</span>
                             {f.active && <span className="sv2-flag-hot">active</span>}
                           </label>
@@ -252,13 +484,23 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
                     </div>
                   )}
 
-                  <button
-                    className="sv2-exec"
-                    onClick={runScan}
-                    disabled={running || (spec.targets === "required" && !targets.trim())}
-                  >
-                    {running ? <><span className="sv2-spinner" /> Running&hellip;</> : <span>&#9654; Execute</span>}
-                  </button>
+                  <div className="sv2-exec-row">
+                    <button
+                      className="sv2-exec"
+                      onClick={runScan}
+                      disabled={isBusy || (spec.targets === "required" && !targets.trim())}
+                    >
+                      {isBusy ? <><span className="sv2-spinner" /> Running&hellip;</> : <span>&#9654; Execute</span>}
+                    </button>
+                    <button
+                      className="sv2-queue-add"
+                      onClick={addToQueue}
+                      disabled={isBusy}
+                      title="Add to scan chain — queue multiple commands to run in sequence"
+                    >
+                      + Chain
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -269,8 +511,32 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
           )}
         </div>
 
-        {/* Right: job queue */}
+        {/* Right: job queue + scan chain */}
         <div className="sv2-jobs">
+          {/* Scan chain */}
+          {queue.length > 0 && (
+            <div className="sv2-chain">
+              <div className="sv2-chain-h">
+                <h4>Scan Chain</h4>
+                <span className="muted small">{queue.length} queued</span>
+              </div>
+              {queue.map((q, i) => (
+                <div key={i} className="sv2-chain-item">
+                  <span className="sv2-chain-num">{i + 1}</span>
+                  <span className="sv2-chain-label">{q.label}</span>
+                  {q.targets && <span className="sv2-chain-target">{q.targets}</span>}
+                  <button className="sv2-chain-rm" onClick={() => setQueue((qs) => qs.filter((_, j) => j !== i))}>×</button>
+                </div>
+              ))}
+              <div className="sv2-chain-actions">
+                <button className="sv2-exec sv2-chain-run" onClick={runQueue} disabled={isBusy}>
+                  ▶ Run Chain ({queue.length})
+                </button>
+                <button className="sv2-chain-clear" onClick={() => setQueue([])}>Clear</button>
+              </div>
+            </div>
+          )}
+
           <div className="sv2-jobs-h">
             <h3>Jobs</h3>
             {runningJobs.length > 0 && <span className="sv2-live">{runningJobs.length} running</span>}
@@ -299,7 +565,7 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
             </div>
           ))}
 
-          {runningJobs.length === 0 && recentJobs.length === 0 && (
+          {runningJobs.length === 0 && recentJobs.length === 0 && queue.length === 0 && (
             <div className="sv2-jobs-empty">No jobs yet</div>
           )}
         </div>
@@ -310,7 +576,7 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
         <div className="scan-console">
           <div className="scan-console-bar">
             <span className="scan-console-title">
-              {running && <span className="scan-pulse-sm" />}
+              {(running || chainRunning) && <span className="scan-pulse-sm" />}
               Output &middot; {log.length} lines
             </span>
             <button className="scan-console-close" onClick={() => setShowLog(false)}>&times;</button>
@@ -319,8 +585,8 @@ export function ScanTab({ tester, onRunning, onLog }: ScanTabProps) {
             {log.map((line, i) => (
               <div key={i} className="scan-console-line">{line}</div>
             ))}
-            {running && <div className="scan-console-line scan-console-cursor">_</div>}
-            {!running && log.length > 0 && (
+            {(running || chainRunning) && <div className="scan-console-line scan-console-cursor">_</div>}
+            {!running && !chainRunning && log.length > 0 && (
               <div className="scan-console-line scan-console-done">&mdash; done &mdash;</div>
             )}
           </div>

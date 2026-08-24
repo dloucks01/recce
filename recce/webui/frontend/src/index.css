@@ -1177,3 +1177,107 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .rpt-finding-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text); }
 .rpt-finding-host { font-size: 11px; color: var(--faint); flex-shrink: 0; }
 .rpt-finding-cve { font-size: 10px; color: var(--muted); flex-shrink: 0; }
+
+/* ============================ Session Reference Panels ============================ */
+.st-refs { border-top: 1px solid var(--line); padding-top: 10px; }
+.st-refs-bar { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
+.st-ref-tab { border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-family: var(--sans); font-weight: 600; font-size: 12px; padding: 6px 14px; border-radius: 20px; cursor: pointer; transition: all .12s; }
+.st-ref-tab:hover { border-color: var(--accent); color: var(--text); }
+.st-ref-tab.active { background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: var(--accent); color: var(--accent); }
+
+/* stabilize guide */
+.stabilize-guide { display: flex; flex-direction: column; gap: 14px; }
+.stab-section { }
+.stab-section-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+.stab-step { display: flex; gap: 8px; align-items: center; padding: 5px 0; flex-wrap: wrap; }
+.stab-step-label { font-size: 12px; font-weight: 700; color: var(--accent); min-width: 100px; flex-shrink: 0; }
+.stab-step-cmd { flex: 1; min-width: 200px; font-family: var(--mono); font-size: 11.5px; background: var(--ground); color: var(--text); padding: 5px 10px; border-radius: 5px; overflow-x: auto; white-space: nowrap; }
+.stab-step-note { flex-shrink: 0; }
+
+/* post-exploitation reference */
+.postex-ref { }
+.postex-tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+.postex-tab { border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-weight: 600; font-size: 12px; padding: 6px 14px; border-radius: 20px; cursor: pointer; transition: all .12s; }
+.postex-tab:hover { border-color: var(--accent); }
+.postex-tab.active { background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: var(--accent); color: var(--accent); }
+.postex-group { margin-bottom: 12px; }
+.postex-group-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; margin-bottom: 6px; padding-bottom: 3px; border-bottom: 1px solid var(--line); }
+.postex-cmd { display: flex; gap: 8px; align-items: center; padding: 4px 0; flex-wrap: wrap; }
+.postex-cmd-label { font-size: 12px; font-weight: 600; color: var(--text); min-width: 110px; flex-shrink: 0; }
+.postex-cmd-code { flex: 1; min-width: 200px; font-family: var(--mono); font-size: 11.5px; background: var(--ground); color: var(--text); padding: 4px 8px; border-radius: 5px; overflow-x: auto; white-space: nowrap; }
+.postex-cmd-note { flex-shrink: 0; }
+
+/* pivot guide */
+.pivot-guide { display: flex; flex-direction: column; gap: 4px; }
+.pivot-cmd { display: flex; gap: 8px; align-items: center; padding: 5px 0; flex-wrap: wrap; }
+.pivot-cmd-label { font-size: 12px; font-weight: 700; color: var(--accent); min-width: 130px; flex-shrink: 0; }
+.pivot-cmd-code { flex: 1; min-width: 200px; font-family: var(--mono); font-size: 11.5px; background: var(--ground); color: var(--text); padding: 5px 10px; border-radius: 5px; overflow-x: auto; white-space: nowrap; }
+.pivot-cmd-note { flex-shrink: 0; }
+
+/* payload catalog: collapsible groups */
+.payload-group-toggle { display: flex; align-items: center; gap: 6px; background: none; border: none; cursor: pointer; padding: 0; width: 100%; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; margin: 6px 0 4px; }
+.payload-group-toggle:hover { color: var(--text); }
+.payload-caret { font-size: 10px; color: var(--faint); width: 12px; }
+.payload-group-ct { font-family: var(--mono); font-size: 10px; color: var(--faint); background: var(--surface2); padding: 1px 6px; border-radius: 999px; margin-left: auto; }
+
+/* ============================ ScanTab Quick Start Presets ============================ */
+.sv2-presets { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow-sm); }
+.sv2-presets-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.sv2-presets-label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.sv2-presets-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.sv2-preset { display: flex; align-items: center; gap: 10px; background: var(--surface2); border: 1px solid var(--line); border-radius: 9px; padding: 10px 14px; cursor: pointer; text-align: left; transition: all .12s; }
+.sv2-preset:hover:not(:disabled) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface2)); }
+.sv2-preset:disabled { opacity: .5; cursor: default; }
+.sv2-preset-icon { font-size: 20px; flex-shrink: 0; }
+.sv2-preset-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sv2-preset-name { font-size: 13px; font-weight: 700; color: var(--text); }
+.sv2-preset-desc { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv2-preset-ct { font-family: var(--mono); font-size: 10px; background: var(--ground); border: 1px solid var(--line); padding: 2px 6px; border-radius: 999px; color: var(--faint); flex-shrink: 0; }
+
+/* target auto-suggest */
+.sv2-targetbar { position: relative; }
+.sv2-target-field { flex: 1; }
+.sv2-suggest { position: absolute; top: 100%; left: 0; right: 0; z-index: 20; background: var(--surface); border: 1px solid var(--line); border-radius: 0 0 var(--radius) var(--radius); box-shadow: var(--shadow-pop); max-height: 300px; overflow-y: auto; }
+.sv2-suggest-h { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); font-weight: 700; padding: 8px 12px 4px; }
+.sv2-suggest-item { display: flex; gap: 8px; align-items: center; width: 100%; background: none; border: none; padding: 8px 12px; cursor: pointer; font-size: 12px; color: var(--text); text-align: left; transition: background .08s; }
+.sv2-suggest-item:hover { background: var(--surface2); }
+.sv2-suggest-ip { font-family: var(--mono); font-weight: 700; color: var(--accent); min-width: 110px; }
+.sv2-suggest-name { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv2-suggest-os { font-size: 10px; color: var(--faint); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv2-suggest-ports { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+
+/* execute row */
+.sv2-exec-row { display: flex; gap: 8px; }
+.sv2-exec-row .sv2-exec { flex: 1; }
+.sv2-queue-add { font-family: var(--sans); font-weight: 700; font-size: 12px; padding: 8px 14px; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); color: var(--accent); border-radius: var(--radius-sm); cursor: pointer; transition: all .12s; white-space: nowrap; }
+.sv2-queue-add:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, var(--surface)); }
+.sv2-queue-add:disabled { opacity: .5; cursor: default; }
+
+/* scan chain queue */
+.sv2-chain { background: color-mix(in srgb, var(--accent) 6%, var(--surface2)); border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.sv2-chain-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+.sv2-chain-h h4 { margin: 0; font-size: 12px; font-weight: 700; color: var(--accent); }
+.sv2-chain-item { display: flex; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.sv2-chain-item:last-of-type { border-bottom: 0; }
+.sv2-chain-num { font-family: var(--mono); font-size: 10px; font-weight: 800; color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; flex-shrink: 0; }
+.sv2-chain-label { font-weight: 600; color: var(--text); flex: 1; }
+.sv2-chain-target { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.sv2-chain-rm { background: none; border: none; color: var(--faint); font-size: 14px; cursor: pointer; padding: 0 4px; }
+.sv2-chain-rm:hover { color: var(--crit); }
+.sv2-chain-actions { display: flex; gap: 8px; margin-top: 8px; }
+.sv2-chain-run { flex: 1; font-size: 12px; padding: 8px; }
+.sv2-chain-clear { background: none; border: 1px solid var(--line); color: var(--muted); font-size: 11px; font-weight: 700; padding: 6px 12px; border-radius: var(--radius-sm); cursor: pointer; }
+.sv2-chain-clear:hover { border-color: var(--crit); color: var(--crit); }
+
+/* ============================ msfvenom Generator Form ============================ */
+.venom-gen { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow-sm); margin-top: 16px; }
+.venom-gen-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; cursor: pointer; }
+.venom-gen-h h3 { margin: 0; font-size: 14px; font-weight: 700; }
+.venom-gen-toggle { color: var(--faint); font-size: 12px; }
+.venom-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.venom-field { display: flex; flex-direction: column; gap: 4px; }
+.venom-field label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); }
+.venom-field select, .venom-field input { font-family: var(--sans); font-size: 13px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface2); color: var(--text); }
+.venom-output { position: relative; }
+.venom-cmd { display: block; font-family: var(--mono); font-size: 12px; background: #0a0f18; color: #b9c6da; padding: 12px 14px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
+.venom-copy-btn { position: absolute; top: 8px; right: 8px; }

