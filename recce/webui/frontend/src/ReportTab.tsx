@@ -24,6 +24,9 @@ export function ReportTab({ findings, onRefresh }: ReportTabProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [sevFilter, setSevFilter] = useState("all");
   const [searchQ, setSearchQ] = useState("");
+  const [showPreview, setShowPreview] = useState(false);
+  // Bumping the key forces the iframe to re-fetch (cache-busts the src).
+  const [previewKey, setPreviewKey] = useState(0);
 
   const realFindings = useMemo(
     () => findings.filter((f) => f.tier !== "lead"),
@@ -149,6 +152,34 @@ export function ReportTab({ findings, onRefresh }: ReportTabProps) {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Live HTML preview — same builder as the download, in an iframe. */}
+      <div className="rpt-preview">
+        <div className="rpt-preview-h">
+          <h3>Preview (HTML)</h3>
+          <span className="muted">
+            what the HTML report looks like right now, straight from the engagement db
+          </span>
+          <div className="rpt-preview-actions">
+            {showPreview && (
+              <button className="toggle" onClick={() => setPreviewKey(k => k + 1)} title="rebuild preview">
+                ↻ Refresh
+              </button>
+            )}
+            <button className="toggle" onClick={() => { setShowPreview(v => !v); if (!showPreview) setPreviewKey(k => k + 1); }}>
+              {showPreview ? "Hide preview" : "Show preview"}
+            </button>
+          </div>
+        </div>
+        {showPreview && (
+          <iframe
+            key={previewKey}
+            className="rpt-preview-frame"
+            src={`/api/report/preview/html?_=${previewKey}`}
+            title="Report preview"
+          />
+        )}
       </div>
 
       {/* Report format cards */}

@@ -34,3 +34,24 @@ def register_report_routes(app: FastAPI, ctx) -> None:
         if not os.path.exists(path):
             raise HTTPException(500, "report generation produced no file")
         return FileResponse(path, media_type=media, filename=fname)
+
+    @app.get("/api/report/preview/html")
+    def report_preview_html():
+        """Serve the HTML report INLINE (not as a download) so the Report tab
+        can render it in an iframe for live preview. Same builder as the
+        download endpoint — the tester sees exactly what they will ship."""
+        from fastapi.responses import Response
+        from ...store import Store
+        from ...cli import _generate_reports, _open_paths
+        paths = _open_paths(eng_dir)
+        with _report_lock, Store(db_path) as st:
+            title = st.get_meta("engagement") or "recce engagement"
+            _generate_reports(st, paths, title, quiet=True)
+        html_path = paths["html"]
+        if not os.path.exists(html_path):
+            raise HTTPException(500, "report generation produced no file")
+        with open(html_path, "rb") as f:
+            data = f.read()
+        # X-Frame-Options omitted deliberately so same-origin iframes work.
+        return Response(data, media_type="text/html; charset=utf-8",
+                        headers={"Cache-Control": "no-store"})
