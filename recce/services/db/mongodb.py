@@ -638,7 +638,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
     from ... import svcprobe
     from ...models import Credential
-    from .postgres import _cred_list
+    from .base import cred_list as _cred_list
     targets = mongodb_targets(hosts)
     probes: dict = {}
     state: dict = {}
@@ -701,7 +701,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
 def _probe_members(discovered: list, targets: list, creds, max_members: int = 8) -> list:
     """Probe replica-set members not already in scope. Returns finding dicts for each
     that is reachable AND accessible (unauth or the same working credential)."""
-    from .postgres import _cred_list
+    from .base import cred_list as _cred_list
     known = {(t["ip"], t["port"]) for t in targets}
     seen: set = set()
     out: list = []

@@ -17,6 +17,7 @@ import socket
 import struct
 
 from ...models import Host, Port
+from .base import recvn as _recvn, cred_list as _base_cred_list, finding as _base_finding
 
 # Column/field names whose data is worth sampling (PII / secrets / credentials).
 _SECRET_COL = re.compile(
@@ -40,16 +41,6 @@ def is_postgres(port: Port) -> bool:
         return False
     svc = (port.service or "").lower()
     return port.portid in _PORTS or "postgres" in svc or svc == "postgresql"
-
-
-def _recvn(sock: socket.socket, n: int) -> bytes:
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            break
-        buf += chunk
-    return buf
 
 
 def _startup(user: str, db: str) -> bytes:
@@ -443,25 +434,6 @@ def prove_rce(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgr
             pass
 
 
-def _cred_list(creds) -> list[tuple]:
-    """Normalize the analyze() `creds` arg (a single dict, or a list of them) into
-    [(user, password), ...]. Accepts username/user + password/secret keys."""
-    if not creds:
-        return []
-    if isinstance(creds, dict):
-        creds = [creds]
-    out, seen = [], set()
-    for c in creds:
-        if not isinstance(c, dict):
-            continue
-        u = c.get("username") or c.get("user")
-        pw = c.get("password") if c.get("password") is not None else c.get("secret")
-        if u and pw is not None and (u, pw) not in seen:
-            seen.add((u, pw))
-            out.append((u, pw))
-    return out
-
-
 def postgres_targets(hosts: list[Host]) -> list[dict]:
     out = []
     for h in hosts:
@@ -473,8 +445,12 @@ def postgres_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
-    return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "psql", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind}
+    return _base_finding("psql", sev, title, target, detail, cmd, rem, cwes, kind)
+
+
+# Back-compat: mysql and mongodb still import _cred_list from postgres.
+# Rewired to base so the same normaliser is used everywhere.
+_cred_list = _base_cred_list
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:

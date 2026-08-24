@@ -16,6 +16,7 @@ import socket
 import struct
 
 from ...models import Host, Port
+from .base import recvn as _recvn, cred_list as _base_cred_list, finding as _base_finding
 
 _PORTS = (3306, 3307, 33060)
 _DEFAULT_PORT = 3306
@@ -36,16 +37,6 @@ def is_mysql(port: Port) -> bool:
         return False
     svc = (port.service or "").lower()
     return port.portid in _PORTS or "mysql" in svc or "mariadb" in svc
-
-
-def _recvn(sock: socket.socket, n: int) -> bytes:
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            break
-        buf += chunk
-    return buf
 
 
 def _read_packet(sock: socket.socket):
@@ -406,8 +397,7 @@ def mysql_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
-    return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "mysql", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind}
+    return _base_finding("mysql", sev, title, target, detail, cmd, rem, cwes, kind)
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -550,7 +540,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     looted: list = []
     if active:
         from ...models import Credential
-        from .postgres import _cred_list
+        from .base import cred_list as _cred_list
         for t, pr in svcprobe.iter_probe(
                 targets, lambda t: probe(t["ip"], t["port"]),
                 budget=budget, progress=progress, state=state):
