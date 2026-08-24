@@ -142,7 +142,7 @@ export function CollabSidebar({ hosts, nav }: { hosts: any[]; nav?: any }) {
                     <span className="avatar xs" style={{ background: `hsl(${hue(j.tester)} 55% 45%)` }}>
                       {initials(j.tester)}
                     </span>
-                    <span className="tester-name">{j.tester === me ? "You" : j.tester}</span>
+                    <span className="tester-name">{j.tester === me ? "You" : j.tester || "system"}</span>
                   </div>
                   <div className="job-cmd" title={j.cmd}>
                     {j.cmd.split(" ").slice(0, 3).join(" ")}
@@ -277,7 +277,8 @@ export function CollabSidebar({ hosts, nav }: { hosts: any[]; nav?: any }) {
 }
 
 // Helpers
-function hue(name: string): number {
+function hue(name: string | null | undefined): number {
+  if (!name) return 200;
   let h = 0;
   for (let i = 0; i < name.length; i++) {
     h = ((h << 5) - h + name.charCodeAt(i)) | 0;
@@ -285,7 +286,8 @@ function hue(name: string): number {
   return (h % 360 + 360) % 360;
 }
 
-function initials(name: string): string {
+function initials(name: string | null | undefined): string {
+  if (!name) return "?";
   return name.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2);
 }
 

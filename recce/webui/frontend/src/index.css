@@ -4,7 +4,7 @@
 :root {
   --ground: #eef1f7; --surface: #ffffff; --surface2: #f1f4f9; --line: #e2e8f1;
   --text: #111a27; --muted: #5a6b82; --faint: #96a3b7; --accent: #2f6bff; --accent-ink: #1b47b8;
-  --crit: #dc2626; --high: #d9720a; --med: #b0810a; --low: #64748b;
+  --crit: #dc2626; --high: #e05d00; --med: #c59b07; --low: #64748b;
   --ok: #059669; --kev: #b021c9;
   --radius: 14px; --radius-sm: 9px;
   --shadow-sm: 0 1px 2px rgba(17,26,39,.04), 0 1px 3px rgba(17,26,39,.05);
@@ -16,7 +16,7 @@
 :root[data-theme="dark"] {
   --ground: #0d131e; --surface: #151d2b; --surface2: #1b2434; --line: #29334a;
   --text: #e6edf6; --muted: #8f9cb1; --faint: #5f6c82; --accent: #5b9bff; --accent-ink: #93bbff;
-  --crit: #fb5871; --high: #fb923c; --med: #f5c04e; --low: #7c8aa0;
+  --crit: #fb5871; --high: #ff8a3a; --med: #e8d44d; --low: #7c8aa0;
   --ok: #34d399; --kev: #e879f9;
   --shadow-sm: 0 1px 2px rgba(0,0,0,.3);
   --shadow-md: 0 2px 8px rgba(0,0,0,.3), 0 14px 30px rgba(0,0,0,.35);
@@ -1278,3 +1278,19 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .portfwd-form { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .portfwd-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .portfwd-item { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: var(--surface2); border-radius: var(--radius-sm); font-size: 12px; }
+
+/* services view */
+.svc-list { display: flex; flex-direction: column; gap: 6px; }
+.svc-group { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.svc-group-h { display: flex; gap: 8px; align-items: center; padding: 10px 14px; cursor: pointer;
+  background: var(--surface); user-select: none; transition: background .1s; flex-wrap: wrap; }
+.svc-group-h:hover { background: color-mix(in srgb, var(--accent) 6%, var(--surface2)); }
+.svc-name { font-weight: 700; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; }
+.svc-ports { font-size: 12px; color: var(--muted); }
+.svc-product { font-size: 12px; color: var(--faint); font-style: italic; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.svc-hosts { border-top: 1px solid var(--line); padding: 6px 8px 8px 24px; display: flex; flex-direction: column; gap: 2px; }
+.svc-host-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: var(--radius-sm); font-size: 13px; }
+.svc-host-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.svc-hn { color: var(--muted); font-size: 12px; }
+.svc-host-actions { margin-left: auto; display: flex; gap: 8px; opacity: 0; transition: opacity .1s; }
+.svc-host-row:hover .svc-host-actions { opacity: 1; }

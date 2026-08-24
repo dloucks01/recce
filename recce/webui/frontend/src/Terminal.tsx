@@ -4,11 +4,24 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { SessionInfo } from "./api";
 
-const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-const strToB64 = (s: string) => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+function b64ToBytes(b64: string): Uint8Array {
+  try {
+    const raw = atob(b64);
+    const buf = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+    return buf;
+  } catch {
+    return new Uint8Array(0);
+  }
+}
 
-// A live, collaborative terminal over the session WebSocket. Everyone attached sees the
-// same output; only the driver's keystrokes reach the target. "Take the wheel" hands off.
+function strToB64(s: string): string {
+  const bytes = new TextEncoder().encode(s);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
 export function ShellTerminal({ session, tester }: { session: SessionInfo; tester: string }) {
   const host = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -18,6 +31,9 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
   const iDrive = driver === tester;
 
   useEffect(() => {
+    if (!host.current) return;
+
+    let disposed = false;
     const term = new Terminal({
       fontFamily: "ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace",
       fontSize: 13, cursorBlink: true, convertEol: false,
@@ -25,9 +41,8 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.open(host.current!);
+    term.open(host.current);
     try { fit.fit(); } catch { /* pre-layout */ }
-    // propagate terminal size to the target PTY so full-screen apps (vim/nano/less) work
     term.onResize(({ cols, rows }) => {
       wsRef.current?.readyState === WebSocket.OPEN &&
         wsRef.current.send(JSON.stringify({ t: "resize", cols, rows }));
@@ -41,31 +56,35 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
     wsRef.current = ws;
 
     ws.onmessage = (ev) => {
-      const m = JSON.parse(ev.data);
-      if (m.t === "scrollback" || m.t === "out") {
-        if (m.data) term.write(b64ToBytes(m.data));
-      } else if (m.t === "presence") {
-        setDriver(m.driver);
-        setAttached(m.attached || []);
-        if (!m.driver && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ t: "wheel" }));
+      if (disposed) return;
+      try {
+        const m = JSON.parse(ev.data);
+        if (m.t === "scrollback" || m.t === "out") {
+          if (m.data) term.write(b64ToBytes(m.data));
+        } else if (m.t === "presence") {
+          setDriver(m.driver);
+          setAttached(m.attached || []);
+          if (!m.driver && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ t: "wheel" }));
+          }
+        } else if (m.t === "status") {
+          setLive(m.status === "live");
+          if (m.status !== "live") term.write("\r\n\x1b[33m[session detached — shell dropped]\x1b[0m\r\n");
         }
-      } else if (m.t === "status") {
-        setLive(m.status === "live");
-        if (m.status !== "live") term.write("\r\n\x1b[33m[session detached — shell dropped]\x1b[0m\r\n");
-      }
+      } catch { /* malformed message — ignore */ }
     };
-    ws.onclose = () => term.write("\r\n\x1b[31m[disconnected]\x1b[0m\r\n");
+    ws.onclose = () => {
+      if (!disposed) term.write("\r\n\x1b[31m[disconnected]\x1b[0m\r\n");
+    };
 
-    // keystrokes → server (server enforces driver-only, this is just UX)
     term.onData((d) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: "in", data: strToB64(d) }));
     });
 
-    // focus the terminal so keyboard input works immediately
-    setTimeout(() => term.focus(), 100);
+    setTimeout(() => { if (!disposed) term.focus(); }, 100);
 
     return () => {
+      disposed = true;
       window.removeEventListener("resize", onResize);
       ws.close();
       term.dispose();

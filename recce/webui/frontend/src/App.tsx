@@ -3,7 +3,7 @@ import {
   Finding, Host, Overview, fetchAll, postTick, postNote, postImport,
   fetchPlaybook, Playbook as PlaybookData,
 } from "./api";
-import { Dashboard, Findings, Hosts, Exploitation, Credentials, Playbook, Nav, FindingFilters } from "./views";
+import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
 import { useEscape } from "./ui";
@@ -444,6 +444,7 @@ export default function App() {
     scan: scanRunning ? 1 : undefined,
     findings: findings.filter((f) => f.tier !== "lead").length || undefined,
     hosts: hosts.length || undefined,
+    services: ov?.services || undefined,
     sessions: undefined,
     report: undefined,
     exploitation: undefined,
@@ -523,6 +524,7 @@ export default function App() {
               nav={nav}
             />
           ) : <div className="loading">Loading…</div>)}
+          {tab === "services" && <Services hosts={hosts} findings={findings} nav={nav} />}
           {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus}
             onScanHost={(ip) => { setScanPrefill(ip); setTab("scan"); }}
             onViewHost={(ip) => setDrawerIp(ip)} />}
