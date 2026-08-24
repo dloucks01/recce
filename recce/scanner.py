@@ -150,6 +150,21 @@ PROFILES: dict[str, ScanProfile] = {
     "thorough": ScanProfile(name="thorough", min_rate=0, udp_top=100,
                             extra_nse=["banner"], host_timeout=40,
                             version_all=True),
+    # `stealth` — for engagements where the target's IDS/rate-limiter is the
+    # constraint, not our scan time. No new nmap flags: we lean entirely on
+    # existing ScanProfile knobs (no fragment/decoy machinery to break other
+    # code paths). Timing 2 (slower than -T4), congestion-adaptive from the
+    # first pass (`reliable=True`), retries floored high, generous host-timeout
+    # so nothing gets dropped for being slow. Top-1000 TCP only — a full sweep
+    # at T2 would take too long to be useful. Skips OS-detect and AD-enrich
+    # NSE (both actively probe things a stealthy operator wouldn't touch first).
+    # UDP basic sweep is on for coverage of firewalled hosts (their TCP is
+    # likely dropped anyway).
+    "stealth": ScanProfile(name="stealth", all_ports=False, top_ports=1000,
+                           timing=2, min_rate=0, max_retries=8, reliable=True,
+                           os_detect=False, ad_enrich=False, deep_enum=False,
+                           host_timeout=45, version_intensity=4,
+                           udp_basic=True),
 }
 
 

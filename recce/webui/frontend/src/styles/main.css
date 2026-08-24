@@ -1497,3 +1497,131 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .svc-hn { color: var(--muted); font-size: 12px; }
 .svc-host-actions { margin-left: auto; display: flex; gap: 8px; opacity: 0; transition: opacity .1s; }
 .svc-host-row:hover .svc-host-actions { opacity: 1; }
+
+/* ============================ findings tab reorg ============================
+ * Sticky toolbar so the tester can scan the list without losing filters.
+ * Severity chips carry live counts (per current lead-toggle state).
+ * Active-filter chip strip mirrors what's applied so the "why am I seeing
+ * these rows" question is answered without opening the sidebar.
+ * Row-left severity band paints a heat map you can scan for the criticals.
+ */
+.findings-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px; margin-bottom: 10px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  position: sticky; top: 60px; z-index: 4;
+  backdrop-filter: saturate(1.4) blur(8px); }
+.findings-toolbar-tail { display: flex; align-items: center; gap: 10px; margin-left: auto; flex-wrap: wrap; }
+.findings-toolbar-tail .search { min-width: 220px; }
+
+.sev-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.sev-chip { display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px 5px 8px; border-radius: 999px; cursor: pointer;
+  font-size: 12px; font-weight: 700; letter-spacing: .01em;
+  background: var(--surface2); border: 1px solid var(--line); color: var(--text);
+  transition: background .12s, border-color .12s, transform .06s; }
+.sev-chip:hover { background: color-mix(in srgb, var(--accent) 8%, var(--surface2)); }
+.sev-chip:active { transform: translateY(1px); }
+.sev-chip.sel { border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface2));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent) inset; }
+.sev-chip.empty { opacity: .45; }
+.sev-chip.all .sev-chip-dot { display: none; }
+.sev-chip-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.sev-chip.s-critical .sev-chip-dot { background: var(--crit); }
+.sev-chip.s-high .sev-chip-dot { background: var(--high); }
+.sev-chip.s-medium .sev-chip-dot { background: var(--med); }
+.sev-chip.s-low .sev-chip-dot { background: var(--low); }
+.sev-chip.s-info .sev-chip-dot { background: var(--faint); }
+.sev-chip.s-critical.sel { border-color: color-mix(in srgb, var(--crit) 60%, transparent);
+  background: color-mix(in srgb, var(--crit) 14%, var(--surface2));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--crit) 45%, transparent) inset; }
+.sev-chip.s-high.sel { border-color: color-mix(in srgb, var(--high) 60%, transparent);
+  background: color-mix(in srgb, var(--high) 14%, var(--surface2));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--high) 45%, transparent) inset; }
+.sev-chip.s-medium.sel { border-color: color-mix(in srgb, var(--med) 60%, transparent);
+  background: color-mix(in srgb, var(--med) 14%, var(--surface2));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--med) 45%, transparent) inset; }
+.sev-chip.s-low.sel { border-color: color-mix(in srgb, var(--low) 60%, transparent);
+  background: color-mix(in srgb, var(--low) 14%, var(--surface2));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--low) 45%, transparent) inset; }
+.sev-chip-count { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  background: var(--ground); color: var(--muted); font-weight: 700; min-width: 22px; text-align: center; }
+.sev-chip.sel .sev-chip-count { background: color-mix(in srgb, var(--accent) 20%, var(--ground)); color: var(--text); }
+
+/* Active-filter chip strip. Each chip dismisses its own filter on click,
+ * so the tester can pop off filters individually instead of hunting them
+ * back down in the toolbar above. */
+.findings-active-filters { display: flex; align-items: center; gap: 6px;
+  padding: 6px 12px; margin-bottom: 10px; flex-wrap: wrap;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: var(--radius); font-size: 12px; }
+.faf-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  font-weight: 700; margin-right: 2px; }
+.faf-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 8px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+  color: var(--text); font-size: 12px; cursor: pointer; transition: border-color .1s, background .1s; }
+.faf-chip:hover { border-color: var(--crit); background: color-mix(in srgb, var(--crit) 8%, var(--surface)); }
+.faf-chip .faf-key { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
+.faf-chip .faf-val { font-weight: 600; }
+.faf-chip .faf-x { display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%; background: var(--surface2); color: var(--muted); font-size: 14px; line-height: 1; }
+.faf-chip:hover .faf-x { background: var(--crit); color: #fff; }
+.faf-chip.s-critical { border-color: color-mix(in srgb, var(--crit) 45%, transparent); }
+.faf-chip.s-high { border-color: color-mix(in srgb, var(--high) 45%, transparent); }
+.faf-chip.s-medium { border-color: color-mix(in srgb, var(--med) 45%, transparent); }
+.faf-chip.s-low { border-color: color-mix(in srgb, var(--low) 45%, transparent); }
+.faf-chip.kev { border-color: color-mix(in srgb, var(--kev) 45%, transparent); }
+.faf-clear { margin-left: auto; font-size: 11px; }
+
+/* Row-left severity band. Uses a box-shadow so it doesn't fight the existing
+ * border-bottom on tds. Only paints on .tbl.findings so other tables keep
+ * their current look. */
+.tbl.findings tbody tr.row-sev-critical td:first-child { box-shadow: inset 4px 0 0 var(--crit); }
+.tbl.findings tbody tr.row-sev-high td:first-child { box-shadow: inset 4px 0 0 var(--high); }
+.tbl.findings tbody tr.row-sev-medium td:first-child { box-shadow: inset 4px 0 0 var(--med); }
+.tbl.findings tbody tr.row-sev-low td:first-child { box-shadow: inset 4px 0 0 var(--low); }
+.tbl.findings tbody tr.row-sev-info td:first-child { box-shadow: inset 4px 0 0 var(--faint); }
+.tbl.findings tbody tr.detail-row td:first-child { box-shadow: none; }
+
+/* ============================ sessions tab split-pane ======================
+ * Rail on the left carries listeners + session groups + persist banner.
+ * Terminal opens in a fixed-position right pane so it doesn't push the rail
+ * out of view — the tester can attach/detach shells without losing context.
+ * Collapses to a single column below 1000px so it stays usable on laptops.
+ */
+.sessions-cols { display: flex; gap: 16px; align-items: flex-start; }
+.sessions-rail { flex: 1 1 380px; min-width: 320px; max-width: 480px;
+  display: flex; flex-direction: column; gap: 16px; }
+.sessions-terminal-pane { flex: 1 1 720px; min-width: 0;
+  display: flex; flex-direction: column; gap: 16px;
+  position: sticky; top: 76px; align-self: flex-start;
+  max-height: calc(100vh - 90px); overflow-y: auto; }
+.sessions-terminal-pane::-webkit-scrollbar { width: 10px; }
+.sessions-terminal-pane::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; }
+.sessions-terminal-pane::-webkit-scrollbar-track { background: transparent; }
+
+/* Empty state so the pane isn't a blank slab when nothing's open. */
+.sess-empty-panel { display: flex; align-items: center; justify-content: center; min-height: 320px; }
+.sess-empty-hero { text-align: center; max-width: 420px; padding: 40px 20px; }
+.sess-empty-icon { font-size: 48px; color: var(--faint); margin-bottom: 12px;
+  font-family: var(--mono); animation: sess-blink 1.8s steps(2) infinite; }
+@keyframes sess-blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: .25; } }
+.sess-empty-hero h3 { margin: 0 0 8px; font-size: 16px; color: var(--muted); font-weight: 700; }
+.sess-empty-hero p { margin: 0; font-size: 13px; line-height: 1.55; }
+
+/* Group action buttons align to the right, "+ shell" first, then detail/scan */
+.sess-group-action { font-size: 11px; padding: 2px 8px; }
+.sess-group-action:disabled { opacity: .45; cursor: not-allowed; }
+.sess-group-action:first-of-type { margin-left: auto; }
+
+/* When the rail's session list gets long, keep it scrollable in-place */
+.sessions-rail .session-list { max-height: 55vh; overflow-y: auto; padding-right: 4px; }
+
+@media (max-width: 1000px) {
+  .sessions-cols { flex-direction: column; }
+  .sessions-rail { max-width: none; }
+  .sessions-terminal-pane { position: static; max-height: none; overflow: visible; }
+  .sessions-rail .session-list { max-height: none; }
+}

@@ -28,12 +28,19 @@ def _f(name, flag, label, active=False):
 # the server builds a safe argv from it - no shell, every value a separate argv token.
 _COMMANDS: dict = {
     # --- scan phases ---
+    # `no-discovery` (-Pn) is the fix for the classic "host is up but doesn't
+    # answer ping" case — a firewall drops ICMP + our discovery probes, so we
+    # write the host off. With -Pn every target in scope is scanned regardless.
+    # Slower on dead ranges (nothing to prune) so it's opt-in.
     "run": _cmd("Run — guided full flow", "Scan", "required", profile=True,
-                flags=[_f("deep", "--deep", "deep")]),
+                flags=[_f("deep", "--deep", "deep"),
+                       _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up")]),
     "scan": _cmd("Scan — enum + vulns", "Scan", "required", profile=True,
-                 flags=[_f("deep", "--deep", "deep"), _f("fast", "--fast", "fast")]),
+                 flags=[_f("deep", "--deep", "deep"), _f("fast", "--fast", "fast"),
+                        _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up")]),
     "enum": _cmd("Enumerate", "Scan", "required", profile=True,
-                 flags=[_f("fast", "--fast", "masscan"), _f("all-ports", "--all-ports", "all ports")]),
+                 flags=[_f("fast", "--fast", "masscan"), _f("all-ports", "--all-ports", "all ports"),
+                        _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up")]),
     "vulns": _cmd("Vuln scan", "Scan", "optional",
                   flags=[_f("fast", "--fast", "fast"), _f("aggressive", "--aggressive", "aggressive NSE", True),
                          _f("offline", "--offline", "offline")]),

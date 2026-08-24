@@ -107,8 +107,27 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
     });
   })();
 
+  // Spawn a new shell on `ip` by piggy-backing on any live PTY session on
+  // that host (spawnSession only works from a PTY parent — the raw stager
+  // can't self-fork reliably). Falls back with a helpful hint otherwise.
+  async function spawnOnHost(ip: string) {
+    const group = hostGroups.find(([h]) => h === ip)?.[1] || [];
+    const parent = group.find(s => s.pty && s.status === "live");
+    if (!parent) {
+      setErr(`can't spawn — need a live PTY session on ${ip}. Upgrade an existing shell first (⤴ Upgrade).`);
+      return;
+    }
+    try {
+      const r = await spawnSession(parent.id);
+      if (!r.ok) setErr(r.reason || "spawn failed");
+      else refresh();
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+  }
+
+  const hasTerminal = !!openSession;
+
   return (
-    <div className="sessions-view">
+    <div className={"sessions-view" + (hasTerminal ? " has-terminal" : "")}>
       {persist.length > 0 && (
         <div className="persist-banner">
           <span>⚠ <b>{persist.length}</b> active persistence artifact(s) installed across{" "}
@@ -116,6 +135,8 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
           <button className="run danger-btn" onClick={sweepPersistence}>Remove all</button>
         </div>
       )}
+      <div className="sessions-cols">
+      <div className="sessions-rail">
       <section className="panel">
         <div className="panel-h">
           <h3>Listeners</h3>
@@ -176,6 +197,18 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
                   <span className="muted">
                     {liveCount > 0 ? `${liveCount} live` : "dead"}{group.length > 1 ? ` · ${group.length} total` : ""}
                   </span>
+                  {(() => {
+                    const hasPtyLive = group.some(s => s.pty && s.status === "live");
+                    return (
+                      <button className="linkish sess-group-action" onClick={(e) => { e.stopPropagation(); spawnOnHost(ip); }}
+                              disabled={!hasPtyLive}
+                              title={hasPtyLive
+                                ? "spawn another session on this host from a live PTY"
+                                : "need a live PTY on this host to spawn — upgrade a raw shell first"}>
+                        + shell
+                      </button>
+                    );
+                  })()}
                   {onViewHost && (
                     <button className="linkish sess-group-action" onClick={(e) => { e.stopPropagation(); onViewHost(ip); }}
                             title="open host detail drawer">detail</button>
@@ -208,36 +241,58 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
         </div>
       </section>
 
-      {openSession && (
-        <section className="panel">
-          <div className="panel-h">
-            <h3>Terminal — <span className="mono">{openSession.host_ip}</span>
-              <span className="muted" style={{fontSize: "0.8em", marginLeft: 8}}>{openSession.id.slice(0, 8)}</span>
-            </h3>
-            <div className="sess-host-actions">
-              <input className="sess-label-input" placeholder="label this session…"
-                     defaultValue={openSession.label}
-                     onBlur={(e) => {
-                       const v = e.target.value.trim();
-                       if (v !== openSession.label) patchSession(openSession.id, { label: v }).then(refresh);
-                     }}
-                     onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-              />
-              {onViewHost && (
-                <button className="linkish" onClick={() => onViewHost(openSession.host_ip)}
-                        title="open host detail drawer">host detail</button>
-              )}
-              {onScanHost && (
-                <button className="linkish" onClick={() => onScanHost(openSession.host_ip)}
-                        title="jump to Scan tab with this host pre-filled">scan host</button>
-              )}
-              <button className="linkish" onClick={() => setOpen(null)}>close</button>
+      </div>{/* .sessions-rail */}
+
+      <div className="sessions-terminal-pane">
+        {openSession ? (
+          <section className="panel">
+            <div className="panel-h">
+              <h3>Terminal — <span className="mono">{openSession.host_ip}</span>
+                <span className="muted" style={{fontSize: "0.8em", marginLeft: 8}}>{openSession.id.slice(0, 8)}</span>
+              </h3>
+              <div className="sess-host-actions">
+                <input className="sess-label-input" placeholder="label this session…"
+                       defaultValue={openSession.label}
+                       onBlur={(e) => {
+                         const v = e.target.value.trim();
+                         if (v !== openSession.label) patchSession(openSession.id, { label: v }).then(refresh);
+                       }}
+                       onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                />
+                {onViewHost && (
+                  <button className="linkish" onClick={() => onViewHost(openSession.host_ip)}
+                          title="open host detail drawer">host detail</button>
+                )}
+                {onScanHost && (
+                  <button className="linkish" onClick={() => onScanHost(openSession.host_ip)}
+                          title="jump to Scan tab with this host pre-filled">scan host</button>
+                )}
+                <button className="linkish" onClick={() => setOpen(null)}>close</button>
+              </div>
             </div>
-          </div>
-          <ShellTerminal key={openSession.id} session={openSession} tester={tester} />
-          <SessionTools session={openSession} />
-        </section>
-      )}
+            <ShellTerminal key={openSession.id} session={openSession} tester={tester} />
+            <SessionTools session={openSession} />
+          </section>
+        ) : (
+          <section className="panel sess-empty-panel">
+            <div className="sess-empty-hero">
+              <div className="sess-empty-icon">▮</div>
+              <h3>No session selected</h3>
+              {sessions.length === 0 ? (
+                <p className="muted">
+                  Open a listener on the left, run its payload on a target, and the caught
+                  shell will appear here — live for the whole team.
+                </p>
+              ) : (
+                <p className="muted">
+                  Pick a session from the rail to attach — the terminal lands right here.
+                </p>
+              )}
+            </div>
+          </section>
+        )}
+      </div>
+      </div>{/* .sessions-cols */}
     </div>
   );
 }

@@ -1,10 +1,40 @@
 import { useMemo, useState } from "react";
 import { Finding, VulnDetail, SEVS, getHost } from "../api";
-import { SevTag, NoteCell, Chips, useBounded } from "../ui";
+import { SevTag, NoteCell, useBounded } from "../ui";
 import { FindingDetail } from "../FindingDetail";
 import { useCollab } from "../collab";
 import { toast } from "../toast";
 import { FindingFilters, Nav } from "./shared";
+
+// Severity chips carry pre-filter counts — the count reflects the whole
+// engagement (minus leads), so a tester can see "there are 12 crits" even
+// when they're currently filtered to a single host or KEV-only.
+function SevChips({ value, onChange, counts }:
+  { value: string; onChange: (v: string) => void; counts: Record<string, number> }
+) {
+  const total = SEVS.reduce((n, s) => n + (counts[s] || 0), 0);
+  return (
+    <div className="sev-chips">
+      <button className={"sev-chip all" + (value === "all" ? " sel" : "")}
+              onClick={() => onChange("all")}>
+        <span className="sev-chip-label">All</span>
+        <span className="sev-chip-count">{total}</span>
+      </button>
+      {SEVS.map((s) => {
+        const c = counts[s] || 0;
+        return (
+          <button key={s} className={"sev-chip s-" + s + (value === s ? " sel" : "") + (c === 0 ? " empty" : "")}
+                  onClick={() => onChange(value === s ? "all" : s)}
+                  title={c === 0 ? `no ${s} findings` : `filter to ${c} ${s} findings`}>
+            <span className="sev-chip-dot" aria-hidden />
+            <span className="sev-chip-label">{s[0].toUpperCase() + s.slice(1)}</span>
+            <span className="sev-chip-count">{c}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 export function Findings(
   { findings, f, setF, nav, onTick, onNote }:
@@ -15,6 +45,16 @@ export function Findings(
   // bulk of the noise and the classic false-positive class, so they are hidden by
   // default; the "Leads" toggle brings them back when a tester wants to dig.
   const leadCount = useMemo(() => findings.filter((x) => x.tier === "lead").length, [findings]);
+  // Sev counts on the visible universe (leads on/off follows the toggle, so
+  // the chip totals match "what you'd see with just this sev filter applied").
+  const sevCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const x of findings) {
+      if (!f.leads && x.tier === "lead") continue;
+      c[x.severity] = (c[x.severity] || 0) + 1;
+    }
+    return c;
+  }, [findings, f.leads]);
   const rows = useMemo(() => {
     const n = f.q.toLowerCase();
     return findings.filter((x) =>
@@ -101,24 +141,76 @@ export function Findings(
           <button className="linkish" onClick={clearSel}>clear selection</button>
         </div>
       )}
-      <div className="controls">
-        <Chips value={f.sev} onChange={(v) => setF({ sev: v })} options={["all", ...SEVS]} />
-        <div className="toggles">
-          <button className={"toggle" + (f.unreviewed ? " on" : "")} onClick={() => setF({ unreviewed: !f.unreviewed })}>Unreviewed</button>
-          <button className={"toggle" + (f.kev ? " on" : "")} onClick={() => setF({ kev: !f.kev })}>🔥 KEV</button>
-          {leadCount > 0 && (
-            <button className={"toggle" + (f.leads ? " on" : "")} onClick={() => setF({ leads: !f.leads })}
-                    title="version/banner inferences below the confidence threshold">
-              Leads <span className="ct">{leadCount}</span>
-            </button>
-          )}
+      <div className="findings-toolbar">
+        <SevChips value={f.sev} onChange={(v) => setF({ sev: v })} counts={sevCounts} />
+        <div className="findings-toolbar-tail">
+          <div className="toggles">
+            <button className={"toggle" + (f.unreviewed ? " on" : "")} onClick={() => setF({ unreviewed: !f.unreviewed })}>Unreviewed</button>
+            <button className={"toggle" + (f.kev ? " on" : "")} onClick={() => setF({ kev: !f.kev })}>🔥 KEV</button>
+            {leadCount > 0 && (
+              <button className={"toggle" + (f.leads ? " on" : "")} onClick={() => setF({ leads: !f.leads })}
+                      title="version/banner inferences below the confidence threshold">
+                Leads <span className="ct">{leadCount}</span>
+              </button>
+            )}
+          </div>
+          <input className="search" placeholder="filter: cve, host, port…" value={f.q}
+                 onChange={(e) => setF({ q: e.target.value })} spellCheck={false} />
         </div>
-        <input className="search" placeholder="filter: cve, host, port…" value={f.q}
-               onChange={(e) => setF({ q: e.target.value })} spellCheck={false} />
       </div>
 
+      {(f.sev !== "all" || f.host || f.kev || f.unreviewed || f.leads || f.q) && (
+        <div className="findings-active-filters" aria-label="active filters">
+          <span className="faf-label">Filters:</span>
+          {f.sev !== "all" && (
+            <button className={"faf-chip s-" + f.sev}
+                    onClick={() => setF({ sev: "all" })} title="clear severity filter">
+              <span className="faf-key">sev</span>
+              <span className="faf-val">{f.sev}</span>
+              <span className="faf-x" aria-hidden>×</span>
+            </button>
+          )}
+          {f.host && (
+            <button className="faf-chip" onClick={() => setF({ host: "" })} title="clear host filter">
+              <span className="faf-key">host</span>
+              <span className="faf-val mono">{f.host}</span>
+              <span className="faf-x" aria-hidden>×</span>
+            </button>
+          )}
+          {f.kev && (
+            <button className="faf-chip kev" onClick={() => setF({ kev: false })} title="clear KEV filter">
+              🔥 <span className="faf-val">KEV only</span>
+              <span className="faf-x" aria-hidden>×</span>
+            </button>
+          )}
+          {f.unreviewed && (
+            <button className="faf-chip" onClick={() => setF({ unreviewed: false })} title="clear unreviewed filter">
+              <span className="faf-val">unreviewed only</span>
+              <span className="faf-x" aria-hidden>×</span>
+            </button>
+          )}
+          {f.leads && (
+            <button className="faf-chip" onClick={() => setF({ leads: false })} title="hide leads">
+              <span className="faf-val">leads visible</span>
+              <span className="faf-x" aria-hidden>×</span>
+            </button>
+          )}
+          {f.q && (
+            <button className="faf-chip" onClick={() => setF({ q: "" })} title="clear search">
+              <span className="faf-key">q</span>
+              <span className="faf-val mono">{f.q}</span>
+              <span className="faf-x" aria-hidden>×</span>
+            </button>
+          )}
+          <button className="faf-clear linkish"
+                  onClick={() => setF({ sev: "all", host: "", kev: false, unreviewed: false, leads: false, q: "" })}>
+            clear all
+          </button>
+        </div>
+      )}
+
       <div className="tablewrap">
-        <table className="tbl">
+        <table className="tbl findings">
           <thead><tr>
             <th className="sel-col" title="select for bulk actions">
               <input type="checkbox" checked={allVisibleSelected}
@@ -131,8 +223,13 @@ export function Findings(
             {shown.map((x) => {
               const open = openKey === x.key;
               const detail = open ? detailFor(x) : undefined;
+              const cls = ["row-sev-" + x.severity];
+              if (x.reviewed) cls.push("done");
+              if (open) cls.push("open");
+              if (cst.dismissed[x.key]) cls.push("dismissed");
+              if (selected.has(x.key)) cls.push("selected");
               return [
-              <tr key={x.key} className={(x.reviewed ? "done" : "") + (open ? " open" : "") + (cst.dismissed[x.key] ? " dismissed" : "") + (selected.has(x.key) ? " selected" : "")}>
+              <tr key={x.key} className={cls.join(" ")}>
                 <td className="sel-col">
                   <input type="checkbox" checked={selected.has(x.key)}
                          onChange={() => toggleSel(x.key)} onClick={(e) => e.stopPropagation()} />

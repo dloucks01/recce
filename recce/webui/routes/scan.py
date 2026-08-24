@@ -38,7 +38,7 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
         argv = [command, "-o", eng_dir]
         if spec["profile"]:
             profile = str(body.get("profile", "")).lower()
-            if profile in ("quick", "standard", "thorough"):
+            if profile in ("quick", "standard", "thorough", "stealth"):
                 argv += ["--profile", profile]
         if spec["creds"]:
             user = str(body.get("username", "")).strip()

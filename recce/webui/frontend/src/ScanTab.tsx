@@ -434,10 +434,12 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
                   {spec.profile && (
                     <label className="sv2-field">
                       <span className="sv2-label">Profile</span>
-                      <select className="sv2-input" value={profile} onChange={(e) => setProfile(e.target.value)} disabled={isBusy}>
+                      <select className="sv2-input" value={profile} onChange={(e) => setProfile(e.target.value)} disabled={isBusy}
+                              title="Stealth: slower T2, congestion-adaptive from pass 1, top-1000 TCP. Use when the target's IDS/rate-limiter is the constraint.">
                         <option value="quick">Quick</option>
                         <option value="standard">Standard</option>
                         <option value="thorough">Thorough</option>
+                        <option value="stealth">Stealth (slow, rate-limit-safe)</option>
                       </select>
                     </label>
                   )}
