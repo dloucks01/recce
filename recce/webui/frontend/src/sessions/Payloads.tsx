@@ -324,11 +324,25 @@ function CompatBadge({ compat }: { compat: string }) {
 
 export function PayloadCatalog({ port, tls = false }: { port: number; tls?: boolean }) {
   const [lhost, setLhost] = useState(location.hostname);
+  const [addrs, setAddrs] = useState<string[]>([]);
   const [token] = useState(genToken);
   const [stager, setStager] = useState<string>("");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [compatFilter, setCompatFilter] = useState<"all" | "recce" | "external" | "reference">("all");
   useEffect(() => { getStager(tls).then(setStager).catch(() => setStager("")); }, [tls]);
+  // Fetch the recce host's non-loopback IPs once. If the tester opened recce
+  // locally, `location.hostname` is "127.0.0.1" — but a shell inside a docker
+  // container (or on another LAN box) can't dial back to that. Default to the
+  // first suggested address so the payloads work out of the box.
+  useEffect(() => {
+    fetch("/api/self/addresses").then(r => r.json()).then(d => {
+      setAddrs(d.addresses || []);
+      if ((location.hostname === "127.0.0.1" || location.hostname === "localhost")
+          && d.addresses?.length) {
+        setLhost(d.addresses[0]);
+      }
+    }).catch(() => {});
+  }, []);
   const fill = (t: string) =>
     t.split("{LHOST}").join(lhost).split("{PORT}").join(String(port)).split("{TOKEN}").join(token);
   const catalog = tls ? TLS_CATALOG : CATALOG;
@@ -337,14 +351,34 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
     setCollapsed((c) => ({ ...c, [group]: !c[group] }));
 
   const filterItem = (p: P) => compatFilter === "all" || (p.compat || "recce") === compatFilter;
+  const isLoopback = lhost === "127.0.0.1" || lhost === "localhost" || lhost === "::1";
 
   return (
     <div className="payload-catalog">
-      <label className="payload-lhost">
-        LHOST <input className="scan-in" value={lhost} onChange={(e) => setLhost(e.target.value)}
-                     title="the address the target should call back to" />
+      <div className="payload-lhost">
+        <label>
+          LHOST <input className="scan-in" value={lhost} onChange={(e) => setLhost(e.target.value)}
+                       title="the address the target should call back to" />
+        </label>
+        {addrs.length > 0 && (
+          <div className="payload-lhost-chips">
+            <span className="muted small">use:</span>
+            {addrs.map(a => (
+              <button key={a} type="button"
+                      className={"chip" + (lhost === a ? " sel" : "")}
+                      onClick={() => setLhost(a)}
+                      title={`callback via ${a}`}>{a}</button>
+            ))}
+          </div>
+        )}
         {tls && <span className="muted small">encrypted listener — use TLS payloads</span>}
-      </label>
+      </div>
+      {isLoopback && addrs.length > 0 && (
+        <div className="payload-warn">
+          ⚠ <b>{lhost}</b> only reaches this box — a shell from a docker container or
+          another host can't dial back. Pick a LAN address above (e.g. <code>{addrs[0]}</code>).
+        </div>
+      )}
 
       <div className="payload-compat-bar">
         <span className="payload-compat-label">Show:</span>

@@ -24,6 +24,56 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
         with Store(db_path) as st:
             return st.get_scope()
 
+    @app.get("/api/self/addresses")
+    def self_addresses():
+        """Every non-loopback IPv4 the recce host currently holds. The Sessions
+        tab's payload catalog uses this to offer LHOST chips — the default
+        `location.hostname` is often `127.0.0.1` when the tester opens recce
+        locally, and a shell inside a docker container can't dial back to a
+        loopback address it doesn't share. Suggesting the LAN/docker-gateway
+        IP catches the most common "shell caught nothing" foot-gun.
+        Sorted with the most-likely-useful address first (docker gateways,
+        then LAN, then anything else)."""
+        import socket
+        addrs: set[str] = set()
+        try:
+            # getaddrinfo on the hostname surfaces every configured IPv4.
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                addrs.add(info[4][0])
+        except (OSError, socket.gaierror):
+            pass
+        # Also try the "connect a UDP socket" trick to surface the primary
+        # outbound IP (route to 8.8.8.8) — no packet is sent.
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 53))
+                addrs.add(s.getsockname()[0])
+            finally:
+                s.close()
+        except OSError:
+            pass
+        # Walk every interface for anything we missed (docker bridges, VPN).
+        try:
+            import subprocess
+            r = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=2)
+            for a in (r.stdout or "").split():
+                if "." in a and not a.startswith("127."):
+                    addrs.add(a)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        addrs.discard("127.0.0.1")
+        addrs.discard("0.0.0.0")
+        # Rank: docker-ish (172.16-31, 10.x, 192.168) first, then anything else.
+        def _rank(a: str) -> int:
+            if a.startswith("172."):
+                oct2 = int(a.split(".")[1]) if a.count(".") >= 1 else 0
+                if 16 <= oct2 <= 31: return 0  # docker default bridge range
+            if a.startswith("10."): return 1
+            if a.startswith("192.168."): return 2
+            return 3
+        return {"addresses": sorted(addrs, key=lambda a: (_rank(a), a))}
+
     @app.get("/api/engagement")
     def engagement():
         hosts, name = _hosts()

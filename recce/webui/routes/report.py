@@ -41,6 +41,46 @@ def register_report_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(500, "report generation produced no file")
         return FileResponse(path, media_type=media, filename=fname)
 
+    @app.get("/api/report/writeup/one")
+    def report_writeup(include: str = ""):
+        """Per-finding walkthrough .docx from report/docx.build_one_writeup.
+        Different SHAPE than the combined report: one document focused on
+        one finding, with pre-filled [TESTER: ...] placeholders for the
+        fields only the operator can supply (mission risk / difficulty /
+        step-by-step walkthrough with screenshots).
+
+        include: a single finding key (from Finding.key). Multiple keys
+        aren't supported here — use the combined report."""
+        from fastapi.responses import FileResponse
+        from ...store import Store
+        from ...report import docx as _docx
+        if not include.strip():
+            raise HTTPException(400, "include=<finding_key> required")
+        with Store(db_path) as st:
+            hosts = st.all_hosts()
+        # Frontend key: "vuln:ip:port:script_id:title[:60]" — pass the title
+        # tail as selector; if that's ambiguous, fall back to IP:port. The
+        # matcher accepts either.
+        parts = include.split(":", 4)
+        selector = parts[4] if len(parts) == 5 else include
+        # Write to the engagement's writeups/ dir directly so the docx
+        # persists (matches CLI's `recce writeup` behavior) and there's
+        # no tempdir cleanup race with FileResponse.
+        eng_out = os.path.join(eng_dir, "writeups")
+        os.makedirs(eng_out, exist_ok=True)
+        with _report_lock:
+            res = _docx.build_one_writeup(hosts, eng_out, selector, overwrite=True)
+        matched = res.get("matched", [])
+        if len(matched) != 1 or not res.get("written"):
+            raise HTTPException(
+                404 if not matched else 409,
+                f"selector matched {len(matched)} findings — need exactly 1")
+        path = res["written"]  # absolute path returned by the builder
+        fname = os.path.basename(path)
+        return FileResponse(
+            path, filename=fname,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
     @app.get("/api/report/preview/html")
     def report_preview_html(include: str = ""):
         """Serve the HTML report INLINE (not as a download) so the Report tab

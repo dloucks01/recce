@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { addFinding, addCredential, addHostScope, addAccess } from "../api";
 import { useEscape } from "../ui";
 import { useCollab } from "./CollabContext";
@@ -25,8 +26,14 @@ export function AddMenu({ onDone }: { onDone: (msg: string) => void }) {
           </div>
         </>
       )}
-      {kind && <AddModal kind={kind} onClose={() => setKind(null)}
-                         onDone={(m) => { onDone(m); refresh(); setKind(null); }} />}
+      {/* Portal to body — .app-header has backdrop-filter, which creates a
+          new containing block for position:fixed descendants and would
+          otherwise place the modal inside the header strip. */}
+      {kind && createPortal(
+        <AddModal kind={kind} onClose={() => setKind(null)}
+                  onDone={(m) => { onDone(m); refresh(); setKind(null); }} />,
+        document.body
+      )}
     </>
   );
 }

@@ -105,6 +105,31 @@ export function ReportTab({ findings, onRefresh }: ReportTabProps) {
     finally { setBusy(null); }
   }
 
+  // Per-finding writeup: a SEPARATE document shape (report/docx.build_one_writeup),
+  // not the combined report shrunk to one finding. Only offered when exactly one
+  // finding is selected — that's what the selector needs to be unambiguous.
+  async function downloadWriteup() {
+    if (!selected || selected.size !== 1) return;
+    const [key] = selected;
+    setBusy("writeup" as any); setError(null);
+    try {
+      const r = await fetch(`/api/report/writeup/one?include=${encodeURIComponent(key)}`);
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${r.status}`);
+      }
+      const blob = await r.blob();
+      const cd = r.headers.get("content-disposition") || "";
+      const name = /filename="?([^"]+)"?/.exec(cd)?.[1] || "finding-writeup.docx";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) { setError(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(null); }
+  }
+
   const timeAgo = (ts: number) => {
     const s = Math.round((Date.now() - ts) / 1000);
     if (s < 60) return "just now";
@@ -206,6 +231,21 @@ export function ReportTab({ findings, onRefresh }: ReportTabProps) {
               : `${selected.size} of ${realFindings.length} findings included`}
           </span>
         </div>
+        {selected && selected.size === 1 && (
+          <div className="rs-writeup-cta">
+            <div className="rs-writeup-body">
+              <div className="rs-writeup-title">📝 Per-finding writeup</div>
+              <div className="rs-writeup-desc muted small">
+                Single-finding walkthrough document with pre-filled [TESTER:…]
+                placeholders for mission risk, difficulty, and step-by-step
+                reproduction — different shape than the combined report below.
+              </div>
+            </div>
+            <button className="run" onClick={downloadWriteup} disabled={!!busy}>
+              {busy === ("writeup" as any) ? "Generating…" : "⬇ Writeup .docx"}
+            </button>
+          </div>
+        )}
         <div className="rs-download-grid">
           {REPORTS.map(([fmt, label, desc]) => (
             <button key={fmt} className="rs-download-card"
