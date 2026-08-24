@@ -61,12 +61,15 @@ export async function getJSON<T>(url: string): Promise<T> {
   return r.json();
 }
 
+type Paginated<T> = { items: T[]; total: number; limit: number; offset: number };
+
 export async function fetchAll(): Promise<[Overview, Finding[], Host[]]> {
-  return Promise.all([
+  const [o, f, h] = await Promise.all([
     getJSON<Overview>("/api/overview"),
-    getJSON<Finding[]>("/api/findings"),
-    getJSON<Host[]>("/api/hosts"),
+    getJSON<Paginated<Finding>>("/api/findings"),
+    getJSON<Paginated<Host>>("/api/hosts"),
   ]);
+  return [o, f.items, h.items];
 }
 
 export async function postTick(key: string, reviewed: boolean) {
@@ -152,7 +155,7 @@ export type AttackCoverage = {
   tactics: { tactic: string; tactic_id: string; techniques: AttackTech[] }[];
 };
 export const getAct = () => getJSON<ActPlan>("/api/act");
-export const getCredentials = () => getJSON<Credential[]>("/api/credentials");
+export const getCredentials = () => getJSON<Paginated<Credential>>("/api/credentials").then(r => r.items);
 export const getAttack = () => getJSON<AttackCoverage>("/api/attack");
 export type ActRunResult = { looted: number; creds: { label: string; source: string }[]; spray_files: string[] };
 export async function postActRun(): Promise<ActRunResult> {
