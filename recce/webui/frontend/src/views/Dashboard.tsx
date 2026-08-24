@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Overview, Host, ActCard, SEV_ALL, getAct } from "../api";
+import { Overview, Host, ActCard, ScanDiff, SEV_ALL, getAct, getDiff } from "../api";
 import { Stat, SevTag, SevBar } from "../ui";
 import { TeamCoverage } from "../collab";
 import { Nav, ARCH_ICON, archLabel } from "./shared";
@@ -25,6 +25,8 @@ export function Dashboard(
       </section>
 
       <NextMoves nav={nav} />
+
+      <RecentChanges nav={nav} />
 
       <section className="panel">
         <div className="panel-h">
@@ -112,6 +114,83 @@ function Meter({ label, now, total, unit, pct, cls }:
       <div className="track"><div className={"fill" + (cls ? " " + cls : "")} style={{ width: `${Math.min(p, 100)}%` }} /></div>
     </div>
   );
+}
+
+// "What happened while I was away" — hosts touched + activity since the
+// chosen window. Uses hosts.updated (populated on fresh scans) + the collab
+// activity log (always populated). Windowed 1h / 24h / 7d.
+const WINDOWS: [string, number][] = [["1h", 3600], ["24h", 86400], ["7d", 604800]];
+
+function RecentChanges({ nav }: { nav: Nav }) {
+  const [win, setWin] = useState(86400);
+  const [d, setD] = useState<ScanDiff | null>(null);
+  useEffect(() => {
+    const since = Date.now() / 1000 - win;
+    getDiff(since).then(setD).catch(() => setD(null));
+  }, [win]);
+  if (!d) return null;
+  const empty = d.hosts_touched.length === 0 && d.activity.length === 0;
+  return (
+    <section className="panel recent">
+      <div className="panel-h">
+        <h3>Recent changes</h3>
+        <span className="muted">
+          {d.summary.hosts} host{d.summary.hosts !== 1 ? "s" : ""} touched
+          {d.summary.findings_added > 0 && ` · ${d.summary.findings_added} findings added`}
+          {d.summary.credentials_added > 0 && ` · ${d.summary.credentials_added} creds looted`}
+        </span>
+        <div className="recent-wins">
+          {WINDOWS.map(([lab, s]) => (
+            <button key={lab} className={"chip" + (win === s ? " sel" : "")} onClick={() => setWin(s)}>
+              {lab}
+            </button>
+          ))}
+        </div>
+      </div>
+      {empty && <div className="muted" style={{padding: "12px 4px"}}>Quiet — nothing has changed in this window.</div>}
+      {d.hosts_touched.length > 0 && (
+        <ul className="recent-hosts">
+          {d.hosts_touched.slice(0, 6).map((h) => (
+            <li key={h.ip} onClick={() => nav.openHost(h.ip)} title="open host detail">
+              <span className="mono ip">{h.ip}</span>
+              {h.hostname && <span className="hn">{h.hostname}</span>}
+              <span className="muted">{h.port_count} port{h.port_count !== 1 ? "s" : ""}</span>
+              <span className="recent-when muted mono">{relTime(h.updated)}</span>
+              <SevBar findings={h.sev} />
+            </li>
+          ))}
+          {d.hosts_touched.length > 6 && (
+            <li className="muted recent-more">+{d.hosts_touched.length - 6} more</li>
+          )}
+        </ul>
+      )}
+      {d.activity.length > 0 && (
+        <div className="recent-activity">
+          <div className="recent-activity-h muted">Activity</div>
+          <ul>
+            {d.activity.slice(0, 8).map((a, i) => (
+              <li key={i}>
+                <span className="mono recent-when">{relTime(a.ts)}</span>
+                <span className="tester">{a.tester}</span>
+                <span className="atxt">{a.text}</span>
+              </li>
+            ))}
+            {d.activity.length > 8 && (
+              <li className="muted">+{d.activity.length - 8} more events</li>
+            )}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function relTime(ts: number): string {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
 }
 
 // Landing-page "so what": the top action-plan moves, so the operator lands on WHAT

@@ -376,6 +376,75 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         return {"narrative": attackpath.narrative(up, steps),
                 "stages": stages, "step_count": len(steps)}
 
+    @app.get("/api/diff")
+    def scan_diff(since: float = 0):
+        """What changed since ``since`` (epoch seconds). If since is 0, defaults
+        to 24 hours ago. Returns touched hosts (with sev rollup + first-seen
+        flag), a summary count of new findings and creds, and recent activity
+        in the window. The primary use is a Dashboard card that answers
+        "what's happened since I stepped away?"."""
+        import time
+        from ...store import Store
+        from .. import collab as _collab
+        now = time.time()
+        if since <= 0:
+            since = now - 24 * 3600
+        with Store(db_path) as st:
+            hosts = st.all_hosts()
+            creds = st.all_credentials()
+            act_raw = st.get_meta(_collab._ACTIVITY) or "[]"
+        import json as _json
+        try:
+            activity = _json.loads(act_raw)
+        except (ValueError, TypeError):
+            activity = []
+
+        # Touched hosts: `updated` column is a unix-timestamp string set on
+        # every upsert. Empty on hosts scanned before the column was added or
+        # imported without a scan wrap — treated as "unknown time" so they
+        # don't spam the recent window.
+        touched = []
+        for h in hosts:
+            try: t = float(h.last_scanned or 0)
+            except ValueError: t = 0
+            if t >= since:
+                sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+                for v in h.vulns:
+                    if v.severity in sev:
+                        sev[v.severity] += 1
+                touched.append({
+                    "ip": h.ip,
+                    "hostname": (h.hostnames[0] if h.hostnames else ""),
+                    "updated": t,
+                    "sev": sev,
+                    "port_count": len(h.open_ports),
+                })
+        touched.sort(key=lambda x: x["updated"], reverse=True)
+
+        # Activity events in the window (from collab.activity — always populated).
+        recent = [a for a in activity if a.get("ts", 0) >= since]
+        recent.sort(key=lambda a: a["ts"], reverse=True)
+        recent = recent[:50]  # cap so the UI doesn't drown
+
+        # Summary derived from activity kinds — cheap and works today.
+        findings_added = sum(1 for a in recent if a.get("kind") == "add"
+                             and "finding" in (a.get("text", "").lower()))
+        creds_added = sum(1 for a in recent if a.get("kind") == "add"
+                          and "credential" in (a.get("text", "").lower()))
+
+        return {
+            "since": since, "until": now,
+            "hosts_touched": touched,
+            "activity": recent,
+            "summary": {
+                "hosts": len(touched),
+                "findings_added": findings_added,
+                "credentials_added": creds_added,
+                "total_hosts": len(hosts),
+                "total_creds": len(creds),
+            },
+        }
+
     @app.get("/api/screenshot")
     def host_screenshot(ip: str, port: int, force: bool = False):
         """Capture a headless-browser PNG of the http(s) service on ip:port.

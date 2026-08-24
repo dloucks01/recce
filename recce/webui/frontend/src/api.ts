@@ -170,6 +170,19 @@ export type PocDossier = {
   dossier_md: string; harness_py: string;
 };
 export const getPoc = (cve: string) => getJSON<PocDossier>(`/api/poc/${encodeURIComponent(cve)}`);
+
+export type DiffHost = { ip: string; hostname: string; updated: number;
+  sev: Record<string, number>; port_count: number };
+export type DiffActivity = { ts: number; tester: string; kind: string; text: string };
+export type ScanDiff = {
+  since: number; until: number;
+  hosts_touched: DiffHost[];
+  activity: DiffActivity[];
+  summary: { hosts: number; findings_added: number; credentials_added: number;
+    total_hosts: number; total_creds: number };
+};
+export const getDiff = (since?: number) =>
+  getJSON<ScanDiff>(`/api/diff${since != null ? `?since=${since}` : ""}`);
 export const getCredentials = () => getJSON<Paginated<Credential>>("/api/credentials").then(r => r.items);
 export const getAttack = () => getJSON<AttackCoverage>("/api/attack");
 export type ActRunResult = { looted: number; creds: { label: string; source: string }[]; spray_files: string[] };

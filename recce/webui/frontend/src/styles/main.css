@@ -1021,6 +1021,26 @@ body { background: var(--ground); color: var(--text); }
 .fd-evidence-code { background: #0a0f18; border: 1px solid #1e2a3e; border-top: 0; border-radius: 0 0 8px 8px; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; color: #b9c6da; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
 .fd-remediation { margin: 12px 0; border-left: 3px solid var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--surface2)); border-radius: 0 8px 8px 0; padding: 10px 14px; }
 
+/* Recent-changes card on the Dashboard */
+.recent .recent-wins { margin-left: auto; display: flex; gap: 4px; }
+.recent .recent-wins .chip { font-size: 11px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface2); color: var(--muted); cursor: pointer; }
+.recent .recent-wins .chip.sel { background: var(--accent); color: #fff; border-color: var(--accent); }
+.recent-hosts { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.recent-hosts li { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); cursor: pointer; font-size: 13px; transition: background .1s; }
+.recent-hosts li:hover { background: color-mix(in srgb, var(--accent) 8%, var(--surface2)); }
+.recent-hosts .ip { font-weight: 600; }
+.recent-hosts .hn { color: var(--muted); font-size: 12px; }
+.recent-hosts .recent-when { margin-left: auto; font-size: 11px; }
+.recent-hosts .sevbar { flex-shrink: 0; width: 140px; }
+.recent-more { justify-content: center; font-size: 12px; color: var(--faint); }
+.recent-activity { margin-top: 12px; }
+.recent-activity-h { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-bottom: 6px; }
+.recent-activity ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 3px; }
+.recent-activity li { display: flex; align-items: center; gap: 10px; padding: 3px 8px; font-size: 12.5px; color: var(--muted); }
+.recent-activity li .tester { font-weight: 600; color: var(--text); }
+.recent-activity li .atxt { color: var(--text); }
+.recent-activity .recent-when { font-size: 11px; color: var(--faint); min-width: 55px; }
+
 /* Screenshot — lazy-captured per finding, from screenshot.py */
 .fd-shot { margin: 12px 0; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface); }
 .fd-shot-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
