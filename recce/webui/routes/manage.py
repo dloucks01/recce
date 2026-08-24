@@ -353,3 +353,104 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         broker.publish({"type": "bulk_review", "count": n, "reviewed": reviewed,
                         "by": x_tester})
         return {"ok": True, "count": n}
+
+    # --- fieldkit export -----------------------------------------------------
+
+    @app.post("/api/fieldkit-export")
+    def fieldkit_export():
+        """Generate the fieldkit seed folder and return a zip archive."""
+        import io
+        import json as _json
+        import os
+        import time
+        import zipfile
+        from fastapi.responses import Response
+        from ... import fieldkit
+        from ...store import Store
+        st = Store(db_path)
+        try:
+            hosts = [h for h in st.all_hosts() if h.is_up]
+            if not hosts:
+                raise HTTPException(422, "no live hosts to export — run enum/vulns first")
+            title = st.get_meta("engagement") or "recce engagement"
+            creds = st.all_credentials()
+        finally:
+            st.close()
+        bridge = fieldkit.build_bridge(hosts, engagement=title,
+                                       generated=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                       creds=creds)
+        users = fieldkit.collect_users(hosts, creds)
+        cred_lines = fieldkit.collect_creds(creds)
+        files = {
+            "ports.gnmap": fieldkit.build_gnmap(hosts),
+            "smb-null.txt": fieldkit.build_smb_null(hosts),
+            "recce-bridge.json": _json.dumps(bridge, indent=2) + "\n",
+            "FIELDKIT.md": fieldkit.build_plan_md(bridge),
+            "users.txt": ("\n".join(users) + "\n") if users
+                         else "# (no usernames enumerated yet)\n",
+            "creds.txt": ("# known credentials — domain/user:secret\n"
+                          + "\n".join(cred_lines) + "\n") if cred_lines
+                         else "# (no captured credentials yet)\n",
+        }
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, content in files.items():
+                zf.writestr(f"fieldkit/{name}", content)
+        buf.seek(0)
+        return Response(
+            buf.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=fieldkit.zip"})
+
+    # --- engagement backup ---------------------------------------------------
+
+    @app.post("/api/backup")
+    def engagement_backup():
+        """Download the full engagement directory as a zip archive."""
+        import io
+        import os
+        import zipfile
+        from fastapi.responses import Response
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, _dirs, filenames in os.walk(eng_dir):
+                for fname in filenames:
+                    fpath = os.path.join(root, fname)
+                    try:
+                        fsize = os.path.getsize(fpath)
+                    except OSError:
+                        continue
+                    if fsize > 100_000_000:
+                        continue
+                    arcname = os.path.relpath(fpath, os.path.dirname(eng_dir))
+                    zf.write(fpath, arcname)
+        buf.seek(0)
+        basename = os.path.basename(eng_dir) or "engagement"
+        return Response(
+            buf.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition":
+                      f"attachment; filename={basename}-backup.zip"})
+
+    # --- proxy status --------------------------------------------------------
+
+    @app.get("/api/proxy")
+    def proxy_status():
+        """Return the current proxy configuration (if any). The proxy is
+        process-global — set via `recce serve --proxy URL` or by running
+        under proxychains. Individual scans inherit it automatically."""
+        from ... import proxy as _proxy
+        from ...store import Store
+        active = _proxy.is_active()
+        desc = _proxy.describe() if active else ""
+        st = Store(db_path)
+        try:
+            stored = st.get_meta("proxy") or ""
+        finally:
+            st.close()
+        return {"active": active, "description": desc,
+                "stored": stored,
+                "hint": ("all scan jobs route through the proxy automatically"
+                         if active else
+                         "start with `recce serve --proxy socks5h://host:port` "
+                         "to route scans through a pivot")}
