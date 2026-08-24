@@ -111,6 +111,17 @@ class ScanProfile:
                                       # firewalled-but-alive box isn't written off down
     reconfirm_cap: int = 1024         # skip that re-probe when more than this many
                                       # hosts missed discovery (huge scope -> use -Pn)
+    filtered_retry: bool = True       # after the sweep, re-probe every port left as
+                                      # `open|filtered` with a TCP-connect (-sT) probe.
+                                      # -sS reads `open|filtered` when a firewall silently
+                                      # drops the response - a full TCP handshake
+                                      # (`-sT`) either completes (definitive OPEN) or gets
+                                      # a RST (definitive CLOSED). This upgrades ambiguous
+                                      # sweep results to hard evidence without any risk of
+                                      # DROPPING a port (a probe timeout leaves it as-is).
+                                      # Bounded to a small port list per host so a huge
+                                      # filtered-port set can't blow the scan time up.
+    filtered_retry_cap: int = 40      # max ports per host to re-probe (top 40 by port#).
     retry_truncated: bool = True      # a host whose port sweep hit --host-timeout gets
                                       # ONE congestion-adaptive retry with 2x the
                                       # timeout, so a slow firewalled host doesn't end
@@ -569,6 +580,34 @@ def verify_port_scan(ip: str, out_xml: str,
     cmd, kill = _portscan_cmd(ip, out_xml, profile, reliable=True)
     outcome = _run(cmd, timeout=kill)
     return out_xml, _issue_from(outcome, out_xml, "verify", profile.host_timeout)
+
+
+def confirm_filtered_ports(ip: str, ports: list[int], out_xml: str,
+                           profile: ScanProfile) -> tuple[str, ScanIssue | None]:
+    """TCP-connect (-sT) re-probe of ports the SYN sweep left as `open|filtered`.
+
+    A SYN scan (-sS) records `open|filtered` when it got NO response — no SYN/ACK
+    (which would mean open) and no RST (which would mean closed). A full TCP
+    handshake either succeeds (definitive OPEN, with a real service reply the
+    parser can pick up as evidence) or gets a RST (definitive CLOSED). Either
+    outcome upgrades the ambiguous sweep result to hard evidence. A probe that
+    still times out here leaves the port as-is on the sweep record — the retry
+    can only ADD confidence, never drop a port.
+
+    Always -sT (no root needed, no CAP_NET_RAW). Runs with `--reason` so the
+    parser sees exactly why nmap called each port open/closed. Bounded to a
+    small port list (caller enforces the cap) so a firewalled host with hundreds
+    of filtered ports doesn't triple the scan time.
+    """
+    if not ports:
+        return _empty_xml(out_xml), None
+    port_arg = ",".join(str(p) for p in sorted(set(ports)))
+    to_args, kill = _timeout_args(profile)
+    cmd = ["nmap", "-sT", "-Pn", "-n", f"-T{profile.timing}",
+           "--max-retries", "4", "--reason", "-p", port_arg,
+           *to_args, ip, "-oX", out_xml]
+    outcome = _run(cmd, timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "filtered-retry", profile.host_timeout)
 
 
 # Common UDP services that answer even when TCP and ICMP are firewalled off. A ping

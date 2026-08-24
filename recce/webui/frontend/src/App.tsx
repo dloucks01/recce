@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { postTick, postNote } from "./api";
 import { ImportModal, ShortcutHelp, CommandPalette } from "./modals";
-import { getSessions, getCredentials, SessionInfo, Credential } from "./api";
+import { getSessions, getCredentials, getListeners, startListener, SessionInfo, Credential } from "./api";
 import { useEngagement } from "./useEngagement";
 import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Timeline, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
@@ -229,7 +229,21 @@ export default function App() {
     openHost: (ip) => setDrawerIp(ip),
     toSessions: () => setTab("sessions"),
     toScan: (target) => { if (target) setScanPrefill(target); setTab("scan"); },
-    toExploitShell: (intent) => { setExploitIntent(intent); setSessionFocus(null); setTab("sessions"); },
+    toExploitShell: async (intent) => {
+      // Auto-start a listener if none is open — the tester clicked "🎯 shell"
+      // meaning they want a callback right now, and hunting for the Listeners
+      // panel first is friction. Try 4444 (msf's canonical default LPORT), fall
+      // back to a kernel-picked port if 4444 is taken. If both fail we still
+      // jump — the intent banner shows an amber "start one first" hint.
+      try {
+        const existing = await getListeners();
+        if (existing.length === 0) {
+          try { await startListener(4444, false); }
+          catch { try { await startListener(0, false); } catch { /* banner will nag */ } }
+        }
+      } catch { /* listener list fetch failed — jump anyway */ }
+      setExploitIntent(intent); setSessionFocus(null); setTab("sessions");
+    },
   };
 
   // Badge counts

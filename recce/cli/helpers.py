@@ -869,6 +869,41 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
                     f"{rprof.host_timeout}m host-timeout recovered "
                     f"{len(open_ports) - len(before)} additional port(s)"),
                     "port-sweep"))
+        # Filtered-port TCP-connect retry: a -sS pass records `open|filtered` when
+        # a firewall silently drops the response - the port is OPEN or FILTERED,
+        # never CLOSED, but the sweep can't tell which. A full TCP handshake (-sT,
+        # no root needed) either completes (definitive open, with a service reply
+        # the parser can grab as evidence) or gets a RST (definitive closed). Runs
+        # only on the ports actually in `open|filtered` state, capped so a heavily
+        # firewalled host can't blow scan time. Never DROPS a port - a probe that
+        # still times out leaves the sweep record as-is.
+        if profile.filtered_retry and swept_ports:
+            filt = [p.portid for p in swept_ports if p.state == "open|filtered"]
+            if filt:
+                filt = sorted(set(filt))[: max(1, profile.filtered_retry_cap)]
+                fx = os.path.join(paths["raw"], f"{ip}_filtered.xml")
+                _, fiss = scanner.confirm_filtered_ports(ip, filt, fx, profile)
+                if fiss and fiss.kind == "host-timeout":
+                    truncated = True
+                confirmed = _swept_ports_for_host(fx, ip)
+                confirmed_open = [p for p in confirmed if p.state == "open"]
+                if confirmed_open:
+                    before = set(open_ports)
+                    open_ports = sorted(before | {p.portid for p in confirmed_open})
+                    # replace each still-filtered swept Port with the confirmed-open one
+                    # so downstream folding gets the harder evidence + real reason.
+                    idx = {(p.protocol, p.portid): i for i, p in enumerate(swept_ports)}
+                    for cp in confirmed_open:
+                        i = idx.get((cp.protocol, cp.portid))
+                        if i is not None:
+                            swept_ports[i] = cp
+                    gained = len(open_ports) - len(before)
+                    issues.append(_mkissue(scanner.ScanIssue(
+                        "warning", f"filtered-retry: TCP-connect confirmed "
+                        f"{len(confirmed_open)} of {len(filt)} `open|filtered` "
+                        f"port(s) as OPEN"
+                        + (f" (+{gained} previously unseen)" if gained else "")),
+                        "filtered-retry"))
         # UDP fallback: still silent on TCP, no discovery reply, and we're treating
         # this IP as up on faith (-Pn / discovery blocked). A UDP ping to common
         # services tells up-behind-a-firewall apart from genuinely dead - so the host
