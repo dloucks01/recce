@@ -8,7 +8,7 @@ import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
 import { useEscape } from "./ui";
 import { TabBar, TabId } from "./TabBar";
-import { Sessions } from "./Sessions";
+import { Sessions } from "./sessions";
 import { ScanTab } from "./ScanTab";
 import { ReportTab } from "./ReportTab";
 import { CollabSidebar } from "./CollabSidebar";

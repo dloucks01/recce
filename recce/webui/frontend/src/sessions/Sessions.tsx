@@ -4,10 +4,10 @@ import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, st
   persistSession, getPersistence, removeAllPersistence, Persistence, patchSession,
   spawnSession,
   PortFwd, startPortFwd, stopPortFwd, listPortFwds,
-  TunnelStatus, startTunnel, stopTunnel, tunnelStatus } from "./api";
+  TunnelStatus, startTunnel, stopTunnel, tunnelStatus } from "../api";
 import { ShellTerminal } from "./Terminal";
 import { PayloadCatalog, StabilizeGuide, PostExploitRef, PivotGuide, ToolCatalog } from "./Payloads";
-import { bytesToB64 } from "./util";
+import { bytesToB64 } from "../util";
 
 function relTime(epoch: number): string {
   const d = Math.floor((Date.now() / 1000) - epoch);

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getStager } from "./api";
+import { getStager } from "../api";
 
 type P = { label: string; tmpl: string; note?: string; compat?: "recce" | "external" | "reference" };
 const CATALOG: { group: string; items: P[] }[] = [
