@@ -9,6 +9,10 @@ venv/
 engagement/
 demo_engagement/
 demo_out/
+test_engagement/
+
+# Test environment (docker compose)
+test_env/
 *.sqlite
 *.xlsx
 raw/
