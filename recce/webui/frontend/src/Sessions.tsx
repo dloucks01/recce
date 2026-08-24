@@ -157,7 +157,7 @@ function SessionTools({ session }: { session: SessionInfo }) {
     if (!u && !p) return;
     try {
       await lootCred(session.id, { username: u, secret: p, kind });
-      setMsg(`✓ credential looted → Loot + spray plan`);
+      setMsg(`✓ credential looted → Credentials + spray plan`);
       setU(""); setP("");
     } catch (e) {
       setMsg(String(e instanceof Error ? e.message : e));

@@ -3,7 +3,7 @@ import {
   Finding, Host, Overview, fetchAll, postTick, postNote, postImport,
   fetchPlaybook, Playbook as PlaybookData,
 } from "./api";
-import { Dashboard, Findings, Hosts, Act, Loot, Playbook, Nav, FindingFilters } from "./views";
+import { Dashboard, Findings, Hosts, Exploitation, Credentials, Playbook, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
 import { useEscape } from "./ui";
@@ -231,7 +231,18 @@ export default function App() {
   const [hosts, setHosts] = useState<Host[]>([]);
   const [pb, setPb] = useState<PlaybookData | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [tab, setTab] = useState<TabId>("dashboard");
+  const [tab, setTab] = useState<TabId>(() => {
+    const saved = localStorage.getItem("recce.tabs");
+    if (saved) {
+      try {
+        const tabs = JSON.parse(saved) as string[];
+        if (tabs.includes("act") && !tabs.includes("exploitation")) {
+          localStorage.setItem("recce.tabs", JSON.stringify(tabs.map(t => t === "act" ? "exploitation" : t === "loot" ? "credentials" : t)));
+        }
+      } catch {}
+    }
+    return "dashboard";
+  });
 
   // cross-tab filter state
   const [ff, setFf] = useState<FindingFilters>({
@@ -370,7 +381,7 @@ export default function App() {
       setHostCov("all");
       setTab("hosts");
     },
-    toAct: () => setTab("act"),
+    toAct: () => setTab("exploitation"),
     openHost: (ip) => setDrawerIp(ip),
   };
 
@@ -382,8 +393,8 @@ export default function App() {
     hosts: hosts.length || undefined,
     sessions: undefined,
     report: undefined,
-    act: undefined,
-    loot: undefined,
+    exploitation: undefined,
+    credentials: undefined,
     playbook: undefined,
   };
 
@@ -456,8 +467,8 @@ export default function App() {
           ) : <div className="loading">Loading…</div>)}
           {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus} />}
           {tab === "report" && <ReportTab onRefresh={() => refresh().catch(() => {})} />}
-          {tab === "act" && <Act nav={nav} />}
-          {tab === "loot" && <Loot />}
+          {tab === "exploitation" && <Exploitation nav={nav} />}
+          {tab === "credentials" && <Credentials />}
           {tab === "playbook" && <Playbook pb={pb} nav={nav} />}
         </div>
 

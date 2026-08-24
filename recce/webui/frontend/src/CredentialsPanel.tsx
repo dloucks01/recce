@@ -1,12 +1,14 @@
 import { useState, useEffect } from "react";
 
 interface Credential {
-  username?: string;
-  password?: string;
-  hash?: string;
-  domain?: string;
-  source?: string;
-  looted_by?: string;
+  username: string;
+  secret: string;
+  kind: string;
+  domain: string;
+  source: string;
+  origin_ip: string;
+  notes: string;
+  label: string;
 }
 
 export function CredentialsPanel() {
@@ -15,12 +17,11 @@ export function CredentialsPanel() {
   const [search, setSearch] = useState("");
 
   useEffect(() => {
-    // Fetch credentials from API
     async function loadCreds() {
       try {
-        const res = await fetch("/api/creds");
+        const res = await fetch("/api/credentials");
         const data = await res.json();
-        setCreds(data || []);
+        setCreds(data?.items || []);
       } catch {
         setCreds([]);
       }
@@ -29,8 +30,8 @@ export function CredentialsPanel() {
   }, []);
 
   let filtered = creds;
-  if (filter === "cleartext") filtered = creds.filter((c) => c.password);
-  else if (filter === "hashes") filtered = creds.filter((c) => c.hash);
+  if (filter === "cleartext") filtered = creds.filter((c) => c.kind === "password");
+  else if (filter === "hashes") filtered = creds.filter((c) => c.kind === "nthash" || c.kind === "hash");
 
   if (search.trim()) {
     const q = search.toLowerCase();
@@ -38,12 +39,13 @@ export function CredentialsPanel() {
       (c) =>
         c.username?.toLowerCase().includes(q) ||
         c.domain?.toLowerCase().includes(q) ||
-        c.source?.toLowerCase().includes(q)
+        c.source?.toLowerCase().includes(q) ||
+        c.label?.toLowerCase().includes(q)
     );
   }
 
-  const cleartextCount = creds.filter((c) => c.password).length;
-  const hashCount = creds.filter((c) => c.hash).length;
+  const cleartextCount = creds.filter((c) => c.kind === "password").length;
+  const hashCount = creds.filter((c) => c.kind === "nthash" || c.kind === "hash").length;
 
   return (
     <div className="creds-panel">
@@ -80,28 +82,20 @@ export function CredentialsPanel() {
           <div className="empty-state">No credentials found</div>
         ) : (
           filtered.map((c, i) => (
-            <div key={i} className={`cred-item ${c.password ? "cleartext" : "hash"}`}>
+            <div key={i} className={`cred-item ${c.kind === "password" ? "cleartext" : "hash"}`}>
               <div className="cred-header">
-                <span className="cred-username">{c.username || "(no username)"}</span>
+                <span className="cred-username">{c.label || c.username || "(no username)"}</span>
                 {c.domain && <span className="cred-domain">@{c.domain}</span>}
               </div>
               <div className="cred-body">
-                {c.password && (
-                  <div className="cred-secret">
-                    <span className="cred-label">Password:</span>
-                    <code className="cred-value">{c.password}</code>
-                  </div>
-                )}
-                {c.hash && (
-                  <div className="cred-secret">
-                    <span className="cred-label">Hash:</span>
-                    <code className="cred-value cred-hash">{c.hash.slice(0, 40)}…</code>
-                  </div>
-                )}
+                <div className="cred-secret">
+                  <span className="cred-label">{c.kind === "password" ? "Password:" : c.kind === "nthash" ? "NT Hash:" : "Hash:"}</span>
+                  <code className="cred-value">{c.kind !== "password" ? (c.secret || "").slice(0, 40) + (c.secret?.length > 40 ? "..." : "") : c.secret || "—"}</code>
+                </div>
               </div>
               <div className="cred-footer">
                 {c.source && <span className="cred-source">from {c.source}</span>}
-                {c.looted_by && <span className="cred-by">looted by {c.looted_by}</span>}
+                {c.origin_ip && <span className="cred-by">on {c.origin_ip}</span>}
               </div>
             </div>
           ))

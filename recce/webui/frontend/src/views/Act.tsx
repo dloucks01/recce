@@ -51,7 +51,7 @@ export function Act({ nav }: { nav: Nav }) {
     try {
       const r = await postActRun();
       setRanMsg(r.looted > 0
-        ? `Collected ${r.looted} new credential(s) — see the Credentials tab. Spray plan refreshed.`
+        ? `Collected ${r.looted} new credential(s) — see Credentials tab. Spray plan refreshed.`
         : "No new credentials collected (already captured, or hosts unreachable).");
       await load();
     } catch { setRanMsg("run failed — is the engagement reachable?"); }

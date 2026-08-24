@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "sessions" | "report" | "act" | "loot" | "playbook";
+export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "sessions" | "report" | "exploitation" | "credentials" | "playbook";
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
@@ -9,12 +9,12 @@ const TAB_LABELS: Record<TabId, string> = {
   hosts: "Hosts",
   sessions: "Sessions",
   report: "Report",
-  act: "Act",
-  loot: "Loot",
+  exploitation: "Exploitation",
+  credentials: "Credentials",
   playbook: "Playbook",
 };
 
-const DEFAULT_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "sessions", "report", "act"];
+const DEFAULT_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "sessions", "report", "exploitation"];
 
 interface TabBarProps {
   active: TabId;
