@@ -20,16 +20,16 @@ import tempfile
 import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
-from . import ad
-from . import exploits
-from . import parser as np
-from . import scanner
-from . import tracking as tr
-from .models import Host
-from .report_excel import read_workbook_edits, update_workbook
-from .report_markdown import build_csv, build_markdown
-from .store import Store, StoreError
-from .targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from .. import ad
+from .. import exploits
+from .. import parser as np
+from .. import scanner
+from .. import tracking as tr
+from ..models import Host
+from ..report_excel import read_workbook_edits, update_workbook
+from ..report_markdown import build_csv, build_markdown
+from ..store import Store, StoreError
+from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 BANNER = r"""
   ____  _____ ____ ____ _____
@@ -154,7 +154,7 @@ def _disproved_ports_in_xml(xml_path: str, ip: str) -> set:
     couldn't reach ('filtered'/no-response = packet loss, NOT counted here) is kept -
     masscan's positive evidence stands over nmap loss. Never raises."""
     import xml.etree.ElementTree as ET
-    from .parser import _declares_entities
+    from ..parser import _declares_entities
     if _declares_entities(xml_path):
         return set()
     try:
@@ -406,7 +406,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     if _DEFER_REPORTS:
         return
     hosts = store.all_hosts()
-    from . import qod, verify, dedup, kev, epss
+    from .. import qod, verify, dedup, kev, epss
     for h in hosts:                    # ensure every finding is QoD-scored before report/gates
         qod.annotate(h)
         kev.annotate(h)                # flag CVEs confirmed exploited-in-the-wild (fix-first)
@@ -435,7 +435,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     # If this (or the originating scan) ran through a proxy, stamp the datastore so the
     # note survives a later plain `recce report`, and surface it in the deliverables -
     # a reader must know the data came from a connect-scan-only, no-UDP proxied run.
-    from . import proxy as _proxy
+    from .. import proxy as _proxy
     if _proxy.is_active():
         store.set_meta("proxy", _proxy.describe())
     proxy_note = store.get_meta("proxy") or ""
@@ -467,12 +467,12 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     # never has to request them one by one; leads/version-guesses and info are excluded
     # by default (build_combined's _is_real filter). `recce writeup <id>` still targets one.
     try:
-        from .report_docx import build_combined
+        from ..report_docx import build_combined
         build_combined(hosts, paths["docx"], title=title)
     except Exception as e:  # noqa: BLE001 - a writeup failure never blocks the other reports
         if not quiet:
             print(f"    [!] findings write-up doc skipped: {e}")
-    from .report_html import build_html, build_assets_html
+    from ..report_html import build_html, build_assets_html
     gen = _now()
     build_html(hosts, paths["html"], title=title, domains=domains,
                credentials=credentials, generated=gen, tracking=tracking,
@@ -484,7 +484,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     # Standalone, directly-viewable diagrams (open the .svg in any browser — no tools).
     # Best-effort - never block a report on these.
     try:
-        from . import netmap
+        from .. import netmap
         eng_dir = os.path.dirname(paths["html"])
         ad_blob = meta.get("ad_bloodhound")
 
@@ -512,7 +512,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             _write("network-reachability.svg",
                    _standalone_svg(netmap.reachability_svg(hosts, ad_blob)))
         # Attack path as a standalone SVG too (only when there's a confirmed path).
-        from . import attackpath as _ap
+        from .. import attackpath as _ap
         _ap_steps = _ap.build(hosts)
         if _ap_steps:
             _write("attack-path.svg", _standalone_svg(_ap.svg(hosts, _ap_steps)))
@@ -862,7 +862,7 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     # (nmap saw it closed). This recovers ports enum lost to packet loss - the same "0
     # open ports" failure as the nmap path - while still pruning masscan's false opens.
     if masscan_candidates:
-        from .models import Port
+        from ..models import Port
         disproved = _disproved_ports_in_xml(enum_xml, ip)
         have = {(p.protocol, p.portid) for p in host.ports}
         for pid in masscan_candidates:
@@ -898,7 +898,7 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     # Recover the services nmap left as unknown/blank: mine its kept fingerprint,
     # fall back to the curated port map, then a stdlib banner grab (active) - so a
     # port like 5040 becomes 'Windows CDPSvc', not a dead 'unknown'.
-    from . import svcdetect
+    from .. import svcdetect
     svcdetect.enrich_host(host, active=active_probe)
     # Second opinion: for the handful of ports STILL unnamed, re-run nmap at max
     # version effort (--version-all) aimed at just those - cheap because it's a few
@@ -913,9 +913,9 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
             svcdetect.apply_reprobe(host, np.parse_nmap_xml(rp_xml))
     ad.identify_roles(host)
     ad.parse_signing_and_ntlm(host)
-    from . import vulndb
+    from .. import vulndb
     vulndb.assess_host_inplace(host)   # offline version->CVE findings, immediately
-    from . import qod
+    from .. import qod
     qod.annotate(host)                 # stamp Quality-of-Detection once, from the method
     return host, issues
 
@@ -954,7 +954,7 @@ def _seed_targets(store, live_ips, subnet_map, hostname_map):
     failed scan can never make a real target vanish from the report ('false no hosts').
     Each is stored up-front with its provided hostname and up_reason 'target-list'; the
     enum phase then enriches it in place. Returns the count seeded."""
-    from .models import Host
+    from ..models import Host
     n = 0
     for ip in live_ips:
         h = Host(ip=ip, subnet=subnet_map.get(ip, ""), up_reason="target-list")
@@ -1303,9 +1303,9 @@ def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss,
     # Deep web enum runs BEFORE the CVE mapping so a product/version recovered from
     # a web fingerprint (Jenkins/Confluence/…) gets version->CVE matched too.
     if use_probes:
-        from . import web
+        from .. import web
         web.scan_host(host, active=True)   # headers/TLS + exposures + fingerprint
-    from . import vulndb
+    from .. import vulndb
     vulndb.assess_host_inplace(host)   # offline version->CVE findings
     if use_ss:
         exploits.enrich_hosts([host])
@@ -1412,7 +1412,7 @@ def _phase_vulns(store, paths, args, profile) -> None:
 
 def _db_worker(host, portids, profile, paths, creds, aggressive, use_ss):
     """Returns (host, issues)."""
-    from . import db as dbmod
+    from .. import db as dbmod
     issues: list[dict] = []
     vx = os.path.join(paths["raw"], f"{host.ip}_db.xml")
     _, iss = scanner.nse_scan(host.ip, portids, vx, profile,
@@ -1431,7 +1431,7 @@ def _db_worker(host, portids, profile, paths, creds, aggressive, use_ss):
 
 
 def _phase_db(store, paths, args, profile) -> None:
-    from . import db as dbmod
+    from .. import db as dbmod
     creds = _creds_of(args)
     aggressive = getattr(args, "aggressive", False)
     use_ss = not getattr(args, "no_searchsploit", False) and exploits.available()
@@ -1469,7 +1469,7 @@ def _phase_db(store, paths, args, profile) -> None:
 
 def _privesc_worker(host, profile, paths, creds, aggressive):
     """Returns (host, issues)."""
-    from . import privesc as pe
+    from .. import privesc as pe
     issues: list[dict] = []
     ports = [p.portid for p in host.open_ports
              if p.portid in (139, 445, 3389, 135) or "http" in (p.service or "")]
@@ -1530,7 +1530,7 @@ def _ssh_creds_of(args) -> dict | None:
 
 def _credenum_worker(host, creds, ssh_creds, aggressive, admin_creds=None):
     """Returns (host, issues, auth)."""
-    from . import credenum
+    from .. import credenum
     issues, auth = credenum.enrich_host(host, creds, ssh_creds, aggressive=aggressive,
                                         admin_creds=admin_creds)
     return host, issues, auth
@@ -1580,7 +1580,7 @@ def _print_auth_table(auth_rows: list) -> None:
 
 
 def _phase_credenum(store, paths, args) -> None:
-    from . import credenum
+    from .. import credenum
     creds = _creds_of(args)
     admin_creds = _admin_creds_of(args)
     ssh_creds = _ssh_creds_of(args)
@@ -1618,8 +1618,8 @@ def _phase_credenum(store, paths, args) -> None:
     # safe) to find the working cred PER HOST, then enum each host with its own cred.
     per_host_creds: dict[str, dict] = {}
     if want_set:
-        from . import credentials as cr
-        from .models import Credential
+        from .. import credentials as cr
+        from ..models import Credential
         stacked = cr.stack(targets, store.all_credentials()) if getattr(args, "all_creds", False) else []
         cred_set = _spray_cred_set(args, stacked)
         if cred_set:
@@ -1700,7 +1700,7 @@ def _setup_scan(args):
     _apply_profile_overrides(profile, args)
     rules = getattr(args, "rules", None)
     if rules:
-        from . import vulndb
+        from .. import vulndb
         n = vulndb.load_rules(rules)
         print(f"[+] Loaded {n} extra detection rule(s) from {rules}."
               if n else f"[!] No usable detection rules found in {rules}.")
@@ -1728,7 +1728,7 @@ def _print_next(paths: dict, output_dir: str, n: int = 1) -> None:
     """Echo the top next-best-action(s) for this engagement (ambient guidance). Opens a
     short-lived read of the datastore, so it works after the main scan store is closed.
     Silent on any error - guidance must never break a command."""
-    from . import workflow
+    from .. import workflow
     try:
         s = Store(paths["db"])
     except Exception:  # noqa: BLE001
@@ -1762,7 +1762,7 @@ def cmd_next(args: argparse.Namespace) -> int:
     store = _open_store(paths["db"])
     if store is None:
         return 1
-    from . import workflow
+    from .. import workflow
     acts = workflow.next_actions(store.all_hosts(), store.all_credentials(), args.output_dir)
     store.close()
     if not acts:
@@ -1782,7 +1782,7 @@ def cmd_act(args: argparse.Namespace) -> int:
     cards by tier (readiness × safety × confidence) then impact × confidence × leverage,
     and prints the guided plan. Read-only/reversible actions are flagged as ones recce
     can run for you; intrusive ones are guided (exact command), never auto-fired."""
-    from . import act
+    from .. import act
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No engagement at {args.output_dir}. Start one:  recce run <targets> "
@@ -1840,7 +1840,7 @@ def cmd_attack(args: argparse.Namespace) -> int:
     """Engagement-wide MITRE ATT&CK coverage: the techniques recce's findings map to,
     grouped by tactic along the kill chain. For client reports that want ATT&CK, not
     just CVEs/CWEs."""
-    from . import attack
+    from .. import attack
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No engagement at {args.output_dir}. Run `recce run <targets>` first.")
@@ -1874,7 +1874,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     (NSE VULNERABLE -> CONFIRMED) or refutes a disproved one (NOT VULNERABLE, hidden by
     default). Only Tier-A/B (read-only / non-intrusive detection) - never a weaponizing PoC.
     See docs/design/ACTIVE-VERIFICATION.md."""
-    from . import verify, qod
+    from .. import verify, qod
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No engagement at {args.output_dir}. Run `recce run <targets> -o "
@@ -2284,8 +2284,8 @@ def cmd_writeups(args: argparse.Namespace) -> int:
     _import_excel_tracking(store, paths)   # honour any Excel edits first
     hosts = _selected_hosts(store.all_hosts(), args)
     out_dir = os.path.join(args.output_dir, "writeups")
-    from .report_docx import build_writeups
-    from . import screenshot
+    from ..report_docx import build_writeups
+    from .. import screenshot
 
     shots: dict = {}
     if not args.no_screenshots and not screenshot.available():
@@ -2308,7 +2308,7 @@ def cmd_writeups(args: argparse.Namespace) -> int:
     title = store.get_meta("engagement") or args.title
     combined_path = None
     if not args.no_combined:
-        from .report_docx import build_combined
+        from ..report_docx import build_combined
         combined_path = os.path.join(out_dir, "findings_report.docx")
         build_combined(hosts, combined_path, title=f"{title} - Findings Report",
                        min_severity=args.min_severity,
@@ -2341,7 +2341,7 @@ def cmd_writeup(args: argparse.Namespace) -> int:
         return 1
     _import_excel_tracking(store, paths)
     hosts = store.all_hosts()
-    from .report_docx import list_findings, build_one_writeup
+    from ..report_docx import list_findings, build_one_writeup
 
     if not args.selector:
         findings = list_findings(hosts, min_severity="info")
@@ -2363,7 +2363,7 @@ def cmd_writeup(args: argparse.Namespace) -> int:
     out_dir = os.path.join(args.output_dir, "writeups")
     shots: dict = {}
     if not args.no_screenshots:
-        from . import screenshot
+        from .. import screenshot
         if screenshot.available():
             res = _match_one_host(hosts, args.selector)
             for h in res:
@@ -2412,7 +2412,7 @@ def cmd_web(args: argparse.Namespace) -> int:
     non-intrusive checks (exposed .git/.env, server-status/actuator, directory
     listing, dangerous methods, cookie flags, headers/TLS). Findings fold into the
     workbook; each endpoint gets the exact Kali deep-scan commands."""
-    from . import web
+    from .. import web
     print(BANNER)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -2536,7 +2536,7 @@ def cmd_web(args: argparse.Namespace) -> int:
 
 def _web_screenshots(targets, output_dir) -> None:
     """Headless-browser screenshot per web endpoint -> engagement/screenshots/."""
-    from . import screenshot, web
+    from .. import screenshot, web
     if not screenshot.available():
         print("    [!] --screenshots: no headless browser found (chromium/firefox); "
               "skipping. `recce doctor` shows what's missing.")
@@ -2576,7 +2576,7 @@ def cmd_services(args: argparse.Namespace) -> int:
         return 1
     hosts = _selected_hosts(store.all_hosts(), args)
     store.close()
-    from . import serviceenum
+    from .. import serviceenum
 
     print("Per-service enumeration - run these against the open ports recce found.")
     print("Safe by default (banners, versions, anon/null checks, TLS, NSE 'safe');")
@@ -2634,7 +2634,7 @@ def cmd_poc(args: argparse.Namespace) -> int:
     it uses the CVEs from the engagement's findings (`--confirmed` to gate to confirmed
     ones only). recce references published exploits and scaffolds a harness; it does not
     author weaponized exploit code."""
-    from . import pocgen
+    from .. import pocgen
     paths = _open_paths(args.output_dir)
     store = _open_store(paths["db"])
     if store is None:
@@ -2698,7 +2698,7 @@ def cmd_exploitplan(args: argparse.Namespace) -> int:
     _import_excel_tracking(store, paths)
     hosts = _selected_hosts(store.all_hosts(), args)
     store.close()
-    from . import exploitplan
+    from .. import exploitplan
 
     summary = exploitplan.build_plan(hosts, args.output_dir, lhost=args.lhost,
                                      lport=args.lport, run=args.run)
@@ -2731,7 +2731,7 @@ def _prove_run_safe_checks(store, paths, hosts, args) -> None:
     """--run: re-run the NON-INTRUSIVE detection NSE for SMB findings so a verdict
     can move from LIKELY to CONFIRMED / FALSE POSITIVE on real evidence. These are
     detection scripts (smb-security-mode, smb-vuln-ms17-010), not exploits."""
-    from . import proofs
+    from .. import proofs
     profile = scanner.PROFILES.get(getattr(args, "profile", "standard"),
                                    scanner.PROFILES["standard"])
     smb_scripts = ["smb-security-mode", "smb2-security-mode",
@@ -2764,7 +2764,7 @@ def cmd_prove(args: argparse.Namespace) -> int:
     SeImpersonate / …) render a verdict - CONFIRMED, LIKELY, FALSE POSITIVE or
     INCONCLUSIVE - from the evidence recce already holds, plus the exact safe step
     to finish proving. Nothing here exploits anything."""
-    from . import proofs
+    from .. import proofs
     print(BANNER)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -2815,7 +2815,7 @@ def cmd_attackpath(args: argparse.Namespace) -> int:
     _import_excel_tracking(store, paths)
     hosts = _selected_hosts(store.all_hosts(), args)
     store.close()
-    from . import attackpath as ap
+    from .. import attackpath as ap
 
     steps = ap.build(hosts)
     for line in ap.narrative(hosts, steps):
@@ -2849,7 +2849,7 @@ def cmd_attackpath(args: argparse.Namespace) -> int:
 
 def _parse_cred_spec(spec: str):
     """Parse 'user:secret', 'DOMAIN\\user:secret', or 'domain/user:secret'."""
-    from .models import Credential
+    from ..models import Credential
     idpart, secret = (spec.split(":", 1) + [""])[:2] if ":" in spec else (spec, "")
     domain = ""
     if "\\" in idpart:
@@ -2868,7 +2868,7 @@ def _spray_cred_set(args, stacked):
     """The credential set to spray: the stacked/looted creds (default) plus any
     --user-list usernames and --pass-list passwords. Returns Credential objects; a
     spray combines all usernames x all passwords (paired when lockout-safe)."""
-    from .models import Credential
+    from ..models import Credential
     creds = list(stacked)
     for path, make in ((getattr(args, "user_list", None), lambda v: Credential(username=v)),
                        (getattr(args, "pass_list", None),
@@ -2886,8 +2886,8 @@ def _spray_cred_set(args, stacked):
 def cmd_creds(args: argparse.Namespace) -> int:
     """Stack credentials (auto-harvested + manually captured) and build/run a spray
     across the discovered SMB/WinRM/LDAP/MSSQL/RDP/SSH surface."""
-    from . import credentials as cr
-    from .models import Credential
+    from .. import credentials as cr
+    from ..models import Credential
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
@@ -3031,38 +3031,38 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name, required, desc in tools:
         present = shutil.which(name) is not None
         if name == "searchsploit":
-            from . import exploits
+            from .. import exploits
             present = exploits.available()               # mirror the runtime gate
         if name == "ldap":
-            from . import ad
+            from .. import ad
             present = ad.ldap_available()                # ldapsearch OR ldap3 package
             if present:
                 backend = "ldapsearch" if shutil.which("ldapsearch") else "ldap3 package"
                 desc = f"credentialed AD LDAP enum (using {backend})"
         if name == "netexec":
-            from . import credenum
+            from .. import credenum
             present = credenum.smb_tool() is not None   # nxc / crackmapexec too
         if name == "browser":
-            from . import screenshot
+            from .. import screenshot
             present = screenshot.available()             # firefox / chrome variants
             found = screenshot.browser_tool()
             if found:
                 desc = f"auto web screenshots in write-ups (using {found})"
         if name == "proxychains4":
-            from . import proxy
+            from .. import proxy
             present = bool(proxy.proxychains_bin())       # proxychains4 OR proxychains
         if name == "nmap":
             nmap_ok = present
         presence[name] = present
         mark = "OK  " if present else ("MISSING (required)" if required else "-   (optional)")
         print(f"  {name:<15} {mark:<20} {desc}")
-    from . import credenum as _ce
+    from .. import credenum as _ce
     if _ce.impacket_tool("GetUserSPNs"):
         print(f"  {'impacket':<15} {'OK  ':<20} Kerberoast / AS-REP / secretsdump")
     # The MSSQL deep enum (linked servers, data-mine, xp_cmdshell) needs the
     # impacket-mssqlclient CLI specifically - it silently no-ops without it, so surface
     # it explicitly (GetUserSPNs being present does not imply mssqlclient is).
-    from . import mssql as _mssql
+    from .. import mssql as _mssql
     _msc = "OK  " if _mssql.mssqlclient_tool() else "-   (deep MSSQL enum disabled)"
     print(f"  {'mssqlclient':<15} {_msc:<20} MSSQL deep enum (impacket-mssqlclient)")
     import importlib.util as _ilu
@@ -3128,7 +3128,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def _self_scan() -> bool:
     import tempfile
     try:
-        from . import scanner
+        from .. import scanner
         profile = scanner.PROFILES["quick"]
         with tempfile.TemporaryDirectory() as d:
             fp = os.path.join(d, "p.xml")
@@ -3138,7 +3138,7 @@ def _self_scan() -> bool:
             scanner.enum_scan("127.0.0.1", ports or [80], deep, profile)  # (xml, issue)
             host = _fold_host("127.0.0.1", np.parse_nmap_xml(deep), {"127.0.0.1": "local"})
             host.enumerated = True
-            from .report_excel import build_workbook, read_workbook_tracking
+            from ..report_excel import build_workbook, read_workbook_tracking
             out = os.path.join(d, "wb.xlsx")
             build_workbook([host], out)
             read_workbook_tracking(out)  # prove read-back parses too
@@ -3278,8 +3278,8 @@ def _tag_host_os(host, parsed) -> None:
 def _ingest_service_output(svc: dict, paths: dict, args) -> int:
     """Fold recce-service.sh per-service findings into the datastore as confirmed
     service-enum Vulns on the matching host:port (creating a host entry if needed)."""
-    from . import ingest
-    from .models import Host, Port
+    from .. import ingest
+    from ..models import Host, Port
     store = _open_store(paths["db"])
     if store is None:
         return 1
@@ -3326,7 +3326,7 @@ def _fold_loot(host, text: str, source: str) -> tuple[int, int, int]:
     category/vector), AV/EDR defenses, and high-signal findings promoted to Vulns.
     Sets privesc_checked. Returns (added, total_rows, promoted). Shared by the
     `ingest` command and the `deploy` orchestrator so both fold identically."""
-    from . import ingest
+    from .. import ingest
     parsed = ingest.parse_loot(text)
     new_rows = ingest.to_local_findings(parsed, source)
     have = {(f.get("category"), f.get("vector")) for f in host.local_findings}
@@ -3358,7 +3358,7 @@ def _fold_loot(host, text: str, source: str) -> tuple[int, int, int]:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    from . import ingest
+    from .. import ingest
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum` first so there's a "
@@ -3416,7 +3416,7 @@ def _deploy_worker(host, ssh_creds, win_creds, timeout, loot_dir,
                    stager=None, authmap=None):
     """Run the on-target enum script on one host remotely, save the raw loot, fold
     it into the host. Returns (host, transport, added, promoted, error)."""
-    from . import deploy
+    from .. import deploy
     transport, out, err = deploy.deploy_one(host, ssh_creds, win_creds, timeout,
                                             stager=stager, authmap=authmap)
     if not out:
@@ -3433,7 +3433,7 @@ def _deploy_worker(host, ssh_creds, win_creds, timeout, loot_dir,
 def cmd_deploy(args: argparse.Namespace) -> int:
     """Push + run recce's read-only local-enum / priv-esc scripts across every host
     we have credentials for (SSH / WinRM / SMB), then fold the results in."""
-    from . import deploy
+    from .. import deploy
     print(BANNER)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -3515,7 +3515,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # Optional HTTP stager for in-memory Windows exec.
     stager = None
     if use_stager:
-        from .stager import Stager, detect_lhost
+        from ..stager import Stager, detect_lhost
         lhost = getattr(args, "lhost", None) or detect_lhost()
         if not lhost:
             print("[x] --stager needs --lhost <your-ip that targets can reach>; "
@@ -3650,7 +3650,7 @@ def cmd_import(args: argparse.Namespace) -> int:
     update the workbook - no scanning, no network. Folds hosts into the datastore,
     runs the offline enrichment (version->CVE, AD roles, SMB signing), sets the
     checkmarks, and preserves any existing tracking."""
-    from . import vulndb
+    from .. import vulndb
     files = _collect_scan_files(args.files)
     if not files:
         print("[x] No nmap scan files found. Point at .xml (-oX) or .gnmap (-oG) "
@@ -3751,8 +3751,8 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     Simple credentialed run:  recce ad loot.zip -u alice -p 'Passw0rd' -d corp.local
     Add ADCS:                 recce ad loot.zip certipy.json -u alice -p ... -d corp.local
     Airgapped, stdlib-only; every command is pre-filled with your credentials."""
-    from . import bloodhound as bh
-    from . import adcs
+    from .. import bloodhound as bh
+    from .. import adcs
 
     srcs = args.paths if isinstance(args.paths, list) else [args.paths]
     for s in srcs:
@@ -3860,7 +3860,7 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     store.set_meta("ad_bloodhound", json.dumps(analysis))
     # Merge domain facts (trusts, functional level, MachineAccountQuota) so the
     # Active Directory sheet reflects the import even without a network scan.
-    from .models import Domain
+    from ..models import Domain
     for dom in analysis["domains"]:
         name = (dom.get("name") or "").lower()
         if not name:
@@ -3881,7 +3881,7 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     # Vulns on the DC / domain host (keyed by --dc-ip when given, so they merge
     # onto the scanned DC rather than creating a duplicate).
     if analysis["findings"]:
-        from .models import Host
+        from ..models import Host
         dom_name = analysis["domains"][0]["name"] if analysis["domains"] else ""
         ad_ip = (creds and creds.get("dc_ip")) or dom_name or "active-directory"
         vulns = bh.findings_to_vulns(analysis, ad_ip, dom_name)
@@ -3941,10 +3941,10 @@ def _proof_shot(args, module: str, filename: str, command: str, output: str,
     if not getattr(args, "screenshots", False):
         return None
     from importlib import import_module
-    from . import screenshot
+    from .. import screenshot
     if not screenshot.available():
         return None
-    mod = import_module(f".{module}", __package__)
+    mod = import_module(f"recce.{module}")
     png = screenshot.capture_html(mod.proof_html(command, output, **proof_kwargs))
     if not png:
         return None
@@ -4031,7 +4031,7 @@ def cmd_mssql(args: argparse.Namespace) -> int:
     """MSSQL offensive enumeration: credential-free pre-auth probes (SQL Browser +
     TDS pre-login), then - with credentials - the nxc access/privilege matrix and
     the full MSSQLPwner-style runbook + attack chain, pre-filled with your creds."""
-    from . import mssql
+    from .. import mssql
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -4324,7 +4324,7 @@ def cmd_smb(args: argparse.Namespace) -> int:
     """SMB offensive enumeration: credential-free stdlib negotiate probes (dialect /
     signing / SMBv1), then anonymous & credentialed share enumeration, a reversible
     writable-share proof, and the full runbook - folded into the main totals."""
-    from . import smb
+    from .. import smb
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -4474,7 +4474,7 @@ def cmd_ftp(args: argparse.Namespace) -> int:
     """FTP offensive enumeration: credential-free stdlib probe (banner / anonymous /
     AUTH-TLS + known-backdoor match), then a reversible writable-directory proof -
     folded into the main totals."""
-    from . import ftp
+    from .. import ftp
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -4553,7 +4553,7 @@ def cmd_docker(args: argparse.Namespace) -> int:
     """Docker Engine API enumeration: read the API unauthenticated (stdlib HTTP) and,
     if it answers, report the CONFIRMED critical exposure (remote root RCE on the
     host). recce reads the API to prove it - it never creates a container."""
-    from . import docker
+    from .. import docker
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -4619,7 +4619,7 @@ def cmd_kubernetes(args: argparse.Namespace) -> int:
     """Kubernetes attack-surface enumeration: unauthenticated reads of the kubelet
     (10250/10255), kube-apiserver (6443/8443) and etcd (2379). recce only READS to
     prove exposure - it never execs into a pod or writes to etcd."""
-    from . import kubernetes as k8s
+    from .. import kubernetes as k8s
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -4664,7 +4664,7 @@ def cmd_ldap(args: argparse.Namespace) -> int:
     binds, reads the RootDSE (domain/forest/DC/functional level), and tests whether
     the directory is anonymously readable. Read-only - it never writes to the
     directory. Credentialed follow-on commands are staged, not run."""
-    from . import ldap as _ldap
+    from .. import ldap as _ldap
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -4750,7 +4750,7 @@ def cmd_api(args: argparse.Namespace) -> int:
     """API enumeration over the web services enum found: OpenAPI/Swagger specs,
     interactive API docs (Swagger UI / ReDoc / GraphiQL), and GraphQL introspection.
     Read-only GETs plus one GraphQL introspection POST."""
-    from . import api
+    from .. import api
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
@@ -4799,7 +4799,7 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
     them. `fmt(t, active)` returns the display text for one target; optional
     `extra(store, hosts, tgts, by_ip)` runs a per-service post-fold step."""
     from importlib import import_module
-    from . import proxy
+    from .. import proxy
     if udp and proxy.is_active():
         # A UDP-only service can't be reached through a TCP proxy, and a datagram would
         # leak from the operator's real IP. Say so loudly instead of returning a clean,
@@ -4807,7 +4807,7 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
         print(f"[!] {label} is UDP-only and can't traverse the proxy ({proxy.describe()}) "
               f"- skipped. Run it from the pivot host directly, or without --proxy.")
         return 0
-    mod = import_module(f".{module}", __package__)
+    mod = import_module(f"recce.{module}")
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
@@ -5191,7 +5191,7 @@ def cmd_kerberos(args: argparse.Namespace) -> int:
     every pre-auth-disabled account (capture a crackable hash with NO credential), and
     validate usernames via the KDC's pre-auth response. Read-only - no logon, no
     lockouts."""
-    from . import kerberos as _krb
+    from .. import kerberos as _krb
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` (and, for the "
@@ -5315,7 +5315,7 @@ def _deprecated_alias(fn, old: str, new: str):
 
 def cmd_fieldkit_export(args: argparse.Namespace) -> int:
     """Export the engagement as a seed for the fieldkit exploitation kit."""
-    from . import fieldkit
+    from .. import fieldkit
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']} - run `enum` first.")
@@ -5376,8 +5376,8 @@ def cmd_fieldkit_export(args: argparse.Namespace) -> int:
 
 def cmd_fieldkit_import(args: argparse.Namespace) -> int:
     """Fold a fieldkit findings.json (proven exploitation) back into the workbook + report."""
-    from . import fieldkit
-    from .models import Host
+    from .. import fieldkit
+    from ..models import Host
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']} - run `enum` first, or `import` a scan.")
@@ -5386,7 +5386,7 @@ def cmd_fieldkit_import(args: argparse.Namespace) -> int:
         print(f"[x] No such file: {args.findings}")
         return 1
     try:
-        from . import importers
+        from .. import importers
         with open(args.findings, "rb") as fh:
             data = json.loads(importers.decode_bytes(fh.read()))   # UTF-16/BOM-safe (Windows tooling)
     except (OSError, ValueError) as e:
@@ -5567,7 +5567,7 @@ def _service_module_coverage(store, hosts) -> list[dict]:
     an applicable open port have actually had the module run. 'Run' = the host appears
     in the module's stored analysis targets, or it carries a finding from that source.
     Ordered highest-impact first so `status` surfaces the critical exposures."""
-    from . import (mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap,
+    from .. import (mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap,
                    snmp as _snmp, mongodb as _mongo, redis as _redis,
                    elasticsearch as _es, rsync as _rsync, nfs as _nfs,
                    kerberos as _krb)
@@ -5864,7 +5864,7 @@ def cmd_access(args: argparse.Namespace) -> int:
     # --act: cap the pipeline with the Act phase - auto-run the read-only links (loot the
     # flagged unauth services, refresh the spray plan) and print the ranked action plan.
     if getattr(args, "act", False):
-        from . import act
+        from .. import act
         print("\n" + "=" * 60)
         print("[*] Act phase - what to do with what was found")
         print("=" * 60)
@@ -5945,8 +5945,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
     store.set_scope("10.0.10.0/24", 254)   # demo scope: three /24s
     store.set_scope("10.0.20.0/24", 254)
     store.set_scope("10.0.30.0/24", 254)   # in scope but no live hosts found
-    from .models import Exploit
-    from .targets import _subnet_of
+    from ..models import Exploit
+    from ..targets import _subnet_of
     # Stand-in for searchsploit output (unavailable offline in the demo).
     demo_exploits = {
         "10.0.20.6": [Exploit(ip="10.0.20.6", port=21, product="vsftpd", version="2.3.4",
@@ -5963,7 +5963,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
         ad.identify_roles(h)
         ad.parse_signing_and_ntlm(h)
         h.exploits = demo_exploits.get(h.ip, [])
-        from . import vulndb
+        from .. import vulndb
         vulndb.assess_host_inplace(h)   # offline version->CVE findings
         h.enumerated = True
         # Confirmed footholds, so the map's access overlay has something to show.
@@ -5992,7 +5992,7 @@ def _demo_credentials(store: Store) -> None:
     """Seed a few captured credentials so the demo report's Credentials section
     renders. Secrets are masked in the shareable HTML; the workbook keeps the full
     values. Offline and deterministic."""
-    from .models import Credential
+    from ..models import Credential
     for c in (
         Credential(username="jsmith", secret="Summer2024!", kind="password",
                    domain="corp.local", source="cracked",
@@ -6016,7 +6016,7 @@ def _demo_bloodhound(store: Store) -> None:
     """Seed a small synthetic SharpHound collection so the demo report showcases the
     AD findings, attack paths and the tier-0 **AD architecture diagram**. Offline and
     deterministic — analysed exactly like a real collection."""
-    from . import bloodhound as bh
+    from .. import bloodhound as bh
     B = "S-1-5-21-4242-4242-4242"
     users = {"meta": {"type": "users"}, "data": [
         {"ObjectIdentifier": f"{B}-1104",
@@ -6228,7 +6228,7 @@ def _add_vuln_opts(pp) -> None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    from . import __version__
+    from .. import __version__
     p = argparse.ArgumentParser(
         prog="recce",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -7291,7 +7291,7 @@ def _setup_proxy(args) -> int | None:
     proxychains so its whole process tree is proxied (unless already wrapped). A run that
     is already under proxychains (our re-exec, or the operator's own wrap) just switches
     on safe/honest mode. See docs/design/PROXY-PIVOT.md."""
-    from . import proxy
+    from .. import proxy
     url = getattr(args, "proxy", None)
     if not url and not proxy.already_proxied():
         return None                              # the common, direct path: nothing to do
