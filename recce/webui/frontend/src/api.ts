@@ -47,6 +47,14 @@ export async function getHost(ip: string) {
   return getJSON<HostDetail>(`/api/host/${encodeURIComponent(ip)}`);
 }
 
+export type ExploitHint = {
+  key: string; ip: string; port: number; cve: string;
+  hint: { module: string; payload: string; note: string } | null;
+};
+export async function getExploitHint(key: string): Promise<ExploitHint> {
+  return getJSON<ExploitHint>(`/api/finding/exploit-hint?key=${encodeURIComponent(key)}`);
+}
+
 export const SEVS = ["critical", "high", "medium", "low"];
 export const SEV_ALL = ["critical", "high", "medium", "low", "info"];
 
@@ -293,6 +301,10 @@ export async function patchSession(sessionId: string, patch: { label?: string })
   });
   if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
+}
+export async function closeSession(sessionId: string): Promise<void> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+  if (!r.ok && r.status !== 404) throw new Error(`${r.status}`);
 }
 
 export async function lootCred(sessionId: string, c: { username: string; secret: string; kind: string }): Promise<void> {

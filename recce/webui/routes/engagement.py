@@ -24,6 +24,36 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
         with Store(db_path) as st:
             return st.get_scope()
 
+    @app.get("/api/finding/exploit-hint")
+    def exploit_hint(key: str = ""):
+        """MSF module hint for a KEV / exploitable finding — powers the Sessions
+        tab's "🎯 Get shell" one-click launcher. Returns `null` (200) when the
+        finding has no mapped published module: not every KEV has a public msf
+        module, and recce ships no exploit code — it only names existing ones.
+        """
+        from ... import tracking
+        from ...store import Store
+        from ...act.exploitplan import _msf_for
+        if not key.strip():
+            raise HTTPException(400, "key=<finding_key> required")
+        with Store(db_path) as st:
+            for h in st.all_hosts():
+                for v in h.vulns:
+                    if tracking.vuln_row_key(v) == key:
+                        text = " ".join(str(x) for x in
+                                        (v.title, v.script_id, *(v.ids or []),
+                                         (v.output or "")[:400]))
+                        hint = _msf_for(text)
+                        if hint is None:
+                            return {"key": key, "hint": None, "ip": h.ip,
+                                    "port": v.port, "cve": (v.ids[0] if v.ids else "")}
+                        return {"key": key, "ip": h.ip, "port": v.port,
+                                "cve": (v.ids[0] if v.ids else ""),
+                                "hint": {"module": hint["module"],
+                                         "payload": hint["payload"] or "",
+                                         "note": hint["note"]}}
+        raise HTTPException(404, "no such finding")
+
     @app.get("/api/self/addresses")
     def self_addresses():
         """Every non-loopback IPv4 the recce host currently holds. The Sessions

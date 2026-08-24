@@ -89,6 +89,7 @@ export default function App() {
   const [scanRunning, setScanRunning] = useState(false);
   const [, setScanLog] = useState<string[]>([]);
   const [scanPrefill, setScanPrefill] = useState<string | null>(null);
+  const [exploitIntent, setExploitIntent] = useState<import("./views/shared").ExploitIntent | null>(null);
 
   useEffect(() => toast.subscribe(setActiveToast), []);
 
@@ -228,6 +229,7 @@ export default function App() {
     openHost: (ip) => setDrawerIp(ip),
     toSessions: () => setTab("sessions"),
     toScan: (target) => { if (target) setScanPrefill(target); setTab("scan"); },
+    toExploitShell: (intent) => { setExploitIntent(intent); setSessionFocus(null); setTab("sessions"); },
   };
 
   // Badge counts
@@ -320,6 +322,7 @@ export default function App() {
           {tab === "services" && <Services hosts={hosts} findings={findings} nav={nav} />}
           {tab === "timeline" && <Timeline nav={nav} />}
           {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus}
+            exploitIntent={exploitIntent} onExploitConsumed={() => setExploitIntent(null)}
             onScanHost={(ip) => { setScanPrefill(ip); setTab("scan"); }}
             onViewHost={(ip) => setDrawerIp(ip)} />}
           {tab === "report" && <ReportTab findings={findings} onRefresh={() => refresh().catch(() => {})} />}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Overview, Host, ActCard, ScanDiff, SEV_ALL, getAct, getDiff } from "../api";
+import { Overview, Host, ActCard, ScanDiff, SEV_ALL, getAct, getDiff, getExploitHint } from "../api";
 import { Stat, SevTag, SevBar } from "../ui";
 import { TeamCoverage } from "../collab";
 import { Nav, ARCH_ICON, archLabel } from "./shared";
@@ -82,6 +82,20 @@ export function Dashboard(
                   <div className="m mono">{f.ip}{f.port ? `:${f.port}` : ""} {f.cve && `· ${f.cve}`}</div>
                 </div>
                 {f.epss > 0 && <span className="badge epss" title="EPSS — 30-day probability this CVE is exploited (FIRST.org)">EPSS {f.epss}%</span>}
+                {nav.toExploitShell && (
+                  <button className="kev-shell-btn" title="Get shell — opens Sessions with the msf module + target pre-filled"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            try {
+                              const h = await getExploitHint(f.key);
+                              nav.toExploitShell!({
+                                ip: h.ip, port: h.port, cve: h.cve, title: f.title,
+                                module: h.hint?.module || "", payload: h.hint?.payload || "",
+                                note: h.hint?.note || "",
+                              });
+                            } catch { /* silent — worst case is no banner shown */ }
+                          }}>🎯 shell</button>
+                )}
               </li>
             ))}
           </ul>

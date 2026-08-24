@@ -95,6 +95,16 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             items = [s for s in items if s.host_ip == host]
         return [s.info() for s in items]
 
+    @app.delete("/api/sessions/{session_id}")
+    async def close_session(session_id: str):
+        """Explicit session close — closes the transport, marks the session
+        dead, and drops it from the registry. The transcript stays on disk
+        (still downloadable via the export flow); only the live ring is gone."""
+        if not await mgr.close_session(session_id):
+            raise HTTPException(404, "no such session")
+        broker.publish({"type": "session", "event": "closed", "id": session_id})
+        return {"ok": True}
+
     @app.patch("/api/sessions/{session_id}")
     def patch_session(session_id: str, body: dict = Body()):
         sess = mgr.get(session_id)

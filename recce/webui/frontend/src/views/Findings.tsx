@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Finding, VulnDetail, SEVS, getHost } from "../api";
+import { Finding, VulnDetail, SEVS, getHost, getExploitHint } from "../api";
 import { SevTag, NoteCell, useBounded } from "../ui";
 import { FindingDetail } from "../FindingDetail";
 import { useCollab } from "../collab";
@@ -244,6 +244,20 @@ export function Findings(
                   <div className="badges">
                     {x.kev && <span className="badge kev" title="CISA Known Exploited Vulnerability — confirmed exploited in the wild; fix first">🔥 KEV</span>}
                     {x.epss > 0 && <span className="badge epss" title="EPSS — 30-day probability this CVE is exploited (FIRST.org)">EPSS {x.epss}%</span>}
+                    {x.kev && nav.toExploitShell && (
+                      <button className="kev-shell-btn" title="Get shell — opens Sessions with the msf module + target pre-filled"
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                try {
+                                  const h = await getExploitHint(x.key);
+                                  nav.toExploitShell!({
+                                    ip: h.ip, port: h.port, cve: h.cve, title: x.title,
+                                    module: h.hint?.module || "", payload: h.hint?.payload || "",
+                                    note: h.hint?.note || "",
+                                  });
+                                } catch { /* silent */ }
+                              }}>🎯 shell</button>
+                    )}
                   </div>
                 </td>
                 <td className="mono host-link" onClick={() => nav.openHost(x.ip)} title="host detail">

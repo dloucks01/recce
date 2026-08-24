@@ -175,3 +175,26 @@ class SessionManager:
 
     def list(self) -> list[Session]:
         return sorted(self.sessions.values(), key=lambda s: s.created, reverse=True)
+
+    async def close_session(self, session_id: str) -> bool:
+        """Explicitly terminate a session — closes the transport if live, marks the
+        session dead, and drops it from the registry. Idempotent: unknown / already-
+        closed ids return False. `_pump` will notice the transport close and unbind
+        naturally, but we set status here so the operator sees `dead` at once."""
+        sess = self.sessions.pop(session_id, None)
+        if sess is None:
+            return False
+        sess.status = "dead"
+        transport = sess._transport
+        sess._transport = None
+        if transport is not None:
+            try:
+                await transport.close()
+            except (ConnectionError, OSError):
+                pass
+        if self.store is not None:
+            self.flush_pending(session_id)
+            self._save(sess)
+        sess._broadcast({"t": "status", "status": "dead"})
+        self._changed(sess)
+        return True

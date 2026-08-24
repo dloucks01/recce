@@ -3,6 +3,11 @@
 export type FindingFilters = {
   sev: string; host: string; kev: boolean; unreviewed: boolean; leads: boolean; q: string;
 };
+export type ExploitIntent = {
+  ip: string; port: number; cve: string; title: string;
+  module: string; payload: string; note: string;
+};
+
 export type Nav = {
   toFindings: (o?: Partial<FindingFilters>) => void;
   toHosts: (o?: { q?: string; owner?: string }) => void;
@@ -10,6 +15,7 @@ export type Nav = {
   openHost: (ip: string) => void;
   toSessions?: () => void;
   toScan?: (target?: string) => void;
+  toExploitShell?: (intent: ExploitIntent) => void;
 };
 
 export const ARCH_ICON: Record<string, string> = {

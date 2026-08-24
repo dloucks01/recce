@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, stopListener,
   lootCred, getTranscript, upgradeSession, runEnum, downloadFromShell, uploadToShell,
   persistSession, getPersistence, removeAllPersistence, Persistence, patchSession,
-  spawnSession,
+  spawnSession, closeSession,
   PortFwd, startPortFwd, stopPortFwd, listPortFwds,
   TunnelStatus, startTunnel, stopTunnel, tunnelStatus } from "../api";
 import { ShellTerminal } from "./Terminal";
 import { PayloadCatalog, StabilizeGuide, PostExploitRef, PivotGuide, ToolCatalog } from "./Payloads";
 import { bytesToB64 } from "../util";
+import type { ExploitIntent } from "../views/shared";
 
 function relTime(epoch: number): string {
   const d = Math.floor((Date.now() / 1000) - epoch);
@@ -24,8 +25,10 @@ function fmtBytes(n: number): string {
 
 // The Sessions tab: open listeners, watch caught shells land (grouped by host), and drive
 // them collaboratively. The whole team sees the same list on the one shared server.
-export function Sessions({ tester, focus, onScanHost, onViewHost }: {
+export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onScanHost, onViewHost }: {
   tester: string; focus?: string | null;
+  exploitIntent?: ExploitIntent | null;
+  onExploitConsumed?: () => void;
   onScanHost?: (ip: string) => void;
   onViewHost?: (ip: string) => void;
 }) {
@@ -40,6 +43,15 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
 
   // open a specific session when jumped here from the host drawer
   useEffect(() => { if (focus) setOpen(focus); }, [focus]);
+
+  // When an "exploit → shell" intent arrives from a KEV finding, auto-expand
+  // the first listener's payload catalog so the tester lands on the payload
+  // they'll paste on the target — instead of a bare Sessions tab.
+  useEffect(() => {
+    if (exploitIntent && listeners.length > 0 && !payloadsFor) {
+      setPayloadsFor(listeners[0].id);
+    }
+  }, [exploitIntent, listeners]);
 
   async function refresh() {
     try {
@@ -124,10 +136,76 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
     } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
   }
 
+  async function stopAllOnHost(ip: string) {
+    const group = hostGroups.find(([h]) => h === ip)?.[1] || [];
+    const live = group.filter(s => s.status !== "dead");
+    if (live.length === 0) return;
+    if (!window.confirm(`Stop ${live.length} session(s) on ${ip}? The transcript(s) stay on disk and remain downloadable.`)) return;
+    try {
+      await Promise.allSettled(live.map(s => closeSession(s.id)));
+      if (open && live.some(s => s.id === open)) setOpen(null);
+      refresh();
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+  }
+
+  async function closeOne(id: string, e?: React.MouseEvent) {
+    if (e) e.stopPropagation();
+    try {
+      await closeSession(id);
+      if (open === id) setOpen(null);
+      refresh();
+    } catch (e2) { setErr(String(e2 instanceof Error ? e2.message : e2)); }
+  }
+
   const hasTerminal = !!openSession;
 
   return (
     <div className={"sessions-view" + (hasTerminal ? " has-terminal" : "")}>
+      {exploitIntent && (
+        <div className="exploit-intent-banner">
+          <div className="eib-row">
+            <span className="eib-icon">🎯</span>
+            <div className="eib-body">
+              <div className="eib-title">
+                Exploiting <span className="mono">{exploitIntent.cve || exploitIntent.title}</span>
+                <span className="muted"> on </span>
+                <span className="mono">{exploitIntent.ip}{exploitIntent.port ? `:${exploitIntent.port}` : ""}</span>
+              </div>
+              {exploitIntent.module ? (
+                <div className="eib-msf">
+                  <span className="muted small">msf resource:</span>
+                  <code className="eib-mod">
+                    use {exploitIntent.module}; set RHOSTS {exploitIntent.ip}
+                    {exploitIntent.port ? `; set RPORT ${exploitIntent.port}` : ""}
+                    {exploitIntent.payload ? `; set PAYLOAD ${exploitIntent.payload}` : ""}
+                    ; set LHOST YOUR_IP; set LPORT {listeners[0]?.port || 4444}; check
+                  </code>
+                  <button className="linkish" onClick={() => {
+                    navigator.clipboard?.writeText(
+                      `use ${exploitIntent.module}\nset RHOSTS ${exploitIntent.ip}\n`
+                      + (exploitIntent.port ? `set RPORT ${exploitIntent.port}\n` : "")
+                      + (exploitIntent.payload ? `set PAYLOAD ${exploitIntent.payload}\n` : "")
+                      + `set LPORT ${listeners[0]?.port || 4444}\ncheck\n`);
+                  }}>copy .rc</button>
+                </div>
+              ) : (
+                <div className="muted small">
+                  No mapped msf module for this CVE — pick a payload below and run your own exploit
+                  against <span className="mono">{exploitIntent.ip}</span>.
+                </div>
+              )}
+              {exploitIntent.note && <div className="eib-note muted small">{exploitIntent.note}</div>}
+              {listeners.length === 0 && (
+                <div className="eib-hint warn-msg small">
+                  ⚠ no listener open — start one on the port you'll use as LPORT before firing the exploit.
+                </div>
+              )}
+            </div>
+            <button className="linkish eib-dismiss" onClick={() => onExploitConsumed?.()}
+                    title="dismiss this exploit intent">✕</button>
+          </div>
+        </div>
+      )}
       {persist.length > 0 && (
         <div className="persist-banner">
           <span>⚠ <b>{persist.length}</b> active persistence artifact(s) installed across{" "}
@@ -199,39 +277,51 @@ export function Sessions({ tester, focus, onScanHost, onViewHost }: {
                   </span>
                   {(() => {
                     const hasPtyLive = group.some(s => s.pty && s.status === "live");
+                    const hasLive = group.some(s => s.status !== "dead");
                     return (
-                      <button className="linkish sess-group-action" onClick={(e) => { e.stopPropagation(); spawnOnHost(ip); }}
-                              disabled={!hasPtyLive}
-                              title={hasPtyLive
-                                ? "spawn another session on this host from a live PTY"
-                                : "need a live PTY on this host to spawn — upgrade a raw shell first"}>
-                        + shell
-                      </button>
+                      <>
+                        <button className="linkish sess-group-action" onClick={(e) => { e.stopPropagation(); spawnOnHost(ip); }}
+                                disabled={!hasPtyLive}
+                                title={hasPtyLive
+                                  ? "spawn another session on this host from a live PTY"
+                                  : "need a live PTY on this host to spawn — upgrade a raw shell first"}>
+                          + shell
+                        </button>
+                        {onViewHost && (
+                          <button className="linkish sess-group-action" onClick={(e) => { e.stopPropagation(); onViewHost(ip); }}
+                                  title="open host detail drawer">detail</button>
+                        )}
+                        {onScanHost && (
+                          <button className="linkish sess-group-action" onClick={(e) => { e.stopPropagation(); onScanHost(ip); }}
+                                  title="jump to Scan tab with this host pre-filled">scan</button>
+                        )}
+                        <button className="linkish sess-group-action danger" onClick={(e) => { e.stopPropagation(); stopAllOnHost(ip); }}
+                                disabled={!hasLive}
+                                title="close every session on this host (transcript kept on disk)">
+                          stop all
+                        </button>
+                      </>
                     );
                   })()}
-                  {onViewHost && (
-                    <button className="linkish sess-group-action" onClick={(e) => { e.stopPropagation(); onViewHost(ip); }}
-                            title="open host detail drawer">detail</button>
-                  )}
-                  {onScanHost && (
-                    <button className="linkish sess-group-action" onClick={(e) => { e.stopPropagation(); onScanHost(ip); }}
-                            title="jump to Scan tab with this host pre-filled">scan</button>
-                  )}
                 </div>
                 {!isCollapsed && (
                   <div className="sess-group-items">
-                    {group.map((s, idx) => (
-                      <button key={s.id} className={"session-item" + (s.id === open ? " sel" : "")}
-                              onClick={() => setOpen(s.id === open ? null : s.id)}>
-                        <span className={"sess-dot " + (s.status === "live" ? "live" : "stale")} />
-                        <span className="mono sess-id" title={s.id}>{s.id.slice(0, 8)}</span>
-                        <span className="badge">{s.status}</span>
-                        {s.pty && <span className="badge pty" title="robust PTY (auto-reconnect stager)">PTY</span>}
-                        {s.label && <span className="sess-label" title={s.label}>{s.label}</span>}
-                        {s.driver && <span className="muted">▸ {s.driver}</span>}
-                        {s.attached.length > 0 && <span className="muted">👁 {s.attached.length}</span>}
-                        <span className="muted sess-meta">{relTime(s.created)}{s.bytes > 0 ? ` · ${fmtBytes(s.bytes)}` : ""}</span>
-                      </button>
+                    {group.map((s) => (
+                      <div key={s.id} className={"session-item-wrap" + (s.id === open ? " sel" : "")}>
+                        <button className={"session-item" + (s.id === open ? " sel" : "")}
+                                onClick={() => setOpen(s.id === open ? null : s.id)}>
+                          <span className={"sess-dot " + (s.status === "live" ? "live" : "stale")} />
+                          <span className="mono sess-id" title={s.id}>{s.id.slice(0, 8)}</span>
+                          <span className="badge">{s.status}</span>
+                          {s.pty && <span className="badge pty" title="robust PTY (auto-reconnect stager)">PTY</span>}
+                          {s.label && <span className="sess-label" title={s.label}>{s.label}</span>}
+                          {s.driver && <span className="muted">▸ {s.driver}</span>}
+                          {s.attached.length > 0 && <span className="muted">👁 {s.attached.length}</span>}
+                          <span className="muted sess-meta">{relTime(s.created)}{s.bytes > 0 ? ` · ${fmtBytes(s.bytes)}` : ""}</span>
+                        </button>
+                        <button className="sess-close" onClick={(e) => closeOne(s.id, e)}
+                                title="close this session (transcript kept on disk)">×</button>
+                      </div>
                     ))}
                   </div>
                 )}
