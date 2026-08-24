@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from . import qod
+from .. import qod
 
 # --- tiers (primary, coarse sort - readiness x safety x confidence) --------------
 AUTO, READY, BLOCKED, LEAD = 0, 1, 2, 3
@@ -306,7 +306,7 @@ def _pivot_card(host, subnets: set, o: str) -> ActionCard | None:
 # --- credential-driven cards (crack / spray / blocked auth enum) ------------------
 
 def _cred_cards(hosts, creds, o: str) -> list[ActionCard]:
-    from . import credentials as cr
+    from .. import credentials as cr
     out: list[ActionCard] = []
     surface = cr.spray_targets(hosts)              # {proto: [ips]}
     surface_hosts = sorted({ip for proto in _SPRAY_PROTOS for ip in surface.get(proto, [])})
@@ -388,7 +388,7 @@ def _default_cred_cards(hosts, o: str) -> list[ActionCard]:
     """One guided card per service type that has known default creds, aggregated across
     the hosts exposing it. Default creds are instant access for near-zero effort - but
     testing them sends auth attempts (lockout risk), so these are guided, not auto."""
-    from . import defaultcreds
+    from .. import defaultcreds
     by_svc: dict[str, list[str]] = {}
     for h in hosts:
         for p in getattr(h, "open_ports", []):
@@ -468,7 +468,8 @@ def action_plan(hosts, credentials=None, output_dir: str = "engagement") -> list
 def _tag_attack(cards: list[ActionCard]) -> None:
     """Annotate each card with its MITRE ATT&CK technique and primary CWE - the specific
     ones implied by the finding title, else the archetype's default technique."""
-    from . import attack, cwe
+    from . import attack
+    from .. import cwe
     for c in cards:
         tech = attack.technique_for_text(c.title) or attack.technique_for_archetype(c.archetype)
         if tech:
@@ -535,7 +536,7 @@ def _has_finding(host, *needles: str) -> bool:
 def _loot_db(store, hosts, o) -> list:
     """Re-run the read-only DB loot (Postgres trust-auth, MySQL empty-password) on hosts
     already flagged for it; persist any NEW credential. Returns the new creds."""
-    from . import mysql, postgres
+    from .. import mysql, postgres
     flagged = [h for h in hosts if _has_finding(h, "trust", "empty-password",
                                                 "empty password", "postgres", "mysql")]
     new: list = []
@@ -553,7 +554,7 @@ def _loot_db(store, hosts, o) -> list:
 def _loot_web(store, hosts, o) -> list:
     """Re-run the read-only web loot (.git/.env/.aws) on hosts already flagged; persist
     any NEW credential."""
-    from . import web
+    from .. import web
     new: list = []
     for h in hosts:
         if not _has_finding(h, "web-git", "gitconfig", "dotenv", ".env", "web-aws"):
@@ -582,7 +583,7 @@ def execute_auto(store, output_dir: str = "engagement", max_passes: int = 3) -> 
     (re)generate the lockout-safe spray PLAN from the accumulated cred set. Read-only
     throughout: loot is non-mutating, the spray plan only WRITES local files (it does
     not spray). Returns a summary for the caller to print."""
-    from . import credentials as cr
+    from .. import credentials as cr
     summary = {"looted": [], "passes": 0, "spray": {}}
     for _ in range(max(1, max_passes)):
         hosts = store.all_hosts()
