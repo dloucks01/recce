@@ -3,6 +3,8 @@ import { useCollab } from "./collab";
 import { ChatPanel } from "./ChatPanel";
 import { AssignmentsPanel } from "./AssignmentsPanel";
 import { CredentialsPanel } from "./CredentialsPanel";
+import { Host } from "./api";
+import { Nav } from "./views";
 
 function useSidebarResize(defaultW = 340) {
   const [width, setWidth] = useState(() => {
@@ -34,22 +36,19 @@ interface Job {
   started: number;
 }
 
-interface Activity {
-  type: string;
-  by?: string;
-  tester?: string;
-  ip?: string;
-  ts: number;
-  what?: string;
-}
+// Backend emits activity as {ts, tester, kind, text} — kind is the discriminator,
+// text is the pre-formatted human-readable line. Keep the icon table close to it.
+const ACTIVITY_ICON: Record<string, string> = {
+  assign: "👤", add: "➕", tick: "✓", note: "📝", scan: "🔍",
+  import: "📥", label: "🏷", dismiss: "✗", chat: "💬", session: "⌨",
+};
 
-export function CollabSidebar({ hosts, nav }: { hosts: any[]; nav?: any }) {
+export function CollabSidebar({ hosts, nav }: { hosts: Host[]; nav?: Nav }) {
   const { c, me } = useCollab();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [tab, setTab] = useState<"status" | "assign" | "activity" | "creds" | "chat">("status");
   const [autoScroll, setAutoScroll] = useState(true);
   const activityRef = useRef<HTMLDivElement>(null);
-  const chatRef = useRef<HTMLDivElement>(null);
   const { width: sidebarWidth, startResize } = useSidebarResize();
 
   // Poll running jobs
@@ -77,9 +76,6 @@ export function CollabSidebar({ hosts, nav }: { hosts: any[]; nav?: any }) {
   const myHosts = hosts.filter((h) => c.assignments[h.ip] === me);
   const myPending = myHosts.filter((h) => !h.reviewed).length;
   const recentActivity = c.activity.slice(-20).reverse();
-
-  // Testers online now
-  const online = [...new Set([...c.online, ...runningJobs.map((j) => j.tester)])];
 
   return (
     <div className="collab-sidebar" style={{ width: sidebarWidth }}>
@@ -219,31 +215,16 @@ export function CollabSidebar({ hosts, nav }: { hosts: any[]; nav?: any }) {
             {recentActivity.length === 0 ? (
               <div className="empty-state">No activity yet</div>
             ) : (
-              recentActivity.map((a, i) => {
-                const icon = a.type === "assign" ? "👤" : a.type === "add" ? "➕" : a.type === "tick" ? "✓"
-                  : a.type === "note" ? "📝" : a.type === "scan" ? "🔍" : a.type === "import" ? "📥"
-                  : a.type === "label" ? "🏷" : a.type === "dismiss" ? "✗" : a.type === "chat" ? "💬" : "◦";
-                const action = a.type === "assign" ? `claimed ${a.ip || "a host"}`
-                  : a.type === "add" ? `added a ${a.what || "item"}`
-                  : a.type === "tick" ? "reviewed a finding"
-                  : a.type === "note" ? "left a note"
-                  : a.type === "scan" ? "ran a scan"
-                  : a.type === "import" ? "imported data"
-                  : a.type === "label" ? `labeled ${a.ip || "a host"}`
-                  : a.type === "dismiss" ? "dismissed a finding"
-                  : a.type === "chat" ? "sent a message"
-                  : (a as any).text || a.type || "activity";
-                return (
-                  <div key={i} className={`activity-item type-${a.type}`}>
-                    <span className="activity-icon">{icon}</span>
-                    <div className="activity-text">
-                      <span className="activity-who">{a.by || a.tester}</span>
-                      <span className="activity-action">{action}</span>
-                    </div>
-                    <span className="activity-time">{timeAgo(a.ts)}</span>
+              recentActivity.map((a, i) => (
+                <div key={i} className={`activity-item type-${a.kind}`}>
+                  <span className="activity-icon">{ACTIVITY_ICON[a.kind] || "◦"}</span>
+                  <div className="activity-text">
+                    <span className="activity-who">{a.tester}</span>
+                    <span className="activity-action">{a.text}</span>
                   </div>
-                );
-              }))
+                  <span className="activity-time">{timeAgo(a.ts)}</span>
+                </div>
+              )))
             }
           </div>
           <button className="autoscroll-toggle" onClick={() => setAutoScroll(!autoScroll)}>

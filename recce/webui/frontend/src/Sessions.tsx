@@ -7,6 +7,7 @@ import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, st
   TunnelStatus, startTunnel, stopTunnel, tunnelStatus } from "./api";
 import { ShellTerminal } from "./Terminal";
 import { PayloadCatalog, StabilizeGuide, PostExploitRef, PivotGuide, ToolCatalog } from "./Payloads";
+import { bytesToB64 } from "./util";
 
 function relTime(epoch: number): string {
   const d = Math.floor((Date.now() / 1000) - epoch);
@@ -495,7 +496,7 @@ function SessionTools({ session }: { session: SessionInfo }) {
   async function upload(file: File) {
     setBusy(true); setMsg(null);
     try {
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer())));
+      const b64 = bytesToB64(new Uint8Array(await file.arrayBuffer()));
       await uploadToShell(session.id, `/tmp/${file.name}`, b64);
       setMsg(`⭱ uploaded ${file.name} → /tmp/${file.name} on the target`);
     } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }

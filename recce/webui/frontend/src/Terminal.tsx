@@ -3,24 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { SessionInfo } from "./api";
-
-function b64ToBytes(b64: string): Uint8Array {
-  try {
-    const raw = atob(b64);
-    const buf = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
-    return buf;
-  } catch {
-    return new Uint8Array(0);
-  }
-}
-
-function strToB64(s: string): string {
-  const bytes = new TextEncoder().encode(s);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return btoa(bin);
-}
+import { b64ToBytes, strToB64 } from "./util";
 
 export function ShellTerminal({ session, tester }: { session: SessionInfo; tester: string }) {
   const host = useRef<HTMLDivElement>(null);

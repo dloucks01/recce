@@ -5,6 +5,7 @@ terminal (scrollback, live output, one-driver input, presence)."""
 from __future__ import annotations
 
 import base64
+import re
 
 from fastapi import Body, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -271,7 +272,11 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(422, "could not decode the transferred data")
         ddir = os.path.join(ctx.eng_dir, "session-loot")
         os.makedirs(ddir, exist_ok=True)
-        dest = os.path.join(ddir, f"{sess.host_ip}_{os.path.basename(path) or 'download'}")
+        # host_ip comes from the peer address today (safe), but sanitise anyway so
+        # a future import path can't slip `..` into the destination.
+        safe_ip = re.sub(r"[^0-9a-fA-F:.]+", "_", sess.host_ip)
+        safe_name = os.path.basename(path) or "download"
+        dest = os.path.join(ddir, f"{safe_ip}_{safe_name}")
         with open(dest, "wb") as f:
             f.write(raw)
         broker.publish({"type": "session", "event": "download", "id": sess.id})

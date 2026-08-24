@@ -1,4 +1,19 @@
-"""Route modules for webui API."""
+"""Route modules for webui API.
+
+Error-shape convention (frontend depends on it):
+
+- ``raise HTTPException(status, detail)`` for genuine 4xx/5xx failures — bad
+  input, missing resource, upstream error. The client reads ``.detail``.
+
+- ``return {"ok": True, ...}`` / ``return {"ok": False, "reason": "..."}`` ONLY
+  for two-outcome business operations where "didn't work" is a first-class
+  result the caller wants to display, not an error to raise. Current uses:
+  upgrade (stager might not call back), spawn (target might lack python/bash),
+  tunnel / port-forward (bind might fail), persistence removal (might already
+  be gone). The client reads ``.ok`` and ``.reason``.
+
+Pick one shape per handler. Do not mix both in the same route.
+"""
 from .engagement import register_engagement_routes
 from .scan import register_scan_routes
 from .collab import register_collab_routes
