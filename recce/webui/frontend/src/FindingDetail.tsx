@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { VulnDetail } from "./api";
+import { VulnDetail, PocDossier, getPoc } from "./api";
 import { SevTag, NoteCell } from "./ui";
 
 function CopyBtn({ text, label }: { text: string; label: string }) {
@@ -132,6 +132,20 @@ export function FindingDetail(
   const suggestions = getSuggestions(v);
   const impact = getImpact(v);
 
+  // PoC dossier — lazy-fetched on click. Cached per finding so re-open is
+  // instant. Only offered when the finding has a real CVE reference.
+  const [poc, setPoc] = useState<PocDossier | null>(null);
+  const [pocBusy, setPocBusy] = useState(false);
+  const [pocErr, setPocErr] = useState<string | null>(null);
+  const cveForPoc = v.cve || v.cves?.[0] || "";
+  async function loadPoc() {
+    if (poc || pocBusy || !cveForPoc) return;
+    setPocBusy(true); setPocErr(null);
+    try { setPoc(await getPoc(cveForPoc)); }
+    catch (e) { setPocErr(String(e instanceof Error ? e.message : e)); }
+    finally { setPocBusy(false); }
+  }
+
   return (
     <div className="dv-detail">
       {/* Metadata */}
@@ -196,6 +210,40 @@ export function FindingDetail(
             <CopyBtn text={v.output} label="Copy" />
           </div>
           <pre className="fd-evidence-code">{v.output}</pre>
+        </div>
+      )}
+
+      {/* PoC dossier — offer only when there's a CVE to generate for. */}
+      {cveForPoc && (
+        <div className="fd-poc">
+          <div className="fd-poc-header">
+            <span className="fd-section-label">PoC dossier</span>
+            {!poc && !pocBusy && (
+              <button className="fd-copy fd-poc-btn" onClick={loadPoc}
+                      title="Generate a per-CVE dossier (offline; from vuln-db + KEV + EPSS + exploit refs)">
+                ⚡ Generate for {cveForPoc}
+              </button>
+            )}
+            {pocBusy && <span className="fd-poc-loading">Assembling…</span>}
+            {poc && (
+              <>
+                <CopyBtn text={poc.dossier_md} label="Copy dossier" />
+                <CopyBtn text={poc.harness_py} label="Copy harness" />
+                <button className="fd-copy" onClick={() => { setPoc(null); setPocErr(null); }}
+                        title="close">✕</button>
+              </>
+            )}
+          </div>
+          {pocErr && <div className="fd-poc-err warn-msg">{pocErr}</div>}
+          {poc && (
+            <div className="fd-poc-body">
+              <pre className="fd-poc-md">{poc.dossier_md}</pre>
+              <details className="fd-poc-harness">
+                <summary>Harness skeleton ({poc.harness_py.split("\n").length} lines) — check(ip, port) + exploit(ip, port)</summary>
+                <pre className="fd-poc-code">{poc.harness_py}</pre>
+              </details>
+            </div>
+          )}
         </div>
       )}
 

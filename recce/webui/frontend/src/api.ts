@@ -161,6 +161,15 @@ export type AttackStep = { stage: string; ip: string; hostname: string; title: s
 export type AttackStageGroup = { stage: string; steps: AttackStep[] };
 export type AttackPath = { narrative: string[]; stages: AttackStageGroup[]; step_count: number };
 export const getAttackPath = () => getJSON<AttackPath>("/api/attackpath");
+
+export type PocAffected = { ip: string; port: number | null; title: string; severity: string; confidence: string };
+export type PocEdb = { id: string; title: string };
+export type PocDossier = {
+  cve: string; title: string; severity: string; kev: boolean; epss: number; cwe: string[];
+  affected: PocAffected[]; msf: string; edb: PocEdb[];
+  dossier_md: string; harness_py: string;
+};
+export const getPoc = (cve: string) => getJSON<PocDossier>(`/api/poc/${encodeURIComponent(cve)}`);
 export const getCredentials = () => getJSON<Paginated<Credential>>("/api/credentials").then(r => r.items);
 export const getAttack = () => getJSON<AttackCoverage>("/api/attack");
 export type ActRunResult = { looted: number; creds: { label: string; source: string }[]; spray_files: string[] };

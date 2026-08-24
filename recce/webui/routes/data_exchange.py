@@ -376,6 +376,25 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         return {"narrative": attackpath.narrative(up, steps),
                 "stages": stages, "step_count": len(steps)}
 
+    @app.get("/api/poc/{cve}")
+    def poc_dossier(cve: str):
+        """Per-CVE PoC dossier + harness skeleton. Renders on demand so the
+        UI can drop a "Generate PoC" button on any KEV/CVE finding without
+        the tester leaving the browser for a terminal. Everything is derived
+        from what recce already knows (vuln db, KEV/EPSS, exploit refs)."""
+        from ...act import pocgen
+        if not pocgen.valid_cve(cve):
+            raise HTTPException(400, "not a CVE id (expected CVE-YYYY-NNNN)")
+        hs, _ = _hosts()
+        data = pocgen.gather(cve.upper(), hs)
+        return {
+            "cve": data["cve"], "title": data["title"], "severity": data["severity"],
+            "kev": data["kev"], "epss": data["epss"], "cwe": data["cwe"],
+            "affected": data["affected"], "msf": data["msf"], "edb": data["edb"],
+            "dossier_md": pocgen.render_dossier(data),
+            "harness_py": pocgen.render_harness(data),
+        }
+
     @app.get("/api/attackpath.svg")
     def attackpath_svg():
         """The projected attack-path graph as a standalone SVG, for inline display."""
