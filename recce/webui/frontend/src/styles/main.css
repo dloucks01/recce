@@ -692,13 +692,71 @@ body { background: var(--ground); color: var(--text); }
 .report-header p { margin: 0; color: var(--muted); }
 .report-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 18px; margin-bottom: 32px; }
 
-/* Live HTML preview panel */
+/* Live HTML preview panel (legacy — Report Studio below supersedes) */
 .rpt-preview { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow-sm); margin-bottom: 24px; }
 .rpt-preview-h { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
 .rpt-preview-h h3 { margin: 0; font-size: 15px; }
 .rpt-preview-h .muted { flex: 1; font-size: 12.5px; }
 .rpt-preview-actions { display: flex; gap: 6px; }
 .rpt-preview-frame { width: 100%; height: 640px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; }
+
+/* ---- Report Studio ------------------------------------------------------- */
+.report-studio { display: flex; flex-direction: column; gap: 18px; }
+.rs-header { display: flex; align-items: flex-start; gap: 20px; }
+.rs-header h2 { margin: 0 0 4px; font-size: 22px; }
+.rs-header p { margin: 0; font-size: 13px; }
+.rs-header-count { margin-left: auto; text-align: right; padding: 8px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-sm); }
+.rs-count-n { font-family: var(--mono); font-size: 24px; font-weight: 700; color: var(--accent); letter-spacing: -.02em; }
+.rs-count-n .muted { font-size: 15px; font-weight: 500; }
+.rs-narrative { padding: 12px 16px; background: color-mix(in srgb, var(--accent) 5%, var(--surface2)); border-left: 3px solid var(--accent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.rs-narrative-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; color: var(--accent); margin-bottom: 6px; display: block; }
+.rs-narrative p { margin: 3px 0; font-size: 13px; line-height: 1.5; }
+
+/* two-pane workspace */
+.rs-body { display: flex; flex-direction: column; gap: 16px; }
+.rs-body.with-preview { display: grid; grid-template-columns: minmax(420px, 1fr) minmax(540px, 1.4fr); gap: 16px; }
+@media (max-width: 1100px) { .rs-body.with-preview { grid-template-columns: 1fr; } }
+
+.rs-controls { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-sm); display: flex; flex-direction: column; overflow: hidden; }
+.rs-controls-h { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.rs-controls-h h3 { margin: 0; font-size: 14px; }
+.rs-controls-h .toggle { margin-left: auto; }
+.rs-filters { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.rs-filters .search { flex: 1; min-width: 180px; }
+.rs-selactions { display: flex; align-items: center; gap: 12px; padding: 8px 14px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); background: var(--surface2); }
+.rs-selactions .linkish { font-weight: 600; }
+.rs-finding-list { max-height: 640px; overflow-y: auto; display: flex; flex-direction: column; }
+.rs-finding { display: grid; grid-template-columns: 20px auto 1fr auto auto auto; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px dashed var(--line); cursor: pointer; font-size: 13px; transition: background .1s, opacity .1s; }
+.rs-finding:last-child { border-bottom: none; }
+.rs-finding:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.rs-finding.out { opacity: .35; }
+.rs-finding.out:hover { opacity: .7; }
+.rs-finding-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.rs-finding-host { color: var(--muted); font-size: 12px; }
+.rs-finding-cve { font-size: 11px; color: var(--faint); }
+
+/* right pane — live preview */
+.rs-preview { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-sm); display: flex; flex-direction: column; overflow: hidden; }
+.rs-preview-h { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.rs-preview-label { font-weight: 600; font-size: 14px; }
+.rs-preview-h .linkish { margin-left: auto; font-size: 14px; }
+.rs-preview-frame { flex: 1; width: 100%; min-height: 720px; border: 0; background: #fff; }
+
+/* downloads at bottom — same-shape grid, kept as a strip */
+.rs-downloads { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow-sm); }
+.rs-downloads-h { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+.rs-downloads-h h3 { margin: 0; font-size: 15px; }
+.rs-downloads-h .muted { flex: 1; }
+.rs-download-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.rs-download-card { text-align: left; padding: 12px 14px; background: var(--surface2); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; font-family: var(--sans); color: var(--text); transition: all .1s; display: flex; flex-direction: column; gap: 4px; }
+.rs-download-card:hover:not(:disabled) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface2)); }
+.rs-download-card:disabled { opacity: .5; cursor: default; }
+.rs-dl-label { display: flex; align-items: center; gap: 8px; }
+.rs-dl-fmt { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; font-weight: 700; padding: 2px 8px; background: var(--accent); color: #fff; border-radius: 4px; }
+.rs-dl-time { font-size: 10px; color: var(--muted); margin-left: auto; }
+.rs-dl-name { font-weight: 600; font-size: 13px; }
+.rs-dl-desc { line-height: 1.4; }
+.rs-dl-cta { margin-top: auto; font-size: 12px; font-weight: 600; color: var(--accent); padding-top: 6px; }
 .report-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow-sm); display: flex; flex-direction: column; }
 .card-header { margin-bottom: 12px; }
 .card-header h3 { margin: 0; font-size: 14px; }

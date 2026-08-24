@@ -436,12 +436,27 @@ _DEFER_REPORTS = False
 
 
 def _generate_reports(store: Store, paths: dict[str, str], title: str,
-                      quiet: bool = False) -> None:
-    """Regenerate all reports from the datastore (the source of truth)."""
+                      quiet: bool = False,
+                      include_keys: "set[str] | None" = None) -> None:
+    """Regenerate all reports from the datastore (the source of truth).
+
+    include_keys: optional filter. When set, only vulns whose `.key` is in
+    the set survive into the deliverables — used by the Report Studio's
+    per-finding include/exclude toggles so the tester's selection reshapes
+    the preview + downloads live."""
     if _DEFER_REPORTS:
         return
     hosts = store.all_hosts()
     from .. import qod, verify, dedup, kev, epss
+    # Apply the tester's include filter first so downstream annotation and
+    # dedup passes only touch what will actually appear in the report.
+    # include_keys uses the same canonical vuln_row_key the frontend and
+    # tracking table use ("vuln:ip:port:script_id:title[:60]"), so the two
+    # views stay in sync.
+    if include_keys is not None:
+        from ..tracking import vuln_row_key
+        for h in hosts:
+            h.vulns = [v for v in h.vulns if vuln_row_key(v) in include_keys]
     for h in hosts:                    # ensure every finding is QoD-scored before report/gates
         qod.annotate(h)
         kev.annotate(h)                # flag CVEs confirmed exploited-in-the-wild (fix-first)

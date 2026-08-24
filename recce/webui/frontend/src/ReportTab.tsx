@@ -1,15 +1,15 @@
-import { useMemo, useState } from "react";
-import { Finding, SEVS } from "./api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Finding, SEVS, AttackPath, getAttackPath } from "./api";
 import { SevTag, Chips } from "./ui";
 
 type ReportFormat = "xlsx" | "html" | "docx" | "csv" | "md";
 
 const REPORTS: [ReportFormat, string, string][] = [
-  ["xlsx", "Excel Workbook", "Structured findings with pivot tables and sorting"],
+  ["xlsx", "Excel Workbook", "Structured findings + pivot tables"],
   ["html", "HTML Report", "Interactive web-ready report"],
-  ["docx", "Findings Write-ups (Word)", "Detailed write-ups with evidence and remediation"],
-  ["csv", "Services CSV", "Discovered services and versions for pivot analysis"],
-  ["md", "Markdown", "Machine-readable findings in Markdown format"],
+  ["docx", "Findings Write-ups (Word)", "Detailed write-ups + evidence + remediation"],
+  ["csv", "Services CSV", "Discovered services for pivot analysis"],
+  ["md", "Markdown", "Machine-readable findings"],
 ];
 
 interface ReportTabProps {
@@ -17,16 +17,31 @@ interface ReportTabProps {
   onRefresh?: () => void;
 }
 
+// Debounce a value — the include filter changes as fast as the tester clicks,
+// but each preview render regenerates the whole report on the server, so wait
+// until the click storm settles before firing.
+function useDebounced<T>(value: T, delay: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = window.setTimeout(() => setV(value), delay);
+    return () => window.clearTimeout(t);
+  }, [value, delay]);
+  return v;
+}
+
+// Report Studio: two-pane layout. Left = triage controls + selection list;
+// right = live HTML preview that reshapes to the tester's selection.
+// Triage becomes the report; the download is a byproduct.
 export function ReportTab({ findings, onRefresh }: ReportTabProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastGenerated, setLastGenerated] = useState<Record<ReportFormat, number>>({} as any);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string> | null>(null); // null = "all"
   const [sevFilter, setSevFilter] = useState("all");
   const [searchQ, setSearchQ] = useState("");
-  const [showPreview, setShowPreview] = useState(false);
-  // Bumping the key forces the iframe to re-fetch (cache-busts the src).
+  const [showPreview, setShowPreview] = useState(true);
   const [previewKey, setPreviewKey] = useState(0);
+  const [narrative, setNarrative] = useState<AttackPath | null>(null);
 
   const realFindings = useMemo(
     () => findings.filter((f) => f.tier !== "lead"),
@@ -41,29 +56,39 @@ export function ReportTab({ findings, onRefresh }: ReportTabProps) {
     );
   }, [realFindings, sevFilter, searchQ]);
 
+  // Live attack narrative for the preview header — the single highest-value
+  // insight recce produces, always visible while the tester is composing.
+  useEffect(() => {
+    getAttackPath().then(setNarrative).catch(() => {});
+  }, []);
+
+  // Debounced include-filter string. null = "all findings" (empty include).
+  // Selecting/clearing rows shifts this; the iframe re-renders when it changes.
+  const includeParam = useMemo(() => {
+    if (selected === null) return "";
+    return [...selected].join(",");
+  }, [selected]);
+  const debouncedInclude = useDebounced(includeParam, 800);
+  useEffect(() => { setPreviewKey(k => k + 1); }, [debouncedInclude]);
+
   function toggleFinding(key: string) {
     setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
+      const start = prev === null ? new Set(realFindings.map(f => f.key)) : new Set(prev);
+      if (start.has(key)) start.delete(key); else start.add(key);
+      return start;
     });
   }
+  function selectVisible() { setSelected(new Set(filtered.map((f) => f.key))); }
+  function selectAll() { setSelected(null); }
+  function selectNone() { setSelected(new Set()); }
 
-  function selectAll() {
-    setSelected(new Set(filtered.map((f) => f.key)));
-  }
-
-  function selectNone() {
-    setSelected(new Set());
-  }
+  const isIncluded = (key: string) => selected === null || selected.has(key);
+  const includedCount = selected === null ? realFindings.length : selected.size;
 
   async function downloadReport(format: ReportFormat) {
-    setBusy(format);
-    setError(null);
+    setBusy(format); setError(null);
     try {
-      const params = selected.size > 0
-        ? `?findings=${Array.from(selected).join(",")}`
-        : "";
+      const params = includeParam ? `?include=${encodeURIComponent(includeParam)}` : "";
       const r = await fetch(`/api/report/${format}${params}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const blob = await r.blob();
@@ -71,19 +96,13 @@ export function ReportTab({ findings, onRefresh }: ReportTabProps) {
       const name = /filename="?([^"]+)"?/.exec(cd)?.[1] || `recce.${format}`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
       setLastGenerated({ ...lastGenerated, [format]: Date.now() });
       onRefresh?.();
-    } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
-    } finally {
-      setBusy(null);
-    }
+    } catch (e) { setError(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(null); }
   }
 
   const timeAgo = (ts: number) => {
@@ -94,114 +113,115 @@ export function ReportTab({ findings, onRefresh }: ReportTabProps) {
     return `${Math.round(s / 86400)}d ago`;
   };
 
+  const previewSrc = `/api/report/preview/html?_=${previewKey}` +
+    (debouncedInclude ? `&include=${encodeURIComponent(debouncedInclude)}` : "");
+
   return (
-    <div className="report-tab">
-      <div className="report-header">
-        <h2>Reports</h2>
-        <p>Generate engagement reports. Select specific findings below, or leave empty to include all.</p>
-      </div>
-
-      {error && <div className="error-banner">{error}</div>}
-
-      {/* Finding selector */}
-      <div className="rpt-selector">
-        <div className="rpt-selector-header">
-          <h3>Finding Selection</h3>
-          <span className="rpt-sel-count">
-            {selected.size > 0
-              ? `${selected.size} of ${realFindings.length} selected`
-              : `All ${realFindings.length} findings (none selected)`}
-          </span>
+    <div className="report-studio">
+      <div className="rs-header">
+        <div>
+          <h2>Report Studio</h2>
+          <p className="muted">
+            Every triage decision reshapes the preview on the right. The download at the
+            bottom is byte-for-byte what the tester sees now.
+          </p>
         </div>
-
-        <div className="rpt-selector-controls">
-          <Chips value={sevFilter} onChange={setSevFilter} options={["all", ...SEVS]} />
-          <input
-            className="search"
-            placeholder="Filter findings..."
-            value={searchQ}
-            onChange={(e) => setSearchQ(e.target.value)}
-            spellCheck={false}
-          />
-          <div className="rpt-sel-actions">
-            <button className="toggle" onClick={selectAll}>Select visible</button>
-            <button className="toggle" onClick={selectNone}>Clear</button>
-          </div>
-        </div>
-
-        <div className="rpt-finding-list">
-          {filtered.slice(0, 80).map((f) => (
-            <label key={f.key} className={`rpt-finding ${selected.has(f.key) ? "checked" : ""}`}>
-              <input
-                type="checkbox"
-                checked={selected.has(f.key)}
-                onChange={() => toggleFinding(f.key)}
-              />
-              <SevTag severity={f.severity} />
-              <span className="rpt-finding-title">{f.title}</span>
-              <span className="rpt-finding-host mono">{f.ip}{f.port ? `:${f.port}` : ""}</span>
-              {f.cve && <span className="rpt-finding-cve mono">{f.cve}</span>}
-            </label>
-          ))}
-          {filtered.length === 0 && (
-            <div className="muted" style={{ padding: "12px" }}>No findings match this filter</div>
-          )}
-          {filtered.length > 80 && (
-            <div className="muted" style={{ padding: "8px 12px", fontSize: "12px" }}>
-              Showing 80 of {filtered.length} &mdash; use the filter to narrow down
-            </div>
-          )}
+        <div className="rs-header-count">
+          <div className="rs-count-n">{includedCount}<span className="muted">/{realFindings.length}</span></div>
+          <div className="muted small">findings included</div>
         </div>
       </div>
 
-      {/* Live HTML preview — same builder as the download, in an iframe. */}
-      <div className="rpt-preview">
-        <div className="rpt-preview-h">
-          <h3>Preview (HTML)</h3>
-          <span className="muted">
-            what the HTML report looks like right now, straight from the engagement db
-          </span>
-          <div className="rpt-preview-actions">
-            {showPreview && (
-              <button className="toggle" onClick={() => setPreviewKey(k => k + 1)} title="rebuild preview">
-                ↻ Refresh
-              </button>
-            )}
-            <button className="toggle" onClick={() => { setShowPreview(v => !v); if (!showPreview) setPreviewKey(k => k + 1); }}>
-              {showPreview ? "Hide preview" : "Show preview"}
+      {narrative && narrative.step_count > 0 && (
+        <div className="rs-narrative">
+          <span className="rs-narrative-label">Attack narrative</span>
+          {narrative.narrative.map((line, i) => <p key={i}>{line}</p>)}
+        </div>
+      )}
+
+      {error && <div className="ranmsg warn-msg">{error}</div>}
+
+      <div className={"rs-body" + (showPreview ? " with-preview" : "")}>
+        <div className="rs-controls">
+          <div className="rs-controls-h">
+            <h3>Select findings</h3>
+            <button className="toggle" onClick={() => setShowPreview(v => !v)}>
+              {showPreview ? "hide preview" : "show preview"}
             </button>
           </div>
+
+          <div className="rs-filters">
+            <Chips value={sevFilter} onChange={setSevFilter} options={["all", ...SEVS]} />
+            <input className="search" placeholder="filter…" value={searchQ}
+                   onChange={(e) => setSearchQ(e.target.value)} spellCheck={false} />
+          </div>
+          <div className="rs-selactions">
+            <button className="linkish" onClick={selectAll}>all</button>
+            <button className="linkish" onClick={selectVisible}>visible ({filtered.length})</button>
+            <button className="linkish" onClick={selectNone}>none</button>
+          </div>
+
+          <div className="rs-finding-list">
+            {filtered.slice(0, 200).map((f) => (
+              <label key={f.key} className={`rs-finding ${isIncluded(f.key) ? "in" : "out"}`}>
+                <input type="checkbox" checked={isIncluded(f.key)} onChange={() => toggleFinding(f.key)} />
+                <SevTag severity={f.severity} />
+                <span className="rs-finding-title">{f.title}</span>
+                <span className="rs-finding-host mono">{f.ip}{f.port ? `:${f.port}` : ""}</span>
+                {f.kev && <span className="badge kev">KEV</span>}
+                {f.cve && <span className="rs-finding-cve mono">{f.cve}</span>}
+              </label>
+            ))}
+            {filtered.length > 200 && (
+              <div className="muted small" style={{padding: "8px 12px"}}>
+                Showing 200 of {filtered.length} — narrow with the filters
+              </div>
+            )}
+            {filtered.length === 0 && (
+              <div className="muted" style={{padding: "12px"}}>No findings match this filter</div>
+            )}
+          </div>
         </div>
+
         {showPreview && (
-          <iframe
-            key={previewKey}
-            className="rpt-preview-frame"
-            src={`/api/report/preview/html?_=${previewKey}`}
-            title="Report preview"
-          />
+          <div className="rs-preview">
+            <div className="rs-preview-h">
+              <span className="rs-preview-label">Live preview</span>
+              <span className="muted small">re-renders 800ms after your last change</span>
+              <button className="linkish" onClick={() => setPreviewKey(k => k + 1)}
+                      title="force re-render">↻</button>
+            </div>
+            <iframe key={previewKey} className="rs-preview-frame"
+                    src={previewSrc} title="Report preview" />
+          </div>
         )}
       </div>
 
-      {/* Report format cards */}
-      <div className="report-grid">
-        {REPORTS.map(([fmt, label, desc]) => (
-          <div key={fmt} className="report-card">
-            <div className="card-header">
-              <h3>{label}</h3>
-              {lastGenerated[fmt] && (
-                <div className="generated-time">Generated {timeAgo(lastGenerated[fmt])}</div>
-              )}
-            </div>
-            <p className="card-desc">{desc}</p>
-            <button
-              className="run"
-              onClick={() => downloadReport(fmt)}
-              disabled={!!busy}
-            >
-              {busy === fmt ? "Generating…" : selected.size > 0 ? `⬇ ${selected.size} findings` : "⬇ All findings"}
+      <div className="rs-downloads">
+        <div className="rs-downloads-h">
+          <h3>Download</h3>
+          <span className="muted small">
+            {selected === null || selected.size === realFindings.length
+              ? `all ${realFindings.length} findings included`
+              : `${selected.size} of ${realFindings.length} findings included`}
+          </span>
+        </div>
+        <div className="rs-download-grid">
+          {REPORTS.map(([fmt, label, desc]) => (
+            <button key={fmt} className="rs-download-card"
+                    onClick={() => downloadReport(fmt)} disabled={!!busy}>
+              <div className="rs-dl-label">
+                <span className="rs-dl-fmt">{fmt.toUpperCase()}</span>
+                {lastGenerated[fmt] && <span className="rs-dl-time">{timeAgo(lastGenerated[fmt])}</span>}
+              </div>
+              <div className="rs-dl-name">{label}</div>
+              <div className="rs-dl-desc muted small">{desc}</div>
+              <div className="rs-dl-cta">
+                {busy === fmt ? "Generating…" : "⬇ Download"}
+              </div>
             </button>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   );
