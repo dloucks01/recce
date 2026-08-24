@@ -2,7 +2,9 @@ import React, { Component, ErrorInfo, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { CollabProvider } from "./collab";
-import "./index.css";
+// Design tokens FIRST — every rule in main.css references them.
+import "./styles/tokens.css";
+import "./styles/main.css";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state: { error: Error | null } = { error: null };

@@ -1,0 +1,27 @@
+/* Design tokens — THIS IS THE DESIGN SYSTEM. Flip these and the whole app flips.
+   Light is the default theme; dark is opt-in via the header toggle (which stamps
+   data-theme="dark" on the root). Everything downstream styles through these vars,
+   so no color literal should appear in main.css. */
+
+:root {
+  --ground: #eef1f7; --surface: #ffffff; --surface2: #f1f4f9; --line: #e2e8f1;
+  --text: #111a27; --muted: #5a6b82; --faint: #96a3b7; --accent: #2f6bff; --accent-ink: #1b47b8;
+  --crit: #dc2626; --high: #e05d00; --med: #c59b07; --low: #64748b;
+  --ok: #059669; --kev: #b021c9;
+  --radius: 14px; --radius-sm: 9px;
+  --shadow-sm: 0 1px 2px rgba(17,26,39,.04), 0 1px 3px rgba(17,26,39,.05);
+  --shadow-md: 0 2px 8px rgba(17,26,39,.05), 0 12px 28px rgba(17,26,39,.07);
+  --shadow-pop: 0 12px 34px rgba(17,26,39,.16);
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+:root[data-theme="dark"] {
+  --ground: #0d131e; --surface: #151d2b; --surface2: #1b2434; --line: #29334a;
+  --text: #e6edf6; --muted: #8f9cb1; --faint: #5f6c82; --accent: #5b9bff; --accent-ink: #93bbff;
+  --crit: #fb5871; --high: #ff8a3a; --med: #e8d44d; --low: #7c8aa0;
+  --ok: #34d399; --kev: #e879f9;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.3);
+  --shadow-md: 0 2px 8px rgba(0,0,0,.3), 0 14px 30px rgba(0,0,0,.35);
+  --shadow-pop: 0 14px 40px rgba(0,0,0,.55);
+}
