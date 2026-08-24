@@ -1029,6 +1029,31 @@ body { background: var(--ground); color: var(--text); }
 .fd-evidence-code { background: #0a0f18; border: 1px solid #1e2a3e; border-top: 0; border-radius: 0 0 8px 8px; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; color: #b9c6da; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
 .fd-remediation { margin: 12px 0; border-left: 3px solid var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--surface2)); border-radius: 0 8px 8px 0; padding: 10px 14px; }
 
+/* Timeline view */
+.timeline-view { display: flex; flex-direction: column; gap: 12px; }
+.tl-filters { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 4px 0; }
+.tl-chips { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
+.tl-chips .chip { font-size: 11px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface2); color: var(--muted); cursor: pointer; }
+.tl-chips .chip.sel { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tl-day-h { display: flex; justify-content: space-between; align-items: baseline; padding: 6px 12px 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.tl-day-label { font-weight: 700; font-size: 13px; color: var(--accent); text-transform: uppercase; letter-spacing: .05em; }
+.tl-list { list-style: none; padding: 0; margin: 0; }
+.tl-event { display: grid; grid-template-columns: 60px 24px 100px 1fr auto; align-items: center; gap: 10px; padding: 6px 12px; font-size: 13px; border-radius: var(--radius-sm); position: relative; }
+.tl-event:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.tl-event::before { content: ""; position: absolute; left: 84px; top: 0; bottom: 0; width: 2px; background: var(--line); opacity: .5; }
+.tl-event.tl-k-session::before, .tl-event.tl-k-session-caught::before { background: var(--emerald, var(--ok)); }
+.tl-event.tl-k-scan::before { background: var(--accent); }
+.tl-event.tl-k-add::before { background: var(--kev); }
+.tl-event.tl-k-finding::before { background: var(--high); }
+.tl-event.tl-k-session-dropped::before { background: var(--crit); }
+.tl-time { color: var(--muted); font-size: 11px; }
+.tl-icon { text-align: center; font-size: 15px; z-index: 1; background: var(--surface); border-radius: 50%; width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); }
+.tl-tester { font-weight: 600; color: var(--text); font-size: 12px; }
+.tl-text { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-actions { display: flex; gap: 8px; opacity: 0; transition: opacity .1s; }
+.tl-event:hover .tl-actions { opacity: 1; }
+.tl-actions .linkish { font-size: 11px; padding: 2px 6px; }
+
 /* Auto-loot panel (Credentials tab) */
 .autoloot-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
 .autoloot-row .run { margin-left: auto; }

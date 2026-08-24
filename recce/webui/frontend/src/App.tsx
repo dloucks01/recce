@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { postTick, postNote } from "./api";
 import { ImportModal, ShortcutHelp } from "./modals";
 import { useEngagement } from "./useEngagement";
-import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Nav, FindingFilters } from "./views";
+import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Timeline, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
 import { TabBar, TabId } from "./TabBar";
@@ -45,7 +45,7 @@ function usePreferences() {
 }
 
 // Main App
-const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "sessions", "report", "exploitation", "credentials", "playbook"];
+const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "sessions", "timeline", "report", "exploitation", "credentials", "playbook"];
 const isTab = (t: string): t is TabId => (VALID_TABS as string[]).includes(t);
 
 // Read the initial UI state from the URL once, so a shared link opens in
@@ -215,6 +215,7 @@ export default function App() {
     hosts: hosts.length || undefined,
     services: ov?.services || undefined,
     sessions: undefined,
+    timeline: undefined,
     report: undefined,
     exploitation: undefined,
     credentials: undefined,
@@ -294,6 +295,7 @@ export default function App() {
             />
           ) : <div className="loading">Loading…</div>)}
           {tab === "services" && <Services hosts={hosts} findings={findings} nav={nav} />}
+          {tab === "timeline" && <Timeline nav={nav} />}
           {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus}
             onScanHost={(ip) => { setScanPrefill(ip); setTab("scan"); }}
             onViewHost={(ip) => setDrawerIp(ip)} />}

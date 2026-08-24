@@ -7,3 +7,4 @@ export { Exploitation } from "./Exploitation";
 export { Credentials } from "./Credentials";
 export { Playbook } from "./Playbook";
 export { Services } from "./Services";
+export { Timeline } from "./Timeline";
