@@ -276,9 +276,34 @@ export async function fetchPlaybook(): Promise<Playbook> { return getJSON<Playbo
 
 // --- shell sessions ---------------------------------------------------------
 export interface SessionInfo {
-  id: string; host_ip: string; host_port: number; kind: string;
+  id: string; name?: string; host_ip: string; host_port: number; kind: string;
   status: "live" | "stale" | "dead"; pty: boolean; label: string;
   driver: string | null; attached: string[]; created: number; bytes: number;
+}
+export interface QuickAction { key: string; label: string; cmd: string; }
+export async function getQuickActions(): Promise<QuickAction[]> {
+  const r = await getJSON<{ actions: QuickAction[] }>("/api/sessions/quick-actions");
+  return r.actions;
+}
+export async function runQuickAction(sessionId: string, key: string): Promise<{ output: string; cmd: string }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/quick`,
+    { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ key }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function runShellCmd(sessionId: string, cmd: string): Promise<{ output: string }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/quickrun`,
+    { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ cmd }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function getSessionHistory(sessionId: string): Promise<string[]> {
+  const r = await getJSON<{ history: string[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/history`);
+  return r.history || [];
+}
+export async function putSessionHistory(sessionId: string, entries: string[]): Promise<void> {
+  await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/history`,
+    { method: "PUT", headers: jsonHeaders(), body: JSON.stringify({ entries }) });
 }
 export interface ListenerInfo { id: string; host: string; port: number; kind: string; status: string; }
 

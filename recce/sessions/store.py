@@ -49,18 +49,45 @@ class SessionStore:
             self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN pty INTEGER DEFAULT 0")
         if "label" not in cols:
             self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN label TEXT DEFAULT ''")
+        if "name" not in cols:
+            self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN name TEXT DEFAULT ''")
+        if "history" not in cols:
+            # Per-session command history so up-arrow after re-attach recalls what
+            # was typed against THIS host, not this browser tab. Stored as JSON list.
+            self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN history TEXT DEFAULT ''")
 
 
     def save_session(self, s) -> None:
         closed = None if s.status == "live" else time.time()
         self._conn.execute(
-            "INSERT INTO shell_sessions(id,host_ip,host_port,kind,status,token,opened,closed,pty,label) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "INSERT INTO shell_sessions(id,host_ip,host_port,kind,status,token,opened,closed,pty,label,name) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET status=excluded.status, closed=excluded.closed, "
-            "pty=excluded.pty, label=excluded.label",
+            "pty=excluded.pty, label=excluded.label, name=excluded.name",
             (s.id, s.host_ip, s.host_port, s.kind, s.status, s.token, s.created, closed,
-             1 if s.pty else 0, s.label))
+             1 if s.pty else 0, s.label, s.name))
         self._conn.commit()
+
+    def save_history(self, session_id: str, entries: list[str]) -> None:
+        """Persist a session's command history (bounded list of strings)."""
+        import json
+        # Cap at 500 entries so a runaway loop can't blow up the row size.
+        payload = json.dumps(entries[-500:], ensure_ascii=True)
+        self._conn.execute(
+            "UPDATE shell_sessions SET history=? WHERE id=?", (payload, session_id))
+        self._conn.commit()
+
+    def load_history(self, session_id: str) -> list[str]:
+        import json
+        row = self._conn.execute(
+            "SELECT history FROM shell_sessions WHERE id=?", (session_id,)).fetchone()
+        if not row or not row[0]:
+            return []
+        try:
+            v = json.loads(row[0])
+            return v if isinstance(v, list) else []
+        except (ValueError, TypeError):
+            return []
 
     def append(self, session_id: str, data: bytes) -> None:
         if not data:
@@ -75,7 +102,7 @@ class SessionStore:
     def load_sessions(self) -> list[tuple[dict, bytes]]:
         """Every persisted session with its concatenated transcript, oldest first."""
         rows = self._conn.execute(
-            "SELECT id,host_ip,host_port,kind,status,token,opened,pty,label FROM shell_sessions "
+            "SELECT id,host_ip,host_port,kind,status,token,opened,pty,label,name FROM shell_sessions "
             "ORDER BY opened").fetchall()
         out: list[tuple[dict, bytes]] = []
         for r in rows:
@@ -86,7 +113,7 @@ class SessionStore:
             self._seq[r[0]] = (chunks[-1][0] + 1) if chunks else 0   # continue the seq
             out.append(({"id": r[0], "host_ip": r[1], "host_port": r[2], "kind": r[3],
                          "token": r[5], "opened": r[6], "pty": r[7],
-                         "label": r[8] or ""}, data))
+                         "label": r[8] or "", "name": r[9] or ""}, data))
         return out
 
     def load_transcript(self, session_id: str, limit: int = 0) -> bytes:

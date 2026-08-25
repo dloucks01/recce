@@ -20,6 +20,39 @@ from .transport import Transport
 # live in-memory window replayed on attach. Held as a deque of chunks so trimming is O(1).
 _BUFFER_CAP = 1024 * 1024   # 1 MB of live scrollback
 
+# Memorable name = adjective + noun (uppercase, underscored). Every session gets one
+# alongside its UUID so testers can refer to it in chat/notes without pasting hex —
+# "attach to STORMY_BEAR" beats "attach to a3f9b1c2". The two lists are small on
+# purpose: 30 × 30 = 900 combos is plenty for the max sessions any real engagement
+# holds; a rare collision gets a `-2` suffix at generation time, deterministically.
+_ADJ = ("STORMY", "SHINY", "SILENT", "SWIFT", "BOLD", "CRAFTY", "IRON", "OBSIDIAN",
+        "SCARLET", "AMBER", "COBALT", "GILDED", "STEEL", "LATENT", "AGILE", "WEIRD",
+        "STRAY", "CROOKED", "DUSTY", "PROUD", "QUIET", "SHARP", "SPRY", "STOIC",
+        "TERSE", "VIVID", "WILD", "ZEALOUS", "SLY", "BRAVE")
+_NOUN = ("BEAR", "TIGER", "OWL", "FOX", "WOLF", "HAWK", "HERON", "MOUNTAIN",
+         "RIVER", "TURKEY", "CEDAR", "STORM", "SPARROW", "COBRA", "LYNX", "MOOSE",
+         "OTTER", "PANDA", "RAVEN", "SEAL", "STAG", "SWAN", "VIPER", "WHALE",
+         "ZEBRA", "BADGER", "CRANE", "EAGLE", "FALCON", "MARLIN")
+
+
+def _generate_name(existing: set[str]) -> str:
+    """Pick an adjective+noun combo not already in use. Deterministic on the token —
+    seeded by uuid.uuid4() at the call site — so the same session always gets the
+    same name across restarts (session id is what's persisted; we regenerate the
+    name on restore only when it wasn't saved before)."""
+    import random
+    for _ in range(20):
+        n = f"{random.choice(_ADJ)}_{random.choice(_NOUN)}"
+        if n not in existing:
+            return n
+    # rare — fall back to a numeric suffix
+    base = f"{random.choice(_ADJ)}_{random.choice(_NOUN)}"
+    for i in range(2, 100):
+        cand = f"{base}-{i}"
+        if cand not in existing:
+            return cand
+    return base
+
 
 class Session:
     """One logical shell on one host. At most one live Transport at a time; survives losing it."""
@@ -33,6 +66,11 @@ class Session:
         self.created = time.time()
         self.status = "live"                   # live | stale | dead
         self.pty = False
+        # Memorable auto-generated name (STORMY_BEAR etc.) — a hex UUID is unmemorable
+        # in a team chat. `label` remains the tester's manual override; `name` is
+        # always present, always shown when no label is set. Uniqueness against
+        # existing session names is enforced by SessionManager at adoption time.
+        self.name: str = _generate_name(set())
         self.label: str = ""                   # user-editable name ("initial foothold", etc.)
         self.driver: str | None = None         # tester id currently allowed to type
         self.attached: set[str] = set()        # presence — who's watching
@@ -57,6 +95,10 @@ class Session:
         s.created = meta.get("opened") or s.created
         s.pty = bool(meta.get("pty"))
         s.label = meta.get("label", "")
+        # Restore the memorable name if one was persisted; else keep whatever the
+        # constructor generated (sessions from before this feature landed).
+        if meta.get("name"):
+            s.name = meta["name"]
         s.status = "stale"
         if transcript:
             tail = transcript[-_BUFFER_CAP:]
@@ -171,7 +213,8 @@ class Session:
 
     # --- serialization for the REST list ----------------------------------------
     def info(self) -> dict:
-        return {"id": self.id, "host_ip": self.host_ip, "host_port": self.host_port,
+        return {"id": self.id, "name": self.name,
+                "host_ip": self.host_ip, "host_port": self.host_port,
                 "kind": self.kind, "status": self.status, "pty": self.pty,
                 "label": self.label, "driver": self.driver, "attached": sorted(self.attached),
                 "created": self.created, "last_seen": self.last_seen, "bytes": self._blen}

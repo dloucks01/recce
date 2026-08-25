@@ -3,6 +3,7 @@ import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, st
   lootCred, getTranscript, upgradeSession, runEnum, downloadFromShell, uploadToShell,
   persistSession, getPersistence, removeAllPersistence, Persistence, patchSession,
   spawnSession, closeSession,
+  QuickAction, getQuickActions, runQuickAction, runShellCmd,
   PortFwd, startPortFwd, stopPortFwd, listPortFwds,
   TunnelStatus, startTunnel, stopTunnel, tunnelStatus } from "../api";
 import { ShellTerminal } from "./Terminal";
@@ -98,6 +99,22 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
 
   const openSession = sessions.find((s) => s.id === open) || null;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Session rail filters: chip axes + free-text search. Filters ONLY the
+  // sessions list; listeners + terminal stay unaffected.
+  const [sfilter, setSfilter] = useState<{status: string; pty: string; q: string}>(
+    { status: "all", pty: "all", q: "" });
+  const filteredSessions = sessions.filter(s => {
+    if (sfilter.status !== "all" && s.status !== sfilter.status) return false;
+    if (sfilter.pty === "pty" && !s.pty) return false;
+    if (sfilter.pty === "raw" && s.pty) return false;
+    if (sfilter.q) {
+      const q = sfilter.q.toLowerCase();
+      const hay = `${s.host_ip} ${s.label || ""} ${s.name || ""} ${s.id}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  const anyFilter = sfilter.status !== "all" || sfilter.pty !== "all" || !!sfilter.q;
   const toggleGroup = (ip: string) => setCollapsed(s => {
     const n = new Set(s);
     n.has(ip) ? n.delete(ip) : n.add(ip);
@@ -106,7 +123,7 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
 
   const hostGroups: [string, SessionInfo[]][] = (() => {
     const m = new Map<string, SessionInfo[]>();
-    sessions.forEach(s => {
+    filteredSessions.forEach(s => {
       const arr = m.get(s.host_ip) || [];
       arr.push(s);
       m.set(s.host_ip, arr);
@@ -261,6 +278,37 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
             shell lands here — live for the whole team, tied to its host.
           </div>
         )}
+        {sessions.length > 0 && (
+          <div className="sess-filter-bar">
+            {(["all", "live", "stale", "dead"] as const).map(s => (
+              <button key={s}
+                      className={"sess-fchip" + (sfilter.status === s ? " sel" : "")}
+                      onClick={() => setSfilter({ ...sfilter, status: s })}>
+                {s === "all" ? "All" : s[0].toUpperCase() + s.slice(1)}
+              </button>
+            ))}
+            <span className="sess-fchip-sep" />
+            {(["all", "pty", "raw"] as const).map(p => (
+              <button key={p}
+                      className={"sess-fchip" + (sfilter.pty === p ? " sel" : "")}
+                      onClick={() => setSfilter({ ...sfilter, pty: p })}>
+                {p === "all" ? "Any" : p === "pty" ? "PTY" : "Raw"}
+              </button>
+            ))}
+            <input className="search sess-fsearch" placeholder="host, name, label…"
+                   value={sfilter.q} onChange={e => setSfilter({ ...sfilter, q: e.target.value })} />
+            {anyFilter && (
+              <button className="linkish"
+                      onClick={() => setSfilter({ status: "all", pty: "all", q: "" })}>clear</button>
+            )}
+            <span className="muted small sess-fcount">
+              {filteredSessions.length}/{sessions.length}
+            </span>
+          </div>
+        )}
+        {sessions.length > 0 && filteredSessions.length === 0 && (
+          <div className="empty">no session matches this filter</div>
+        )}
         <div className="session-list">
           {hostGroups.map(([ip, group]) => {
             const liveCount = group.filter(s => s.status === "live").length;
@@ -311,7 +359,9 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
                         <button className={"session-item" + (s.id === open ? " sel" : "")}
                                 onClick={() => setOpen(s.id === open ? null : s.id)}>
                           <span className={"sess-dot " + (s.status === "live" ? "live" : "stale")} />
-                          <span className="mono sess-id" title={s.id}>{s.id.slice(0, 8)}</span>
+                          <span className="sess-name" title={`${s.name || ""}  •  id ${s.id}`}>
+                            {s.name || s.id.slice(0, 8)}
+                          </span>
                           <span className="badge">{s.status}</span>
                           {s.pty && <span className="badge pty" title="robust PTY (auto-reconnect stager)">PTY</span>}
                           {s.label && <span className="sess-label" title={s.label}>{s.label}</span>}
@@ -338,7 +388,9 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
           <section className="panel">
             <div className="panel-h">
               <h3>Terminal — <span className="mono">{openSession.host_ip}</span>
-                <span className="muted" style={{fontSize: "0.8em", marginLeft: 8}}>{openSession.id.slice(0, 8)}</span>
+                <span className="muted" style={{fontSize: "0.8em", marginLeft: 8}}>
+                  {openSession.name || openSession.id.slice(0, 8)}
+                </span>
               </h3>
               <div className="sess-host-actions">
                 <input className="sess-label-input" placeholder="label this session…"
@@ -581,6 +633,63 @@ function PortForwardPanel({ session }: { session: SessionInfo }) {
   );
 }
 
+// Quick-recon actions panel: catalog buttons (whoami/id/uname/...) that fire a
+// non-attach `run_and_capture` and render the result inline. Plus an arbitrary-cmd
+// text input for one-shot runs without stealing the terminal wheel.
+function QuickActions({ session }: { session: SessionInfo }) {
+  const [catalog, setCatalog] = useState<QuickAction[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [out, setOut] = useState<{ cmd: string; output: string } | null>(null);
+  const [customCmd, setCustomCmd] = useState("");
+  useEffect(() => { getQuickActions().then(setCatalog).catch(() => {}); }, []);
+  async function fire(key: string) {
+    setBusy(key); setOut(null);
+    try { const r = await runQuickAction(session.id, key); setOut(r); }
+    catch (e) { setOut({ cmd: key, output: String(e instanceof Error ? e.message : e) }); }
+    finally { setBusy(null); }
+  }
+  async function runCustom() {
+    const cmd = customCmd.trim();
+    if (!cmd) return;
+    setBusy("_custom"); setOut(null);
+    try { const r = await runShellCmd(session.id, cmd); setOut({ cmd, output: r.output }); }
+    catch (e) { setOut({ cmd, output: String(e instanceof Error ? e.message : e) }); }
+    finally { setBusy(null); }
+  }
+  const disabled = session.status !== "live";
+  return (
+    <div className="st-section">
+      <div className="st-section-label">Quick recon (no attach)</div>
+      <div className="qa-bar">
+        {catalog.map(a => (
+          <button key={a.key} className={"qa-btn" + (busy === a.key ? " busy" : "")}
+                  disabled={disabled || !!busy} onClick={() => fire(a.key)}
+                  title={a.cmd}>
+            {busy === a.key ? "…" : a.label}
+          </button>
+        ))}
+      </div>
+      <div className="qa-custom">
+        <input className="scan-in" placeholder="run one-shot: e.g. cat /etc/passwd | head"
+               value={customCmd} disabled={disabled || !!busy}
+               onChange={e => setCustomCmd(e.target.value)}
+               onKeyDown={e => { if (e.key === "Enter") runCustom(); }} />
+        <button className="toggle" onClick={runCustom} disabled={disabled || !!busy || !customCmd.trim()}>
+          {busy === "_custom" ? "…" : "▶ Run"}
+        </button>
+      </div>
+      {out && (
+        <div className="qa-out">
+          <div className="qa-out-h"><code>{out.cmd}</code>
+            <button className="linkish" onClick={() => setOut(null)}>×</button>
+          </div>
+          <pre className="qa-out-pre">{out.output || "(no output)"}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Loot a credential found in the shell (→ store + spray plan) and grab the transcript.
 function SessionTools({ session }: { session: SessionInfo }) {
   const [u, setU] = useState("");
@@ -683,6 +792,8 @@ function SessionTools({ session }: { session: SessionInfo }) {
           <span className="muted small">auto-pivots this raw shell into a self-healing, full-PTY session</span>
         </div>
       )}
+
+      <QuickActions session={session} />
 
       <div className="st-section">
         <div className="st-section-label">Actions</div>

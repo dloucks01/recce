@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { SessionInfo } from "../api";
+import { SessionInfo, getSessionHistory, putSessionHistory } from "../api";
 import { b64ToBytes, strToB64 } from "../util";
 
 export function ShellTerminal({ session, tester }: { session: SessionInfo; tester: string }) {
@@ -12,6 +12,23 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
   const [attached, setAttached] = useState<string[]>(session.attached);
   const [live, setLive] = useState(session.status === "live");
   const iDrive = driver === tester;
+  // Per-session command history — recall what YOU typed to this shell across
+  // attach/detach, and across different browsers. Assembled from keystrokes at
+  // the WebSocket layer (before the target echoes them), split on Enter, and
+  // persisted server-side so a re-attach picks up where you left off.
+  const [history, setHistory] = useState<string[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const cmdBuf = useRef<string>("");
+  const saveTimer = useRef<number | null>(null);
+  const scheduleSave = (entries: string[]) => {
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      putSessionHistory(session.id, entries).catch(() => {});
+    }, 800);
+  };
+  useEffect(() => {
+    getSessionHistory(session.id).then(setHistory).catch(() => {});
+  }, [session.id]);
 
   useEffect(() => {
     if (!host.current) return;
@@ -62,6 +79,32 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
 
     term.onData((d) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: "in", data: strToB64(d) }));
+      // Build up a command buffer from keystrokes — Enter (\r or \n) flushes it
+      // to history. Backspace (\x7f, ^H) trims. Ctrl-C (\x03) discards without
+      // recording. Filter escape sequences (\x1b[...) which are arrow keys etc.
+      // Only "you" (the tester with the wheel) contributes — history is per-tester
+      // but stored per-session; the collaborative side is intentional.
+      for (const ch of d) {
+        if (ch === "\r" || ch === "\n") {
+          const line = cmdBuf.current.trim();
+          cmdBuf.current = "";
+          if (line && line.length <= 2000) {
+            setHistory(prev => {
+              // Bash-style: drop consecutive duplicates + collapse whitespace
+              if (prev[prev.length - 1] === line) return prev;
+              const next = [...prev, line].slice(-500);
+              scheduleSave(next);
+              return next;
+            });
+          }
+        } else if (ch === "\x7f" || ch === "\b") {
+          cmdBuf.current = cmdBuf.current.slice(0, -1);
+        } else if (ch === "\x03") {  // Ctrl-C — abort current line
+          cmdBuf.current = "";
+        } else if (ch.charCodeAt(0) >= 0x20 && ch.charCodeAt(0) < 0x7f) {
+          cmdBuf.current += ch;
+        }
+      }
     });
 
     setTimeout(() => { if (!disposed) term.focus(); }, 100);
@@ -74,6 +117,12 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
     };
   }, [session.id, tester]);
 
+  function insertHistory(cmd: string) {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ t: "in", data: strToB64(cmd) }));
+    }
+    setShowHistory(false);
+  }
   return (
     <div className="shell-term">
       <div className="shell-term-bar">
@@ -88,6 +137,25 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
           </button>
         )}
         <span className="shell-term-watchers" title="attached">👁 {attached.length}</span>
+        {history.length > 0 && (
+          <div className="shell-term-history">
+            <button className="toggle" onClick={() => setShowHistory(v => !v)}
+                    title="recent commands typed to this session (persists across attach/detach)">
+              ⇧ history ({history.length})
+            </button>
+            {showHistory && (
+              <div className="shell-hist-pop">
+                {history.slice(-30).reverse().map((c, i) => (
+                  <button key={i} className="shell-hist-item mono"
+                          title="click to insert (no Enter — you review then hit Enter)"
+                          onClick={() => insertHistory(c)}>
+                    {c}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <div className="shell-term-screen" ref={host} />
     </div>

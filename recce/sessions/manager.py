@@ -107,6 +107,13 @@ class SessionManager:
             sess = Session(host_ip=ip, host_port=port)
             if token:
                 sess.token = token          # the stager's embedded token IS the session's,
+            # Ensure the auto-generated name is unique across live+stale sessions.
+            # Session.__init__ picks from an empty exclusion set (it can't see the
+            # registry), so a rare collision gets resolved here at adoption time.
+            from .session import _generate_name
+            names = {s.name for s in self.sessions.values() if s.id != sess.id}
+            if sess.name in names:
+                sess.name = _generate_name(names)
             self.sessions[sess.id] = sess   # so every reconnect rebinds to this same session
         if pty:
             sess.pty = True

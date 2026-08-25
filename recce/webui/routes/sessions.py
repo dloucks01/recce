@@ -206,6 +206,90 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             await sess.send(b"printf '%s' '" + b64[i:i + 2048] + b"' >> " + q + b".b64\n")
         await sess.send(b"base64 -d " + q + b".b64 > " + q + b" && rm -f " + q + b".b64\n")
 
+    # Quick recon commands testers run on every fresh shell. Kept as an allowlist
+    # so this endpoint can never turn into an arbitrary-cmd runner (that lives at
+    # /quickrun with its own tester-provided input) — a fixed catalog is what
+    # justifies the "one-click" UX on the session card.
+    _QUICK_ACTIONS = {
+        "whoami":   "whoami",
+        "id":       "id",
+        "hostname": "hostname",
+        "uname":    "uname -a",
+        "sudo":     "sudo -n -l 2>&1 | head -30",
+        "pwd":      "pwd",
+        "os":       "cat /etc/os-release 2>/dev/null || uname -a",
+        "ifconfig": "ip a 2>/dev/null || ifconfig 2>/dev/null",
+        "ps":       "ps -eo user,pid,comm --no-headers 2>/dev/null | head -30",
+        "netstat":  "ss -tlnp 2>/dev/null | head -30 || netstat -tlnp 2>/dev/null | head -30",
+    }
+
+    @app.get("/api/sessions/quick-actions")
+    def quick_actions_catalog():
+        """The names the UI renders as buttons. Kept in sync via one source of
+        truth — the frontend never invents a name."""
+        return {"actions": [{"key": k, "label": k, "cmd": v}
+                            for k, v in _QUICK_ACTIONS.items()]}
+
+    @app.post("/api/sessions/{session_id}/quick")
+    async def quick_action(session_id: str, body: dict = Body()):
+        """Run a pre-baked recon command on this session and return its output —
+        no attach, no wheel-steal, no scrollback pollution. Backed by
+        `run_and_capture` (marker-bounded, extraction is robust on an echoing PTY)."""
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not sess.connected:
+            raise HTTPException(409, "shell not connected")
+        key = str(body.get("key", "")).strip()
+        cmd = _QUICK_ACTIONS.get(key)
+        if cmd is None:
+            raise HTTPException(400, f"unknown quick action {key!r}")
+        out = await sess.run_and_capture(cmd.encode() + b"\n", timeout=15.0)
+        return {"ok": True, "key": key, "cmd": cmd, "output": out.decode("utf-8", "replace")}
+
+    @app.post("/api/sessions/{session_id}/quickrun")
+    async def quickrun(session_id: str, body: dict = Body()):
+        """One-shot arbitrary-command execution on this session — same non-attach
+        contract as `/quick` but with a tester-typed command. Bounded by a short
+        timeout so a runaway command can't hold the request open forever; long
+        commands should be run via the actual terminal (attach)."""
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not sess.connected:
+            raise HTTPException(409, "shell not connected")
+        cmd = str(body.get("cmd", "")).strip()
+        if not cmd:
+            raise HTTPException(400, "cmd required")
+        if len(cmd) > 2000:
+            raise HTTPException(400, "cmd too long (max 2000 chars)")
+        out = await sess.run_and_capture(cmd.encode() + b"\n", timeout=20.0)
+        return {"ok": True, "cmd": cmd, "output": out.decode("utf-8", "replace")}
+
+    # Per-session command history (up-arrow across attaches / browsers)
+    @app.get("/api/sessions/{session_id}/history")
+    def get_history(session_id: str):
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if mgr.store is None:
+            return {"history": []}
+        return {"history": mgr.store.load_history(session_id)}
+
+    @app.put("/api/sessions/{session_id}/history")
+    def put_history(session_id: str, body: dict = Body()):
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if mgr.store is None:
+            return {"ok": False, "reason": "store unavailable"}
+        entries = body.get("entries") or []
+        if not isinstance(entries, list):
+            raise HTTPException(400, "entries must be a list")
+        entries = [str(e)[:2000] for e in entries[-500:]]
+        mgr.store.save_history(session_id, entries)
+        return {"ok": True, "count": len(entries)}
+
     @app.post("/api/sessions/{session_id}/enum")
     async def run_enum(session_id: str, x_tester: str = Header(default="someone")):
         """Run recce's on-target enumeration THROUGH the shell and fold the output straight
