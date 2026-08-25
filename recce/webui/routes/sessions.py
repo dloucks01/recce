@@ -94,11 +94,14 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         """Mark an uploaded file as cleared (tester ran the removal manually or
         deleted via the shell). Doesn't attempt to run anything on target —
         remote removal happens via the session's shell; this just records that
-        the tester says it's done. Same pattern as persistence-mark-removed."""
+        the tester says it's done. Same pattern as persistence-mark-removed.
+        Returns 404 on unknown upload_id so a UI stale on a purged row shows
+        the mismatch clearly instead of a silent 200 no-op."""
         import time
         if mgr.store is None:
             raise HTTPException(500, "no store")
-        mgr.store.mark_upload_cleared(upload_id, time.time())
+        if not mgr.store.mark_upload_cleared(upload_id, time.time()):
+            raise HTTPException(404, "no such upload")
         broker.publish({"type": "teardown", "event": "upload-cleared",
                         "id": upload_id, "by": x_tester})
         return {"ok": True}

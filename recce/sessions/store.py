@@ -188,9 +188,11 @@ class SessionStore:
                 "uploaded_at", "cleared_at", "note")
         return [dict(zip(cols, r)) for r in self._conn.execute(q, args).fetchall()]
 
-    def mark_upload_cleared(self, uid: str, ts: float) -> None:
-        self._conn.execute("UPDATE uploads SET cleared_at=? WHERE id=?", (ts, uid))
+    def mark_upload_cleared(self, uid: str, ts: float) -> bool:
+        """Returns True if a row was updated. Callers can 404 on False."""
+        cur = self._conn.execute("UPDATE uploads SET cleared_at=? WHERE id=?", (ts, uid))
         self._conn.commit()
+        return cur.rowcount > 0
 
     def close(self) -> None:
         try:

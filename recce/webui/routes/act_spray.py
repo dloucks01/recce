@@ -58,9 +58,16 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
         body = body or {}
         with Store(db_path) as st:
             hosts = st.all_hosts()
-            sel = (body.get("targets") or "").strip()
-            if sel:
-                match = ip_matcher(sel.split())
+            # Accept either a whitespace-separated string ("10.0.0.1 10.0.0.2")
+            # or a list (["10.0.0.1", "10.0.0.2"]). Both are natural JSON shapes
+            # a caller might reach for; the frontend sends string, tests use list.
+            raw = body.get("targets") or ""
+            if isinstance(raw, list):
+                tokens = [str(t) for t in raw if t]
+            else:
+                tokens = str(raw).split()
+            if tokens:
+                match = ip_matcher(tokens)
                 hosts = [h for h in hosts if match(h.ip)]
             creds = cr.stack(hosts, st.all_credentials())
             res = cr.run_spray(hosts, creds, eng_dir, safe=body.get("safe", True))
