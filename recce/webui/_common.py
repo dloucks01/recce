@@ -33,8 +33,11 @@ _COMMANDS: dict = {
     # write the host off. With -Pn every target in scope is scanned regardless.
     # Slower on dead ranges (nothing to prune) so it's opt-in.
     "run": _cmd("Run — guided full flow", "Scan", "required", profile=True,
-                flags=[_f("deep", "--deep", "deep"),
-                       _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up"),
+                # `run` IS the full pipeline — --deep is implicit, and the CLI
+                # parser doesn't accept a --deep flag on `run` (it's only valid
+                # on `scan`). Listing it in the catalog would translate to argv
+                # that the parser rejects with "unrecognized arguments: --deep".
+                flags=[_f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up"),
                        _f("resume", "--resume", "resume — skip hosts already enumerated")]),
     "scan": _cmd("Scan — enum + vulns", "Scan", "required", profile=True,
                  flags=[_f("deep", "--deep", "deep"), _f("fast", "--fast", "fast"),
