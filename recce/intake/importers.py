@@ -348,9 +348,10 @@ def _extend_scanner_parsers() -> None:
     global SCANNER_PARSERS
     if "burp" in SCANNER_PARSERS:
         return
-    from . import parsers_web, parsers_recon, parsers_supply
+    from . import parsers_web, parsers_recon, parsers_supply, parsers_generic
     SCANNER_PARSERS = {**SCANNER_PARSERS, **parsers_web.PARSERS,
-                       **parsers_recon.PARSERS, **parsers_supply.PARSERS}
+                       **parsers_recon.PARSERS, **parsers_supply.PARSERS,
+                       **parsers_generic.PARSERS}
 _extend_scanner_parsers()
 
 

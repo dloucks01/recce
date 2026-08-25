@@ -261,7 +261,11 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
                     if st.add_credential(cred):
                         added += 1
                 summary = f"stored {added} credential(s)"
-            elif kind in ("nessus", "openvas", "nuclei", "testssl"):
+            elif kind in ("nessus", "openvas", "nuclei", "testssl",
+                          "burp", "zap", "nikto", "wpscan", "sslyze", "enum4linux",
+                          "kerbrute", "impacket-adusers", "impacket-delegation",
+                          "whatweb", "wafw00f", "ffuf", "gobuster", "trivy", "grype",
+                          "generic"):
                 from ... import epss, kev
                 from ...importers import SCANNER_PARSERS
                 vulns = SCANNER_PARSERS[kind](content)

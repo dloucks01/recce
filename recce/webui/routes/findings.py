@@ -107,3 +107,95 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(400, str(e))
         broker.publish({"type": "add", "what": "finding", "ip": info["ip"], "by": x_tester})
         return {"ok": True}
+
+    @app.post("/api/evidence/upload")
+    def upload_evidence(body: dict = Body(...),
+                        x_tester: str = Header(default="someone")):
+        """Attach an arbitrary file to a host as raw evidence.
+
+        The escape hatch for anything that can't be parsed — screenshots,
+        PDFs, packet captures, vendor reports, custom-tool output that
+        recce doesn't recognize and even the universal loose parser can't
+        get anything out of. Saves the file to <eng>/evidence/<ip>/ and
+        creates an info-level finding on the host titled "Manual evidence:
+        <filename>" so it shows up in the Findings tab with a link.
+
+        body: {ip: "10.0.0.5", filename: "screenshot.png",
+               data: "<base64>", note?: "optional context"}
+        """
+        import base64
+        import os
+        import re as _re
+        import time
+        from ...store import Store
+        from ...models import Host, Vuln
+
+        ip = str(body.get("ip", "")).strip()
+        filename = str(body.get("filename", "")).strip()
+        data_b64 = str(body.get("data", ""))
+        note = str(body.get("note", "")).strip()
+
+        if not ip or not filename or not data_b64:
+            raise HTTPException(400, "ip, filename, and data (base64) required")
+        # Path sanitization — refuse anything that looks like a traversal.
+        if _re.search(r"[/\\]|\.\.", filename):
+            raise HTTPException(400, "filename must be a bare name (no slashes / '..')")
+        try:
+            raw = base64.b64decode(data_b64, validate=True)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "data is not valid base64")
+        # 25 MB cap — evidence files can be big (captures, PDFs) but we won't
+        # let a mistake ballon the engagement dir.
+        if len(raw) > 25 * 1024 * 1024:
+            raise HTTPException(413, "evidence file too large (max 25 MB)")
+
+        # IP sanity — allow synthetic hosts (container:foo, generic-import,
+        # active-directory) so evidence for those "hosts" has a home too.
+        safe_ip = _re.sub(r"[^A-Za-z0-9._:-]+", "_", ip)[:80]
+        ev_dir = os.path.join(ctx.eng_dir, "evidence", safe_ip)
+        os.makedirs(ev_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        # Prefix filename with timestamp so multiple uploads of the same
+        # `screenshot.png` don't clobber each other.
+        safe_fn = _re.sub(r"[^A-Za-z0-9._-]+", "_", filename)[:120]
+        dest = os.path.join(ev_dir, f"{stamp}_{safe_fn}")
+        with open(dest, "wb") as fh:
+            fh.write(raw)
+
+        rel_path = os.path.relpath(dest, ctx.eng_dir)
+
+        # Create the info-level tracker finding on the host.
+        title = f"Manual evidence: {filename}"
+        output = f"Attached by {x_tester} at {stamp}\nFile: {rel_path}\nSize: {len(raw)} bytes"
+        if note:
+            output += f"\n\nNote:\n{note}"
+        with Store(db_path) as st:
+            host = st.get_host(ip) or Host(ip=ip)
+            if not host.is_up:
+                host.state = "up"
+            host.vulns.append(Vuln(
+                ip=ip, port=None, protocol="tcp",
+                script_id=f"evidence-{stamp}",
+                state="finding", title=title,
+                output=output[:4000], severity="info",
+                source="manual-evidence", confidence="confirmed"))
+            st.upsert_host(host, merge=True)
+
+        broker.publish({"type": "evidence", "ip": ip, "path": rel_path,
+                        "by": x_tester})
+        return {"ok": True, "path": rel_path, "bytes": len(raw)}
+
+    @app.get("/api/evidence/{ip}/{name}")
+    def download_evidence(ip: str, name: str):
+        """Serve back an evidence file the tester uploaded, so the "Manual
+        evidence" finding row can link to it."""
+        import os
+        import re as _re
+        from fastapi.responses import FileResponse
+        if _re.search(r"[/\\]|\.\.", name):
+            raise HTTPException(400, "bad filename")
+        safe_ip = _re.sub(r"[^A-Za-z0-9._:-]+", "_", ip)[:80]
+        path = os.path.join(ctx.eng_dir, "evidence", safe_ip, name)
+        if not os.path.isfile(path):
+            raise HTTPException(404, "no such evidence file")
+        return FileResponse(path, filename=name)

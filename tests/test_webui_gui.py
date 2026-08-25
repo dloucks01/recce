@@ -105,8 +105,13 @@ class ApiShape(unittest.TestCase):
             self.assertEqual(c.post("/api/import", json={"content": NESSUS, "kind": "auto"}).status_code, 200)
             self.assertTrue(any(f["title"] == "EternalBlue" and f["kev"]
                                 for f in c.get("/api/findings").json()["items"]))
-            # an undetectable blob is rejected with guidance, not silently swallowed
-            self.assertEqual(c.post("/api/import", json={"content": "hello world", "kind": "auto"}).status_code, 422)
+            # An undetectable blob falls through to the universal loose parser
+            # (kind='generic'). If it has nothing findings-shaped, the import
+            # succeeds with 0 findings folded — the file lands, it just brings
+            # nothing with it. This is the intentional "don't drop the file"
+            # trade added with the P1 tranche.
+            r = c.post("/api/import", json={"content": "hello world", "kind": "auto"})
+            self.assertEqual(r.status_code, 200)
 
     def test_collab_endpoints_track_team_state(self):
         """The multi-tester layer: claim/assign, triage labels, per-port status,

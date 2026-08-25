@@ -380,11 +380,19 @@ def _import_signatures(content: str, filename: str = "") -> list[str]:
 
 
 def _detect_import_kind(content: str, filename: str = "") -> str:
-    """The single best-guess kind (or 'unknown'). 'multiple' means a concatenated paste of
-    more than one tool's output — the endpoint asks the user to import them separately."""
+    """The single best-guess kind (or 'generic'). 'multiple' means a concatenated paste of
+    more than one tool's output — the endpoint asks the user to import them separately.
+
+    Falls back to 'generic' (universal loose parser) when no specific format
+    matched — so ad-hoc / custom-script / drifting-tool output still lands
+    somewhere the tester can triage, rather than being rejected as unknown.
+    """
     kinds = _import_signatures(content, filename)
     if not kinds:
-        return "unknown"
+        # Only fall back if the input has ANYTHING worth extracting — an empty
+        # paste or a screenshot upload shouldn't emit a phantom "0 findings" row.
+        stripped = content.strip() if isinstance(content, str) else ""
+        return "generic" if stripped else "unknown"
     if len(set(kinds)) > 1:
         return "multiple"
     return kinds[0]
@@ -402,7 +410,8 @@ def _import_preview(kind: str, content: str, raw_bytes: bytes) -> dict:
                     "burp", "zap", "nikto", "wpscan", "sslyze", "enum4linux",
                     "kerbrute", "impacket-adusers", "impacket-delegation",
                     "whatweb", "wafw00f",
-                    "ffuf", "gobuster", "trivy", "grype"):
+                    "ffuf", "gobuster", "trivy", "grype",
+                    "generic"):
             vs = importers.SCANNER_PARSERS[kind](content)
             n = len(vs)
             detail = f"{n} finding(s) across {len({v.ip for v in vs})} host(s)"
@@ -456,8 +465,14 @@ def _import_preview(kind: str, content: str, raw_bytes: bytes) -> dict:
     except Exception:  # noqa: BLE001 — a preview must never 500
         import logging
         logging.getLogger("recce.webui").debug("import preview failed for kind=%s", kind, exc_info=True)
-    warning = ("" if n or kind in ("loot", "fieldkit", "bloodhound")
-               else f"parsed 0 rows — this may not be {kind} output, or it's a variant recce "
-               "can't read yet. Check the tool/format before importing.")
+    if n or kind in ("loot", "fieldkit", "bloodhound"):
+        warning = ""
+    elif kind == "generic":
+        warning = ("The universal loose parser found no CVE / IP / severity / "
+                   "credential patterns to extract. If this file has content worth "
+                   "keeping, attach it as raw evidence to a host instead.")
+    else:
+        warning = (f"parsed 0 rows — this may not be {kind} output, or it's a variant recce "
+                   "can't read yet. Check the tool/format before importing.")
     return {"mode": "preview", "kind": kind, "count": n, "detail": detail,
             "sample": sample, "warning": warning}

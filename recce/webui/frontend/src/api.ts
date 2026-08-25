@@ -167,6 +167,20 @@ export async function postImport(content: string, filename: string, kind: string
   return r.json();
 }
 
+// Raw-evidence attach — the escape hatch for files that can't be parsed
+// (screenshots, PDFs, packet captures, vendor reports, proprietary formats).
+// Saves the file into <eng>/evidence/<ip>/ and creates an info-level finding
+// on the host titled "Manual evidence: <filename>" with a download link.
+export async function uploadEvidence(ip: string, filename: string,
+                                     base64Data: string, note?: string): Promise<{ path: string; bytes: number }> {
+  const r = await fetch("/api/evidence/upload", {
+    method: "POST", headers: jsonHeaders(),
+    body: JSON.stringify({ ip, filename, data: base64Data, note: note || "" }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+
 // --- Act phase / Loot / ATT&CK ------------------------------------------------
 export type ActCard = {
   archetype: string; title: string; target: string; command: string; yields: string;

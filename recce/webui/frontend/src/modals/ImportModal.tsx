@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { postImport } from "../api";
+import { useEffect, useState } from "react";
+import { postImport, uploadEvidence, getJSON, Host } from "../api";
 import { useEscape } from "../ui";
 
 // Tool catalog is grouped by category so the dropdown reads like a menu of
@@ -69,6 +69,17 @@ export function ImportModal(
   >(null);
   // Multi-file drop queue — populated by dropping >1 file, or by "Add more"
   const [queue, setQueue] = useState<QueueEntry[]>([]);
+  // Attach-as-evidence mode — the escape hatch for unparseable files.
+  const [mode, setMode] = useState<"parse" | "evidence">("parse");
+  const [evHost, setEvHost] = useState("");
+  const [evNote, setEvNote] = useState("");
+  const [hosts, setHosts] = useState<Host[]>([]);
+  useEffect(() => {
+    if (mode === "evidence" && hosts.length === 0) {
+      getJSON<{ items: Host[] }>("/api/hosts?limit=500")
+        .then(r => setHosts(r.items || [])).catch(() => {});
+    }
+  }, [mode, hosts.length]);
   useEscape(onClose, !busy);
 
   function readFile(file: File) {
@@ -148,6 +159,20 @@ export function ImportModal(
     finally { setBusy(false); }
   }
 
+  async function attachEvidence() {
+    if (!text || !filename || !evHost.trim() || busy) return;
+    setBusy(true); setErr(null);
+    try {
+      // The dropzone already gave us base64 in `text` (encoding='base64').
+      // If the user pasted plain text into the textarea, encode it.
+      const b64 = encoding === "base64" ? text : btoa(text);
+      const r = await uploadEvidence(evHost.trim(), filename, b64, evNote);
+      onDone(`Attached evidence: ${r.path} (${r.bytes}B)`);
+      onClose();
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
@@ -160,14 +185,51 @@ export function ImportModal(
           Drop a file or paste output from any supported tool. recce folds it into this engagement and every open
           browser updates — no terminal needed.
         </p>
-        <label className="imp-field">
-          Tool
-          <select value={kind} onChange={(e) => { setKind(e.target.value); setPrev(null); }} disabled={busy}>
-            {IMPORT_TOOLS.map(([k, label]) => (
-              <option key={k} value={k}>{label}</option>
-            ))}
-          </select>
-        </label>
+        <div className="imp-mode-tabs">
+          <button className={"imp-mode-tab" + (mode === "parse" ? " sel" : "")}
+                  onClick={() => setMode("parse")} disabled={busy}>
+            Parse into findings
+          </button>
+          <button className={"imp-mode-tab" + (mode === "evidence" ? " sel" : "")}
+                  onClick={() => setMode("evidence")} disabled={busy}>
+            Attach as evidence
+          </button>
+        </div>
+        {mode === "parse" && (
+          <label className="imp-field">
+            Tool
+            <select value={kind} onChange={(e) => { setKind(e.target.value); setPrev(null); }} disabled={busy}>
+              {IMPORT_TOOLS.map(([k, label]) => (
+                <option key={k} value={k}>{label}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {mode === "evidence" && (
+          <>
+            <label className="imp-field">
+              Host
+              <select value={evHost} onChange={(e) => setEvHost(e.target.value)} disabled={busy}>
+                <option value="">— pick a host —</option>
+                {hosts.map(h => (
+                  <option key={h.ip} value={h.ip}>
+                    {h.ip}{h.hostname ? ` (${h.hostname})` : ""}{h.os ? ` · ${h.os.slice(0, 30)}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="imp-field">
+              Note (optional)
+              <input value={evNote} onChange={(e) => setEvNote(e.target.value)} disabled={busy}
+                     placeholder="what's in this file? which finding does it evidence?" />
+            </label>
+            <p className="muted small" style={{marginTop:0}}>
+              Escape hatch for files that can't be parsed — screenshots, PDFs, packet captures,
+              vendor reports, proprietary formats. Saved to <code>{"<engagement>/evidence/<host>/"}</code>
+              and a "Manual evidence" finding lands on the host so it shows up in Findings + Report.
+            </p>
+          </>
+        )}
         <div className={"dropzone" + (drag ? " over" : "")}
              onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
              onDragLeave={() => setDrag(false)}
@@ -236,10 +298,20 @@ export function ImportModal(
         {err && <div className="ranmsg warn-msg">{err}</div>}
         <div className="modal-actions">
           <button className="toggle" onClick={onClose} disabled={busy}>Cancel</button>
-          <button className="toggle" onClick={doPreview} disabled={busy || !text.trim()}>Preview</button>
-          <button className="run" onClick={go} disabled={busy || !text.trim()}>
-            {busy ? "Importing…" : "Import"}
-          </button>
+          {mode === "parse" && (
+            <>
+              <button className="toggle" onClick={doPreview} disabled={busy || !text.trim()}>Preview</button>
+              <button className="run" onClick={go} disabled={busy || !text.trim()}>
+                {busy ? "Importing…" : "Import"}
+              </button>
+            </>
+          )}
+          {mode === "evidence" && (
+            <button className="run" onClick={attachEvidence}
+                    disabled={busy || !text || !filename || !evHost.trim()}>
+              {busy ? "Attaching…" : "▶ Attach to host"}
+            </button>
+          )}
         </div>
       </div>
     </>

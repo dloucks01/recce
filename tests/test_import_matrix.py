@@ -325,11 +325,23 @@ class EdgeCases(unittest.TestCase):
         c, _ = _client()
         self.assertEqual(_post(c, "   ").status_code, 400)
 
-    def test_unknown_format_rejected(self):
+    def test_unknown_format_falls_back_to_generic(self):
+        """Random prose no longer 422s — it routes to the universal loose
+        parser (kind='generic'). If it has no CVE / IP / severity / cred
+        patterns to extract, the import succeeds with 0 findings folded
+        rather than dropping the input on the floor."""
         c, _ = _client()
         r = _post(c, "just some random prose that isn't any tool output at all")
-        self.assertEqual(r.status_code, 422)
-        self.assertIn("could not detect", r.json()["detail"])
+        self.assertEqual(r.status_code, 200)
+        # Import succeeded; no findings extracted (nothing looked like a CVE / IP / sev marker)
+        body = r.json()
+        self.assertIn(body.get("mode"), ("done", "job"))
+
+    def test_empty_input_still_400s(self):
+        """Empty input has nothing to do — still a 4xx, not a phantom import."""
+        c, _ = _client()
+        r = _post(c, "   \n\n  ")
+        self.assertEqual(r.status_code, 400)
 
     def test_bloodhound_zip_routes_to_job(self):
         c, _ = _client()

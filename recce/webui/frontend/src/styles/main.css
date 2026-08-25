@@ -1850,3 +1850,14 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .imp-queue-item.status-error .imp-queue-icon { color: var(--crit); }
 .imp-queue-name { font-family: var(--mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .imp-queue-outcome { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+
+/* Import modal mode toggle (P1b): parse-vs-evidence tabs */
+.imp-mode-tabs { display: flex; gap: 0; margin-bottom: 10px;
+  border-bottom: 1px solid var(--line); }
+.imp-mode-tab { flex: 1; padding: 8px 12px; background: transparent;
+  border: 0; border-bottom: 2px solid transparent; cursor: pointer;
+  font-size: 13px; font-weight: 600; color: var(--muted);
+  transition: color .1s, border-color .1s; }
+.imp-mode-tab:hover:not(:disabled) { color: var(--text); }
+.imp-mode-tab.sel { color: var(--accent); border-bottom-color: var(--accent); }
+.imp-mode-tab:disabled { opacity: .5; cursor: not-allowed; }
