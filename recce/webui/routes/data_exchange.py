@@ -39,6 +39,68 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
             for s in user_parser_specs()
         ]}
 
+    @app.post("/api/import/parsers/test")
+    def test_user_parser(body: dict = Body(...)):
+        """Phase 3 — dry-run a parser spec against sample text without saving.
+        Powers the Build-parser modal's "Test" button so testers see what
+        would extract before committing. Body: {spec: {...}, sample: "..."}."""
+        from ...intake.parsers_user import test_spec
+        spec = body.get("spec") or {}
+        sample = str(body.get("sample", ""))
+        return test_spec(spec, sample)
+
+    @app.post("/api/import/parsers/save")
+    def save_user_parser(body: dict = Body(...),
+                         x_tester: str = Header(default="someone")):
+        """Phase 3 — persist a tester-authored parser to
+        <engagement>/parsers/<name>.json and refresh the loader so it's live
+        immediately (no serve restart)."""
+        from ...intake import parsers_user as _up
+        from ...intake import importers as _imp
+        spec = body.get("spec") or {}
+        ok, path_or_err = _up.save_spec_to_engagement(spec, ctx.eng_dir)
+        if not ok:
+            raise HTTPException(400, path_or_err)
+        _imp.refresh_user_parsers()
+        broker.publish({"type": "parsers", "event": "saved",
+                        "name": spec.get("name"), "by": x_tester})
+        return {"ok": True, "path": path_or_err, "name": spec.get("name")}
+
+    @app.delete("/api/import/parsers/{name}")
+    def delete_user_parser(name: str, x_tester: str = Header(default="someone")):
+        from ...intake import parsers_user as _up
+        from ...intake import importers as _imp
+        removed = _up.delete_spec_from_engagement(name, ctx.eng_dir)
+        if not removed:
+            raise HTTPException(404, "no such parser (or invalid name)")
+        _imp.refresh_user_parsers()
+        broker.publish({"type": "parsers", "event": "deleted",
+                        "name": name, "by": x_tester})
+        return {"ok": True}
+
+    @app.post("/api/import/parsers/draft")
+    def draft_user_parser(body: dict = Body(...)):
+        """Phase 3 — ask a configured LLM (Ollama by default) to draft a
+        parser spec from the tester's pasted sample. Response is validated
+        against the same schema `save` requires; the tester reviews +
+        tweaks in the form + saves. Nothing auto-registers.
+
+        Requires an LLM endpoint reachable at RECCE_LLM_URL (default
+        http://localhost:11434 — Ollama). Returns 503 with a friendly
+        message when it isn't."""
+        from ...intake.llm_extract import draft_parser_spec, LLMError
+        sample = str(body.get("sample", ""))
+        hint = str(body.get("hint", ""))
+        if not sample.strip():
+            raise HTTPException(400, "sample required")
+        try:
+            spec = draft_parser_spec(sample, hint)
+        except LLMError as e:
+            # 503 (not 500) so the frontend renders "LLM unavailable" as
+            # a friendly banner, not a scary crash.
+            raise HTTPException(503, str(e))
+        return {"ok": True, "spec": spec}
+
     @app.post("/api/import")
     def import_output(body: dict = Body(...), x_tester: str = Header(default="someone")):
         """Fold external tool output into the live engagement so the whole team sees it.

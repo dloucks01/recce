@@ -312,3 +312,55 @@ def user_parser_specs() -> list[dict]:
     """List of loaded specs (for the ImportModal dropdown to enumerate)."""
     ensure_loaded()
     return list(_LOADED.values())
+
+
+def test_spec(spec: dict, sample_text: str) -> dict:
+    """Dry-run a spec against sample_text without registering it. Returns
+    {ok, error?, count, sample:[{severity,title,ip,port}]}. Powers the
+    Build-parser "Test" button so testers see what their parser would
+    extract before saving."""
+    ok, why = _validate(spec, "<test>")
+    if not ok:
+        return {"ok": False, "error": why, "count": 0, "sample": []}
+    parser = _make_parser(spec)
+    try:
+        vulns = parser(sample_text)
+    except Exception as e:  # noqa: BLE001 — return diagnostic, don't raise
+        return {"ok": False, "error": f"parse crashed: {e}", "count": 0, "sample": []}
+    return {"ok": True, "count": len(vulns),
+            "sample": [{"severity": v.severity, "title": v.title,
+                        "ip": v.ip, "port": v.port} for v in vulns[:10]]}
+
+
+def save_spec_to_engagement(spec: dict, eng_dir: str) -> tuple[bool, str]:
+    """Persist a user-authored parser to <engagement>/parsers/<name>.json
+    and refresh the loader so it's live immediately. Returns (ok, path or error)."""
+    ok, why = _validate(spec, "<save>")
+    if not ok:
+        return False, why
+    import json as _json
+    parsers_dir = os.path.join(eng_dir, "parsers")
+    os.makedirs(parsers_dir, exist_ok=True)
+    name = spec["name"]
+    path = os.path.join(parsers_dir, f"{name}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump(spec, fh, indent=2, ensure_ascii=False)
+    except OSError as e:
+        return False, f"write failed: {e}"
+    return True, path
+
+
+def delete_spec_from_engagement(name: str, eng_dir: str) -> bool:
+    """Remove a user parser file from <engagement>/parsers/. Returns True if
+    a file was removed. Caller is expected to refresh() afterwards."""
+    if not re.match(r"^[a-z0-9][a-z0-9_-]{1,40}$", name, re.I):
+        return False
+    path = os.path.join(eng_dir, "parsers", f"{name}.json")
+    if not os.path.isfile(path):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return False

@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { postImport, uploadEvidence, getJSON, Host } from "../api";
+import { postImport, uploadEvidence, getJSON, Host,
+         ParserSpec, ParserTestResult,
+         testUserParser, saveUserParser, draftParserWithLLM } from "../api";
 import { useEscape } from "../ui";
 
 // Tool catalog is grouped by category so the dropdown reads like a menu of
@@ -45,6 +47,30 @@ const IMPORT_TOOLS: Array<[string, string]> = [
 
 const isBinaryFile = (name: string) => /\.zip$/i.test(name);
 
+// Skeleton the Build-parser textarea starts with — a working example the
+// tester can adapt rather than staring at an empty form.
+function _defaultParserJson(): string {
+  const skel = {
+    name: "my-parser",
+    description: "one-line what this parser is for",
+    detect: {
+      filename_glob: "*.mytool",
+      content_substr: "my-tool"
+    },
+    match: {
+      target_re: "^Host:\\s+(?P<target>\\S+)",
+      port_default: 80
+    },
+    findings: [
+      { marker_re: "^\\[CRIT\\]\\s+(?P<title>.+?)(?:\\s+at\\s+(?P<port>\\d+))?$",
+        severity: "critical" },
+      { marker_re: "^\\[HIGH\\]\\s+(?P<title>.+)$",
+        severity: "high" }
+    ]
+  };
+  return JSON.stringify(skel, null, 2);
+}
+
 // Queue entry for the multi-file drop workflow. Each file is imported
 // separately (each format has its own parser); the queue drives sequential
 // upload with a per-item outcome ledger the tester can see.
@@ -70,10 +96,17 @@ export function ImportModal(
   // Multi-file drop queue — populated by dropping >1 file, or by "Add more"
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   // Attach-as-evidence mode — the escape hatch for unparseable files.
-  const [mode, setMode] = useState<"parse" | "evidence">("parse");
+  // Build-parser mode — declarative parser authoring (Phase 3).
+  const [mode, setMode] = useState<"parse" | "evidence" | "build">("parse");
   const [evHost, setEvHost] = useState("");
   const [evNote, setEvNote] = useState("");
   const [hosts, setHosts] = useState<Host[]>([]);
+  // Parser-builder state (P3). Kept minimal: raw JSON textarea + a "Test"
+  // button that dry-runs against the paste sample.
+  const [pbJson, setPbJson] = useState<string>(_defaultParserJson());
+  const [pbTestResult, setPbTestResult] = useState<ParserTestResult | null>(null);
+  const [pbLlmBusy, setPbLlmBusy] = useState(false);
+  const [pbLlmHint, setPbLlmHint] = useState("");
   useEffect(() => {
     if (mode === "evidence" && hosts.length === 0) {
       getJSON<{ items: Host[] }>("/api/hosts?limit=500")
@@ -159,6 +192,49 @@ export function ImportModal(
     finally { setBusy(false); }
   }
 
+  // ---- Build-parser (Phase 3) handlers -----------------------------------
+
+  function _parsePbJson(): { spec: ParserSpec | null; err: string | null } {
+    try { return { spec: JSON.parse(pbJson) as ParserSpec, err: null }; }
+    catch (e) { return { spec: null, err: String(e instanceof Error ? e.message : e) }; }
+  }
+
+  async function pbTest() {
+    setPbTestResult(null); setErr(null);
+    const { spec, err: parseErr } = _parsePbJson();
+    if (!spec) { setErr(`JSON: ${parseErr}`); return; }
+    setBusy(true);
+    try {
+      const r = await testUserParser(spec, text || "");
+      setPbTestResult(r);
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+
+  async function pbSave() {
+    setErr(null);
+    const { spec, err: parseErr } = _parsePbJson();
+    if (!spec) { setErr(`JSON: ${parseErr}`); return; }
+    setBusy(true);
+    try {
+      const r = await saveUserParser(spec);
+      onDone(`Parser saved: ${r.name} → ${r.path}`);
+      onClose();
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+
+  async function pbLlmDraft() {
+    if (!text.trim()) { setErr("Paste some tool output first — the LLM drafts from a sample"); return; }
+    setPbLlmBusy(true); setErr(null);
+    try {
+      const spec = await draftParserWithLLM(text, pbLlmHint);
+      setPbJson(JSON.stringify(spec, null, 2));
+      setPbTestResult(null);
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+    finally { setPbLlmBusy(false); }
+  }
+
   async function attachEvidence() {
     if (!text || !filename || !evHost.trim() || busy) return;
     setBusy(true); setErr(null);
@@ -194,6 +270,11 @@ export function ImportModal(
                   onClick={() => setMode("evidence")} disabled={busy}>
             Attach as evidence
           </button>
+          <button className={"imp-mode-tab" + (mode === "build" ? " sel" : "")}
+                  onClick={() => setMode("build")} disabled={busy}
+                  title="Add a custom-tool parser without touching Python">
+            Build parser
+          </button>
         </div>
         {mode === "parse" && (
           <label className="imp-field">
@@ -205,6 +286,45 @@ export function ImportModal(
             </select>
           </label>
         )}
+        {mode === "build" && (
+          <>
+            <p className="modal-sub">
+              Author a parser without touching Python. Paste your tool's output in the box below
+              (used as the test sample), edit the JSON spec, hit <b>Test</b> to see what would
+              extract, then <b>Save</b> to persist it to <code>{"<engagement>/parsers/<name>.json"}</code>.
+              If Ollama is running (or <code>RECCE_LLM_URL</code> is set), <b>Draft with LLM</b>
+              builds the JSON from your sample.
+            </p>
+            <label className="imp-field">
+              Parser JSON
+              <textarea className="imp-paste" style={{minHeight: 200, fontFamily: "var(--mono)"}}
+                        value={pbJson} onChange={e => { setPbJson(e.target.value); setPbTestResult(null); }}
+                        disabled={busy || pbLlmBusy} />
+            </label>
+            <label className="imp-field">
+              LLM hint (optional)
+              <input value={pbLlmHint} onChange={e => setPbLlmHint(e.target.value)}
+                     placeholder="'this is nikto -o out.xml' — one sentence for the model"
+                     disabled={busy || pbLlmBusy} />
+            </label>
+            {pbTestResult && (
+              <div className={"imp-preview" + (pbTestResult.ok ? "" : " warn")}>
+                <div>
+                  <b>Test:</b>{" "}
+                  {pbTestResult.ok
+                    ? `${pbTestResult.count} finding(s) would extract`
+                    : `error — ${pbTestResult.error}`}
+                </div>
+                {pbTestResult.sample?.length > 0 && (
+                  <ul>{pbTestResult.sample.map((s, i) => (
+                    <li key={i}>[{s.severity}] {s.title} @ {s.ip}{s.port ? ":" + s.port : ""}</li>
+                  ))}</ul>
+                )}
+              </div>
+            )}
+          </>
+        )}
+
         {mode === "evidence" && (
           <>
             <label className="imp-field">
@@ -311,6 +431,21 @@ export function ImportModal(
                     disabled={busy || !text || !filename || !evHost.trim()}>
               {busy ? "Attaching…" : "▶ Attach to host"}
             </button>
+          )}
+          {mode === "build" && (
+            <>
+              <button className="toggle" onClick={pbLlmDraft}
+                      disabled={busy || pbLlmBusy || !text.trim()}
+                      title="Ask a local LLM (Ollama by default) to draft this spec from the pasted sample">
+                {pbLlmBusy ? "Drafting…" : "✨ Draft with LLM"}
+              </button>
+              <button className="toggle" onClick={pbTest} disabled={busy || pbLlmBusy || !pbJson.trim()}>
+                Test
+              </button>
+              <button className="run" onClick={pbSave} disabled={busy || pbLlmBusy || !pbJson.trim()}>
+                {busy ? "Saving…" : "▶ Save parser"}
+              </button>
+            </>
           )}
         </div>
       </div>

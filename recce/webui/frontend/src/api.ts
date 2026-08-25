@@ -181,6 +181,47 @@ export async function uploadEvidence(ip: string, filename: string,
   return r.json();
 }
 
+// Phase 3 — declarative parser builder + LLM-assisted draft
+export type ParserSpec = {
+  name: string; description?: string;
+  detect: { filename_glob?: string; content_re?: string; content_substr?: string };
+  match?: { target_re?: string; port_default?: number };
+  findings: Array<{ marker_re: string; severity: string; confidence?: string; source?: string }>;
+};
+export type ParserTestResult = {
+  ok: boolean; error?: string; count: number;
+  sample: Array<{ severity: string; title: string; ip: string; port: number | null }>;
+};
+
+export async function listUserParsers(): Promise<Array<{ name: string; description: string;
+    detect: any; findings_count: number }>> {
+  const r = await getJSON<{ parsers: any[] }>("/api/import/parsers");
+  return r.parsers;
+}
+export async function testUserParser(spec: ParserSpec, sample: string): Promise<ParserTestResult> {
+  const r = await fetch("/api/import/parsers/test",
+    { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ spec, sample }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function saveUserParser(spec: ParserSpec): Promise<{ path: string; name: string }> {
+  const r = await fetch("/api/import/parsers/save",
+    { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ spec }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+export async function deleteUserParser(name: string): Promise<void> {
+  const r = await fetch(`/api/import/parsers/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (!r.ok && r.status !== 404) throw new Error(`${r.status}`);
+}
+export async function draftParserWithLLM(sample: string, hint?: string): Promise<ParserSpec> {
+  const r = await fetch("/api/import/parsers/draft",
+    { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ sample, hint: hint || "" }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  const d = await r.json();
+  return d.spec;
+}
+
 // --- Act phase / Loot / ATT&CK ------------------------------------------------
 export type ActCard = {
   archetype: string; title: string; target: string; command: string; yields: string;
