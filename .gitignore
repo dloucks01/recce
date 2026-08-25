@@ -33,3 +33,10 @@ dump.rdb
 
 # web frontend dev artifacts
 recce/webui/frontend/node_modules/
+
+# Claude Code — .claude/settings.json is the shared allowlist (tracked
+# separately). Local overrides and any temp files it writes should not
+# travel with the repo.
+.claude/settings.local.json
+.claude/settings.local.json.tmp.*
+.claude/history.jsonl
