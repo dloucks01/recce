@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS persistence (
   id TEXT PRIMARY KEY, host_ip TEXT, mechanism TEXT, artifact_path TEXT,
   remove_cmd TEXT, installed_by TEXT, installed_at REAL, removed_at REAL
 );
+CREATE TABLE IF NOT EXISTS uploads (
+  id TEXT PRIMARY KEY, host_ip TEXT, remote_path TEXT, bytes INTEGER,
+  uploaded_by TEXT, uploaded_at REAL, cleared_at REAL, note TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_uploads_host ON uploads(host_ip);
 """
 
 
@@ -154,6 +159,37 @@ class SessionStore:
 
     def mark_persistence_removed(self, pid: str, ts: float) -> None:
         self._conn.execute("UPDATE persistence SET removed_at=? WHERE id=?", (ts, pid))
+        self._conn.commit()
+
+    # --- upload tracking: every file dropped on a target is recorded so a
+    # teardown sweep can walk the list and either delete via a live shell or
+    # produce a checklist for manual cleanup. Same pattern as persistence.
+    def add_upload(self, u: dict) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO uploads"
+            "(id,host_ip,remote_path,bytes,uploaded_by,uploaded_at,cleared_at,note) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (u["id"], u["host_ip"], u["remote_path"], int(u.get("bytes", 0)),
+             u.get("uploaded_by", ""), u["uploaded_at"], u.get("cleared_at"),
+             u.get("note", "")))
+        self._conn.commit()
+
+    def list_uploads(self, host_ip: str = "", active_only: bool = False) -> list[dict]:
+        q = "SELECT id,host_ip,remote_path,bytes,uploaded_by,uploaded_at,cleared_at,note FROM uploads"
+        cond, args = [], []
+        if host_ip:
+            cond.append("host_ip=?"); args.append(host_ip)
+        if active_only:
+            cond.append("cleared_at IS NULL")
+        if cond:
+            q += " WHERE " + " AND ".join(cond)
+        q += " ORDER BY uploaded_at DESC"
+        cols = ("id", "host_ip", "remote_path", "bytes", "uploaded_by",
+                "uploaded_at", "cleared_at", "note")
+        return [dict(zip(cols, r)) for r in self._conn.execute(q, args).fetchall()]
+
+    def mark_upload_cleared(self, uid: str, ts: float) -> None:
+        self._conn.execute("UPDATE uploads SET cleared_at=? WHERE id=?", (ts, uid))
         self._conn.commit()
 
     def close(self) -> None:

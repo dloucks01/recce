@@ -1,11 +1,30 @@
 // Types + fetch helpers for the recce workbench API.
 
+// Finding lifecycle status. Empty string = implicit "new" (no row written).
+export type FindingStatus = "" | "new" | "triaged" | "confirmed"
+  | "in-report" | "excluded" | "retested-fixed" | "retested-open";
+export const FINDING_STATUSES: FindingStatus[] = [
+  "", "triaged", "confirmed", "in-report", "excluded",
+  "retested-fixed", "retested-open",
+];
+export const FINDING_STATUS_LABEL: Record<FindingStatus, string> = {
+  "": "new", new: "new", triaged: "triaged", confirmed: "confirmed",
+  "in-report": "in report", excluded: "excluded",
+  "retested-fixed": "retested — fixed", "retested-open": "retested — still open",
+};
 export type Finding = {
   key: string; reviewed: boolean; notes: string;
   severity: string; title: string; ip: string; port: number | null;
   cve: string; cves: string[]; kev: boolean; epss: number;
   tier: string; source: string; confidence: string;
+  sources?: string[]; status?: FindingStatus;
 };
+
+export async function setFindingStatus(key: string, status: FindingStatus): Promise<void> {
+  const r = await fetch("/api/finding/status",
+    { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ key, status }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+}
 export type Port = { port: number; proto: string; service: string; product: string };
 export type Host = {
   ip: string; key: string; hostname: string; os: string; roles: string[]; up: boolean;
@@ -321,6 +340,22 @@ export async function setEngagementMeta(patch: EngagementMeta): Promise<void> {
     { method: "POST", headers: jsonHeaders(), body: JSON.stringify(patch) });
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
 }
+// Teardown checklist: aggregate inventory of everything recce deployed that
+// still needs cleanup at engagement end. Reads from the sessions store +
+// live listener/session registries.
+export type TeardownInventory = {
+  generated_at: number; total: number;
+  persistence: any[]; uploads: any[]; listeners: any[];
+  sessions: any[]; tunnels: any[]; portfwds: any[];
+};
+export async function getTeardown(): Promise<TeardownInventory> {
+  return getJSON<TeardownInventory>("/api/teardown");
+}
+export async function clearTeardownUpload(id: string): Promise<void> {
+  await fetch(`/api/teardown/upload/${encodeURIComponent(id)}/clear`,
+    { method: "POST", headers: jsonHeaders() });
+}
+
 export async function uploadClientLogo(base64Data: string): Promise<{ path: string }> {
   const r = await fetch("/api/meta/logo",
     { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ data: base64Data }) });

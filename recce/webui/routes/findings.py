@@ -47,6 +47,29 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
                         "tester": x_tester})
         return {"ok": True}
 
+    # Finding lifecycle status — beyond reviewed/dismissed. Values are open;
+    # the frontend renders the standard set (new / triaged / confirmed /
+    # in-report / excluded / retested-fixed / retested-open). Empty status
+    # clears back to "new" (which is implicit — no row is stored).
+    _STATUSES = {"", "new", "triaged", "confirmed", "in-report", "excluded",
+                 "retested-fixed", "retested-open"}
+
+    @app.post("/api/finding/status")
+    def set_status(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        from ...store import Store
+        import time
+        key = str(body.get("key", "")).strip()
+        status = str(body.get("status", "")).strip().lower()
+        if not key:
+            raise HTTPException(400, "key required")
+        if status not in _STATUSES:
+            raise HTTPException(400, f"unknown status {status!r}")
+        with Store(db_path) as st:
+            st.set_status(key, status, when=str(int(time.time())))
+        broker.publish({"type": "status", "key": key, "status": status,
+                        "tester": x_tester})
+        return {"ok": True, "status": status}
+
     @app.post("/api/loot/extract")
     def loot_extract(body: dict = Body(...), x_tester: str = Header(default="someone")):
         """Auto-loot: scan arbitrary text for credentials (secretsdump rows,

@@ -44,6 +44,65 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
     mgr.on_change = lambda s: broker.publish(
         {"type": "session", "event": s.status, "id": s.id})
 
+    # --- teardown checklist: everything recce deployed that a tester should
+    # verify is cleaned up before closing out an engagement. Aggregates the
+    # persistence table, uploads table, live listeners, live tunnels, and
+    # active port-forwards into one view. All items already tracked
+    # individually — this is a rollup, not a new source of truth. Powers the
+    # `Teardown` panel in the UI and the pre-report safety check.
+    @app.get("/api/teardown")
+    def teardown_inventory():
+        import time
+        pers = mgr.store.list_persistence(active_only=True) if mgr.store else []
+        ups = mgr.store.list_uploads(active_only=True) if mgr.store else []
+        listeners = [{"id": l.id, "port": l.port, "kind": l.kind}
+                     for l in mgr.listeners.values()]
+        live_sessions = [{"id": s.id, "name": s.name, "host_ip": s.host_ip,
+                          "kind": s.kind, "pty": s.pty}
+                         for s in mgr.list() if s.status == "live"]
+        tunnels: list[dict] = []
+        portfwds: list[dict] = []
+        # Tunnel + port-forward state is tracked on the session objects (they
+        # were opened through a session), so reflect that.
+        for s in mgr.list():
+            if s.status != "live":
+                continue
+            try:
+                from ...sessions import tunnel as _tunnel
+                tstate = _tunnel.get_state(s.id) if hasattr(_tunnel, "get_state") else None
+                if tstate and tstate.get("active"):
+                    tunnels.append({"session_id": s.id, "host_ip": s.host_ip,
+                                    "socks_port": tstate.get("socks_port")})
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            from ...sessions.tunnel import list_all_portfwds
+            portfwds = list_all_portfwds() if callable(list_all_portfwds) else []
+        except (ImportError, AttributeError):
+            portfwds = []
+        total = (len(pers) + len(ups) + len(listeners) + len(live_sessions)
+                 + len(tunnels) + len(portfwds))
+        return {
+            "generated_at": time.time(), "total": total,
+            "persistence": pers, "uploads": ups, "listeners": listeners,
+            "sessions": live_sessions, "tunnels": tunnels, "portfwds": portfwds,
+        }
+
+    @app.post("/api/teardown/upload/{upload_id}/clear")
+    def teardown_clear_upload(upload_id: str,
+                              x_tester: str = Header(default="someone")):
+        """Mark an uploaded file as cleared (tester ran the removal manually or
+        deleted via the shell). Doesn't attempt to run anything on target —
+        remote removal happens via the session's shell; this just records that
+        the tester says it's done. Same pattern as persistence-mark-removed."""
+        import time
+        if mgr.store is None:
+            raise HTTPException(500, "no store")
+        mgr.store.mark_upload_cleared(upload_id, time.time())
+        broker.publish({"type": "teardown", "event": "upload-cleared",
+                        "id": upload_id, "by": x_tester})
+        return {"ok": True}
+
     # --- listeners ---------------------------------------------------------------
     @app.get("/api/listeners")
     def list_listeners():
@@ -377,8 +436,13 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         return {"ok": True, "saved": dest, "size": len(raw)}
 
     @app.post("/api/sessions/{session_id}/upload")
-    async def upload(session_id: str, body: dict = Body(...)):
-        """Push a file to the target through the shell (chunked base64 → base64 -d)."""
+    async def upload(session_id: str, body: dict = Body(...),
+                     x_tester: str = Header(default="someone")):
+        """Push a file to the target through the shell (chunked base64 → base64 -d).
+        Recorded in the uploads table so the teardown sweep can walk what was
+        left on target — every file recce dropped is trackable + removable."""
+        import time
+        import uuid
         sess = mgr.get(session_id)
         if sess is None:
             raise HTTPException(404, "no such session")
@@ -395,6 +459,11 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         if not sess.connected:
             raise HTTPException(409, "shell not connected")
         await _push_file(sess, path, raw)           # chunked — safe past the PTY line limit
+        if mgr.store is not None:
+            mgr.store.add_upload({
+                "id": uuid.uuid4().hex[:12], "host_ip": sess.host_ip,
+                "remote_path": path, "bytes": len(raw),
+                "uploaded_by": x_tester, "uploaded_at": time.time()})
         broker.publish({"type": "session", "event": "upload", "id": sess.id})
         return {"ok": True, "bytes": len(raw)}
 

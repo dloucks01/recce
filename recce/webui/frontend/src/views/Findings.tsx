@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { Finding, VulnDetail, SEVS, getHost, getExploitHint } from "../api";
+import { Finding, VulnDetail, SEVS, getHost, getExploitHint,
+  FINDING_STATUSES, FINDING_STATUS_LABEL, FindingStatus, setFindingStatus } from "../api";
 import { SevTag, NoteCell, useBounded } from "../ui";
 import { FindingDetail } from "../FindingDetail";
 import { useCollab } from "../collab";
@@ -254,7 +255,13 @@ export function Findings(
                 <td><SevTag severity={x.severity} /></td>
                 <td className="expand" onClick={() => toggle(x)} title="show detail">
                   <div className="t"><span className="caret">{open ? "▾" : "▸"}</span> {x.title}</div>
-                  <div className="m">{x.cve && <span>{x.cve} · </span>}{x.source}</div>
+                  <div className="m">{x.cve && <span>{x.cve} · </span>}{x.source}
+                    {x.sources && x.sources.length > 1 && (
+                      <span className="sources-badge" title={`corroborated by: ${x.sources.join(", ")}`}>
+                        +{x.sources.length - 1} source{x.sources.length > 2 ? "s" : ""}
+                      </span>
+                    )}
+                  </div>
                   <div className="badges">
                     {x.kev && <span className="badge kev" title="CISA Known Exploited Vulnerability — confirmed exploited in the wild; fix first">🔥 KEV</span>}
                     {x.epss > 0 && <span className="badge epss" title="EPSS — 30-day probability this CVE is exploited (FIRST.org)">EPSS {x.epss}%</span>}
@@ -285,12 +292,27 @@ export function Findings(
                 </td>
                 <td><span className={"tier " + x.tier}>{x.tier === "lead" ? "lead · verify" : x.tier}</span></td>
                 <td className="note-col">
-                  <NoteCell value={x.notes} onSave={(t) => onNote(x.key, t)} />
-                  <button className={"dismiss-btn" + (cst.dismissed[x.key] ? " on" : "")}
-                          title={cst.dismissed[x.key] ? "restore this finding" : "mark not a finding (false positive)"}
-                          onClick={() => dismiss(x.key, !cst.dismissed[x.key])}>
-                    {cst.dismissed[x.key] ? "restore" : "dismiss"}
-                  </button>
+                  <div className="note-col-row">
+                    <select className={"finding-status status-" + (x.status || "new")}
+                            value={x.status || ""}
+                            title="lifecycle status — drives what appears in the retest / report filters"
+                            onChange={(e) => {
+                              const s = e.target.value as FindingStatus;
+                              setFindingStatus(x.key, s).catch(() => {});
+                              // optimistic local update — the SSE broker will resync anyway
+                              (x as Finding).status = s;
+                            }}>
+                      {FINDING_STATUSES.map(s => (
+                        <option key={s} value={s}>{FINDING_STATUS_LABEL[s]}</option>
+                      ))}
+                    </select>
+                    <NoteCell value={x.notes} onSave={(t) => onNote(x.key, t)} />
+                    <button className={"dismiss-btn" + (cst.dismissed[x.key] ? " on" : "")}
+                            title={cst.dismissed[x.key] ? "restore this finding" : "mark not a finding (false positive)"}
+                            onClick={() => dismiss(x.key, !cst.dismissed[x.key])}>
+                      {cst.dismissed[x.key] ? "restore" : "dismiss"}
+                    </button>
+                  </div>
                 </td>
               </tr>,
               open && (

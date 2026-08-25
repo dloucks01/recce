@@ -512,6 +512,18 @@ class Store:
                 "SELECT key, status FROM tracking WHERE status != ''").fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def set_status(self, key: str, status: str, when: str = "") -> None:
+        """Set the lifecycle status on one tracking row. Empty status clears it
+        (back to the implicit 'new' state — the get_statuses filter drops it)."""
+        with closing(self.conn.cursor()) as cur:
+            cur.execute(
+                "INSERT INTO tracking(key, reviewed, notes, status, updated) "
+                "VALUES(?, 0, '', ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                "status=excluded.status, updated=excluded.updated",
+                (key, status or "", when),
+            )
+        self.conn.commit()
+
     # --- scan issues (errors / incomplete scans, surfaced to the operator) ------
 
     def add_issue(self, ip: str, phase: str, level: str, message: str,

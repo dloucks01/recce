@@ -31,7 +31,7 @@ from ..targets import expand_excludes, explicit_targets, ip_matcher, load_target
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
 
-__all__ = ['cmd_writeups', 'cmd_writeup', 'cmd_report', 'cmd_status', 'cmd_review']
+__all__ = ['cmd_writeups', 'cmd_writeup', 'cmd_report', 'cmd_retest', 'cmd_status', 'cmd_review']
 
 
 
@@ -197,6 +197,50 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+
+
+def cmd_retest(args: argparse.Namespace) -> int:
+    """Compare THIS engagement against a prior one, emit a retest report.
+
+    The current engagement's DB is the "curr" side; --against points at the
+    previous engagement's directory or DB path. Verdicts are computed on the
+    fly; nothing is written to either DB. The retest .docx lands in -o and
+    includes: cover with counts (fixed / still-open / regressed / new),
+    per-verdict finding lists (still-open first — those are the ones the
+    client still owes you)."""
+    from ..store import Store
+    from .. import retest as _retest
+    from ..report.retest_docx import build_retest_report
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']} — retest needs the current engagement's DB.")
+        return 1
+    prev = args.prev
+    if os.path.isdir(prev):
+        prev_db = os.path.join(prev, "results.sqlite")
+    else:
+        prev_db = prev
+    if not os.path.exists(prev_db):
+        print(f"[x] No previous datastore at {prev_db}")
+        return 1
+    print(f"[*] Comparing {paths['db']} (current) vs {prev_db} (previous)…")
+    with Store(prev_db) as prev_store, Store(paths["db"]) as curr_store:
+        prev_hosts = prev_store.all_hosts()
+        curr_hosts = curr_store.all_hosts()
+    verdicts = _retest.compare(prev_hosts, curr_hosts)
+    summary = _retest.summary(verdicts)
+    print(f"[+] {summary['total']} finding(s) across the two engagements:")
+    for k in ("still-open", "regressed", "new", "fixed"):
+        print(f"    {k:12s} {summary['counts'].get(k, 0)}")
+    out_path = os.path.join(args.output_dir, args.out_name)
+    with Store(paths["db"]) as st:
+        title = st.get_meta("engagement") or args.title or "Retest report"
+        meta = {k: (st.get_meta(k) or "") for k in
+                ("client", "start_date", "end_date", "testers", "tester", "roe_notes", "client_logo")}
+    build_retest_report(verdicts, summary, out_path, title=title,
+                        meta=meta, eng_dir=args.output_dir)
+    print(f"[+] Retest report written to {out_path}")
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:

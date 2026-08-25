@@ -5,7 +5,8 @@ import { SessionInfo, ListenerInfo, getSessions, getListeners, startListener, st
   spawnSession, closeSession,
   QuickAction, getQuickActions, runQuickAction, runShellCmd,
   PortFwd, startPortFwd, stopPortFwd, listPortFwds,
-  TunnelStatus, startTunnel, stopTunnel, tunnelStatus } from "../api";
+  TunnelStatus, startTunnel, stopTunnel, tunnelStatus,
+  TeardownInventory, getTeardown, clearTeardownUpload } from "../api";
 import { ShellTerminal } from "./Terminal";
 import { PayloadCatalog, StabilizeGuide, PostExploitRef, PivotGuide, ToolCatalog } from "./Payloads";
 import { bytesToB64 } from "../util";
@@ -136,6 +137,18 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
     });
   })();
 
+  // Teardown modal state — the aggregated view of everything recce deployed
+  // that still needs cleanup. Loaded on open, refreshed after each clear.
+  const [showTeardown, setShowTeardown] = useState(false);
+  const [tinv, setTinv] = useState<TeardownInventory | null>(null);
+  useEffect(() => {
+    if (showTeardown) getTeardown().then(setTinv).catch(() => setTinv(null));
+  }, [showTeardown]);
+  async function clearUpload(id: string) {
+    await clearTeardownUpload(id);
+    getTeardown().then(setTinv);
+  }
+
   // Spawn a new shell on `ip` by piggy-backing on any live PTY session on
   // that host (spawnSession only works from a PTY parent — the raw stager
   // can't self-fork reliably). Falls back with a helpful hint otherwise.
@@ -178,6 +191,89 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
 
   return (
     <div className={"sessions-view" + (hasTerminal ? " has-terminal" : "")}>
+      <div className="teardown-launch">
+        <button className="toggle" onClick={() => setShowTeardown(true)}
+                title="everything recce deployed that still needs cleanup at engagement end">
+          🧹 Teardown checklist
+        </button>
+        <span className="muted small">verify cleanup before you close the engagement</span>
+      </div>
+      {showTeardown && (
+        <div className="modal-backdrop" onClick={() => setShowTeardown(false)}>
+          <div className="teardown-modal" onClick={e => e.stopPropagation()}>
+            <div className="teardown-h">
+              <h3>Teardown checklist</h3>
+              <span className="muted small">
+                {tinv ? `${tinv.total} item(s) recce deployed still tracked` : "loading…"}
+              </span>
+              <button className="linkish" onClick={() => setShowTeardown(false)} style={{marginLeft: "auto"}}>× close</button>
+            </div>
+            <div className="teardown-body">
+              {tinv && tinv.total === 0 && (
+                <div className="teardown-clean">
+                  ✓ Nothing left behind — safe to close the engagement.
+                </div>
+              )}
+              {tinv?.persistence?.length ? (
+                <section>
+                  <h4>Persistence artifacts on target ({tinv.persistence.length})</h4>
+                  <p className="muted small">Use the Sessions "Remove all" button — recce runs the tracked remove_cmd via a live shell.</p>
+                  <ul>{tinv.persistence.map((p: any) => (
+                    <li key={p.id}><span className="mono">{p.host_ip}</span> · <code>{p.artifact_path}</code> · <span className="muted">{p.mechanism}</span></li>
+                  ))}</ul>
+                </section>
+              ) : null}
+              {tinv?.uploads?.length ? (
+                <section>
+                  <h4>Uploaded files on target ({tinv.uploads.length})</h4>
+                  <p className="muted small">Delete each via a shell on that host (<code>rm -f {"<path>"}</code>), then check it off here.</p>
+                  <ul>{tinv.uploads.map((u: any) => (
+                    <li key={u.id}>
+                      <span className="mono">{u.host_ip}</span> · <code>{u.remote_path}</code>
+                      <span className="muted small"> · {u.bytes} B · by {u.uploaded_by}</span>
+                      <button className="linkish" onClick={() => clearUpload(u.id)}>✓ cleared</button>
+                    </li>
+                  ))}</ul>
+                </section>
+              ) : null}
+              {tinv?.listeners?.length ? (
+                <section>
+                  <h4>Active listeners on this host ({tinv.listeners.length})</h4>
+                  <p className="muted small">Stop each via the Listeners panel — leaving one open past engagement leaks the callback port.</p>
+                  <ul>{tinv.listeners.map((l: any) => (
+                    <li key={l.id}><span className="mono">:{l.port}</span> · <span className="muted">{l.kind}</span></li>
+                  ))}</ul>
+                </section>
+              ) : null}
+              {tinv?.sessions?.length ? (
+                <section>
+                  <h4>Live shells ({tinv.sessions.length})</h4>
+                  <p className="muted small">Close via ✕ or group "stop all" — transcript stays on disk.</p>
+                  <ul>{tinv.sessions.map((s: any) => (
+                    <li key={s.id}><span className="mono">{s.host_ip}</span> · {s.name} · {s.pty ? "PTY" : "raw"}</li>
+                  ))}</ul>
+                </section>
+              ) : null}
+              {tinv?.tunnels?.length ? (
+                <section>
+                  <h4>Active SOCKS tunnels ({tinv.tunnels.length})</h4>
+                  <ul>{tinv.tunnels.map((t: any, i: number) => (
+                    <li key={i}><span className="mono">{t.host_ip}</span> · SOCKS :{t.socks_port}</li>
+                  ))}</ul>
+                </section>
+              ) : null}
+              {tinv?.portfwds?.length ? (
+                <section>
+                  <h4>Port forwards ({tinv.portfwds.length})</h4>
+                  <ul>{tinv.portfwds.map((f: any, i: number) => (
+                    <li key={i}><span className="mono">:{f.lport}</span> → <span className="mono">{f.rhost}:{f.rport}</span></li>
+                  ))}</ul>
+                </section>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      )}
       {exploitIntent && (
         <div className="exploit-intent-banner">
           <div className="eib-row">

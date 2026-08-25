@@ -3,21 +3,39 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Query
 
-from .._common import _SEV_ORDER, _finding_dict, _host_dict, _host_key
+from .._common import _SEV_ORDER, _finding_dict, _host_dict, _host_key, _apply_dedup
 
 
 def register_engagement_routes(app: FastAPI, ctx) -> None:
     db_path = ctx.db_path
 
     def _hosts():
+        """Load hosts + dedup findings in-place. Reads apply the same collapse
+        the report already does (intake.dedup) so the WebUI and the docx
+        report see the same canonical row count, not a doubled list from
+        (say) an nmap NSE + a version-db match for the same CVE."""
         from ...store import Store
         with Store(db_path) as st:
-            return st.all_hosts(), (st.get_meta("engagement") or "recce engagement")
+            hosts = st.all_hosts()
+        _apply_dedup(hosts)
+        return hosts, (_meta_name() or "recce engagement")
+
+    def _meta_name():
+        from ...store import Store
+        with Store(db_path) as st:
+            return st.get_meta("engagement")
 
     def _tracking() -> dict:
         from ...store import Store
         with Store(db_path) as st:
             return st.get_tracking()
+
+    def _statuses() -> dict:
+        """Lifecycle status per finding key (new/triaged/confirmed/in-report/
+        excluded/retested-*). Empty dict when no rows carry a status yet."""
+        from ...store import Store
+        with Store(db_path) as st:
+            return st.get_statuses()
 
     def _scope() -> dict:
         from ...store import Store
@@ -147,13 +165,16 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
         with Store(db_path) as st:
             h = st.get_host(ip)
             trk = st.get_tracking()
+            statuses = st.get_statuses()
         if h is None:
             raise HTTPException(404, "no such host")
+        _apply_dedup([h])                     # same canonical collapse as the list endpoints
         hrev, hnotes = trk.get(_host_key(h.ip), (False, ""))
         vulns = []
         for v in h.vulns:
             rev, notes = trk.get(tracking.vuln_row_key(v), (False, ""))
-            d = _finding_dict(v, bool(rev), notes)
+            d = _finding_dict(v, bool(rev), notes,
+                              status=statuses.get(tracking.vuln_row_key(v), ""))
             qscore, qtype = qod.score(v)
             d.update({
                 "output": (v.output or "")[:4000], "remediation": v.remediation or "",
@@ -188,13 +209,15 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
         from ... import tracking
         hs, _ = _hosts()
         tr = _tracking()
+        statuses = _statuses()
         out = []
         for h in hs:
             if not h.is_up:
                 continue
             for v in h.vulns:
                 rev, notes = tr.get(tracking.vuln_row_key(v), (False, ""))
-                out.append(_finding_dict(v, bool(rev), notes))
+                out.append(_finding_dict(v, bool(rev), notes,
+                                         status=statuses.get(tracking.vuln_row_key(v), "")))
         out.sort(key=lambda f: (not f["kev"], _SEV_ORDER.get(f["severity"], 9), -f["epss"]))
         total = len(out)
         if limit > 0:

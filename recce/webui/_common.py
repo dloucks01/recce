@@ -34,13 +34,16 @@ _COMMANDS: dict = {
     # Slower on dead ranges (nothing to prune) so it's opt-in.
     "run": _cmd("Run — guided full flow", "Scan", "required", profile=True,
                 flags=[_f("deep", "--deep", "deep"),
-                       _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up")]),
+                       _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up"),
+                       _f("resume", "--resume", "resume — skip hosts already enumerated")]),
     "scan": _cmd("Scan — enum + vulns", "Scan", "required", profile=True,
                  flags=[_f("deep", "--deep", "deep"), _f("fast", "--fast", "fast"),
-                        _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up")]),
+                        _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up"),
+                        _f("resume", "--resume", "resume — skip hosts already enumerated")]),
     "enum": _cmd("Enumerate", "Scan", "required", profile=True,
                  flags=[_f("fast", "--fast", "masscan"), _f("all-ports", "--all-ports", "all ports"),
-                        _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up")]),
+                        _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up"),
+                        _f("resume", "--resume", "resume — skip hosts already enumerated")]),
     "vulns": _cmd("Vuln scan", "Scan", "optional",
                   flags=[_f("fast", "--fast", "fast"), _f("aggressive", "--aggressive", "aggressive NSE", True),
                          _f("offline", "--offline", "offline")]),
@@ -122,11 +125,16 @@ def _tier(v) -> str:
     return "confirmed" if q >= 95 else "likely" if q >= 70 else "lead"
 
 
-def _finding_dict(v, reviewed: bool = False, notes: str = "") -> dict:
+def _finding_dict(v, reviewed: bool = False, notes: str = "",
+                  status: str = "") -> dict:
     from .. import tracking
+    # `sources` = distinct detector names that corroborated this finding after
+    # dedup. Populated by _apply_dedup below; a singleton just carries [v.source].
+    sources = getattr(v, "_sources", None) or ([v.source] if v.source else [])
     return {
         "key": tracking.vuln_row_key(v),      # same key the Excel sheet + coverage use
         "reviewed": reviewed, "notes": notes,
+        "status": status or ("reviewed" if reviewed else ""),
         "severity": v.severity or "info",
         "title": v.title or v.script_id or "finding",
         "ip": v.ip, "port": v.port,
@@ -134,7 +142,30 @@ def _finding_dict(v, reviewed: bool = False, notes: str = "") -> dict:
         "kev": bool(getattr(v, "kev", False)),
         "epss": round((getattr(v, "epss", 0.0) or 0.0) * 100),
         "tier": _tier(v), "source": v.source, "confidence": v.confidence,
+        "sources": sources,
     }
+
+
+def _apply_dedup(hosts) -> None:
+    """Collapse duplicate findings across each host, in-place, and stamp the
+    merged Vuln with a `_sources` attribute listing the detectors that
+    corroborated it. The dedup engine (intake.dedup) already handles the
+    merge — this helper just captures the pre-merge source list so the API
+    can surface it to the UI without changing the Vuln model."""
+    from ..intake import dedup as _dd
+    for h in hosts:
+        pre = h.vulns
+        # Bucket by identity BEFORE merge so we know who contributed
+        groups: dict = {}
+        for v in pre:
+            k = _dd.identity(v)
+            groups.setdefault(k, []).append(v)
+        _dd.dedupe_host(h)
+        # After dedupe: for each merged Vuln, look up its identity and attach
+        # the pre-merge source list. Singletons get their single source.
+        for v in h.vulns:
+            grp = groups.get(_dd.identity(v), [v])
+            v._sources = sorted({g.source for g in grp if g.source})
 
 
 def _host_key(ip: str) -> str:

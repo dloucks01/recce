@@ -1120,6 +1120,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="hide refuted findings again (the default).")
     r.set_defaults(func=_h("report"))
 
+    rt = sub.add_parser("retest", help="compare the current engagement against a "
+                                       "prior one and emit a per-finding verdict "
+                                       "report (fixed / still-open / new)")
+    _add_io(rt, title=False)
+    rt.add_argument("--against", "--prev", dest="prev", required=True,
+                    help="path to the previous engagement's directory (or its recce.db)")
+    rt.add_argument("--out-name", default="retest_report.docx",
+                    help="basename for the retest .docx (written into -o)")
+    rt.set_defaults(func=_h("retest"))
+
     st = sub.add_parser("status", help="print live review coverage")
     _add_io(st, title=False)
     st.set_defaults(func=_h("status"))
