@@ -322,6 +322,46 @@ function CompatBadge({ compat }: { compat: string }) {
   );
 }
 
+// Target-profile inference: map a group header + payload label to an OS +
+// interpreter tag so the wizard chips can score matches. Kept as a heuristic
+// rather than data on each payload entry so we don't have to migrate the
+// existing catalog — new payloads work as soon as their group is one of these.
+type OSKind = "linux" | "windows" | "macos" | "web" | "any";
+type Interp = "bash" | "sh" | "python" | "powershell" | "php" | "perl" | "ruby"
+  | "netcat" | "socat" | "node" | "java" | "lua" | "awk" | "openssl"
+  | "certutil" | "mshta" | "curl" | "wget" | "any";
+
+function groupToOS(group: string): OSKind {
+  const g = group.toLowerCase();
+  if (g.includes("linux") || g.includes("unix")) return "linux";
+  if (g.includes("windows")) return "windows";
+  if (g.includes("macos")) return "macos";
+  if (g.includes("web") || g.includes("bind")) return "any";
+  return "any";
+}
+function labelToInterp(label: string): Interp {
+  const l = label.toLowerCase();
+  if (l.startsWith("powershell") || l.includes(" ps ") || l.includes("powercat")
+      || l.includes(" ps ") || l.startsWith("ps ")) return "powershell";
+  if (l.startsWith("python")) return "python";
+  if (l.startsWith("bash")) return "bash";
+  if (l.startsWith("nc") || l.includes("mkfifo")) return "netcat";
+  if (l.startsWith("socat")) return "socat";
+  if (l.startsWith("perl")) return "perl";
+  if (l.startsWith("ruby")) return "ruby";
+  if (l.startsWith("php")) return "php";
+  if (l.startsWith("node")) return "node";
+  if (l.startsWith("java")) return "java";
+  if (l.startsWith("lua")) return "lua";
+  if (l.startsWith("awk")) return "awk";
+  if (l.startsWith("openssl")) return "openssl";
+  if (l.includes("certutil")) return "certutil";
+  if (l.includes("mshta")) return "mshta";
+  if (l.startsWith("curl")) return "curl";
+  if (l.startsWith("wget")) return "wget";
+  return "any";
+}
+
 export function PayloadCatalog({ port, tls = false }: { port: number; tls?: boolean }) {
   const [lhost, setLhost] = useState(location.hostname);
   const [addrs, setAddrs] = useState<string[]>([]);
@@ -329,6 +369,11 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
   const [stager, setStager] = useState<string>("");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [compatFilter, setCompatFilter] = useState<"all" | "recce" | "external" | "reference">("all");
+  // Wizard profile: OS + preferred interpreter. `any` = don't filter on that
+  // axis. When both are set, matching payloads sort to the top of each group
+  // with a ★ pick badge; non-matches stay visible but dimmed.
+  const [wizOS, setWizOS] = useState<OSKind>("any");
+  const [wizInt, setWizInt] = useState<Interp>("any");
   useEffect(() => { getStager(tls).then(setStager).catch(() => setStager("")); }, [tls]);
   // Fetch the recce host's non-loopback IPs once. If the tester opened recce
   // locally, `location.hostname` is "127.0.0.1" — but a shell inside a docker
@@ -380,6 +425,30 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
         </div>
       )}
 
+      <div className="payload-wizard">
+        <div className="pw-row">
+          <span className="pw-label">Target:</span>
+          {(["any", "linux", "windows", "macos"] as const).map(o => (
+            <button key={o} className={"pw-chip" + (wizOS === o ? " sel" : "")}
+                    onClick={() => setWizOS(o)}>
+              {o === "any" ? "Any" : o[0].toUpperCase() + o.slice(1)}
+            </button>
+          ))}
+        </div>
+        <div className="pw-row">
+          <span className="pw-label">Interp:</span>
+          {(["any", "bash", "python", "powershell", "netcat", "socat", "php"] as const).map(i => (
+            <button key={i} className={"pw-chip" + (wizInt === i ? " sel" : "")}
+                    onClick={() => setWizInt(i)}>
+              {i === "any" ? "Any" : i[0].toUpperCase() + i.slice(1)}
+            </button>
+          ))}
+          {(wizOS !== "any" || wizInt !== "any") && (
+            <button className="linkish" onClick={() => { setWizOS("any"); setWizInt("any"); }}>reset</button>
+          )}
+        </div>
+      </div>
+
       <div className="payload-compat-bar">
         <span className="payload-compat-label">Show:</span>
         <button className={`compat-filter ${compatFilter === "all" ? "active" : ""}`}
@@ -420,6 +489,22 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
       {catalog.map((g) => {
         const visible = g.items.filter(filterItem);
         if (visible.length === 0) return null;
+        // Wizard scoring: OS match adds 2, interpreter match adds 3. Sort desc.
+        // Non-matches keep their spot within their score bucket (stable sort).
+        const gOS = groupToOS(g.group);
+        const score = (p: P) => {
+          let s = 0;
+          if (wizOS !== "any" && (gOS === wizOS || gOS === "any")) s += 2;
+          if (wizInt !== "any" && labelToInterp(p.label) === wizInt) s += 3;
+          return s;
+        };
+        // If OS wizard is set and this group's OS is a hard mismatch (e.g.
+        // "Windows" group and user picked "Linux"), skip the group entirely.
+        const hardMiss = wizOS !== "any" && gOS !== "any" && gOS !== wizOS;
+        if (hardMiss) return null;
+        const items = [...visible].map(p => ({ p, s: score(p) }))
+          .sort((a, b) => b.s - a.s);
+        const topScore = Math.max(0, ...items.map(x => x.s));
         return (
           <div key={g.group} className="payload-group">
             <button className="payload-group-h payload-group-toggle" onClick={() => toggle(g.group)}>
@@ -427,15 +512,20 @@ export function PayloadCatalog({ port, tls = false }: { port: number; tls?: bool
               {g.group}
               <span className="payload-group-ct">{visible.length}{visible.length !== g.items.length ? `/${g.items.length}` : ""}</span>
             </button>
-            {!collapsed[g.group] && visible.map((p) => (
-              <div key={p.label} className={`payload-item ${(p.compat || "recce") !== "recce" ? "payload-dim" : ""}`}>
-                <span className="payload-label">{p.label}</span>
-                <CompatBadge compat={p.compat || "recce"} />
-                <code className="payload-code">{fill(p.tmpl)}</code>
-                {p.note && <span className="payload-note muted small">{p.note}</span>}
-                <CopyLine text={fill(p.tmpl)} />
-              </div>
-            ))}
+            {!collapsed[g.group] && items.map(({ p, s }) => {
+              const isPick = (wizOS !== "any" || wizInt !== "any") && s > 0 && s === topScore;
+              const wizMiss = (wizOS !== "any" || wizInt !== "any") && s === 0;
+              return (
+                <div key={p.label} className={`payload-item ${(p.compat || "recce") !== "recce" ? "payload-dim" : ""} ${wizMiss ? "payload-wiz-miss" : ""} ${isPick ? "payload-pick" : ""}`}>
+                  <span className="payload-label">{p.label}</span>
+                  {isPick && <span className="payload-pick-badge" title="best match for the target profile above">★ pick</span>}
+                  <CompatBadge compat={p.compat || "recce"} />
+                  <code className="payload-code">{fill(p.tmpl)}</code>
+                  {p.note && <span className="payload-note muted small">{p.note}</span>}
+                  <CopyLine text={fill(p.tmpl)} />
+                </div>
+              );
+            })}
           </div>
         );
       })}

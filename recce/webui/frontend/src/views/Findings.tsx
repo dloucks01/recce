@@ -55,16 +55,24 @@ export function Findings(
     }
     return c;
   }, [findings, f.leads]);
+  // Assignee filter: mine / unassigned / all. Finding assignment inherits from
+  // its host (via c.assignments[ip]) — recce doesn't have per-finding
+  // assignments yet, so a whole-host claim is what covers its findings too.
+  const [assignee, setAssignee] = useState<"all" | "mine" | "unassigned">("all");
   const rows = useMemo(() => {
     const n = f.q.toLowerCase();
-    return findings.filter((x) =>
-      (f.leads || x.tier !== "lead") &&
-      (f.sev === "all" || x.severity === f.sev) &&
-      (!f.host || x.ip === f.host) &&
-      (!f.unreviewed || !x.reviewed) &&
-      (!f.kev || x.kev) &&
-      (!n || `${x.title} ${x.ip} ${x.cve} ${x.port} ${x.source}`.toLowerCase().includes(n)));
-  }, [findings, f]);
+    return findings.filter((x) => {
+      const owner = cst.assignments[x.ip];
+      if (assignee === "mine" && owner !== me) return false;
+      if (assignee === "unassigned" && owner) return false;
+      return (f.leads || x.tier !== "lead") &&
+        (f.sev === "all" || x.severity === f.sev) &&
+        (!f.host || x.ip === f.host) &&
+        (!f.unreviewed || !x.reviewed) &&
+        (!f.kev || x.kev) &&
+        (!n || `${x.title} ${x.ip} ${x.cve} ${x.port} ${x.source}`.toLowerCase().includes(n));
+    });
+  }, [findings, f, assignee, cst.assignments, me]);
   const { shown, limit, total, sentinel } =
     useBounded(rows, 120, [f.sev, f.host, f.kev, f.unreviewed, f.leads, f.q]);
 
@@ -83,7 +91,7 @@ export function Findings(
     }
   }
   const detailFor = (x: Finding) => cache[x.ip]?.find((v) => v.key === x.key);
-  const { c: cst, dismiss } = useCollab();
+  const { c: cst, me, dismiss } = useCollab();
 
   // Bulk selection — checkboxes appear alongside the reviewed tick.
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -147,6 +155,12 @@ export function Findings(
           <div className="toggles">
             <button className={"toggle" + (f.unreviewed ? " on" : "")} onClick={() => setF({ unreviewed: !f.unreviewed })}>Unreviewed</button>
             <button className={"toggle" + (f.kev ? " on" : "")} onClick={() => setF({ kev: !f.kev })}>🔥 KEV</button>
+            <button className={"toggle" + (assignee === "mine" ? " on" : "")}
+                    onClick={() => setAssignee(assignee === "mine" ? "all" : "mine")}
+                    title={`show only findings on hosts assigned to ${me}`}>👤 Mine</button>
+            <button className={"toggle" + (assignee === "unassigned" ? " on" : "")}
+                    onClick={() => setAssignee(assignee === "unassigned" ? "all" : "unassigned")}
+                    title="show only findings on hosts nobody owns yet">✋ Unassigned</button>
             {leadCount > 0 && (
               <button className={"toggle" + (f.leads ? " on" : "")} onClick={() => setF({ leads: !f.leads })}
                       title="version/banner inferences below the confidence threshold">
@@ -262,6 +276,12 @@ export function Findings(
                 </td>
                 <td className="mono host-link" onClick={() => nav.openHost(x.ip)} title="host detail">
                   {x.ip}{x.port ? `:${x.port}` : ""}
+                  {cst.assignments[x.ip] && (
+                    <span className={"assignee-chip" + (cst.assignments[x.ip] === me ? " mine" : "")}
+                          title={`host claimed by ${cst.assignments[x.ip]}`}>
+                      {cst.assignments[x.ip] === me ? "you" : cst.assignments[x.ip]}
+                    </span>
+                  )}
                 </td>
                 <td><span className={"tier " + x.tier}>{x.tier === "lead" ? "lead · verify" : x.tier}</span></td>
                 <td className="note-col">

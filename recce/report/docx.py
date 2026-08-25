@@ -953,17 +953,55 @@ def build_one_writeup(hosts: list[Host], out_dir: str, selector: str, *,
 
 def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
                    min_severity: str = "low", include_potential: bool = False,
-                   screenshots: dict | None = None) -> dict:
+                   screenshots: dict | None = None,
+                   meta: dict | None = None,
+                   eng_dir: str | None = None) -> dict:
     """One document: title, severity summary, findings-summary table, then every
     finding as a section. Regenerated each run (it's a rollup, not hand-edited).
     Real findings only by default (include_potential brings back version guesses);
-    informational (info) items excluded unless min_severity is lowered to 'info'."""
+    informational (info) items excluded unless min_severity is lowered to 'info'.
+
+    When `meta` is provided (from `/api/meta`), the doc opens with a branded
+    cover page (client name, engagement dates, testers, ROE blurb, optional
+    logo). `eng_dir` roots the relative `client_logo` path from meta.
+    """
     cutoff = _SEV_ORDER.get(min_severity, 4)
     findings_with_ids = [(fid, f) for fid, f in _all_findings_with_ids(hosts)
                          if _SEV_ORDER.get(f.severity, 9) <= cutoff
                          and (include_potential or _is_real(f))]
     findings = [f for _fid, f in findings_with_ids]
     doc = Document()
+    meta = meta or {}
+    _has_meta = any(meta.get(k) for k in
+                    ("client", "start_date", "end_date", "testers",
+                     "roe_notes", "client_logo"))
+    if _has_meta:
+        # Cover page: logo, engagement title, client, dates, testers, ROE.
+        # Kept simple — text stack with an image; no complex table layouts so
+        # the docx builder stays free of new primitives.
+        if meta.get("client_logo") and eng_dir:
+            logo_path = os.path.join(eng_dir, meta["client_logo"])
+            try:
+                with open(logo_path, "rb") as fh:
+                    doc.image(fh.read())
+            except OSError:
+                pass                                # missing/renamed → skip silently
+        doc.title(title or "Penetration Test - Findings Report")
+        if meta.get("client"):
+            doc.para(f"Prepared for: {meta['client']}", bold=True)
+        _dates = " – ".join(x for x in (meta.get("start_date"), meta.get("end_date")) if x)
+        if _dates:
+            doc.para(f"Engagement window: {_dates}", italic=True, color="666666")
+        _testers = meta.get("testers") or meta.get("tester") or ""
+        if _testers:
+            doc.para(f"Tester(s): {_testers}", italic=True, color="666666")
+        if meta.get("scope_notes"):
+            doc.heading("Scope", 2)
+            doc.para(meta["scope_notes"])
+        if meta.get("roe_notes"):
+            doc.heading("Rules of Engagement", 2)
+            doc.para(meta["roe_notes"])
+        doc.page_break()
     doc.title(title or "Penetration Test - Findings Report")
     doc.para(f"{len(findings)} finding(s) across "
              f"{len({a[0] for f in findings for a in f.affected})} affected host(s).",

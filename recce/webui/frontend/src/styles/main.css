@@ -1720,3 +1720,53 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
   color: var(--text); font-size: 12px; cursor: pointer; border-radius: 4px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .shell-hist-item:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+
+/* payload wizard */
+.payload-wizard { padding: 8px 10px; background: color-mix(in srgb, var(--accent) 5%, var(--surface2));
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line)); border-radius: var(--radius);
+  display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.pw-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.pw-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); font-weight: 700; margin-right: 2px; min-width: 52px; }
+.pw-chip { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--text); font-size: 12px; font-weight: 600;
+  cursor: pointer; transition: border-color .1s, background .1s; }
+.pw-chip:hover { border-color: var(--accent); }
+.pw-chip.sel { background: color-mix(in srgb, var(--accent) 18%, var(--surface)); border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent) inset; }
+.payload-pick-badge { display: inline-block; padding: 1px 6px; margin-left: 4px;
+  border-radius: 4px; background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+.payload-wiz-miss { opacity: .55; }
+.payload-pick { border-left: 3px solid var(--accent); padding-left: 8px; background: color-mix(in srgb, var(--accent) 5%, transparent); }
+
+/* assignee chip surfaced on finding rows so ownership is visible where you triage */
+.assignee-chip { display: inline-block; margin-left: 8px; padding: 1px 7px;
+  border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: .02em;
+  font-family: var(--mono); border: 1px solid var(--line); background: var(--surface2);
+  color: var(--muted); }
+.assignee-chip.mine { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface2)); }
+
+/* engagement metadata + branding panel (Report Studio) */
+.brand-panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  margin-bottom: 12px; overflow: hidden; }
+.brand-h { width: 100%; text-align: left; padding: 10px 14px; background: var(--surface2);
+  border: 0; border-bottom: 1px solid var(--line); cursor: pointer;
+  display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; color: var(--text); }
+.brand-h:hover { background: color-mix(in srgb, var(--accent) 6%, var(--surface2)); }
+.brand-caret { color: var(--faint); }
+.brand-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.brand-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 12px; }
+.brand-grid label, .brand-wide { display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 700; }
+.brand-grid input, .brand-wide input, .brand-wide textarea {
+  padding: 6px 8px; background: var(--ground); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  color: var(--text); font-family: var(--sans); font-size: 13px; font-weight: 400;
+  text-transform: none; letter-spacing: 0; }
+.brand-grid input:focus, .brand-wide input:focus, .brand-wide textarea:focus {
+  outline: none; border-color: var(--accent); }
+.brand-logo { grid-column: 1 / -1; }
+.brand-logo input[type="file"] { padding: 4px 0; background: transparent; border: 0; }
+.brand-actions { display: flex; align-items: center; gap: 10px; margin-top: 4px; }

@@ -84,33 +84,37 @@ export function CommandPalette(p: CommandPaletteProps) {
       out.push({ kind: "action", label, keywords: (label + " " + kw).toLowerCase(), onSelect: fn });
     }
     for (const h of p.hosts) {
+      // Roles + notes go into the keyword corpus so "search the DC by role"
+      // or "find the host I put a note about" both work from the palette.
       out.push({
         kind: "host", label: h.ip, sub: h.hostname || h.os,
-        keywords: `${h.ip} ${h.hostname || ""} ${h.os || ""} ${(h.roles || []).join(" ")}`.toLowerCase(),
+        keywords: `${h.ip} ${h.hostname || ""} ${h.os || ""} ${(h.roles || []).join(" ")} ${h.notes || ""}`.toLowerCase(),
         onSelect: () => p.onOpenHost(h.ip),
       });
     }
     for (const f of p.findings) {
       if (f.tier === "lead") continue; // hide low-conf leads by default
       out.push({
-        kind: "finding", label: f.title, sub: `${f.ip}${f.port ? `:${f.port}` : ""}${f.cve ? ` · ${f.cve}` : ""}`,
-        keywords: `${f.title} ${f.ip} ${f.cve || ""} ${(f.cves || []).join(" ")} ${f.severity} ${f.source}`.toLowerCase(),
+        kind: "finding", label: f.title, sub: `${f.ip}${f.port ? `:${f.port}` : ""}${f.cve ? ` · ${f.cve}` : ""}${f.notes ? ` · ✎ ${f.notes.slice(0, 40)}${f.notes.length > 40 ? "…" : ""}` : ""}`,
+        keywords: `${f.title} ${f.ip} ${f.cve || ""} ${(f.cves || []).join(" ")} ${f.severity} ${f.source} ${f.notes || ""}`.toLowerCase(),
         onSelect: () => p.onOpenFinding(f.ip, f.key),
       });
     }
     for (const s of p.sessions) {
+      // Include the human-friendly name so "attach to STORMY_BEAR" from the
+      // palette works without knowing the hex id.
       out.push({
-        kind: "session", label: `shell ${s.host_ip}`,
+        kind: "session", label: `${s.name || "shell"} ${s.host_ip}`,
         sub: `${s.status}${s.pty ? " · PTY" : ""}${s.label ? " · " + s.label : ""}`,
-        keywords: `session shell ${s.host_ip} ${s.label || ""} ${s.status}`.toLowerCase(),
+        keywords: `session shell ${s.name || ""} ${s.host_ip} ${s.label || ""} ${s.status} ${s.id}`.toLowerCase(),
         onSelect: () => p.onOpenSession(s.id),
       });
     }
     for (const c of p.credentials) {
       out.push({
         kind: "cred", label: `${c.username || "(blank)"} · ${c.kind}`,
-        sub: `${c.origin_ip || ""}${c.domain ? " · " + c.domain : ""}${c.source ? " · " + c.source : ""}`,
-        keywords: `${c.username} ${c.domain || ""} ${c.origin_ip || ""} ${c.source || ""} ${c.kind}`.toLowerCase(),
+        sub: `${c.origin_ip || ""}${c.domain ? " · " + c.domain : ""}${c.source ? " · " + c.source : ""}${c.notes ? ` · ✎ ${c.notes.slice(0, 40)}` : ""}`,
+        keywords: `${c.username} ${c.domain || ""} ${c.origin_ip || ""} ${c.source || ""} ${c.kind} ${c.notes || ""}`.toLowerCase(),
         onSelect: () => { p.onGoto("credentials"); p.onClose(); },
       });
     }

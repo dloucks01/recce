@@ -518,7 +518,15 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     # by default (build_combined's _is_real filter). `recce writeup <id>` still targets one.
     try:
         from ..report_docx import build_combined
-        build_combined(hosts, paths["docx"], title=title)
+        # Client branding + engagement context so the cover page reflects the
+        # actual engagement, not just "recce". Fields are optional; the builder
+        # skips the cover cleanly when nothing is set.
+        _brand_meta = {k: (store.get_meta(k) or "") for k in
+                       ("client", "start_date", "end_date", "testers", "tester",
+                        "scope_notes", "roe_notes", "client_logo")}
+        _eng_dir = os.path.dirname(paths["docx"])
+        build_combined(hosts, paths["docx"], title=title,
+                       meta=_brand_meta, eng_dir=_eng_dir)
     except Exception as e:  # noqa: BLE001 - a writeup failure never blocks the other reports
         if not quiet:
             print(f"    [!] findings write-up doc skipped: {e}")

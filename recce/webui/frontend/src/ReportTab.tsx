@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Finding, SEVS, AttackPath, getAttackPath } from "./api";
+import { Finding, SEVS, AttackPath, getAttackPath, EngagementMeta,
+  getEngagementMeta, setEngagementMeta, uploadClientLogo } from "./api";
 import { SevTag, Chips } from "./ui";
 
 type ReportFormat = "xlsx" | "html" | "docx" | "csv" | "md";
@@ -27,6 +28,74 @@ function useDebounced<T>(value: T, delay: number): T {
     return () => window.clearTimeout(t);
   }, [value, delay]);
   return v;
+}
+
+// Engagement metadata panel — client + dates + testers + ROE + logo. Persists
+// via /api/meta so the docx builder can render a branded cover page. Collapsed
+// by default so it doesn't compete with the triage flow.
+function BrandingPanel() {
+  const [open, setOpen] = useState(false);
+  const [meta, setMeta] = useState<EngagementMeta>({});
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [logoErr, setLogoErr] = useState<string | null>(null);
+  useEffect(() => { getEngagementMeta().then(setMeta).catch(() => {}); }, []);
+  const update = (k: keyof EngagementMeta) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+    setMeta(m => ({ ...m, [k]: e.target.value }));
+  async function save() {
+    setSaving(true); setSaved(false);
+    try { await setEngagementMeta(meta); setSaved(true); setTimeout(() => setSaved(false), 1800); }
+    finally { setSaving(false); }
+  }
+  async function pickLogo(file: File) {
+    setLogoErr(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const bin = Array.from(new Uint8Array(buf)).map(b => String.fromCharCode(b)).join("");
+      const b64 = btoa(bin);
+      const r = await uploadClientLogo(b64);
+      setMeta(m => ({ ...m, client_logo: r.path }));
+    } catch (e) { setLogoErr(String(e instanceof Error ? e.message : e)); }
+  }
+  return (
+    <div className="brand-panel">
+      <button className="brand-h" onClick={() => setOpen(o => !o)}>
+        <span className="brand-caret">{open ? "▾" : "▸"}</span>
+        <span>Engagement metadata &amp; branding</span>
+        <span className="muted small">{meta.client ? `— ${meta.client}` : "— not set"}</span>
+      </button>
+      {open && (
+        <div className="brand-body">
+          <div className="brand-grid">
+            <label>Client<input value={meta.client || ""} onChange={update("client")} placeholder="Acme Corp" /></label>
+            <label>Engagement name<input value={meta.engagement || ""} onChange={update("engagement")} placeholder="Q4 external pen-test" /></label>
+            <label>Start date<input type="date" value={meta.start_date || ""} onChange={update("start_date")} /></label>
+            <label>End date<input type="date" value={meta.end_date || ""} onChange={update("end_date")} /></label>
+            <label>Tester(s)<input value={meta.testers || meta.tester || ""} onChange={update("testers")} placeholder="Alice, Bob" /></label>
+            <label className="brand-logo">
+              Client logo (PNG / JPEG, ≤ 4 MB)
+              <input type="file" accept="image/png,image/jpeg"
+                     onChange={e => { const f = e.target.files?.[0]; if (f) pickLogo(f); }} />
+              {meta.client_logo && <span className="muted small">current: <code>{meta.client_logo}</code></span>}
+              {logoErr && <span className="warn-msg">{logoErr}</span>}
+            </label>
+          </div>
+          <label className="brand-wide">Scope
+            <textarea value={meta.scope_notes || ""} onChange={update("scope_notes")}
+                      placeholder="IPs, domains, or apps in scope — one per line" rows={2} />
+          </label>
+          <label className="brand-wide">Rules of Engagement
+            <textarea value={meta.roe_notes || ""} onChange={update("roe_notes")}
+                      placeholder="Testing window, contact escalation, out-of-scope actions, credentials source" rows={2} />
+          </label>
+          <div className="brand-actions">
+            <button className="run" onClick={save} disabled={saving}>{saving ? "Saving…" : "Save"}</button>
+            {saved && <span className="muted small">✓ saved — next report picks it up</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Report Studio: two-pane layout. Left = triage controls + selection list;
@@ -143,6 +212,7 @@ export function ReportTab({ findings, onRefresh }: ReportTabProps) {
 
   return (
     <div className="report-studio">
+      <BrandingPanel />
       <div className="rs-header">
         <div>
           <h2>Report Studio</h2>

@@ -305,6 +305,28 @@ export async function putSessionHistory(sessionId: string, entries: string[]): P
   await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/history`,
     { method: "PUT", headers: jsonHeaders(), body: JSON.stringify({ entries }) });
 }
+
+// Engagement metadata (client, dates, testers, ROE, logo). Consumed by the
+// docx report builder to render a branded cover page.
+export type EngagementMeta = {
+  engagement?: string; client?: string; tester?: string; testers?: string;
+  scope_notes?: string; notes?: string; start_date?: string; end_date?: string;
+  roe_notes?: string; client_logo?: string;
+};
+export async function getEngagementMeta(): Promise<EngagementMeta> {
+  return getJSON<EngagementMeta>("/api/meta");
+}
+export async function setEngagementMeta(patch: EngagementMeta): Promise<void> {
+  const r = await fetch("/api/meta",
+    { method: "POST", headers: jsonHeaders(), body: JSON.stringify(patch) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+}
+export async function uploadClientLogo(base64Data: string): Promise<{ path: string }> {
+  const r = await fetch("/api/meta/logo",
+    { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ data: base64Data }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
 export interface ListenerInfo { id: string; host: string; port: number; kind: string; status: string; }
 
 export async function getSessions(host?: string): Promise<SessionInfo[]> {

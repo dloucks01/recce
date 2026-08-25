@@ -5,6 +5,7 @@ lifecycle — they manage the engagement itself rather than its findings."""
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 
 from fastapi import Body, FastAPI, Header, HTTPException
@@ -117,8 +118,14 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
 
     # --- engagement metadata -------------------------------------------------
 
-    _META_KEYS = ("engagement", "client", "tester", "scope_notes", "notes",
-                  "start_date", "end_date")
+    # Extended so reports pick up client branding + engagement context. The
+    # docx builder reads these directly (falls back to the recce defaults when
+    # a field is empty). `testers` is a comma-separated list rendered as an
+    # attribution line; `roe_notes` is the rules-of-engagement blurb reproduced
+    # on the cover page; `client_logo` is a relative path (e.g. branding/logo.png)
+    # written by /api/meta/logo — see below.
+    _META_KEYS = ("engagement", "client", "tester", "testers", "scope_notes",
+                  "notes", "start_date", "end_date", "roe_notes", "client_logo")
 
     @app.get("/api/meta")
     def get_meta():
@@ -148,6 +155,47 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(400, f"no recognized fields (use: {', '.join(_META_KEYS)})")
         broker.publish({"type": "meta", "updated": updated, "by": x_tester})
         return {"ok": True, "updated": updated}
+
+    @app.post("/api/meta/logo")
+    def upload_client_logo(body: dict = Body(...),
+                           x_tester: str = Header(default="someone")):
+        """Store a client logo for report branding. Accepts a base64 image blob
+        (from a file input on the WebUI) — decodes, writes to
+        <eng>/branding/logo.<ext>, and records the relative path in meta.
+        The docx builder inlines it on the report cover page.
+
+        Format inferred from the first bytes (PNG / JPEG only — reports embed
+        raster; SVG isn't supported by our docx pipeline). Size capped at 4 MB
+        so a runaway upload can't clog the sqlite meta blob."""
+        import base64
+        from ...store import Store
+        b64 = str(body.get("data", "")).strip()
+        if not b64:
+            raise HTTPException(400, "data (base64 image bytes) required")
+        # tolerate a data: URL prefix
+        if "," in b64 and b64.startswith("data:"):
+            b64 = b64.split(",", 1)[1]
+        try:
+            raw = base64.b64decode(b64, validate=True)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "data is not valid base64")
+        if len(raw) > 4 * 1024 * 1024:
+            raise HTTPException(413, "logo too large (max 4 MB)")
+        if raw[:8] == b"\x89PNG\r\n\x1a\n":
+            ext = "png"
+        elif raw[:3] == b"\xff\xd8\xff":
+            ext = "jpg"
+        else:
+            raise HTTPException(400, "logo must be PNG or JPEG")
+        brand_dir = os.path.join(eng_dir, "branding")
+        os.makedirs(brand_dir, exist_ok=True)
+        rel = f"branding/logo.{ext}"
+        with open(os.path.join(eng_dir, rel), "wb") as fh:
+            fh.write(raw)
+        with Store(db_path) as st:
+            st.set_meta("client_logo", rel)
+        broker.publish({"type": "meta", "updated": ["client_logo"], "by": x_tester})
+        return {"ok": True, "path": rel, "bytes": len(raw)}
 
     # --- issues log ----------------------------------------------------------
 
