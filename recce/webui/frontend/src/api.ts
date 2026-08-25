@@ -149,11 +149,6 @@ export async function postCommand(req: RunReq): Promise<{ id: string }> {
   return r.json();
 }
 
-// back-compat convenience
-export async function postScan(targets: string, profile: string): Promise<{ id: string }> {
-  return postCommand({ command: "scan", targets, profile });
-}
-
 export type ImportResult =
   | { mode: "job"; id: string; kind: string }
   | { mode: "done"; kind: string; added: number; summary: string }
@@ -247,9 +242,6 @@ export async function postSpray(targets: string, safe: boolean): Promise<SprayRe
 // weighted risk score for sorting hosts most-dangerous-first
 export function hostScore(f: Record<string, number>): number {
   return (f.critical || 0) * 1000 + (f.high || 0) * 100 + (f.medium || 0) * 10 + (f.low || 0);
-}
-export function sevTotal(f: Record<string, number>): number {
-  return SEVS.reduce((n, s) => n + (f[s] || 0), 0);
 }
 
 // --- multi-tester collaboration -----------------------------------------------
