@@ -303,7 +303,10 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         cmd = _QUICK_ACTIONS.get(key)
         if cmd is None:
             raise HTTPException(400, f"unknown quick action {key!r}")
-        out = await sess.run_and_capture(cmd.encode() + b"\n", timeout=15.0)
+        # No trailing newline here — run_and_capture already terminates the
+        # wrapped command with \n. A stray newline splits the wrapper across
+        # two shell lines and the end marker never runs (empty output bug).
+        out = await sess.run_and_capture(cmd.encode(), timeout=15.0)
         return {"ok": True, "key": key, "cmd": cmd, "output": out.decode("utf-8", "replace")}
 
     @app.post("/api/sessions/{session_id}/quickrun")
@@ -322,7 +325,9 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "cmd required")
         if len(cmd) > 2000:
             raise HTTPException(400, "cmd too long (max 2000 chars)")
-        out = await sess.run_and_capture(cmd.encode() + b"\n", timeout=20.0)
+        # Same fix as /quick — no trailing \n (run_and_capture terminates
+        # its wrapper itself).
+        out = await sess.run_and_capture(cmd.encode(), timeout=20.0)
         return {"ok": True, "cmd": cmd, "output": out.decode("utf-8", "replace")}
 
     # Per-session command history (up-arrow across attaches / browsers)
