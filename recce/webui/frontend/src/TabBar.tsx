@@ -16,7 +16,14 @@ const TAB_LABELS: Record<TabId, string> = {
   playbook: "Playbook",
 };
 
-const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "sessions", "timeline", "report", "exploitation", "credentials", "playbook"];
+// Default tab order follows the natural pen-test workflow:
+// dashboard (pulse) → scan (start) → findings (surface) → hosts / services
+// (drill / pivot) → exploit (plan) → sessions (post-ex) → credentials (loot) →
+// playbook (phase tracking) → timeline (retrospective) → report (deliverable).
+// Testers can still drag-and-drop; localStorage remembers their reorder.
+const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services",
+                           "exploitation", "sessions", "credentials", "playbook",
+                           "timeline", "report"];
 
 interface TabBarProps {
   active: TabId;
