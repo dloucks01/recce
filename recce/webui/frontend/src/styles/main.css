@@ -1812,3 +1812,15 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .finding-status.status-excluded { color: var(--faint); background: var(--ground); text-decoration: line-through; }
 .finding-status.status-retested-fixed { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
 .finding-status.status-retested-open { color: var(--crit); background: color-mix(in srgb, var(--crit) 12%, transparent); border-color: color-mix(in srgb, var(--crit) 40%, transparent); }
+
+/* Scan tab: value-carrying flags + job cancel button */
+.sv2-value-flags { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.sv2-value-flag input { font-family: var(--mono); font-size: 12px; }
+.sv2-job-cancel { flex: none; width: 28px; height: 28px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--faint);
+  font-size: 14px; line-height: 1; cursor: pointer; margin-left: auto;
+  opacity: 0; transition: opacity .1s, border-color .1s, color .1s, background .1s; }
+.sv2-job.live:hover .sv2-job-cancel, .sv2-job-cancel:focus-visible { opacity: 1; }
+.sv2-job-cancel:hover { border-color: var(--crit); color: var(--crit);
+  background: color-mix(in srgb, var(--crit) 8%, var(--surface)); }

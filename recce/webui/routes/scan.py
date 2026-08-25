@@ -31,8 +31,12 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
         spec = _COMMANDS.get(command)
         if spec is None:
             raise HTTPException(400, f"unknown command {command!r}")
-        # Targets: whitespace-split, drop any token starting with '-' (no flag injection).
-        targets = [t for t in str(body.get("targets", "")).split() if not t.startswith("-")]
+        # Targets: split on whitespace OR commas (the field placeholder invites
+        # comma lists — "10.0.0.0/24, 10.0.0.5, hostname"). Empty tokens
+        # dropped; anything starting with '-' dropped (no flag injection).
+        import re as _re
+        targets = [t for t in _re.split(r"[\s,]+", str(body.get("targets", "")))
+                   if t and not t.startswith("-")]
         if spec["targets"] == "required" and not targets:
             raise HTTPException(400, "this command needs targets")
         argv = [command, "-o", eng_dir]
@@ -54,12 +58,48 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
             lh = str(body.get("lhost", "")).strip()
             if lh:
                 argv += ["--lhost", lh]
-        # Only pass flags this command declares (silently drop anything else).
-        allowed = {f["name"]: f["flag"] for f in spec["flags"]}
+        # Boolean flags: silent-drop anything not in the catalog.
+        allowed = {f["name"]: f for f in spec["flags"]}
         for name in (body.get("flags") or []):
-            if name in allowed and allowed[name] not in argv:
-                argv.append(allowed[name])
+            f = allowed.get(name)
+            if f and f.get("kind", "bool") == "bool" and f["flag"] not in argv:
+                argv.append(f["flag"])
+        # Value-carrying flags: `flag_values: {name: value}`. Splits list-kind
+        # inputs on whitespace/commas so `--skip mssql,docker` becomes
+        # `--skip mssql docker` (nargs='*' on the parser side).
+        import re as _re
+        used_list_flag = False
+        for name, raw in (body.get("flag_values") or {}).items():
+            f = allowed.get(name)
+            if f is None or f.get("kind", "bool") == "bool":
+                continue
+            val = str(raw).strip()
+            if not val:
+                continue
+            kind = f.get("kind", "bool")
+            if kind == "int":
+                try:
+                    int(val)
+                except ValueError:
+                    continue                     # bad int → drop silently
+                argv += [f["flag"], val]
+            elif kind == "list":
+                toks = [t for t in _re.split(r"[\s,]+", val) if t and not t.startswith("-")]
+                if toks:
+                    argv += [f["flag"], *toks]
+                    used_list_flag = True
+            else:                                # "text"
+                if not val.startswith("-"):
+                    argv += [f["flag"], val]
         if spec["targets"] != "none":
+            # `--` separator when a list-kind flag was used: those flags declare
+            # nargs='*' on the parser side, so argparse would otherwise eat the
+            # trailing target IP into the list (--skip mssql 10.0.0.1 → skip=
+            # [mssql, 10.0.0.1], no target). The explicit terminator forces
+            # argparse to stop consuming for the option and treat what follows
+            # as positionals.
+            if used_list_flag:
+                argv.append("--")
             argv += targets
         label = f"{command} {' '.join(targets)}".strip()
         full_argv = recce_argv(*argv)

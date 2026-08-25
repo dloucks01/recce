@@ -113,7 +113,14 @@ export async function postNote(key: string, note: string) {
   });
 }
 
-export type CmdFlag = { name: string; flag: string; label: string; active?: boolean };
+export type CmdFlag = {
+  name: string; flag: string; label: string;
+  active?: boolean;
+  // "bool" (checkbox) is the default. "text" / "int" / "list" render as
+  // inputs and their values ride on `flag_values` in the scan POST.
+  kind?: "bool" | "text" | "int" | "list";
+  placeholder?: string;
+};
 export type CmdSpec = {
   label: string; group: string;
   targets: "required" | "optional" | "none";
@@ -131,6 +138,7 @@ export type RunReq = {
   command: string; targets?: string; profile?: string;
   username?: string; password?: string; domain?: string;
   lhost?: string; flags?: string[];
+  flag_values?: Record<string, string>;
 };
 
 export async function postCommand(req: RunReq): Promise<{ id: string }> {

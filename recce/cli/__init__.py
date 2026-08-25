@@ -36,6 +36,7 @@ from ._intake import *  # noqa: F401,F403
 from ._services import *  # noqa: F401,F403
 from ._db import *  # noqa: F401,F403
 from ._ad import *  # noqa: F401,F403
+from ._external import *  # noqa: F401,F403
 from ._meta import *  # noqa: F401,F403
 from .. import tracking as tr
 from ..models import Host

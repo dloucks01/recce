@@ -377,6 +377,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sv.set_defaults(func=_h("services"))
 
     # Deep web enumeration: fingerprint + non-intrusive checks on every HTTP(S) port.
+    # External-tool bridges: recce doesn't reimplement these scanners — it
+    # drives them and folds their native output back into the engagement.
+    nu = sub.add_parser("nuclei",
+                        help="run nuclei against web endpoints and fold findings "
+                             "back into the engagement (recce doesn't ship nuclei — install it)")
+    nu.add_argument("targets", nargs="*",
+                    help="URLs or host[:port] tokens; default = every web endpoint in the store")
+    _add_io(nu)
+    nu.set_defaults(func=_h("nuclei"))
+
+    ct = sub.add_parser("certipy",
+                        help="run certipy find against an AD-CS enrollment endpoint "
+                             "and fold ESC findings via the `ad` importer "
+                             "(recce doesn't ship certipy — pipx install certipy-ad)")
+    _add_io(ct)
+    ct.add_argument("-u", "--username", required=True, help="domain user")
+    ct.add_argument("-p", "--password", required=True, help="domain user password")
+    ct.add_argument("-d", "--domain", required=True, help="domain FQDN (CORP.LOCAL)")
+    ct.add_argument("--dc-ip", dest="dc_ip", required=True, help="DC IP")
+    # Placeholders so cmd_certipy can hand the whole ns to cmd_ad without KeyError.
+    ct.add_argument("--admin-username", default="", help=argparse.SUPPRESS)
+    ct.add_argument("--admin-password", default="", help=argparse.SUPPRESS)
+    ct.add_argument("--admin-domain", default="", help=argparse.SUPPRESS)
+    ct.add_argument("--replace-ad", action="store_true", default=False, help=argparse.SUPPRESS)
+    ct.add_argument("--roast", action="store_true", default=False, help=argparse.SUPPRESS)
+    ct.add_argument("--asrep", action="store_true", default=False, help=argparse.SUPPRESS)
+    ct.add_argument("--dcsync", action="store_true", default=False, help=argparse.SUPPRESS)
+    ct.add_argument("--owned", default="", help=argparse.SUPPRESS)
+    ct.add_argument("--screenshots", action="store_true", default=False, help=argparse.SUPPRESS)
+    ct.add_argument("--creds", default="", help=argparse.SUPPRESS)
+    ct.set_defaults(func=_h("certipy"))
+
     wb = sub.add_parser("web",
                         help="deep-enumerate web endpoints (tech fingerprint + "
                              "exposed .git/.env, actuator, methods, headers/TLS)")

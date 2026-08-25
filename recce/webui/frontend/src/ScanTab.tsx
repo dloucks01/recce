@@ -130,6 +130,9 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
   const [cDomain, setCDomain] = useState("");
   const [cLhost, setCLhost] = useState("");
   const [cFlags, setCFlags] = useState<Record<string, boolean>>({});
+  // Value-carrying flags (text/int/list). Kept separate from boolean cFlags
+  // so both can be sent to the backend independently.
+  const [cFlagValues, setCFlagValues] = useState<Record<string, string>>({});
   const [log, setLog] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [showLog, setShowLog] = useState(false);
@@ -196,6 +199,12 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
     if (!s) return;
     if (s.targets === "required" && !targets.trim()) return;
     const flags = Object.keys(cFlags).filter((k) => cFlags[k]);
+    // Only forward non-empty flag_values (empty inputs → drop from the wire so
+    // the backend's kind-specific validation doesn't need to see empty strings).
+    const flag_values: Record<string, string> = {};
+    for (const [k, v] of Object.entries(cFlagValues)) {
+      if (v && v.trim()) flag_values[k] = v;
+    }
     try {
       const { id } = await postCommand({
         command, targets, profile,
@@ -204,6 +213,7 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
         domain: s.creds ? cDomain : undefined,
         lhost: s.lhost ? cLhost : undefined,
         flags,
+        flag_values: Object.keys(flag_values).length ? flag_values : undefined,
       });
       streamJob(id);
     } catch (e) {
@@ -394,7 +404,7 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
             <button
               key={g}
               className={`sv2-tab ${activeGroup === g ? "active" : ""}`}
-              onClick={() => { setActiveGroup(g); setCommand(null); setCFlags({}); }}
+              onClick={() => { setActiveGroup(g); setCommand(null); setCFlags({}); setCFlagValues({}); }}
             >
               <span className="sv2-tab-icon">{meta.icon}</span>
               <span className="sv2-tab-name">{g}</span>
@@ -414,7 +424,7 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
                   <button
                     key={key}
                     className={`sv2-cmd ${command === key ? "active" : ""}`}
-                    onClick={() => { setCommand(key); setCFlags({}); }}
+                    onClick={() => { setCommand(key); setCFlags({}); setCFlagValues({}); }}
                     disabled={isBusy}
                   >
                     <span className="sv2-cmd-name">{s.label}</span>
@@ -476,7 +486,7 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
                     <div className="sv2-flags">
                       <span className="sv2-label">Flags</span>
                       <div className="sv2-flag-list">
-                        {spec.flags.map((f) => (
+                        {spec.flags.filter(f => (f.kind || "bool") === "bool").map((f) => (
                           <label key={f.name} className={`sv2-flag ${cFlags[f.name] ? "on" : ""}`}>
                             <input type="checkbox" checked={cFlags[f.name] || false}
                                    onChange={(e) => setCFlags({ ...cFlags, [f.name]: e.target.checked })}
@@ -486,6 +496,24 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
                           </label>
                         ))}
                       </div>
+                      {spec.flags.some(f => (f.kind || "bool") !== "bool") && (
+                        <div className="sv2-value-flags">
+                          {spec.flags.filter(f => (f.kind || "bool") !== "bool").map((f) => (
+                            <label key={f.name} className="sv2-field sv2-value-flag">
+                              <span className="sv2-label">
+                                {f.label}
+                                {f.active && <span className="sv2-flag-hot" style={{marginLeft:6}}>active</span>}
+                              </span>
+                              <input className="sv2-input"
+                                     type={f.kind === "int" ? "number" : "text"}
+                                     value={cFlagValues[f.name] || ""}
+                                     placeholder={f.placeholder || f.flag}
+                                     disabled={isBusy}
+                                     onChange={(e) => setCFlagValues({ ...cFlagValues, [f.name]: e.target.value })} />
+                            </label>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -554,6 +582,12 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
                 <div className="sv2-job-cmd">{j.cmd}</div>
                 <div className="sv2-job-meta">{j.tester} &middot; {elapsed(j.started)}</div>
               </div>
+              <button className="sv2-job-cancel" title="cancel this scan"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!window.confirm(`Cancel this scan?\n\n${j.cmd}`)) return;
+                        fetch(`/api/jobs/${j.id}/cancel`, { method: "POST" });
+                      }}>✕</button>
             </div>
           ))}
 

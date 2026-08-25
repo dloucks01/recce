@@ -19,8 +19,20 @@ def _cmd(label, group, targets="optional", profile=False, creds=False, lhost=Fal
             "creds": creds, "lhost": lhost, "flags": list(flags)}
 
 
-def _f(name, flag, label, active=False):
-    return {"name": name, "flag": flag, "label": label, "active": active}
+def _f(name, flag, label, active=False, *, kind="bool", placeholder=""):
+    """Catalog entry for a scan-tab flag.
+
+    kind:
+      * "bool"  — checkbox (default). Body sends the name in `flags: []`.
+      * "text"  — single string. Body sends `flag_values: {name: "value"}`.
+      * "int"   — integer. Same wire shape as "text" (validated server-side).
+      * "list"  — whitespace/comma-separated tokens. Splits and passes each
+                  as its own argv token after the flag (e.g. `--skip a b c`).
+    `active` marks intrusive flags in the UI (renders an "active" pill).
+    `placeholder` is UI-only hint text for non-bool inputs.
+    """
+    return {"name": name, "flag": flag, "label": label, "active": active,
+            "kind": kind, "placeholder": placeholder}
 
 
 # The full command surface the workbench can run. Each entry declares what the UI
@@ -38,15 +50,45 @@ _COMMANDS: dict = {
                 # on `scan`). Listing it in the catalog would translate to argv
                 # that the parser rejects with "unrecognized arguments: --deep".
                 flags=[_f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up"),
-                       _f("resume", "--resume", "resume — skip hosts already enumerated")]),
+                       _f("resume", "--resume", "resume — skip hosts already enumerated"),
+                       _f("act", "--act", "run the Act phase after — auto-loot + ranked action plan"),
+                       _f("exclude", "--exclude", "exclude IPs / CIDRs", kind="list",
+                          placeholder="10.0.0.5, 10.0.0.10/32"),
+                       _f("workers", "--workers", "worker threads", kind="int",
+                          placeholder="8"),
+                       _f("skip", "--skip", "skip deep modules", kind="list",
+                          placeholder="mssql docker snmp"),
+                       _f("only-modules", "--only-modules", "run ONLY these deep modules", kind="list",
+                          placeholder="web ldap smb")]),
     "scan": _cmd("Scan — enum + vulns", "Scan", "required", profile=True,
-                 flags=[_f("deep", "--deep", "deep"), _f("fast", "--fast", "fast"),
+                 flags=[_f("deep", "--deep", "deep — every credential-free deep module"),
+                        _f("fast", "--fast", "fast (masscan port sweep)"),
                         _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up"),
-                        _f("resume", "--resume", "resume — skip hosts already enumerated")]),
+                        _f("resume", "--resume", "resume — skip hosts already enumerated"),
+                        _f("all-ports", "--all-ports", "all 65535 TCP ports"),
+                        _f("exclude", "--exclude", "exclude IPs / CIDRs", kind="list",
+                           placeholder="10.0.0.5, 10.0.0.10/32"),
+                        _f("workers", "--workers", "worker threads", kind="int", placeholder="8"),
+                        _f("skip", "--skip", "with --deep: skip these modules", kind="list",
+                           placeholder="mssql docker snmp"),
+                        _f("only-modules", "--only-modules", "with --deep: only these modules", kind="list",
+                           placeholder="web ldap smb"),
+                        _f("host-timeout", "--host-timeout", "per-host timeout (minutes)", kind="int",
+                           placeholder="20"),
+                        _f("max-retries", "--max-retries", "nmap retry cap", kind="int", placeholder="6")]),
     "enum": _cmd("Enumerate", "Scan", "required", profile=True,
-                 flags=[_f("fast", "--fast", "masscan"), _f("all-ports", "--all-ports", "all ports"),
+                 flags=[_f("fast", "--fast", "masscan port sweep"),
+                        _f("all-ports", "--all-ports", "all 65535 TCP ports"),
                         _f("no-discovery", "--no-discovery", "no ping (-Pn) — assume every target up"),
-                        _f("resume", "--resume", "resume — skip hosts already enumerated")]),
+                        _f("resume", "--resume", "resume — skip hosts already enumerated"),
+                        _f("no-os", "--no-os", "skip OS detection"),
+                        _f("no-ad", "--no-ad", "skip SMB / LDAP AD scripts"),
+                        _f("no-reconfirm", "--no-reconfirm", "skip -Pn re-probe of missed hosts"),
+                        _f("exclude", "--exclude", "exclude IPs / CIDRs", kind="list",
+                           placeholder="10.0.0.5, 10.0.0.10/32"),
+                        _f("workers", "--workers", "worker threads", kind="int", placeholder="8"),
+                        _f("host-timeout", "--host-timeout", "per-host timeout (minutes)", kind="int",
+                           placeholder="20")]),
     "vulns": _cmd("Vuln scan", "Scan", "optional",
                   flags=[_f("fast", "--fast", "fast"), _f("aggressive", "--aggressive", "aggressive NSE", True),
                          _f("offline", "--offline", "offline")]),
@@ -91,8 +133,36 @@ _COMMANDS: dict = {
     "dns": _cmd("DNS", "Services", "optional"),
     "smtp": _cmd("SMTP", "Services", "optional"),
     # --- AD / credentialed ---
-    "credenum": _cmd("Credentialed enum (SMB/AD/SSH)", "Credentialed", "optional", creds=True),
+    # Credentialed enum accepts AD scoping (--dc-ip / --ldap-*) + a separate
+    # admin account for admin-only checks (secretsdump). Surfacing them turns
+    # the tab into a real AD enumeration surface without any CLI shell-out.
+    "credenum": _cmd("Credentialed enum (SMB/AD/SSH)", "Credentialed", "optional", creds=True,
+                     flags=[_f("dc-ip", "--dc-ip", "target DC IP for LDAP (else auto-detect)",
+                               kind="text", placeholder="10.0.0.1"),
+                            _f("ldap-enum", "--ldap-enum", "credentialed LDAP enum of discovered DCs"),
+                            _f("ldap-anon", "--ldap-anon", "attempt anonymous LDAP bind"),
+                            _f("ldap-ssl", "--ldap-ssl", "use LDAPS (636)"),
+                            _f("admin-user", "--admin-user", "admin username for admin-only checks",
+                               kind="text", placeholder="administrator"),
+                            _f("admin-pass", "--admin-pass", "admin password", kind="text", placeholder="•••"),
+                            _f("admin-domain", "--admin-domain", "admin account domain",
+                               kind="text", placeholder="CORP.LOCAL")]),
     "deploy": _cmd("Deploy on-target enum", "Credentialed", "optional", creds=True),
+    # `ad` (SharpHound / Certipy) is deliberately NOT in the catalog: it takes a
+    # file path (nargs='+'), not a target IP, so it doesn't fit the target-based
+    # scan-tab shape. The Add → Import flow (ImportModal) already handles it —
+    # drag the .zip, recce folds it into the AD graph. Leaving it out avoids a
+    # broken UX where filling the "target" field with an IP wouldn't work.
+    "verify": _cmd("Verify version leads (dry-run NSE re-check)", "Reporting", "optional",
+                   flags=[_f("run", "--run", "actually execute the check (else dry-run)", active=True)]),
+    "showmount": _cmd("NFS showmount (exports)", "Services", "optional"),
+    # Active external-tool bridges. recce doesn't reimplement these — it drives
+    # them and folds their native output back into the engagement. Missing-tool
+    # cases are surfaced as friendly info-level findings, not silent failures.
+    "nuclei": _cmd("Nuclei (active web vuln scan)", "Web", "optional"),
+    "certipy": _cmd("Certipy — AD-CS enumeration (ESC1..ESC15)", "Credentialed", "none", creds=True,
+                    flags=[_f("dc-ip", "--dc-ip", "target DC IP (required)", kind="text",
+                              placeholder="10.0.0.1")]),
     "privesc": _cmd("Priv-esc playbook", "Exploitation", "optional",
                     flags=[_f("scan", "--scan", "remote NSE checks")]),
     # --- exploitation / reporting ---
