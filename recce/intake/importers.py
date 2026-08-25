@@ -345,13 +345,36 @@ SCANNER_PARSERS = {
 }
 # IP1/IP2/IP3 additions — pulled in lazily so the base importers.py stays small.
 def _extend_scanner_parsers() -> None:
+    """Idempotent parser registry extend. First call loads every built-in
+    module and any user parsers reachable from the current search paths.
+    Callable again after `parsers_user.set_engagement_parser_dir` + reset()
+    to pick up an engagement-local parsers/ directory that didn't exist
+    at import time — see `refresh_user_parsers` below."""
     global SCANNER_PARSERS
-    if "burp" in SCANNER_PARSERS:
-        return
     from . import parsers_web, parsers_recon, parsers_supply, parsers_generic
-    SCANNER_PARSERS = {**SCANNER_PARSERS, **parsers_web.PARSERS,
+    from . import parsers_user
+    # Rebuild from scratch so `refresh` picks up removed/renamed user parsers
+    # rather than leaving zombie entries.
+    base = {"nessus": parse_nessus, "openvas": parse_openvas,
+            "nuclei": parse_nuclei, "testssl": parse_testssl}
+    # Order: built-in scanners → generic fallback → user parsers LAST so a
+    # user-defined `nikto.json` can shadow the built-in nikto parser if the
+    # tester's tool output differs from the standard shape.
+    SCANNER_PARSERS = {**base, **parsers_web.PARSERS,
                        **parsers_recon.PARSERS, **parsers_supply.PARSERS,
-                       **parsers_generic.PARSERS}
+                       **parsers_generic.PARSERS,
+                       **parsers_user.user_parsers()}
+
+
+def refresh_user_parsers() -> None:
+    """Re-run the extend after `parsers_user.set_engagement_parser_dir` +
+    reset() so an engagement-local parsers/ directory registers. Safe to
+    call multiple times."""
+    from . import parsers_user
+    parsers_user.reset()
+    _extend_scanner_parsers()
+
+
 _extend_scanner_parsers()
 
 
@@ -424,4 +447,11 @@ def detect_scanner(text: str) -> str:
         # gobuster --format json (one obj per line)
         if '"path"' in w and '"status"' in w and '"gobuster"' in wide:
             return "gobuster"
+    # Phase 2 — user-declared parsers (JSON/YAML in ~/.recce/parsers/). Runs
+    # AFTER every built-in sniff so a user parser can shadow a built-in only
+    # when nothing built-in matched. Filename hint accepted here too.
+    from . import parsers_user
+    hit = parsers_user.detect_user_parser(text, "")
+    if hit:
+        return hit
     return ""

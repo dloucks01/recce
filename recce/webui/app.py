@@ -41,6 +41,13 @@ def create_app(eng_dir: str) -> FastAPI:
     from .. import __version__
     from ..cli import _open_paths
     db_path = _open_paths(eng_dir)["db"]
+    # Phase 2 — tell the user-parser loader where <engagement>/parsers/
+    # lives so an engagement can carry its own custom-tool parsers, then
+    # refresh the SCANNER_PARSERS registry so those parsers register.
+    from ..intake import parsers_user as _up
+    from ..intake import importers as _importers
+    _up.set_engagement_parser_dir(eng_dir)
+    _importers.refresh_user_parsers()
 
     broker = _Broker()
     from ..sessions import SessionManager

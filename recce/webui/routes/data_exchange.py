@@ -27,6 +27,18 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         with Store(db_path) as st:
             return st.all_hosts(), (st.get_meta("engagement") or "recce engagement")
 
+    @app.get("/api/import/parsers")
+    def list_user_parsers():
+        """Phase 2 — enumerate loaded user parsers (JSON in ~/.recce/parsers/
+        + <engagement>/parsers/). Powers the ImportModal dropdown so a user-
+        contributed parser shows up next to the built-ins."""
+        from ...intake.parsers_user import user_parser_specs
+        return {"parsers": [
+            {"name": s["name"], "description": s.get("description", ""),
+             "detect": s.get("detect", {}), "findings_count": len(s.get("findings", []))}
+            for s in user_parser_specs()
+        ]}
+
     @app.post("/api/import")
     def import_output(body: dict = Body(...), x_tester: str = Header(default="someone")):
         """Fold external tool output into the live engagement so the whole team sees it.
@@ -261,13 +273,14 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
                     if st.add_credential(cred):
                         added += 1
                 summary = f"stored {added} credential(s)"
-            elif kind in ("nessus", "openvas", "nuclei", "testssl",
-                          "burp", "zap", "nikto", "wpscan", "sslyze", "enum4linux",
-                          "kerbrute", "impacket-adusers", "impacket-delegation",
-                          "whatweb", "wafw00f", "ffuf", "gobuster", "trivy", "grype",
-                          "generic"):
+            else:
+                # Any registered parser — built-in OR user-defined (Phase 2).
+                # A user parser under ~/.recce/parsers/ shows up in
+                # SCANNER_PARSERS and folds via the same path.
                 from ... import epss, kev
                 from ...importers import SCANNER_PARSERS
+                if kind not in SCANNER_PARSERS:
+                    raise HTTPException(422, f"unsupported import kind {kind!r}")
                 vulns = SCANNER_PARSERS[kind](content)
                 by_ip: dict[str, list] = {}
                 for v in vulns:
@@ -288,8 +301,6 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
                     folded_hosts += 1
                 summary = (f"folded {added} {kind} finding(s) across {folded_hosts} host(s)"
                            + (f"; {skipped_noip} without a host skipped" if skipped_noip else ""))
-            else:
-                raise HTTPException(422, f"unsupported import kind {kind!r}")
         if added == 0:                                   # don't let "0 rows" read as success
             summary = (summary + " — " if summary else "") + (
                 f"parsed 0 rows; check this is really {kind} output (or a variant recce "

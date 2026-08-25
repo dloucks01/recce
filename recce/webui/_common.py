@@ -376,6 +376,18 @@ def _import_signatures(content: str, filename: str = "") -> list[str]:
             kinds.append("trivy")
         elif "grype" in fn:
             kinds.append("grype")
+    # Phase 2 — user-declared parsers (JSON in ~/.recce/parsers/). Consulted
+    # AFTER built-ins so a user parser only fires when nothing built-in
+    # matched. Passes the filename explicitly so filename_glob rules work
+    # even when the paste body wouldn't match a content_re.
+    if not kinds:
+        try:
+            from ..intake.parsers_user import detect_user_parser
+            hit = detect_user_parser(content, filename)
+            if hit:
+                kinds.append(hit)
+        except ImportError:
+            pass
     return kinds
 
 
@@ -406,12 +418,11 @@ def _import_preview(kind: str, content: str, raw_bytes: bytes) -> dict:
     detail = ""
     sample: list[str] = []
     try:
-        if kind in ("nessus", "openvas", "nuclei", "testssl",
-                    "burp", "zap", "nikto", "wpscan", "sslyze", "enum4linux",
-                    "kerbrute", "impacket-adusers", "impacket-delegation",
-                    "whatweb", "wafw00f",
-                    "ffuf", "gobuster", "trivy", "grype",
-                    "generic"):
+        # Any kind that's actually registered in SCANNER_PARSERS gets the
+        # generic preview shape. Covers built-ins + user parsers (Phase 2)
+        # so a new declarative parser previews correctly without a
+        # pyproject / route edit.
+        if kind in importers.SCANNER_PARSERS:
             vs = importers.SCANNER_PARSERS[kind](content)
             n = len(vs)
             detail = f"{n} finding(s) across {len({v.ip for v in vs})} host(s)"
