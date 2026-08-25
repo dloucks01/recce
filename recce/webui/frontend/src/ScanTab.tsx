@@ -37,22 +37,24 @@ const PRESETS: Preset[] = [
   },
   {
     label: "Web App",
-    desc: "Web deep-enum + API testing",
+    desc: "Web crawl + API enum + nuclei active scan",
     icon: "🌐",
     cmds: [
-      { command: "web" },
+      { command: "web", flags: ["crawl"] },
       { command: "api" },
+      { command: "nuclei" },
     ],
   },
   {
     label: "AD Assessment",
-    desc: "Kerberos + LDAP + SMB + DNS",
+    desc: "Kerberos + LDAP + SMB + DNS + Certipy (ADCS)",
     icon: "🏢",
     cmds: [
       { command: "kerberos" },
       { command: "ldap" },
       { command: "smb" },
       { command: "dns" },
+      { command: "certipy" },
     ],
   },
   {
@@ -69,6 +71,15 @@ const PRESETS: Preset[] = [
     icon: "⚡",
     cmds: [
       { command: "vulns", flags: ["aggressive"] },
+    ],
+  },
+  {
+    label: "Triage + Verify",
+    desc: "Dry-run NSE re-checks against version leads",
+    icon: "🔍",
+    cmds: [
+      { command: "verify" },
+      { command: "prove" },
     ],
   },
   {
