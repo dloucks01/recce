@@ -43,18 +43,31 @@ markers = [
 [project.scripts]
 recce = "recce.cli:main"
 
-[tool.setuptools]
-# recce.webui MUST be listed explicitly: cli.py imports `from .webui.app import
-# create_app`, so a plain `pip install` that shipped only "recce" produced a package
-# whose `serve`/web-UI command ImportErrors at runtime. (recce.scripts / recce.local
-# are data, not import packages - they ride along via package-data below.)
-packages = ["recce", "recce.webui"]
-
 [tool.setuptools.dynamic]
 version = { attr = "recce.__version__" }
 
+# Auto-discover every subpackage so a `pip install` never quietly ships a
+# broken tree again. The previous "packages = ['recce','recce.webui']" list
+# was missing 11 real subpackages (recce.cli, recce.act, recce.ad, recce.core,
+# recce.intake, recce.report, recce.report.formats, recce.services,
+# recce.services.db, recce.services.web, recce.sessions, recce.vuln,
+# recce.webui.routes, recce.webui.services) — the shell installed cleanly but
+# then ImportError'd on the very first subcommand dispatch.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["recce*"]
+exclude = ["tests*", "tools*", "test_env*", "docs*"]
+
 [tool.setuptools.package-data]
-# Ship the bundled demo scan, the on-target enum scripts, and the Kali-side
-# per-service enumeration suite alongside the code.
-recce = ["sample_scan.xml", "local/*", "scripts/*", "scripts/services/*",
-         "webui/static/*", "webui/static/assets/*"]
+# Ship the bundled demo scan, the on-target enum scripts, the Kali-side
+# per-service enumeration suite, and the pre-built webui bundle. Recursive
+# globs (**/*) so a new file under scripts/ or webui/static/ doesn't need a
+# pyproject edit to reach the wheel.
+recce = [
+    "sample_scan.xml",
+    "local/**/*",
+    "scripts/**/*",
+    "creds/**/*",
+    "webui/static/**/*",
+    "*.json",              # KEV/EPSS snapshots (refresh_intel drops these)
+]

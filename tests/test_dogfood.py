@@ -163,23 +163,44 @@ class PackagingDogfood(unittest.TestCase):
         self.assertEqual(failed, [], f"modules that fail to import: {failed}")
 
     def test_pyproject_declared_packages_are_importable(self):
+        """Every subpackage that setuptools will ship must be importable.
+
+        Read the ground truth via setuptools.find_packages() using the same
+        include/exclude the wheel build uses — the old test hardcoded a
+        static list under `tool.setuptools.packages` which drifted the day
+        someone added a subpackage and forgot to update it. `find_packages`
+        can't drift.
+        """
         import importlib
-        import tomllib
-        pyproj = Path(__file__).resolve().parent.parent / "pyproject.toml"
-        with open(pyproj, "rb") as fh:
-            packages = tomllib.load(fh)["tool"]["setuptools"]["packages"]
+        from setuptools import find_packages
+        repo_root = Path(__file__).resolve().parent.parent
+        packages = find_packages(
+            where=str(repo_root),
+            include=["recce*"],
+            exclude=["tests*", "tools*", "test_env*", "docs*"],
+        )
+        # Sanity — the tree really does have many subpackages; a regression
+        # that collapsed find_packages to ['recce'] should fail loudly here.
+        self.assertGreater(len(packages), 10,
+                           f"packaging looks broken — only {len(packages)} subpkgs "
+                           f"found (expected 10+): {packages}")
         for pkg in packages:
             importlib.import_module(pkg)              # ImportError here = a shipping bug
 
     def test_cli_imports_webui_which_must_be_a_declared_package(self):
-        # the regression guard for the exact bug we hit: cli imports recce.webui, so
-        # recce.webui MUST be in the shipped package list.
-        import tomllib
-        pyproj = Path(__file__).resolve().parent.parent / "pyproject.toml"
-        with open(pyproj, "rb") as fh:
-            packages = set(tomllib.load(fh)["tool"]["setuptools"]["packages"])
-        self.assertIn("recce.webui", packages,
-                      "cli.py imports recce.webui.app - it must be a shipped package")
+        # Original guard: `cli` imports `recce.webui.app`, so recce.webui MUST
+        # ship in the wheel. Now enforced via find_packages() ground truth.
+        from setuptools import find_packages
+        repo_root = Path(__file__).resolve().parent.parent
+        packages = set(find_packages(
+            where=str(repo_root),
+            include=["recce*"],
+            exclude=["tests*", "tools*", "test_env*", "docs*"],
+        ))
+        for critical in ("recce", "recce.cli", "recce.webui", "recce.core",
+                         "recce.act", "recce.ad", "recce.sessions"):
+            self.assertIn(critical, packages,
+                          f"packaging must ship {critical} — CLI dispatch depends on it")
 
 
 if __name__ == "__main__":
