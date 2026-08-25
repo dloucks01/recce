@@ -1,0 +1,41 @@
+{
+  "meta": {"type": "groups", "count": 3, "version": 5},
+  "data": [
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-512",
+      "Properties": {
+        "name": "DOMAIN ADMINS@CORP.LOCAL",
+        "distinguishedname": "CN=Domain Admins,CN=Users,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "samaccountname": "Domain Admins",
+        "admincount": true
+      },
+      "Members": [
+        {"ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-500", "ObjectType": "User"},
+        {"ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-1106", "ObjectType": "User"}
+      ]
+    },
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-513",
+      "Properties": {
+        "name": "DOMAIN USERS@CORP.LOCAL",
+        "distinguishedname": "CN=Domain Users,CN=Users,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "samaccountname": "Domain Users"
+      },
+      "Members": []
+    },
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-516",
+      "Properties": {
+        "name": "DOMAIN CONTROLLERS@CORP.LOCAL",
+        "distinguishedname": "CN=Domain Controllers,CN=Users,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "samaccountname": "Domain Controllers"
+      },
+      "Members": [
+        {"ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-1001", "ObjectType": "Computer"}
+      ]
+    }
+  ]
+}

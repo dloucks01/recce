@@ -1,0 +1,29 @@
+# Primary Linux target — SSH + Python3 + common tools
+# Credentials: root/toor, testuser/password123
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-server python3 socat curl wget \
+    netcat-openbsd iproute2 iputils-ping procps \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /run/sshd \
+    && echo 'root:toor' | chpasswd \
+    && useradd -m -s /bin/bash testuser \
+    && echo 'testuser:password123' | chpasswd \
+    && sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
+    && sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+    # Low-priv privesc bait: testuser has NOPASSWD on /usr/bin/find, a classic
+    # GTFOBins escalation (find . -exec /bin/sh \; -quit). Gives `sudo -l` a
+    # meaningful, exploitable row so the privesc / sudo quick-action returns
+    # real signal instead of "user may not run sudo".
+    && apt-get update && apt-get install -y --no-install-recommends sudo \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo 'testuser ALL=(ALL) NOPASSWD: /usr/bin/find' > /etc/sudoers.d/testuser \
+    && chmod 440 /etc/sudoers.d/testuser
+
+EXPOSE 22
+
+CMD ["/usr/sbin/sshd", "-D"]

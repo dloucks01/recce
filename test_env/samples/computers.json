@@ -1,0 +1,45 @@
+{
+  "meta": {"type": "computers", "count": 3, "version": 5},
+  "data": [
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-1001",
+      "Properties": {
+        "name": "DC01.CORP.LOCAL",
+        "distinguishedname": "CN=DC01,OU=Domain Controllers,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "samaccountname": "DC01$",
+        "operatingsystem": "Windows Server 2019 Standard",
+        "enabled": true,
+        "unconstraineddelegation": false,
+        "haslaps": false
+      },
+      "PrimaryGroupSID": "S-1-5-21-1111111111-2222222222-3333333333-516"
+    },
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-1002",
+      "Properties": {
+        "name": "FILE01.CORP.LOCAL",
+        "distinguishedname": "CN=FILE01,CN=Computers,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "samaccountname": "FILE01$",
+        "operatingsystem": "Windows Server 2016 Standard",
+        "enabled": true,
+        "unconstraineddelegation": true,
+        "haslaps": false
+      }
+    },
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-1003",
+      "Properties": {
+        "name": "WKSTN01.CORP.LOCAL",
+        "distinguishedname": "CN=WKSTN01,CN=Computers,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "samaccountname": "WKSTN01$",
+        "operatingsystem": "Windows 10 Pro",
+        "enabled": true,
+        "unconstraineddelegation": false,
+        "haslaps": true
+      }
+    }
+  ]
+}

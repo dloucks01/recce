@@ -1,0 +1,69 @@
+{
+  "Certificate Authorities": {
+    "0": {
+      "CA Name": "corp-DC01-CA",
+      "DNS Name": "dc01.corp.local",
+      "Certificate Subject": "CN=corp-DC01-CA, DC=corp, DC=local",
+      "Certificate Serial Number": "1A2B3C4D5E6F70819AABBCCDDEEFF001",
+      "Certificate Validity Start": "2024-01-01 00:00:00+00:00",
+      "Certificate Validity End": "2044-01-01 00:00:00+00:00",
+      "Web Enrollment": "Enabled",
+      "User Specified SAN": "Enabled",
+      "Request Disposition": "Issue",
+      "Enforce Encryption for Requests": "Disabled",
+      "[!] Vulnerabilities": {
+        "ESC8": "Web Enrollment is enabled and Request Disposition is set to Issue, allowing NTLM relay to HTTP endpoint for cert issuance.",
+        "ESC11": "Enforce Encryption for Requests is disabled, allowing NTLM relay over RPC (ICPR)."
+      },
+      "Permissions": {
+        "Owner": "CORP.LOCAL\\Enterprise Admins",
+        "Access Rights": {
+          "Manage CA": ["CORP.LOCAL\\Enterprise Admins", "CORP.LOCAL\\Domain Admins"],
+          "Manage Certificates": ["CORP.LOCAL\\Enterprise Admins", "CORP.LOCAL\\Domain Admins"]
+        }
+      }
+    }
+  },
+  "Certificate Templates": {
+    "0": {
+      "Template Name": "WorkstationAuth-Weak",
+      "Display Name": "Workstation Authentication (weak)",
+      "Certificate Authorities": ["corp-DC01-CA"],
+      "Enabled": true,
+      "Client Authentication": true,
+      "Enrollment Agent": false,
+      "Any Purpose": false,
+      "Enrollee Supplies Subject": true,
+      "Requires Manager Approval": false,
+      "Requires Key Archival": false,
+      "Authorized Signatures Required": 0,
+      "Validity Period": "1 year",
+      "Renewal Period": "6 weeks",
+      "Extended Key Usage": ["Client Authentication"],
+      "[!] Vulnerabilities": {
+        "ESC1": "Enrollee can supply arbitrary SAN + Client Authentication EKU + Enrolment rights granted to Domain Users. Any authenticated user can request a cert as any principal."
+      },
+      "Enrollment Permissions": {
+        "Enrollment Rights": ["CORP.LOCAL\\Domain Users"]
+      }
+    },
+    "1": {
+      "Template Name": "MachineOffline",
+      "Display Name": "Machine (offline enrollment)",
+      "Certificate Authorities": ["corp-DC01-CA"],
+      "Enabled": true,
+      "Client Authentication": true,
+      "Enrollment Agent": false,
+      "Enrollee Supplies Subject": false,
+      "Requires Manager Approval": false,
+      "Validity Period": "2 years",
+      "Extended Key Usage": ["Client Authentication", "Server Authentication"],
+      "[!] Vulnerabilities": {
+        "ESC3": "Enrollment Agent template + this template's Enrollment Agent EKU set — chain to enroll as any principal."
+      },
+      "Enrollment Permissions": {
+        "Enrollment Rights": ["CORP.LOCAL\\Domain Computers"]
+      }
+    }
+  }
+}

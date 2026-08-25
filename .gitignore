@@ -11,8 +11,15 @@ demo_engagement/
 demo_out/
 test_engagement/
 
-# Test environment (docker compose)
-test_env/
+# Test environment (docker compose). The compose file + supporting
+# Dockerfiles + sample importer files are TRACKED so anyone cloning the repo
+# has a working lab out of the box. Runtime artifacts (volumes, .env, per-
+# operator overrides, transient logs) stay ignored.
+test_env/.env
+test_env/.env.local
+test_env/*.log
+test_env/data/
+test_env/volumes/
 *.sqlite
 *.xlsx
 raw/

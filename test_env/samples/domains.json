@@ -1,0 +1,16 @@
+{
+  "meta": {"type": "domains", "count": 1, "version": 5},
+  "data": [
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333",
+      "Properties": {
+        "name": "CORP.LOCAL",
+        "distinguishedname": "DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "functionallevel": "2016",
+        "domainsid": "S-1-5-21-1111111111-2222222222-3333333333"
+      },
+      "Trusts": []
+    }
+  ]
+}

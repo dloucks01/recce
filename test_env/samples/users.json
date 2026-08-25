@@ -1,0 +1,84 @@
+{
+  "meta": {"type": "users", "count": 5, "version": 5},
+  "data": [
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-500",
+      "Properties": {
+        "name": "ADMINISTRATOR@CORP.LOCAL",
+        "distinguishedname": "CN=Administrator,CN=Users,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "displayname": "Administrator",
+        "samaccountname": "administrator",
+        "enabled": true,
+        "admincount": true,
+        "hasspn": false,
+        "dontreqpreauth": false,
+        "sensitive": true
+      },
+      "PrimaryGroupSID": "S-1-5-21-1111111111-2222222222-3333333333-513"
+    },
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-1103",
+      "Properties": {
+        "name": "SVC_SQL@CORP.LOCAL",
+        "distinguishedname": "CN=svc_sql,CN=Users,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "displayname": "SQL Service Account",
+        "samaccountname": "svc_sql",
+        "enabled": true,
+        "admincount": false,
+        "hasspn": true,
+        "serviceprincipalnames": ["MSSQLSvc/db01.corp.local:1433", "MSSQLSvc/db01.corp.local"],
+        "dontreqpreauth": false,
+        "pwdlastset": 1580515200
+      },
+      "PrimaryGroupSID": "S-1-5-21-1111111111-2222222222-3333333333-513"
+    },
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-1104",
+      "Properties": {
+        "name": "LEGACY.APP@CORP.LOCAL",
+        "distinguishedname": "CN=legacy.app,CN=Users,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "displayname": "Legacy Kerberos Client",
+        "samaccountname": "legacy.app",
+        "enabled": true,
+        "admincount": false,
+        "hasspn": false,
+        "dontreqpreauth": true,
+        "pwdlastset": 1520000000
+      },
+      "PrimaryGroupSID": "S-1-5-21-1111111111-2222222222-3333333333-513"
+    },
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-1105",
+      "Properties": {
+        "name": "ALICE@CORP.LOCAL",
+        "distinguishedname": "CN=Alice Wonderland,OU=HR,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "displayname": "Alice Wonderland",
+        "samaccountname": "alice",
+        "enabled": true,
+        "admincount": false,
+        "hasspn": false,
+        "dontreqpreauth": false
+      },
+      "PrimaryGroupSID": "S-1-5-21-1111111111-2222222222-3333333333-513"
+    },
+    {
+      "ObjectIdentifier": "S-1-5-21-1111111111-2222222222-3333333333-1106",
+      "Properties": {
+        "name": "BOB@CORP.LOCAL",
+        "distinguishedname": "CN=Bob Builder,OU=IT,DC=corp,DC=local",
+        "domain": "CORP.LOCAL",
+        "displayname": "Bob Builder",
+        "samaccountname": "bob",
+        "enabled": true,
+        "admincount": true,
+        "hasspn": false,
+        "dontreqpreauth": false
+      },
+      "PrimaryGroupSID": "S-1-5-21-1111111111-2222222222-3333333333-513"
+    }
+  ]
+}

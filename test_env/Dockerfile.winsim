@@ -1,0 +1,13 @@
+# Windows service simulator — ncat listeners on common Windows ports
+FROM alpine:3.18
+
+RUN apk add --no-cache nmap-ncat bash
+
+# RDP-sim on 3389: responds with RDP cookie
+# WinRM-sim on 5985: responds with HTTP 200
+COPY winsim-start.sh /start.sh
+RUN chmod +x /start.sh
+
+EXPOSE 3389 5985
+
+CMD ["/start.sh"]

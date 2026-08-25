@@ -1,0 +1,41 @@
+# SMB target — Samba with a share and known credentials
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    samba samba-common-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m smbuser \
+    && mkdir -p /srv/share \
+    && chown smbuser:smbuser /srv/share \
+    && echo "test file for recce" > /srv/share/readme.txt
+
+RUN cat > /etc/samba/smb.conf <<'EOF'
+[global]
+   workgroup = TESTLAB
+   server string = Test SMB Server
+   security = user
+   map to guest = Bad User
+   server min protocol = SMB2
+
+[public]
+   path = /srv/share
+   browseable = yes
+   read only = no
+   guest ok = yes
+
+[private]
+   path = /srv/share
+   browseable = yes
+   read only = no
+   valid users = smbuser
+EOF
+
+COPY smb-start.sh /start.sh
+RUN chmod +x /start.sh
+
+EXPOSE 139 445
+
+CMD ["/start.sh"]

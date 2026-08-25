@@ -1,0 +1,21 @@
+{
+  "meta": {"type": "ous", "count": 2, "version": 5},
+  "data": [
+    {
+      "ObjectIdentifier": "1B6A9C50-4E5F-4A7B-BB50-3F6A5E7CDE01",
+      "Properties": {
+        "name": "HR@CORP.LOCAL",
+        "distinguishedname": "OU=HR,DC=corp,DC=local",
+        "domain": "CORP.LOCAL"
+      }
+    },
+    {
+      "ObjectIdentifier": "1B6A9C50-4E5F-4A7B-BB50-3F6A5E7CDE02",
+      "Properties": {
+        "name": "IT@CORP.LOCAL",
+        "distinguishedname": "OU=IT,DC=corp,DC=local",
+        "domain": "CORP.LOCAL"
+      }
+    }
+  ]
+}
