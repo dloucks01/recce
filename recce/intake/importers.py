@@ -343,6 +343,15 @@ SCANNER_PARSERS = {
     "nuclei": parse_nuclei,
     "testssl": parse_testssl,
 }
+# IP1/IP2/IP3 additions — pulled in lazily so the base importers.py stays small.
+def _extend_scanner_parsers() -> None:
+    global SCANNER_PARSERS
+    if "burp" in SCANNER_PARSERS:
+        return
+    from . import parsers_web, parsers_recon, parsers_supply
+    SCANNER_PARSERS = {**SCANNER_PARSERS, **parsers_web.PARSERS,
+                       **parsers_recon.PARSERS, **parsers_supply.PARSERS}
+_extend_scanner_parsers()
 
 
 def detect_scanner(text: str) -> str:
@@ -364,4 +373,54 @@ def detect_scanner(text: str) -> str:
         if ("scanresult" in wide or '"testssl"' in wide
                 or ('"severity"' in w and '"finding"' in w)):
             return "testssl"
+        # IP1: WPScan / sslyze / enum4linux-ng JSON
+        if '"target_url"' in w or '"wpscan_version"' in w:
+            return "wpscan"
+        if '"server_scan_results"' in w or '"sslyze_version"' in w:
+            return "sslyze"
+        # enum4linux-ng --json — its output has a distinctive combination
+        # (target + one of sessions/shares/users) that's stable across versions.
+        if '"target"' in w and ('"sessions"' in w or '"shares"' in w or '"nmblookup"' in wide
+                                or '"smb_dialects"' in wide):
+            return "enum4linux"
+    # IP1: XML-shaped scanners
+    if "<issues" in wide and ("burp" in wide or "burpversion" in wide):
+        return "burp"
+    if "<owaspzapreport" in wide or ('<alertitem' in wide and '<riskcode>' in wide):
+        return "zap"
+    if "<niktoscan" in wide or "<scandetails" in wide and "niktoscan" in wide:
+        return "nikto"
+    # enum4linux plain-text: has the classic "Target Information" banner
+    if "target information" in wide and ("[+] enumerating" in wide or "workgroup" in wide):
+        return "enum4linux"
+    # IP2 — text/JSON scanners
+    if "[+] valid username:" in wide or "kerbrute" in wide:
+        return "kerbrute"
+    if wide.startswith("[") or "\n[" in wide[:2000]:
+        # WhatWeb JSON array/lines: entries have "target" + "plugins"
+        if '"target"' in wide[:4000] and '"plugins"' in wide[:4000]:
+            return "whatweb"
+    if "is behind" in wide and ("waf" in wide or "wafw00f" in wide):
+        return "wafw00f"
+    if "no waf detected by the generic detection" in wide:
+        return "wafw00f"
+    if "getadusers" in wide or ("passwordlastset" in wide and "lastlogon" in wide):
+        return "impacket-adusers"
+    if "delegationrightsto" in wide or "finddelegation" in wide:
+        return "impacket-delegation"
+    # IP3 — content-discovery + container/SBOM scanners (all JSON)
+    if body[:1] in "[{":
+        w = text[:8000]
+        # ffuf: distinctive "commandline" + "results" keys
+        if '"commandline"' in w and '"results"' in w:
+            return "ffuf"
+        # Trivy: ArtifactName + Results with Vulnerabilities/Misconfigurations
+        if '"ArtifactName"' in w or ('"SchemaVersion"' in w and '"Results"' in w):
+            return "trivy"
+        # Grype: matches[] + vulnerability + artifact combo
+        if '"matches"' in w and '"vulnerability"' in w and '"artifact"' in w:
+            return "grype"
+        # gobuster --format json (one obj per line)
+        if '"path"' in w and '"status"' in w and '"gobuster"' in wide:
+            return "gobuster"
     return ""

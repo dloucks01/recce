@@ -1824,3 +1824,29 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .sv2-job.live:hover .sv2-job-cancel, .sv2-job-cancel:focus-visible { opacity: 1; }
 .sv2-job-cancel:hover { border-color: var(--crit); color: var(--crit);
   background: color-mix(in srgb, var(--crit) 8%, var(--surface)); }
+
+/* Multi-file import queue (IP4). Drop many files at once, each runs through
+ * auto-detect, ledger shows per-file outcome. */
+.imp-queue { margin-top: 12px; padding: 10px 12px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface2));
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line));
+  border-radius: var(--radius); }
+.imp-queue-h { display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+.imp-queue ul { list-style: none; padding: 0; margin: 0 0 10px; display: flex;
+  flex-direction: column; gap: 3px; }
+.imp-queue-item { display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: var(--radius-sm); font-size: 12px;
+  background: var(--surface); border: 1px solid var(--line); }
+.imp-queue-item.status-uploading { border-color: var(--accent); }
+.imp-queue-item.status-done { border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: color-mix(in srgb, var(--ok) 6%, var(--surface)); }
+.imp-queue-item.status-error { border-color: color-mix(in srgb, var(--crit) 40%, transparent);
+  background: color-mix(in srgb, var(--crit) 6%, var(--surface)); }
+.imp-queue-icon { width: 18px; text-align: center; font-family: var(--mono); }
+.imp-queue-item.status-uploading .imp-queue-icon { color: var(--accent); animation: sess-blink 1s steps(2) infinite; }
+.imp-queue-item.status-done .imp-queue-icon { color: var(--ok); }
+.imp-queue-item.status-error .imp-queue-icon { color: var(--crit); }
+.imp-queue-name { font-family: var(--mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imp-queue-outcome { font-size: 11px; color: var(--muted); font-family: var(--mono); }

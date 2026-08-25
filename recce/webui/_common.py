@@ -343,6 +343,39 @@ def _import_signatures(content: str, filename: str = "") -> list[str]:
         kinds.append("loot")                                           # on-target sweep
     if not kinds and fn.endswith((".gnmap", ".nmap")):                 # extension is the last hint
         kinds.append("nmap")
+    # IP1: filename hints for scanners whose export shape overlaps with
+    # generic JSON/XML. These only fire when nothing more specific matched.
+    if not kinds:
+        if "burp" in fn:
+            kinds.append("burp")
+        elif "zap" in fn or "owasp-zap" in fn:
+            kinds.append("zap")
+        elif "nikto" in fn:
+            kinds.append("nikto")
+        elif "wpscan" in fn:
+            kinds.append("wpscan")
+        elif "sslyze" in fn:
+            kinds.append("sslyze")
+        elif "enum4linux" in fn or "e4l" in fn:
+            kinds.append("enum4linux")
+        elif "kerbrute" in fn:
+            kinds.append("kerbrute")
+        elif "getadusers" in fn:
+            kinds.append("impacket-adusers")
+        elif "finddelegation" in fn or "delegation" in fn:
+            kinds.append("impacket-delegation")
+        elif "whatweb" in fn:
+            kinds.append("whatweb")
+        elif "wafw00f" in fn or "waf00f" in fn:
+            kinds.append("wafw00f")
+        elif "ffuf" in fn:
+            kinds.append("ffuf")
+        elif "gobuster" in fn:
+            kinds.append("gobuster")
+        elif "trivy" in fn:
+            kinds.append("trivy")
+        elif "grype" in fn:
+            kinds.append("grype")
     return kinds
 
 
@@ -365,7 +398,11 @@ def _import_preview(kind: str, content: str, raw_bytes: bytes) -> dict:
     detail = ""
     sample: list[str] = []
     try:
-        if kind in ("nessus", "openvas", "nuclei", "testssl"):
+        if kind in ("nessus", "openvas", "nuclei", "testssl",
+                    "burp", "zap", "nikto", "wpscan", "sslyze", "enum4linux",
+                    "kerbrute", "impacket-adusers", "impacket-delegation",
+                    "whatweb", "wafw00f",
+                    "ffuf", "gobuster", "trivy", "grype"):
             vs = importers.SCANNER_PARSERS[kind](content)
             n = len(vs)
             detail = f"{n} finding(s) across {len({v.ip for v in vs})} host(s)"

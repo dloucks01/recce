@@ -2,24 +2,57 @@ import { useState } from "react";
 import { postImport } from "../api";
 import { useEscape } from "../ui";
 
-const IMPORT_TOOLS: [string, string][] = [
+// Tool catalog is grouped by category so the dropdown reads like a menu of
+// what recce can eat, not an alphabet soup. Auto-detect stays first — 95% of
+// imports go through it. Each new IP1/2/3 tool lives under its category.
+const IMPORT_TOOLS: Array<[string, string]> = [
   ["auto", "Auto-detect"],
+  // — general scanners —
   ["nmap", "nmap / masscan  (.xml / .gnmap / .nmap)"],
   ["nessus", "Nessus  (.nessus export)"],
   ["openvas", "OpenVAS / Greenbone  (GVM XML)"],
   ["nuclei", "nuclei  (JSON / JSONL)"],
+  // — web scanners (IP1 + existing) —
+  ["burp", "Burp Suite  (Issues XML)"],
+  ["zap", "OWASP ZAP  (XML)"],
+  ["nikto", "Nikto  (XML: nikto -Format xml)"],
+  ["wpscan", "WPScan  (JSON: wpscan --format json)"],
+  ["whatweb", "WhatWeb  (JSON log)"],
+  ["wafw00f", "wafw00f  (text)"],
   ["testssl", "testssl.sh  (JSON)"],
+  ["sslyze", "sslyze  (JSON: sslyze --json_out)"],
+  // — content discovery (IP3) —
+  ["ffuf", "ffuf  (JSON: ffuf -o out.json)"],
+  ["gobuster", "gobuster  (JSON / text)"],
+  // — AD + SMB (IP1/IP2 + existing) —
+  ["enum4linux", "enum4linux(-ng)  (text or --json)"],
+  ["kerbrute", "kerbrute userenum  (text)"],
   ["nxc", "netexec / crackmapexec  (smb / ldap / mssql / winrm)"],
   ["kerberoast", "impacket GetUserSPNs  (Kerberoast)"],
   ["asrep", "impacket GetNPUsers  (AS-REP)"],
   ["secretsdump", "impacket secretsdump  (NTLM hashes)"],
-  ["creds", "Credential list  (user:password per line)"],
+  ["impacket-adusers", "impacket GetADUsers  (user directory dump)"],
+  ["impacket-delegation", "impacket findDelegation  (constrained/unconstrained)"],
   ["bloodhound", "BloodHound / Certipy  (.zip / certipy .json)"],
+  // — container / SBOM (IP3) —
+  ["trivy", "Trivy  (JSON: trivy -f json)"],
+  ["grype", "Grype  (JSON: grype -o json)"],
+  // — misc + creds —
+  ["creds", "Credential list  (user:password per line)"],
   ["loot", "recce on-target enum  (recce-enum.sh/.ps1)"],
   ["fieldkit", "fieldkit findings  (findings.json)"],
 ];
 
 const isBinaryFile = (name: string) => /\.zip$/i.test(name);
+
+// Queue entry for the multi-file drop workflow. Each file is imported
+// separately (each format has its own parser); the queue drives sequential
+// upload with a per-item outcome ledger the tester can see.
+type QueueEntry = {
+  file: File;
+  status: "queued" | "uploading" | "done" | "error";
+  outcome?: string;   // "12 findings folded" / error text
+};
 
 export function ImportModal(
   { onClose, onJob, onDone }: { onClose: () => void; onJob: (id: string) => void; onDone: (msg: string) => void }
@@ -34,6 +67,8 @@ export function ImportModal(
   const [prev, setPrev] = useState<
     { kind: string; count: number; detail: string; sample: string[]; warning: string } | null
   >(null);
+  // Multi-file drop queue — populated by dropping >1 file, or by "Add more"
+  const [queue, setQueue] = useState<QueueEntry[]>([]);
   useEscape(onClose, !busy);
 
   function readFile(file: File) {
@@ -48,6 +83,48 @@ export function ImportModal(
     };
     r.readAsDataURL(file);
     if (isBinaryFile(file.name) && kind === "auto") setKind("bloodhound");
+  }
+
+  // Read a File and return its (base64 payload, encoding) pair — used by the
+  // queue path where we don't touch the paste textarea.
+  function readFileAsBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => {
+        const url = String(r.result || "");
+        resolve(url.slice(url.indexOf(",") + 1));
+      };
+      r.onerror = () => reject(r.error);
+      r.readAsDataURL(file);
+    });
+  }
+
+  async function runQueue() {
+    if (busy || queue.length === 0) return;
+    setBusy(true); setErr(null);
+    let done = 0, failed = 0;
+    for (let i = 0; i < queue.length; i++) {
+      // mutate progressively so the UI reflects live state
+      setQueue(q => q.map((e, idx) => idx === i ? { ...e, status: "uploading" } : e));
+      try {
+        const data = await readFileAsBase64(queue[i].file);
+        const res = await postImport(data, queue[i].file.name, "auto", "base64");
+        if (res.mode === "job") {
+          setQueue(q => q.map((e, idx) => idx === i ? { ...e, status: "done", outcome: `queued as job ${res.id}` } : e));
+        } else if (res.mode === "done") {
+          setQueue(q => q.map((e, idx) => idx === i ? { ...e, status: "done", outcome: res.summary || `+${res.added}` } : e));
+        } else {
+          setQueue(q => q.map((e, idx) => idx === i ? { ...e, status: "done", outcome: `${res.count} preview` } : e));
+        }
+        done++;
+      } catch (e) {
+        setQueue(q => q.map((e2, idx) => idx === i ? { ...e2, status: "error", outcome: String(e instanceof Error ? e.message : e) } : e2));
+        failed++;
+      }
+    }
+    setBusy(false);
+    onDone(`Multi-import: ${done} succeeded, ${failed} failed`);
+    // Leave the queue visible so the tester can see the results; close on manual dismiss
   }
 
   async function doPreview() {
@@ -96,19 +173,55 @@ export function ImportModal(
              onDragLeave={() => setDrag(false)}
              onDrop={(e) => {
                e.preventDefault(); setDrag(false);
-               const f = e.dataTransfer.files[0];
-               if (f) readFile(f);
+               const files = Array.from(e.dataTransfer.files);
+               if (files.length === 1) {
+                 // single file — populate the paste box + preview flow (unchanged)
+                 readFile(files[0]);
+               } else if (files.length > 1) {
+                 // multi-file — queue them all, run through auto-detect each
+                 setQueue(q => [...q, ...files.map(f => ({ file: f, status: "queued" as const }))]);
+                 setFilename("");
+                 setText("");
+                 setPrev(null);
+               }
              }}>
-          <span>⭱ Drop a file here, or </span>
+          <span>⭱ Drop a file here (or several), or </span>
           <label className="filepick">
             browse
-            <input type="file" onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) readFile(f);
+            <input type="file" multiple onChange={(e) => {
+              const files = Array.from(e.target.files || []);
+              if (files.length === 1) readFile(files[0]);
+              else if (files.length > 1) {
+                setQueue(q => [...q, ...files.map(f => ({ file: f, status: "queued" as const }))]);
+              }
             }} hidden />
           </label>
           {filename && <span className="imp-fn">· {filename}</span>}
         </div>
+
+        {queue.length > 0 && (
+          <div className="imp-queue">
+            <div className="imp-queue-h">
+              <span>Multi-file queue · {queue.length} file(s)</span>
+              <button className="linkish" onClick={() => setQueue([])} disabled={busy}>clear</button>
+            </div>
+            <ul>
+              {queue.map((e, i) => (
+                <li key={i} className={`imp-queue-item status-${e.status}`}>
+                  <span className="imp-queue-icon">
+                    {e.status === "queued" ? "○" : e.status === "uploading" ? "…" :
+                     e.status === "done" ? "✓" : "✗"}
+                  </span>
+                  <span className="imp-queue-name">{e.file.name}</span>
+                  <span className="imp-queue-outcome">{e.outcome || ""}</span>
+                </li>
+              ))}
+            </ul>
+            <button className="run" onClick={runQueue} disabled={busy || queue.every(e => e.status !== "queued")}>
+              {busy ? "Importing…" : `▶ Import all (${queue.filter(e => e.status === "queued").length} queued)`}
+            </button>
+          </div>
+        )}
         <textarea className="imp-paste" placeholder="…or paste the tool output here"
                   value={text}
                   onChange={(e) => { setText(e.target.value); setEncoding(""); setPrev(null); }}
