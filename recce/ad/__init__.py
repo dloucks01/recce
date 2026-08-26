@@ -253,6 +253,44 @@ def quick_wins(hosts: list[Host]) -> list[dict]:
         add("Privileged account", f"{a.domain}\\{a.name}".strip("\\"),
             a.attrs.get("memberof", "") or "adminCount=1",
             "High-value credential; prioritise for compromise / protection.")
+    # LAPS / gMSA / PSO / trust findings — collected from the Domain objects
+    # attached to each DC host during LDAP enum.
+    seen_domain_keys: set[str] = set()
+    for h in hosts:
+        for dom in getattr(h, "domains", None) or []:
+            key = getattr(dom, "name", "") or getattr(dom, "netbios", "")
+            if key in seen_domain_keys:
+                continue
+            seen_domain_keys.add(key)
+            for entry in getattr(dom, "laps_readable", None) or []:
+                add("LAPS password readable",
+                    entry.get("host", "?"),
+                    f"attr={entry.get('attr')} dns={entry.get('dns') or '-'}",
+                    "Current LDAP bind reads the LAPS local-admin password on "
+                    "this computer — instant local admin.")
+            for entry in getattr(dom, "gmsa", None) or []:
+                tag = " (password readable)" if entry.get("password_readable") else ""
+                add(f"gMSA account{tag}",
+                    f"{key}\\{entry.get('name','?')}",
+                    "spns=" + (", ".join(entry.get("spns") or []) or "none"),
+                    "Group Managed Service Account. If msDS-ManagedPassword is "
+                    "readable, decrypt client-side for a full TGT.")
+            for pso in getattr(dom, "password_policies", None) or []:
+                add("Fine-grained password policy (PSO)",
+                    pso.get("name", "?"),
+                    f"min_len={pso.get('min_length')} complexity="
+                    f"{pso.get('complexity')} lockout={pso.get('lockout')} "
+                    f"applies_to={', '.join(pso.get('applies_to') or []) or '-'}",
+                    "PSOs relax password policy for specific groups. Groups "
+                    "with weak PSO settings are priority spray targets.")
+            for trust in getattr(dom, "trusts", None) or []:
+                add("Trust relationship",
+                    f"{key} → {trust.get('name', '?')}",
+                    f"direction={trust.get('direction','?')} "
+                    f"type={trust.get('type','?')}",
+                    "Cross-domain trust. Bidirectional or outbound trusts let "
+                    "the trusted domain authenticate to this one — lateral "
+                    "movement route across forests.")
     return rows
 
 
@@ -456,13 +494,88 @@ def _enum_ldap3(
     except Exception as e:
         dom.enum_errors.append(str(e))
 
-    # Computers (delegation + OS).
+    # Computers (delegation + OS + LAPS password readability).
     try:
         conn.search(base_dn, "(objectClass=computer)", search_scope=SUBTREE,
                     attributes=["sAMAccountName", "dNSHostName", "operatingSystem",
-                                "operatingSystemVersion", "userAccountControl"],
+                                "operatingSystemVersion", "userAccountControl",
+                                # LAPS: legacy attr (ms-Mcs-AdmPwd) + new attr
+                                # (msLAPS-Password, Windows LAPS from Server 2019+).
+                                "ms-Mcs-AdmPwd", "msLAPS-Password",
+                                "msLAPS-EncryptedPassword"],
                     paged_size=500)
         accounts += _accounts_from_entries(conn, dc_ip, domain, kind="computer")
+        # LAPS-readable tally: any computer where the CURRENT bind can read
+        # ms-Mcs-AdmPwd or msLAPS-Password is a bug (that attribute should be
+        # readable only to specific privileged groups). One readable = the
+        # tester has a local-admin password for that computer.
+        laps_readable: list[dict] = []
+        for e in conn.entries:
+            legacy = e["ms-Mcs-AdmPwd"].value if "ms-Mcs-AdmPwd" in e else None
+            newer = e["msLAPS-Password"].value if "msLAPS-Password" in e else None
+            if legacy or newer:
+                laps_readable.append({
+                    "host": str(e.sAMAccountName.value or "?").rstrip("$"),
+                    "dns": str(e.dNSHostName.value or "") if "dNSHostName" in e else "",
+                    "attr": "ms-Mcs-AdmPwd" if legacy else "msLAPS-Password",
+                })
+        if laps_readable:
+            dom.laps_readable = laps_readable
+    except Exception as e:
+        dom.enum_errors.append(str(e))
+
+    # gMSA (Group Managed Service Accounts) — msDS-GroupManagedServiceAccount.
+    # A tester who reads msDS-ManagedPassword can compute the gMSA plaintext
+    # password (the blob decrypts client-side). Flag every gMSA we CAN read.
+    try:
+        conn.search(base_dn,
+                    "(objectClass=msDS-GroupManagedServiceAccount)",
+                    search_scope=SUBTREE,
+                    attributes=["sAMAccountName", "servicePrincipalName",
+                                "msDS-ManagedPassword",
+                                "msDS-GroupMSAMembership"],
+                    paged_size=200)
+        gmsa_accts: list[dict] = []
+        for e in conn.entries:
+            name = str(e.sAMAccountName.value or "?").rstrip("$")
+            has_pw = "msDS-ManagedPassword" in e and e["msDS-ManagedPassword"].value
+            spns = list(e.servicePrincipalName.values or []) if "servicePrincipalName" in e else []
+            gmsa_accts.append({
+                "name": name,
+                "password_readable": bool(has_pw),
+                "spns": spns[:5],
+            })
+        if gmsa_accts:
+            dom.gmsa = gmsa_accts
+    except Exception as e:
+        dom.enum_errors.append(str(e))
+
+    # Fine-grained password policies (PSOs) — often relaxed for specific
+    # service-account groups (msDS-PasswordSettings). Weaker policies on a
+    # named group = spray priority target.
+    try:
+        conn.search(base_dn,
+                    "(objectClass=msDS-PasswordSettings)",
+                    search_scope=SUBTREE,
+                    attributes=["cn", "msDS-MinimumPasswordLength",
+                                "msDS-PasswordComplexityEnabled",
+                                "msDS-LockoutThreshold",
+                                "msDS-PSOAppliesTo"])
+        psos: list[dict] = []
+        for e in conn.entries:
+            psos.append({
+                "name": str(e.cn.value or "?"),
+                "min_length": str(e["msDS-MinimumPasswordLength"].value or "?")
+                               if "msDS-MinimumPasswordLength" in e else "?",
+                "complexity": str(e["msDS-PasswordComplexityEnabled"].value or "?")
+                              if "msDS-PasswordComplexityEnabled" in e else "?",
+                "lockout": str(e["msDS-LockoutThreshold"].value or "?")
+                           if "msDS-LockoutThreshold" in e else "?",
+                "applies_to": [_cn(a) for a in (e["msDS-PSOAppliesTo"].values or [])]
+                              if "msDS-PSOAppliesTo" in e else [],
+            })
+        if psos:
+            dom.password_policies = psos
     except Exception as e:
         dom.enum_errors.append(str(e))
 

@@ -209,6 +209,17 @@ class Domain:
     trusts: list[dict[str, Any]] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
     enum_errors: list[str] = field(default_factory=list)   # LDAP searches that failed
+    # Computer accounts whose LAPS attribute (ms-Mcs-AdmPwd / msLAPS-Password)
+    # was READABLE with the current bind — one entry = one local-admin
+    # password leaked. Empty on hardened deployments.
+    laps_readable: list[dict[str, Any]] = field(default_factory=list)
+    # Group Managed Service Accounts. Each entry: {name, password_readable, spns}.
+    # password_readable=True means msDS-ManagedPassword was readable and the
+    # tester can compute the gMSA plaintext client-side.
+    gmsa: list[dict[str, Any]] = field(default_factory=list)
+    # Fine-grained Password Settings Objects (PSOs). Weaker settings for a
+    # named group = high-priority spray target.
+    password_policies: list[dict[str, Any]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
