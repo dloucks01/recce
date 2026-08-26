@@ -35,7 +35,9 @@ import urllib.request
 
 
 _DEFAULT_URL = "http://localhost:11434/api/generate"
-_DEFAULT_MODEL = "llama3.2"
+# Default matches the model shipped on the production airgapped laptop.
+# Override with RECCE_LLM_MODEL if a different tag is installed.
+_DEFAULT_MODEL = "qwen3:8b"
 
 _PROMPT_TEMPLATE = """You are helping author a JSON parser spec for a pentest-tool
 importer called `recce`. The spec loads at runtime and extracts findings
@@ -99,7 +101,12 @@ def draft_parser_spec(sample_text: str, hint: str = "") -> dict:
     if hint:
         prompt += f"\n\nAdditional hint from the tester: {hint[:500]}"
 
+    # `think: false` disables the reasoning-model chain-of-thought preamble
+    # (qwen3, deepseek-r1, etc.) — we want JSON out, not scratchpad. Non-thinking
+    # models silently ignore the field. `format: "json"` forces valid JSON output
+    # on Ollama; the model can no longer wander into prose or markdown fences.
     body = {"model": model, "prompt": prompt, "stream": False,
+            "think": False, "format": "json",
             "options": {"temperature": 0.2}}
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
