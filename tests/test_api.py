@@ -41,7 +41,9 @@ class AnalyzeTest(unittest.TestCase):
         a = api.analyze([self._host()])
         titles = {f["title"] for f in a["findings"]}
         self.assertIn("OpenAPI/Swagger spec exposed", titles)
-        self.assertIn("GraphQL introspection enabled", titles)
+        # Title now includes the full-schema follow-up marker.
+        self.assertTrue(any(t.startswith("GraphQL introspection enabled") for t in titles),
+                        f"expected a GraphQL introspection finding, got {titles}")
         self.assertEqual(a["targets"], [{"ip": "10.0.0.1", "port": 80}])
 
     def test_no_api_surface_is_no_findings(self):

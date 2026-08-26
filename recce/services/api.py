@@ -32,6 +32,21 @@ _UI_PATHS = ["/swagger-ui.html", "/swagger-ui/", "/swagger/index.html", "/api/do
 # GraphQL endpoints to probe for introspection.
 _GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/v1/graphql", "/query"]
 _INTROSPECT = '{"query":"query{__schema{queryType{name}}}"}'
+# Full introspection — when the compact _INTROSPECT gets a __schema response,
+# this second POST pulls every type, every query, every mutation. That IS the
+# attack-surface map the tester needs to plan next steps.
+_INTROSPECT_FULL = ('{"query":"query{__schema{queryType{name} mutationType{name} '
+                    'types{name kind fields{name args{name type{name kind ofType{name}}} '
+                    'type{name kind ofType{name}}}}}}"}')
+
+# SOAP / WSDL endpoints commonly seen on .NET and Java stacks.
+_SOAP_WSDL_PATHS = ["/service?wsdl", "/services?wsdl", "/Service.svc?wsdl",
+                    "/api?wsdl", "/soap?wsdl", "/ws?wsdl"]
+
+# gRPC servers running gRPC-Web often expose a reflection API without auth.
+# grpc-web content-type is the reliable signal.
+_GRPC_WEB_PATHS = ["/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+                   "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"]
 
 
 def _base(ip: str, port) -> str:
@@ -230,14 +245,77 @@ def _probe_port(ip: str, port) -> list[dict]:
     for path in _GRAPHQL_PATHS:
         r = web._fetch(ip, port, path, method="POST", body=_INTROSPECT)
         if r and r[0] == 200 and "__schema" in (r[2] or "") and "queryType" in r[2]:
+            # Full introspection follow-up — pull every type, query, mutation.
+            # Cap the response snapshot so a huge schema doesn't blow the finding
+            # size, but keep enough for the tester to see the top-level surface.
+            full = web._fetch(ip, port, path, method="POST", body=_INTROSPECT_FULL)
+            schema_txt = full[2] if (full and full[0] == 200) else r[2]
+            query_names = re.findall(r'"queryType":\s*\{\s*"name":\s*"([^"]+)"', schema_txt or "")
+            mutation_names = re.findall(r'"mutationType":\s*\{\s*"name":\s*"([^"]+)"', schema_txt or "")
+            # Field names inside the schema — a rough surface count.
+            type_hits = re.findall(r'"name":\s*"(?!__)([A-Za-z_][A-Za-z0-9_]*)"', schema_txt or "")
+            unique_types = sorted(set(type_hits))[:80]
+            detail = (f"POST {base}{path} introspection -> full schema returned. "
+                      f"Query type={query_names[0] if query_names else '?'}; "
+                      f"Mutation type={mutation_names[0] if mutation_names else 'none'}; "
+                      f"~{len(unique_types)} type/field name(s) leaked. "
+                      f"Sample: {', '.join(unique_types[:15])}"
+                      + ("…" if len(unique_types) > 15 else ""))
             out.append({"target": tgt, "severity": "medium",
-                        "title": "GraphQL introspection enabled",
-                        "detail": f"POST {base}{path} introspection -> the schema was returned.",
+                        "title": "GraphQL introspection enabled (full schema readable)",
+                        "detail": detail,
                         "narrative": "Introspection leaks the entire GraphQL schema (types, "
-                                     "queries, mutations) - a map of the attack surface.",
+                                     "queries, mutations) - a map of the attack surface. "
+                                     "Every discovered mutation name is a candidate for "
+                                     "unauthorized-write testing.",
                         "command": (f"curl -s {base}{path} -H 'Content-Type: application/json' "
-                                    f"-d '{_INTROSPECT}'"),
-                        "remediation": "Disable introspection in production.",
+                                    f"-d '{_INTROSPECT_FULL}' | jq '.data.__schema.types[] | select(.kind==\"OBJECT\") | .name'"),
+                        "remediation": "Disable introspection in production; if introspection "
+                                       "is intended for internal API explorers, gate it behind auth.",
+                        "cwes": ["CWE-200"]})
+            break
+
+    # SOAP / WSDL discovery — .NET WCF, Java Axis. WSDL exposes the full
+    # operation surface + type schema, same attack-map value as OpenAPI.
+    for path in _SOAP_WSDL_PATHS:
+        r = web._fetch(ip, port, path)
+        if r and r[0] == 200 and "<wsdl:definitions" in (r[2] or "") \
+                or (r and r[0] == 200 and "<definitions" in (r[2] or "")
+                    and "http://schemas.xmlsoap.org/wsdl/" in r[2]):
+            # Extract operation names from WSDL — regex is good enough here.
+            ops = re.findall(r'<(?:wsdl:)?operation\s+name="([^"]+)"', r[2] or "")
+            unique_ops = sorted(set(ops))[:40]
+            out.append({"target": tgt, "severity": "medium",
+                        "title": "SOAP/WSDL exposed",
+                        "detail": (f"GET {base}{path} -> WSDL document returned. "
+                                   f"{len(unique_ops)} operation(s) described: "
+                                   f"{', '.join(unique_ops[:15])}"
+                                   + ("…" if len(unique_ops) > 15 else "")),
+                        "narrative": "The WSDL describes every SOAP operation, its "
+                                     "parameters, and its return types — full attack "
+                                     "surface for the service.",
+                        "command": f"curl -s {base}{path} | grep -oE '<(wsdl:)?operation name=\"[^\"]+\"'",
+                        "remediation": "Restrict WSDL to authenticated/internal access; "
+                                       "or gate the SOAP service behind auth entirely.",
+                        "cwes": ["CWE-200"]})
+            break
+
+    # gRPC ServerReflection — POST returns proto-encoded reflection data with
+    # a distinctive 'grpc-web+proto' content-type header even on rejection.
+    for path in _GRPC_WEB_PATHS:
+        # Just probe — the presence of a grpc-status header (0 = OK, 3 = INVALID)
+        # in the response confirms this is a gRPC endpoint speaking reflection.
+        r = web._fetch(ip, port, path, method="POST", body="")
+        if r and r[0] in (200, 415) and \
+                any(h in (r[2] or "").lower() for h in ("grpc-status", "grpc-message")):
+            out.append({"target": tgt, "severity": "low",
+                        "title": "gRPC ServerReflection endpoint reachable",
+                        "detail": f"POST {base}{path} -> gRPC reflection responded.",
+                        "narrative": "gRPC ServerReflection lets any client list every "
+                                     "service, RPC method, and message type without a .proto. "
+                                     "Together with grpcurl, the tester can hand-craft calls.",
+                        "command": f"grpcurl -plaintext {ip}:{port.portid} list",
+                        "remediation": "Disable reflection in production servers.",
                         "cwes": ["CWE-200"]})
             break
     return out
