@@ -1109,6 +1109,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_budget(kp)
     kp.set_defaults(func=_h("kerberos"))
 
+    # ── T4 scanner-expansion services ────────────────────────────────────
+    # Every entry follows the same pattern: targets nargs='*' + --no-probe +
+    # standard IO + budget. Each maps to its cmd_<name> handler in
+    # cli/_services.py which delegates to _run_service_scan.
+    def _add_t4(name, help_txt, *aliases):
+        p = sub.add_parser(name, aliases=list(aliases), help=help_txt)
+        p.add_argument("targets", nargs="*",
+                       help="restrict to these IPs / ranges / CIDRs / @file "
+                            "(default: all matching hosts in the datastore)")
+        p.add_argument("--no-probe", action="store_true",
+                       help="skip the live probe; just write the commands")
+        _add_io(p); _add_budget(p)
+        p.set_defaults(func=_h(name.replace("-", "_")))
+        return p
+    _add_t4("zookeeper",       "Zookeeper 4LW probe: ruok/stat + dumping (dump/conf/cons) + admin (wchc/wchp) — leaks_data flag = HIGH")
+    _add_t4("kafka",           "Kafka native MetadataRequest v1 probe: broker + topic enum without auth")
+    _add_t4("etcd",            "etcd v2 + v3 unauthenticated read probe (TLS auto-fallback)")
+    _add_t4("consul",          "Consul HTTP API probe: services + KV + nodes, ACL-disabled = CRITICAL")
+    _add_t4("nomad",           "Nomad HTTP API probe: jobs + allocations + nodes, ACL detection")
+    _add_t4("prometheus",      "Prometheus API probe: config leak + query open + admin-writable /-/reload")
+    _add_t4("docker-registry", "Docker Registry v2 anonymous /v2/_catalog probe (5000/tcp)", "dregistry")
+    _add_t4("vnc",             "VNC RFB 3.x handshake: security-type list; no-auth (type 1) = CRITICAL")
+    _add_t4("modbus",          "Modbus/TCP Function 0x03 Read Holding Registers + Function 0x2B Read Device ID")
+    _add_t4("rdp",             "RDP X.224 Connection Request: NLA (Network Level Authentication) detection")
+    _add_t4("ipmi",            "IPMI 623/udp Get Channel Auth Capabilities: cipher-zero (CVE-2013-4786) + null-user + weak MD2/MD5")
+
     sk = sub.add_parser("fieldkit-export",
                         help="export the engagement as a seed for the fieldkit "
                              "exploitation kit (gnmap + bridge JSON + attack plan)")

@@ -31,7 +31,12 @@ from ..targets import expand_excludes, explicit_targets, ip_matcher, load_target
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
 
-__all__ = ['cmd_web', 'cmd_smb', 'cmd_ftp', 'cmd_docker', 'cmd_kubernetes', 'cmd_ldap', 'cmd_api', 'cmd_snmp', 'cmd_smtp', 'cmd_dns', 'cmd_rsync', 'cmd_nfs']
+__all__ = ['cmd_web', 'cmd_smb', 'cmd_ftp', 'cmd_docker', 'cmd_kubernetes', 'cmd_ldap',
+           'cmd_api', 'cmd_snmp', 'cmd_smtp', 'cmd_dns', 'cmd_rsync', 'cmd_nfs',
+           # T4 scanner-expansion additions:
+           'cmd_zookeeper', 'cmd_kafka', 'cmd_etcd', 'cmd_consul', 'cmd_nomad',
+           'cmd_prometheus', 'cmd_docker_registry', 'cmd_vnc', 'cmd_modbus',
+           'cmd_rdp', 'cmd_ipmi']
 
 
 def cmd_web(args: argparse.Namespace) -> int:
@@ -671,3 +676,144 @@ def cmd_nfs(args: argparse.Namespace) -> int:
         no_targets="[!] No NFS endpoints in the datastore (no port 2049/111). Run "
                    "`enum` against the file hosts first.",
         fmt=_fmt_nfs)
+
+
+# ─── T4 scanner-expansion service handlers ────────────────────────────────
+# All share _run_service_scan(). The formatters are simple `ip:port [tags]`
+# strings — matches the shape helpers.py's other _fmt_* functions produce.
+
+def _fmt_simple(label_extra):
+    """Build a formatter that prints `ip:port · <label_extra>(t, active)`.
+    Each T4 service passes a lambda that extracts its most-interesting probe
+    fields (broker count, KEV flags, etc.) for the tester-visible summary."""
+    def _fmt(t, active):
+        core = f"{t['ip']}:{t['port']}"
+        extra = label_extra(t, active) if callable(label_extra) else ""
+        return f"{core}  {extra}".rstrip() if extra else core
+    return _fmt
+
+
+def cmd_zookeeper(args: argparse.Namespace) -> int:
+    """Zookeeper 4-letter-word probe: ruok/stat baseline + dumping (dump/conf/
+    cons/envi) + admin (wchc/wchp). Read-only."""
+    return _run_service_scan(
+        args, module="zookeeper", source="zookeeper", label="Zookeeper",
+        noun="Zookeeper endpoint(s)",
+        no_targets="[!] No Zookeeper endpoints in the datastore (port 2181). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: f"v{t.get('version','?')}" if a else ""))
+
+
+def cmd_kafka(args: argparse.Namespace) -> int:
+    """Kafka native MetadataRequest v1 probe: broker list + topic names.
+    Read-only. Modern Kafka's ApiVersions handshake is done automatically."""
+    return _run_service_scan(
+        args, module="kafka", source="kafka", label="Kafka",
+        noun="Kafka broker(s)",
+        no_targets="[!] No Kafka endpoints in the datastore (port 9092). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: f"{t.get('brokers',0)} broker(s), {t.get('topics',0)} topic(s)"))
+
+
+def cmd_etcd(args: argparse.Namespace) -> int:
+    """etcd v2 + v3 unauthenticated read probe. TLS auto-fallback."""
+    return _run_service_scan(
+        args, module="etcd", source="etcd", label="etcd",
+        noun="etcd endpoint(s)",
+        no_targets="[!] No etcd endpoints in the datastore (port 2379). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: (t.get('version','?') +
+                                       (' UNAUTH' if t.get('unauth_read') else ''))))
+
+
+def cmd_consul(args: argparse.Namespace) -> int:
+    """Consul HTTP API probe: services + KV + nodes, ACL disabled detection."""
+    return _run_service_scan(
+        args, module="consul", source="consul", label="Consul",
+        noun="Consul endpoint(s)",
+        no_targets="[!] No Consul endpoints in the datastore (port 8500). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: (t.get('version','?') +
+                                       (' UNAUTH' if t.get('unauth') else ''))))
+
+
+def cmd_nomad(args: argparse.Namespace) -> int:
+    """Nomad HTTP API probe: jobs + allocations + nodes, ACL detection."""
+    return _run_service_scan(
+        args, module="nomad", source="nomad", label="Nomad",
+        noun="Nomad endpoint(s)",
+        no_targets="[!] No Nomad endpoints in the datastore (port 4646). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: (t.get('version','?') +
+                                       (' UNAUTH' if t.get('unauth') else ''))))
+
+
+def cmd_prometheus(args: argparse.Namespace) -> int:
+    """Prometheus HTTP API probe: /-/healthy + /api/v1/status/config +
+    /api/v1/query + /-/reload (admin write)."""
+    return _run_service_scan(
+        args, module="prometheus", source="prometheus", label="Prometheus",
+        noun="Prometheus endpoint(s)",
+        no_targets="[!] No Prometheus endpoints in the datastore (port 9090). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: 'v' + (t.get('version','?') or '?') +
+                                       (' config-readable' if t.get('config_readable') else '')))
+
+
+def cmd_docker_registry(args: argparse.Namespace) -> int:
+    """Docker Registry v2 anonymous catalog probe (5000/tcp).
+    Distinct from `docker` — that's the Engine API on 2375."""
+    return _run_service_scan(
+        args, module="docker_registry", source="docker-registry",
+        label="Docker Registry", noun="Docker Registry endpoint(s)",
+        no_targets="[!] No Docker Registry endpoints (port 5000). "
+                   "Run `enum` against the registry hosts first.",
+        fmt=_fmt_simple(lambda t, a: f"{t.get('repositories',0)} repo(s)"))
+
+
+def cmd_vnc(args: argparse.Namespace) -> int:
+    """VNC RFB handshake + security-type list. Detects no-auth (type 1) and
+    DES-only (type 2). Read-only."""
+    return _run_service_scan(
+        args, module="vnc", source="vnc", label="VNC",
+        noun="VNC endpoint(s)",
+        no_targets="[!] No VNC endpoints in the datastore (port 5900-5906). "
+                   "Run `enum` against the workstation targets first.",
+        fmt=_fmt_simple(lambda t, a: 'NO-AUTH' if t.get('no_auth') else 'password-gated'))
+
+
+def cmd_modbus(args: argparse.Namespace) -> int:
+    """Modbus/TCP probe: Function 0x03 (Read Holding Registers) + Function
+    0x2B (Read Device Identification). Read-only, no writes."""
+    return _run_service_scan(
+        args, module="modbus", source="modbus", label="Modbus",
+        noun="Modbus/TCP device(s)",
+        no_targets="[!] No Modbus endpoints in the datastore (port 502). "
+                   "Run `enum` against the OT segment first.",
+        fmt=_fmt_simple(lambda t, a: (t.get('vendor','?') + ' ' +
+                                       t.get('product','?')).strip()))
+
+
+def cmd_rdp(args: argparse.Namespace) -> int:
+    """RDP X.224 Connection Request probe: negotiates security mode, detects
+    NLA (Network Level Authentication) off vs. required."""
+    return _run_service_scan(
+        args, module="rdp", source="rdp", label="RDP",
+        noun="RDP endpoint(s)",
+        no_targets="[!] No RDP endpoints in the datastore (port 3389). "
+                   "Run `enum` against the Windows targets first.",
+        fmt=_fmt_simple(lambda t, a: 'NLA OFF' if t.get('standard_rdp_accepted')
+                                     else ('NLA required' if t.get('nla_required') else '?')))
+
+
+def cmd_ipmi(args: argparse.Namespace) -> int:
+    """IPMI UDP 623 Get Channel Auth Capabilities probe: cipher-zero
+    (CVE-2013-4786), null-user, anonymous logon, weak MD2/MD5 auth."""
+    return _run_service_scan(
+        args, module="ipmi", source="ipmi", label="IPMI",
+        noun="IPMI/BMC endpoint(s)",
+        no_targets="[!] No IPMI endpoints in the datastore (port 623/udp). "
+                   "Run `enum -U` (UDP) against the BMC targets first.",
+        fmt=_fmt_simple(lambda t, a: 'cipher-zero' if t.get('cipher_zero')
+                                     else ('anon' if t.get('anonymous') else '?')),
+        udp=True)

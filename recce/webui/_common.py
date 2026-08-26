@@ -132,6 +132,18 @@ _COMMANDS: dict = {
     "kubernetes": _cmd("Kubernetes", "Services", "optional"),
     "dns": _cmd("DNS", "Services", "optional"),
     "smtp": _cmd("SMTP", "Services", "optional"),
+    # --- T4 scanner-expansion services (from the "everything else" round) ---
+    "zookeeper":       _cmd("Zookeeper 4LW", "Services", "optional"),
+    "kafka":           _cmd("Kafka MetadataRequest", "Services", "optional"),
+    "etcd":            _cmd("etcd (v2 + v3)", "Services", "optional"),
+    "consul":          _cmd("Consul", "Services", "optional"),
+    "nomad":           _cmd("Nomad", "Services", "optional"),
+    "prometheus":      _cmd("Prometheus", "Services", "optional"),
+    "docker-registry": _cmd("Docker Registry v2", "Services", "optional"),
+    "vnc":             _cmd("VNC", "Services", "optional"),
+    "modbus":          _cmd("Modbus/TCP (OT/ICS)", "Services", "optional"),
+    "rdp":             _cmd("RDP (NLA detection)", "Services", "optional"),
+    "ipmi":            _cmd("IPMI (cipher-zero + null-user)", "Services", "optional"),
     # --- AD / credentialed ---
     # Credentialed enum accepts AD scoping (--dc-ip / --ldap-*) + a separate
     # admin account for admin-only checks (secretsdump). Surfacing them turns

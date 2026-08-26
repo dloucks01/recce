@@ -1912,6 +1912,13 @@ _UNAUTH_SWEEP = [
     ("influxdb", "cmd_influxdb"), ("cassandra", "cmd_cassandra"),
     ("oracle", "cmd_oracle"), ("db2", "cmd_db2"),
     ("smtp", "cmd_smtp"), ("dns", "cmd_dns"),
+    # T4 scanner-expansion services:
+    ("zookeeper", "cmd_zookeeper"), ("kafka", "cmd_kafka"),
+    ("etcd", "cmd_etcd"), ("consul", "cmd_consul"), ("nomad", "cmd_nomad"),
+    ("prometheus", "cmd_prometheus"),
+    ("docker-registry", "cmd_docker_registry"),
+    ("vnc", "cmd_vnc"), ("modbus", "cmd_modbus"),
+    ("rdp", "cmd_rdp"), ("ipmi", "cmd_ipmi"),
 ]
 
 
