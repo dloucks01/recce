@@ -28,7 +28,11 @@
 /* Snapshot region — informational rows below the priority card. */
 .dash-snapshot { display: flex; flex-direction: column; gap: 18px; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 17px 19px; box-shadow: var(--shadow-sm); }
-.panel-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+/* `gap: 10px` keeps the title and the trailing muted-summary from butting
+   right up against each other. `space-between` alone gives no space when
+   the panel is narrow and the two elements collapse together. */
+.panel-h { display: flex; align-items: baseline; justify-content: space-between;
+  gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 .panel-h h3 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: -.01em; }
 .panel-sub { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .panel-h .muted, .muted { color: var(--muted); font-size: 12px; }
