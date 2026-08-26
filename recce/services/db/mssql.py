@@ -300,40 +300,197 @@ def _build_login7_sql(user: str, password: str, hostname: str = "recce",
     return struct.pack(">BBHHBB", 0x10, 0x01, 8 + len(body), 0, 0, 0) + body
 
 
+def _tds_wrap_prelogin(data: bytes) -> bytes:
+    """Wrap raw bytes in a TDS PRELOGIN packet (type 0x12) — the frame the
+    server accepts during the TDS-tunneled TLS handshake per MS-TDS 2.2.6.5."""
+    return struct.pack(">BBHHBB", 0x12, 0x01, 8 + len(data), 0, 0, 0) + data
+
+
+def _recv_exact(sock, n: int) -> bytes:
+    """Read exactly n bytes or return whatever came back (short reads = EOF)."""
+    buf = b""
+    while len(buf) < n:
+        try:
+            chunk = sock.recv(n - len(buf))
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def _tds_read_payload(sock) -> bytes:
+    """Read one TDS frame; return the body (post-8-byte header) or b'' on EOF."""
+    hdr = _recv_exact(sock, 8)
+    if len(hdr) < 8:
+        return b""
+    length = struct.unpack(">H", hdr[2:4])[0]
+    body_len = length - 8
+    if body_len <= 0 or body_len > 65528:
+        return b""
+    return _recv_exact(sock, body_len)
+
+
+def _tls_handshake_over_tds(sock, ip: str, timeout: float):
+    """Complete a TLS handshake tunnelled inside TDS PRELOGIN packets, as
+    modern MSSQL (2016+) requires for the LOGIN7 phase even when the
+    ENCRYPTION field in the prelogin response says OFF.
+
+    Returns an ssl.SSLObject that reads/writes through in_bio/out_bio; the
+    caller is responsible for feeding it socket bytes and flushing its output
+    (in_bio.write / out_bio.read) for the LOGIN7 exchange that follows.
+    Returns None on any handshake failure."""
+    import ssl
+    in_bio = ssl.MemoryBIO()
+    out_bio = ssl.MemoryBIO()
+    ctx = ssl._create_unverified_context()
+    # Older servers may not support TLS 1.3; be permissive for testing.
+    try:
+        ctx.minimum_version = ssl.TLSVersion.TLSv1
+    except (AttributeError, ValueError):
+        pass
+    sslobj = ctx.wrap_bio(in_bio, out_bio, server_hostname=ip)
+    sock.settimeout(timeout)
+    # Handshake loop: 20 round-trips is far more than TLS 1.2/1.3 ever needs.
+    for _ in range(20):
+        try:
+            sslobj.do_handshake()
+            break
+        except ssl.SSLWantReadError:
+            # Flush any pending outgoing TLS bytes (ClientHello etc.), wrapped
+            # in a TDS PRELOGIN header.
+            out = out_bio.read()
+            if out:
+                try:
+                    sock.sendall(_tds_wrap_prelogin(out))
+                except OSError:
+                    return None
+            # Read the next TDS-wrapped chunk from the server.
+            payload = _tds_read_payload(sock)
+            if not payload:
+                return None
+            in_bio.write(payload)
+        except (ssl.SSLError, OSError):
+            return None
+    else:
+        return None
+    # Flush any final handshake bytes (session tickets, ChangeCipherSpec).
+    out = out_bio.read()
+    if out:
+        try:
+            sock.sendall(_tds_wrap_prelogin(out))
+        except OSError:
+            return None
+    return sslobj, in_bio, out_bio
+
+
 def sqlauth_login(ip: str, port: int, user: str, password: str,
                   timeout: float = 4.0) -> tuple[bool, str]:
     """Attempt a SQL Server login with (user, password). Returns (ok, detail)
     where ok=True means the server accepted the credentials (LOGINACK token
     seen), detail carries the error message from the ERROR token on failure.
 
-    Native TDS — no external tools needed. Runs against airgapped targets."""
+    Modern MSSQL (2016+) requires the LOGIN7 packet to travel through a TLS
+    tunnel — TLS handshake bytes wrapped in TDS PRELOGIN packets. We do the
+    tunnel first, send LOGIN7 through TLS, and decrypt the response. Native
+    TDS/TLS — no external tools needed, no impacket dependency."""
+    import ssl
     try:
-        with socket.create_connection((ip, port), timeout=timeout) as s:
-            s.settimeout(timeout)
-            s.sendall(_build_prelogin())
-            s.recv(4096)                          # drain PRELOGIN response
-            s.sendall(_build_login7_sql(user, password))
-            hdr = s.recv(8)
-            if len(hdr) < 8:
-                return (False, "no response header")
-            length = struct.unpack(">H", hdr[2:4])[0]
-            resp = hdr
-            while len(resp) < length and len(resp) < 65536:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                resp += chunk
+        sock = socket.create_connection((ip, port), timeout=timeout)
     except OSError as e:
         return (False, f"connect error: {e}")
-    # Parse tokens from the response body. LOGINACK (0xAD) = success.
-    # ERROR (0xAA) with number ~18456 = auth failure. Body starts at offset 8.
-    body = resp[8:]
-    if b"\xad" in body[:64] or _has_token(body, 0xAD):
+    try:
+        sock.settimeout(timeout)
+        sock.sendall(_build_prelogin())
+        prelogin_resp = _tds_read_payload(sock)
+        if not prelogin_resp:
+            return (False, "no prelogin response")
+
+        handshake = _tls_handshake_over_tds(sock, ip, timeout)
+        if handshake is None:
+            # Server refused TLS (or the socket died). Try one plaintext
+            # fallback for legacy servers that don't do TLS at all.
+            return _sqlauth_login_plaintext(sock, user, password)
+        sslobj, in_bio, out_bio = handshake
+
+        # Send LOGIN7 through the TLS layer. sslobj encrypts and stashes
+        # ciphertext in out_bio, which we flush over the raw socket.
+        login = _build_login7_sql(user, password)
+        sslobj.write(login)
+        out = out_bio.read()
+        if out:
+            sock.sendall(out)
+
+        # Read the response. Here's the subtlety: when the server negotiated
+        # ENCRYPT_OFF (0x00), only the LOGIN REQUEST is encrypted; the
+        # response comes back as PLAINTEXT TDS. When it negotiated ENCRYPT_ON
+        # (0x01), the response stays encrypted. We handle both by peeking at
+        # the first byte:
+        #   * 0x04 = TabularResult TDS packet in the clear (ENCRYPT_OFF)
+        #   * anything else = TLS record; feed through sslobj to decrypt
+        raw = _recv_exact(sock, 8)
+        if len(raw) < 8:
+            return (False, "no response from server after LOGIN7")
+        if raw[0] == 0x04:
+            # Plaintext TDS — read the rest and parse.
+            length = struct.unpack(">H", raw[2:4])[0]
+            body_len = max(0, length - 8)
+            body = _recv_exact(sock, body_len)
+        else:
+            # Encrypted — feed the header bytes and the rest of the record
+            # through the TLS layer to get plaintext TDS.
+            in_bio.write(raw)
+            plain = b""
+            for _ in range(30):
+                try:
+                    while True:
+                        chunk = sslobj.read(8192)
+                        if not chunk: break
+                        plain += chunk
+                except ssl.SSLWantReadError:
+                    pass
+                except ssl.SSLError:
+                    break
+                if len(plain) >= 200 and (b"\xad" in plain or b"\xaa" in plain):
+                    break
+                try:
+                    more = sock.recv(8192)
+                except OSError:
+                    break
+                if not more: break
+                in_bio.write(more)
+            body = plain[8:] if len(plain) >= 8 else plain
+
+        if _has_token(body, 0xAD):
+            return (True, "LOGINACK")
+        err = _extract_error_message(body)
+        return (False, err or "no LOGINACK; auth failed")
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _sqlauth_login_plaintext(sock, user: str, password: str) -> tuple[bool, str]:
+    """Fallback for legacy MSSQL servers that don't support TLS at all
+    (pre-2005 / SQL Server Express with encryption disabled). The socket is
+    still open post-prelogin; send LOGIN7 in the clear and read directly."""
+    try:
+        sock.sendall(_build_login7_sql(user, password))
+        hdr = _recv_exact(sock, 8)
+        if len(hdr) < 8:
+            return (False, "no response header (server likely requires TLS)")
+        length = struct.unpack(">H", hdr[2:4])[0]
+        body_len = max(0, length - 8)
+        body = _recv_exact(sock, body_len)
+    except OSError as e:
+        return (False, f"plaintext login error: {e}")
+    if _has_token(body, 0xAD):
         return (True, "LOGINACK")
-    # Extract error message if present. ERROR token layout: 0xAA, length(2),
-    # number(4), state(1), class(1), msgLen(2), msg(UTF-16LE * msgLen), ...
-    err_msg = _extract_error_message(body)
-    return (False, err_msg or "no LOGINACK; auth failed")
+    err = _extract_error_message(body)
+    return (False, err or "no LOGINACK; auth failed")
 
 
 def _has_token(body: bytes, token: int) -> bool:
