@@ -70,6 +70,43 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
                         "tester": x_tester})
         return {"ok": True, "status": status}
 
+    @app.post("/api/loot/scan-evidence")
+    def loot_scan_evidence(x_tester: str = Header(default="someone")):
+        """Walk `<engagement>/evidence/**` and produce Vuln findings for
+        Kerberos ticket files (.ccache/.kirbi), credential-bearing files
+        (.aws/credentials, .netrc, id_rsa, browser saved logins, …), .git
+        repository dumps, and configs with embedded secrets (API keys,
+        DB URLs, private keys, JWTs, ...).
+
+        Read-only — never mutates the evidence tree. Newly-discovered
+        findings persist to the datastore so they show up in the Findings
+        tab and roll into the report."""
+        from ...intake.loot import scan_evidence
+        from ...store import Store
+        new_vulns = scan_evidence(ctx.eng_dir)
+        if not new_vulns:
+            return {"scanned": True, "added": 0}
+        with Store(ctx.eng_dir + "/results.sqlite") as st:
+            hosts_by_ip = {h.ip: h for h in st.all_hosts()}
+            added = 0
+            for v in new_vulns:
+                h = hosts_by_ip.get(v.ip)
+                if not h:
+                    continue
+                # Dedup: skip if this host already has an identical loot finding.
+                if any(x.script_id == v.script_id and x.title == v.title
+                       for x in h.vulns):
+                    continue
+                h.vulns.append(v)
+                st.upsert_host(h)
+                added += 1
+            if added:
+                collab.add_activity(st, x_tester, "scan",
+                    f"{x_tester} scanned evidence and added {added} loot finding(s)")
+        broker.publish({"type": "add", "what": "loot", "by": x_tester, "count": added})
+        return {"scanned": True, "added": added, "detected": len(new_vulns)}
+
+
     @app.post("/api/loot/extract")
     def loot_extract(body: dict = Body(...), x_tester: str = Header(default="someone")):
         """Auto-loot: scan arbitrary text for credentials (secretsdump rows,
