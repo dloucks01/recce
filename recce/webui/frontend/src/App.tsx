@@ -8,6 +8,29 @@ import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbo
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
 import { TabBar, TabId } from "./TabBar";
+import { Skeleton } from "./ui";
+
+/** Placeholder shown while the initial engagement Overview is loading. Mirrors
+ * the shape of the real dashboard (stats row + priority card + panel) so the
+ * layout doesn't shift when the data arrives. */
+function DashboardSkeleton() {
+  return (
+    <div className="dash">
+      <div className="dash-priority">
+        <div className="stats stats-priority" style={{ display: "grid", gap: 12 }}>
+          <Skeleton variant="block" height="70px" />
+          <Skeleton variant="block" height="70px" />
+          <Skeleton variant="block" height="70px" />
+        </div>
+        <Skeleton variant="block" height="140px" />
+      </div>
+      <div className="dash-snapshot">
+        <Skeleton variant="block" height="90px" />
+        <Skeleton variant="block" height="160px" />
+      </div>
+    </div>
+  );
+}
 import { Sessions } from "./sessions";
 import { ScanTab } from "./ScanTab";
 import { ReportTab } from "./ReportTab";
@@ -337,7 +360,7 @@ export default function App() {
       {/* Main content */}
       <div className="app-main">
         <div className="main-content">
-          {tab === "dashboard" && (ov ? <Dashboard nav={nav} hosts={hosts} ov={ov} /> : <div className="loading">Loading…</div>)}
+          {tab === "dashboard" && (ov ? <Dashboard nav={nav} hosts={hosts} ov={ov} /> : <DashboardSkeleton />)}
           {tab === "scan" && (
             <ScanTab tester={tester} onRunning={setScanRunning} onLog={setScanLog}
                      prefillTarget={scanPrefill} />
@@ -366,7 +389,7 @@ export default function App() {
               onNote={onNote}
               nav={nav}
             />
-          ) : <div className="loading">Loading…</div>)}
+          ) : <DashboardSkeleton />)}
           {tab === "services" && <Services hosts={hosts} findings={findings} nav={nav} />}
           {tab === "timeline" && <Timeline nav={nav} />}
           {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus}

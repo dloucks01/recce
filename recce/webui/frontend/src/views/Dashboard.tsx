@@ -12,39 +12,54 @@ export function Dashboard(
   const enumPct = ov.hosts_up ? Math.round((100 * ov.enumerated) / ov.hosts_up) : 0;
   return (
     <div className="dash">
-      <section className="stats">
-        <Stat k="Hosts up" v={`${ov.hosts_up}`} sub={`/ ${ov.hosts_total}`} onClick={() => nav.toHosts()} />
-        <Stat k="Services" v={`${ov.services}`} />
-        <Stat k="Critical" v={`${ov.by_severity.critical ?? 0}`} cls="crit"
-              onClick={() => nav.toFindings({ sev: "critical", leads: true })} />
-        <Stat k="🔥 Known-exploited" v={`${ov.kev_total}`} cls="kev"
-              title="CISA KEV (Known Exploited Vulnerabilities) — CVEs confirmed exploited in the wild. Fix these first."
-              onClick={() => nav.toFindings({ kev: true })} />
-        <Stat k="Reviewed" v={`${reviewPct}%`} sub={`${ov.reviewed}/${ov.findings_total}`}
-              onClick={() => nav.toFindings({ unreviewed: true })} />
-      </section>
+      {/* PRIORITY REGION — "what needs my attention RIGHT NOW".
+          Above-the-fold: NextMoves (recommended actions), critical + KEV
+          headline stats. Accent-bar treatment sets it apart from the
+          snapshot region below. */}
+      <div className="dash-priority">
+        <section className="stats stats-priority">
+          <Stat k="Critical" v={`${ov.by_severity.critical ?? 0}`} cls="crit"
+                onClick={() => nav.toFindings({ sev: "critical", leads: true })} />
+          <Stat k="🔥 Known-exploited" v={`${ov.kev_total}`} cls="kev"
+                title="CISA KEV (Known Exploited Vulnerabilities) — CVEs confirmed exploited in the wild. Fix these first."
+                onClick={() => nav.toFindings({ kev: true })} />
+          <Stat k="Reviewed" v={`${reviewPct}%`} sub={`${ov.reviewed}/${ov.findings_total}`}
+                onClick={() => nav.toFindings({ unreviewed: true })} />
+        </section>
 
-      <NextMoves nav={nav} />
+        <NextMoves nav={nav} />
+      </div>
 
-      <RecentChanges nav={nav} />
+      {/* SNAPSHOT REGION — "what's the state of the engagement".
+          Below-the-fold: fleet counters, severity breakdown, recent activity,
+          top-risk hosts, KEV list. Everything that's informational rather
+          than actionable-right-now. */}
+      <div className="dash-snapshot">
+        <section className="stats">
+          <Stat k="Hosts up" v={`${ov.hosts_up}`} sub={`/ ${ov.hosts_total}`} onClick={() => nav.toHosts()} />
+          <Stat k="Services" v={`${ov.services}`} />
+          <Stat k="Enumerated" v={`${enumPct}%`} sub={`${ov.enumerated}/${ov.hosts_up}`} />
+        </section>
 
-      <section className="panel">
-        <div className="panel-h">
-          <h3>Severity</h3><span className="muted">{ov.findings_total} findings</span>
-        </div>
-        <div className="sevrow">
-          {SEV_ALL.map((s) => {
-            const c = ov.by_severity[s] ?? 0;
-            return (
-              <button key={s} className={"sevblock s-bg-" + s} disabled={!c}
-                      onClick={() => nav.toFindings({ sev: s, leads: true })}>
-                <span className="n">{c}</span>
-                <span className="l">{s}</span>
-              </button>
-            );
-          })}
-        </div>
-      </section>
+        <RecentChanges nav={nav} />
+
+        <section className="panel">
+          <div className="panel-h">
+            <h3>Severity</h3><span className="muted">{ov.findings_total} findings</span>
+          </div>
+          <div className="sevrow">
+            {SEV_ALL.map((s) => {
+              const c = ov.by_severity[s] ?? 0;
+              return (
+                <button key={s} className={"sevblock s-bg-" + s} disabled={!c}
+                        onClick={() => nav.toFindings({ sev: s, leads: true })}>
+                  <span className="n">{c}</span>
+                  <span className="l">{s}</span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
 
       <div className="cols2">
         <section className="panel">
@@ -115,6 +130,7 @@ export function Dashboard(
           <Meter label="Findings reviewed" now={ov.reviewed} total={ov.findings_total} unit="" />
         </div>
       </section>
+      </div>{/* /.dash-snapshot */}
     </div>
   );
 }

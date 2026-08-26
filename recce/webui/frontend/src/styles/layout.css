@@ -9,7 +9,24 @@
 .stat.ok .v { color: var(--ok); }
 
 /* panels */
-.dash { display: flex; flex-direction: column; gap: 18px; }
+.dash { display: flex; flex-direction: column; gap: 22px; }
+
+/* Dashboard priority region — "what needs my attention RIGHT NOW".
+   Sits above the fold; accent bar sets it apart from the snapshot
+   region below. Contains only critical/KEV/reviewed stats + NextMoves. */
+.dash-priority { display: flex; flex-direction: column; gap: 14px;
+  padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow-sm);
+  border-left: 3px solid var(--accent);
+  position: relative; }
+.dash-priority::before { content: "PRIORITY"; position: absolute; top: -9px; left: 14px;
+  font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .12em;
+  color: var(--accent); background: var(--ground); padding: 0 8px; border-radius: 4px;
+  text-transform: uppercase; }
+.stats-priority { grid-template-columns: repeat(3, 1fr); }
+
+/* Snapshot region — informational rows below the priority card. */
+.dash-snapshot { display: flex; flex-direction: column; gap: 18px; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 17px 19px; box-shadow: var(--shadow-sm); }
 .panel-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
 .panel-h h3 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: -.01em; }

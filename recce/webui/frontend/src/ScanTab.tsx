@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { CmdCatalog, CmdSpec, getCommands, postCommand, Host, getJSON } from "./api";
+import { ScanConsole } from "./scan/ScanConsole";
 
 interface Job {
   id: string;
@@ -623,24 +624,13 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
 
       {/* Console output */}
       {showLog && (
-        <div className="scan-console">
-          <div className="scan-console-bar">
-            <span className="scan-console-title">
-              {(running || chainRunning) && <span className="scan-pulse-sm" />}
-              Output &middot; {log.length} lines
-            </span>
-            <button className="scan-console-close" onClick={() => setShowLog(false)}>&times;</button>
-          </div>
-          <div className="scan-console-body" ref={logRef}>
-            {log.map((line, i) => (
-              <div key={i} className="scan-console-line">{line}</div>
-            ))}
-            {(running || chainRunning) && <div className="scan-console-line scan-console-cursor">_</div>}
-            {!running && !chainRunning && log.length > 0 && (
-              <div className="scan-console-line scan-console-done">&mdash; done &mdash;</div>
-            )}
-          </div>
-        </div>
+        <ScanConsole
+          log={log}
+          running={running}
+          chainRunning={chainRunning}
+          logRef={logRef}
+          onClose={() => setShowLog(false)}
+        />
       )}
     </div>
   );
