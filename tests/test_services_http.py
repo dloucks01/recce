@@ -151,5 +151,104 @@ class FingerprintTest(unittest.TestCase):
         self.assertEqual(fp, {})
 
 
+class MethodsTest(unittest.TestCase):
+    def test_trace_reflection_detected(self):
+        class H(_FixedHandler):
+            def do_GET(self):
+                self.send_response(200); self.send_header("Content-Length","2")
+                self.end_headers(); self.wfile.write(b"OK")
+            def do_TRACE(self):
+                # Echo the request line + headers back — real XST behavior.
+                echo = b"TRACE / HTTP/1.1\r\nHost: x\r\nUser-Agent: recce-probe/1.0\r\n\r\n"
+                self.send_response(200); self.send_header("Content-Length", str(len(echo)))
+                self.end_headers(); self.wfile.write(echo)
+        srv, _t = _serve(H)
+        try:
+            m = svc_http.methods_probe("127.0.0.1", srv.server_address[1], False)
+        finally:
+            srv.shutdown()
+        self.assertIn("TRACE", m["accepted"])
+        self.assertTrue(m["trace_reflected"])
+
+    def test_spa_catchall_suppresses_methods(self):
+        """SPA that 200s every method with the same body must NOT report every
+        verb as accepted."""
+        body = b"<html>index</html>"
+        class H(_FixedHandler):
+            def do_GET(self): self._reply()
+            def do_OPTIONS(self): self._reply()
+            def do_PUT(self): self._reply()
+            def do_DELETE(self): self._reply()
+            def _reply(self):
+                self.send_response(200); self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+        srv, _t = _serve(H)
+        try:
+            m = svc_http.methods_probe("127.0.0.1", srv.server_address[1], False)
+        finally:
+            srv.shutdown()
+        # OPTIONS/PUT/DELETE all echo the exact GET / body — should be filtered.
+        self.assertEqual(m["accepted"], [], f"expected empty, got {m['accepted']}")
+
+
+class CorsTest(unittest.TestCase):
+    def test_reflection_with_credentials_flagged(self):
+        class H(_FixedHandler):
+            def do_GET(self):
+                origin = self.headers.get("Origin","")
+                self.send_response(200)
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Access-Control-Allow-Credentials", "true")
+                self.send_header("Content-Length","2")
+                self.end_headers(); self.wfile.write(b"OK")
+        srv, _t = _serve(H)
+        try:
+            c = svc_http.cors_probe("127.0.0.1", srv.server_address[1], False)
+        finally:
+            srv.shutdown()
+        self.assertTrue(c["reflects_origin"])
+        self.assertTrue(c["credentials"])
+
+
+class RobotsSitemapTest(unittest.TestCase):
+    def test_disallow_paths_extracted(self):
+        class H(_FixedHandler):
+            ROUTES = {
+                "/robots.txt": (200, [("Content-Type","text/plain")],
+                                b"User-agent: *\nDisallow: /admin\nDisallow: /internal/\nAllow: /public\n"),
+                "/sitemap.xml": (200, [("Content-Type","application/xml")],
+                                 b"<urlset><url><loc>/secret-report</loc></url></urlset>"),
+            }
+        srv, _t = _serve(H)
+        try:
+            paths = svc_http.free_paths_from_index("127.0.0.1", srv.server_address[1], False)
+        finally:
+            srv.shutdown()
+        self.assertIn("/admin", paths)
+        self.assertIn("/internal/", paths)
+        self.assertIn("/public", paths)
+        self.assertIn("/secret-report", paths)
+        # Bare "/" must be filtered (dev servers often "Disallow: /").
+        self.assertNotIn("/", paths)
+
+
+class ApiSpecTest(unittest.TestCase):
+    def test_openapi_json_detected(self):
+        spec = (b'{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {'
+                b'"/users": {"get": {}}, "/orders": {"post": {}}, "/health": {"get": {}}'
+                b'}}')
+        class H(_FixedHandler):
+            ROUTES = {"/openapi.json": (200, [("Content-Type","application/json")], spec)}
+        srv, _t = _serve(H)
+        try:
+            r = svc_http.api_spec_probe("127.0.0.1", srv.server_address[1], False)
+        finally:
+            srv.shutdown()
+        self.assertIsNotNone(r)
+        self.assertEqual(r["kind"], "openapi")
+        self.assertEqual(r["path"], "/openapi.json")
+        self.assertGreaterEqual(r["endpoint_count"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

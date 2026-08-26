@@ -479,6 +479,214 @@ def fingerprint(ip: str, port: int, use_tls: bool) -> dict:
     return out
 
 
+# ---- HTTP methods probe (Tier A) -------------------------------------------
+
+# Methods that are notable enough to report if a server actually accepts them.
+# GET/HEAD/POST are expected — no news there. We look for the writeable /
+# tunneling / debugging ones.
+_METHODS_TO_PROBE = ["OPTIONS", "TRACE", "PUT", "DELETE", "PATCH", "CONNECT", "PROPFIND"]
+
+# Server responses that mean "yes I speak this method." 405 or 501 means no.
+# 200/204/207 → definitely yes. 400 with a meaningful body is ambiguous — treat
+# as no. Auth-required (401/403) counts as YES because the method IS routed.
+_METHOD_ACCEPTED = {200, 201, 202, 204, 207, 401, 403}
+_METHOD_REJECTED = {405, 501}
+
+
+def methods_probe(ip: str, port: int, use_tls: bool) -> dict:
+    """Ask OPTIONS then probe each interesting verb directly. Returns
+    {allow_header: str, accepted: [verbs]} — accepted verbs are the ones the
+    server actually routed (not 405/501, and not the SPA catch-all that 200s
+    every request). A GET-based sanity check on the same root confirms the
+    server's baseline; a method that returns the exact same (status, length)
+    as GET / on a catch-all target is treated as unrouted."""
+    out = {"allow_header": "", "accepted": [], "trace_reflected": False}
+    # Baseline: what does a normal GET / return? Then use it as the "SPA
+    # catch-all" fingerprint against method responses.
+    baseline = _get(ip, port, use_tls, "/", read_body=True)
+    baseline_sig = None
+    if baseline is not None and baseline["status"] in _HIT_STATUSES:
+        baseline_sig = (baseline["status"], len(baseline.get("body") or b""))
+    r_opt = _get(ip, port, use_tls, "/", method="OPTIONS", read_body=False)
+    if r_opt is not None:
+        out["allow_header"] = r_opt["headers"].get("allow", "")
+    for m in _METHODS_TO_PROBE:
+        r = _get(ip, port, use_tls, "/", method=m, read_body=True)
+        if r is None:
+            continue
+        if r["status"] not in _METHOD_ACCEPTED:
+            continue
+        # SPA / wildcard-proxy suppression: if the method's response matches
+        # the GET-/ baseline exactly, the app didn't actually route the method
+        # — it just returned index.html.
+        if baseline_sig is not None and \
+                (r["status"], len(r.get("body") or b"")) == baseline_sig:
+            continue
+        out["accepted"].append(m)
+        if m == "TRACE":
+            body = (r.get("body") or b"").decode("latin-1", "replace")
+            if "User-Agent" in body and _UA in body:
+                out["trace_reflected"] = True
+    return out
+
+
+# ---- CORS misconfig probe (Tier A) -----------------------------------------
+
+def cors_probe(ip: str, port: int, use_tls: bool) -> dict:
+    """Send Origin: https://attacker.example and see if the server reflects it
+    into Access-Control-Allow-Origin with Allow-Credentials: true. That
+    combination is a real cross-origin exfil bug — any origin can read the
+    response with the victim's cookies."""
+    origin = "https://attacker.example"
+    r = _get(ip, port, use_tls, "/", extra_headers={"Origin": origin})
+    if r is None:
+        return {}
+    aco = r["headers"].get("access-control-allow-origin", "")
+    acc = r["headers"].get("access-control-allow-credentials", "").lower() == "true"
+    reflects = aco.strip() == origin
+    wildcard_with_creds = aco.strip() == "*" and acc
+    return {"aco": aco, "credentials": acc, "reflects_origin": reflects,
+            "wildcard_with_creds": wildcard_with_creds}
+
+
+# ---- robots.txt / sitemap.xml free-path enum (Tier A) ----------------------
+
+_ROBOTS_PATH_RE = re.compile(r"^\s*(?:Disallow|Allow):\s*(\S+)", re.M | re.I)
+_SITEMAP_LOC_RE = re.compile(r"<loc>([^<]+)</loc>", re.I)
+
+
+def free_paths_from_index(ip: str, port: int, use_tls: bool) -> list[str]:
+    """Pull paths from robots.txt (Disallow/Allow) and sitemap.xml. Servers
+    hand these to us for free — every listed path is one the site owner already
+    considers interesting. Returns unique same-host paths."""
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def _add(p: str) -> None:
+        p = p.strip()
+        if not p or p in seen:
+            return
+        # Only same-host relative paths — a sitemap that lists external URLs
+        # isn't attack surface here.
+        if p.startswith("http"):
+            m = re.match(r"^https?://[^/]+(/.*)?$", p)
+            if not m:
+                return
+            p = m.group(1) or "/"
+        if not p.startswith("/"):
+            p = "/" + p
+        # Ignore bare "/" — it's not attack surface, and a "Disallow: /" in a
+        # dev-server robots.txt would otherwise flood the finding with
+        # useless root entries.
+        if p in ("/", ""):
+            return
+        seen.add(p)
+        paths.append(p)
+
+    r = _get(ip, port, use_tls, "/robots.txt", read_body=True)
+    if r is not None and r["status"] == 200:
+        for m in _ROBOTS_PATH_RE.finditer(r["body"].decode("utf-8", "replace")):
+            _add(m.group(1))
+    r = _get(ip, port, use_tls, "/sitemap.xml", read_body=True)
+    if r is not None and r["status"] == 200:
+        for m in _SITEMAP_LOC_RE.finditer(r["body"].decode("utf-8", "replace")):
+            _add(m.group(1))
+    return paths[:200]                    # cap — a sitemap can list thousands
+
+
+# ---- OpenAPI / Swagger / GraphQL introspection (Tier A) -------------------
+
+# Paths where API specs commonly live. If we get one, we've got the full
+# API surface handed to us — every endpoint, every parameter, every method.
+_API_SPEC_PATHS = [
+    "/openapi.json", "/openapi.yaml", "/swagger.json", "/swagger.yaml",
+    "/v2/api-docs", "/v3/api-docs", "/api-docs", "/api/openapi.json",
+    "/api/swagger.json", "/api/swagger", "/docs/swagger.json",
+]
+
+
+def api_spec_probe(ip: str, port: int, use_tls: bool) -> dict | None:
+    """Return {path, kind, endpoint_count} for the first API spec that hits.
+    'kind' is one of openapi/swagger/graphql based on the body. None if none."""
+    for path in _API_SPEC_PATHS:
+        r = _get(ip, port, use_tls, path, read_body=True)
+        if r is None or r["status"] != 200:
+            continue
+        body = r.get("body") or b""
+        if len(body) < 32:
+            continue
+        text = body.decode("utf-8", "replace")
+        # Cheap fingerprint of the body: OpenAPI/Swagger spec bodies mention
+        # "openapi" or "swagger" near the top. Reject arbitrary JSON.
+        head = text[:400].lower()
+        if "openapi" in head:
+            kind = "openapi"
+        elif "swagger" in head:
+            kind = "swagger"
+        else:
+            continue
+        # Path count = number of "paths" keys in the JSON — cheap regex, since
+        # the tester just needs a rough sense of API surface size.
+        endpoints = len(re.findall(r"\"paths\"\s*:", text)) and \
+                    len(re.findall(r'"/[^"\\]{1,200}"\s*:\s*\{', text))
+        return {"path": path, "kind": kind, "endpoint_count": endpoints}
+    # GraphQL introspection — POST the __schema query.
+    try:
+        import json as _json
+        conn = _connect(ip, port, use_tls, _REQ_TIMEOUT * 2)
+        body = _json.dumps({"query": "{__schema{types{name}}}"}).encode()
+        conn.request("POST", "/graphql", body=body,
+                     headers={"Content-Type": "application/json", "User-Agent": _UA,
+                              "Connection": "close"})
+        resp = conn.getresponse()
+        text = resp.read(_MAX_BODY).decode("utf-8", "replace")
+        conn.close()
+        if resp.status == 200 and '"__schema"' in text and '"types"' in text:
+            type_count = len(re.findall(r'"name"', text))
+            return {"path": "/graphql", "kind": "graphql", "endpoint_count": type_count}
+    except (OSError, http.client.HTTPException, ssl.SSLError, ValueError):
+        pass
+    return None
+
+
+# ---- vhost enumeration (Tier A) --------------------------------------------
+
+# Small list of hostname patterns that commonly bind to the same IP as a
+# public site. Each is tried as Host: header; a materially different response
+# (different size + different title) indicates a virtual host bound to that
+# name. The tester now knows there's a second app hiding on the same box.
+_VHOST_CANDIDATES = [
+    "admin", "dev", "staging", "test", "internal", "intranet", "portal",
+    "api", "vpn", "mail", "webmail", "monitor", "grafana", "jenkins",
+]
+
+
+def vhost_probe(ip: str, port: int, use_tls: bool, root_domain: str = "") -> list[dict]:
+    """Try each candidate hostname as `Host:` header vs. the ip-only baseline.
+    Return list of {hostname, status, length, title} that were materially
+    different from the baseline. `root_domain` seeds fully-qualified guesses
+    (e.g. 'corp.local' -> admin.corp.local); an empty string uses bare names."""
+    r0 = _get(ip, port, use_tls, "/", read_body=True)
+    if r0 is None:
+        return []
+    baseline_len = len(r0.get("body") or b"")
+    baseline_status = r0["status"]
+
+    hits: list[dict] = []
+    for name in _VHOST_CANDIDATES:
+        host_val = f"{name}.{root_domain}" if root_domain else name
+        r = _get(ip, port, use_tls, "/", read_body=True,
+                 extra_headers={"Host": host_val})
+        if r is None:
+            continue
+        length = len(r.get("body") or b"")
+        # Materially different: status differs OR size differs by >=32 bytes.
+        # Small differences (dynamic tokens, request IDs) are noise.
+        if r["status"] != baseline_status or abs(length - baseline_len) >= 32:
+            hits.append({"hostname": host_val, "status": r["status"], "length": length})
+    return hits
+
+
 # ---- Vuln conversion --------------------------------------------------------
 
 def _mk(host_ip: str, port: Port, sid: str, sev: str, title: str,
@@ -522,7 +730,6 @@ def enum_findings(host_ip: str, port: Port) -> list[Vuln]:
         title = f"Exposed path: {h['path']}"
         output = (f"HTTP {h['status']} · {h['description']} "
                   f"(body {h['length']} bytes)")
-        # Remediation depends on category.
         if h["category"] == "disclosure":
             fix = f"Block external access to {h['path']} — return 404 or restrict to internal."
         else:
@@ -531,4 +738,70 @@ def enum_findings(host_ip: str, port: Port) -> list[Vuln]:
             host_ip, port, "http-path-enum", h["severity"], title,
             h["cwes"], output, fix,
         ))
+
+    # Robots + sitemap — free path list from the server itself. Anything they
+    # tell us to disallow is exactly what we want to look at. Emit as info
+    # findings so the tester sees the surface without cluttering the report.
+    free_paths = free_paths_from_index(host_ip, port.portid, use_tls)
+    if free_paths:
+        out.append(_mk(
+            host_ip, port, "http-robots-sitemap", "info",
+            "Paths advertised by robots.txt / sitemap.xml",
+            [],
+            f"{len(free_paths)} path(s) advertised: " + ", ".join(free_paths[:20])
+            + ("…" if len(free_paths) > 20 else ""),
+            "Informational — anything a Disallow line names is worth reviewing directly."))
+
+    # OpenAPI / Swagger / GraphQL — full API surface handed to us.
+    spec = api_spec_probe(host_ip, port.portid, use_tls)
+    if spec:
+        out.append(_mk(
+            host_ip, port, "http-api-spec", "info",
+            f"{spec['kind'].upper()} spec exposed at {spec['path']}",
+            ["CWE-200"],
+            f"{spec['kind']} spec reachable — approximately {spec['endpoint_count']} "
+            f"endpoints/types described",
+            f"If the API is internal, block {spec['path']} externally. "
+            f"Otherwise, ensure documented endpoints have appropriate authz."))
+
+    # HTTP methods — TRACE with reflection = real XST, PUT/DELETE routed
+    # anywhere = worth flagging.
+    methods = methods_probe(host_ip, port.portid, use_tls)
+    if methods.get("trace_reflected"):
+        out.append(_mk(
+            host_ip, port, "http-method-trace", "medium",
+            "HTTP TRACE method reflects request (XST)",
+            ["CWE-693"],
+            "TRACE request echoed User-Agent — confirmed Cross-Site Tracing",
+            "Disable the TRACE method (e.g. Apache: TraceEnable off; nginx: reject at directive)."))
+    dangerous = [m for m in ("PUT", "DELETE", "PATCH", "CONNECT", "PROPFIND")
+                 if m in methods.get("accepted", [])]
+    if dangerous:
+        out.append(_mk(
+            host_ip, port, "http-method-writable", "medium",
+            "Writable/tunneling HTTP methods accepted",
+            ["CWE-650"],
+            f"Server routes: {', '.join(dangerous)} (Allow header: {methods.get('allow_header','') or 'none'})",
+            "Restrict methods to GET/HEAD/POST for public endpoints; disable PUT/DELETE/PROPFIND unless the app truly needs them."))
+
+    # CORS misconfig — reflect origin + credentials = real cross-origin exfil.
+    cors = cors_probe(host_ip, port.portid, use_tls)
+    if cors.get("reflects_origin") and cors.get("credentials"):
+        out.append(_mk(
+            host_ip, port, "http-cors-reflect", "high",
+            "CORS reflects any origin with credentials",
+            ["CWE-346", "CWE-942"],
+            f"Access-Control-Allow-Origin echoes 'https://attacker.example' "
+            f"with Allow-Credentials: true — any origin can read authenticated responses",
+            "Restrict Access-Control-Allow-Origin to a fixed allowlist. Never combine "
+            "wildcard/reflection with Allow-Credentials: true."))
+    elif cors.get("wildcard_with_creds"):
+        out.append(_mk(
+            host_ip, port, "http-cors-wildcard", "medium",
+            "CORS wildcard '*' combined with credentials",
+            ["CWE-346"],
+            "Access-Control-Allow-Origin: * with Allow-Credentials: true — browsers "
+            "typically block this combination, but some setups still leak.",
+            "Set an explicit origin allowlist instead of '*' when credentials are enabled."))
+
     return out
