@@ -1,0 +1,17 @@
+/* ============================ Report finding selector ============================ */
+.rpt-selector { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow-sm); margin-bottom: 24px; }
+.rpt-selector-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.rpt-selector-header h3 { margin: 0; font-size: 14px; }
+.rpt-sel-count { font-size: 12px; font-weight: 600; color: var(--accent); font-family: var(--mono); }
+.rpt-selector-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.rpt-sel-actions { display: flex; gap: 6px; }
+.rpt-finding-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.rpt-finding { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 12px; transition: background .08s; }
+.rpt-finding:last-child { border-bottom: 0; }
+.rpt-finding:hover { background: var(--surface2); }
+.rpt-finding.checked { background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.rpt-finding input { accent-color: var(--accent); margin: 0; flex-shrink: 0; }
+.rpt-finding-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text); }
+.rpt-finding-host { font-size: 11px; color: var(--faint); flex-shrink: 0; }
+.rpt-finding-cve { font-size: 10px; color: var(--muted); flex-shrink: 0; }
+

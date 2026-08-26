@@ -1,0 +1,103 @@
+/* ============================ msfvenom Generator Form ============================ */
+.venom-gen { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow-sm); margin-top: 16px; }
+.venom-gen-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; cursor: pointer; }
+.venom-gen-h h3 { margin: 0; font-size: 14px; font-weight: 700; }
+.venom-gen-toggle { color: var(--faint); font-size: 12px; }
+.venom-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.venom-field { display: flex; flex-direction: column; gap: 4px; }
+.venom-field label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); }
+.venom-field select, .venom-field input { font-family: var(--sans); font-size: 13px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface2); color: var(--text); }
+.venom-output { position: relative; }
+.venom-cmd { display: block; font-family: var(--mono); font-size: 12px; background: #0a0f18; color: #b9c6da; padding: 12px 14px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
+.venom-copy-btn { position: absolute; top: 8px; right: 8px; }
+
+/* Payload compatibility badges + filter */
+.payload-compat-bar { display: flex; align-items: center; gap: 6px; margin: 8px 0 4px; flex-wrap: wrap; }
+.payload-compat-label { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.compat-filter { font-size: 11px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface2); color: var(--muted); cursor: pointer; font-weight: 500; }
+.compat-filter:hover { border-color: var(--accent); color: var(--text); }
+.compat-filter.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.compat-filter.compat-recce.active { background: var(--ok); border-color: var(--ok); }
+.compat-filter.compat-external.active { background: var(--high); border-color: var(--high); }
+.compat-filter.compat-reference.active { background: var(--muted); border-color: var(--muted); }
+
+.compat-badge { font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 4px; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; flex-shrink: 0; }
+.compat-recce { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.compat-external { background: color-mix(in srgb, var(--high) 18%, transparent); color: var(--high); }
+.compat-reference { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+
+.payload-dim { opacity: .72; }
+
+.venom-compat { font-size: 11px; font-weight: 600; padding: 6px 12px; border-radius: var(--radius-sm); margin-bottom: 10px; }
+.venom-compat.compat-ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent); }
+.venom-compat.compat-ext { background: color-mix(in srgb, var(--high) 12%, transparent); color: var(--high); border: 1px solid color-mix(in srgb, var(--high) 30%, transparent); }
+
+/* Credential quick-connect */
+.hit-actions { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.cred-try-btn { font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--ok) 50%, transparent); background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); cursor: pointer; }
+.cred-try-btn:hover { background: color-mix(in srgb, var(--ok) 22%, transparent); border-color: var(--ok); }
+.cred-try-btn:disabled { opacity: .5; cursor: default; }
+.cred-cmd-copy { font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line); background: var(--surface2); color: var(--muted); cursor: pointer; }
+.cred-cmd-copy:hover { border-color: var(--accent); color: var(--text); }
+
+/* Keyboard shortcut help */
+.shortcut-help { max-width: 400px; }
+.shortcut-list { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
+.shortcut-row { display: flex; align-items: center; gap: 14px; }
+.shortcut-row kbd { background: var(--surface2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 10px; font-family: var(--mono); font-size: 12px; min-width: 48px; text-align: center; color: var(--text); font-weight: 600; box-shadow: 0 1px 0 var(--line); }
+.shortcut-row span { font-size: 13px; color: var(--muted); }
+
+/* Tool catalog */
+.tool-catalog { padding: 12px 0; }
+.tool-list { display: flex; flex-direction: column; gap: 10px; }
+.tool-card { background: var(--surface2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; }
+.tool-card-h { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.tool-name { font-weight: 600; font-family: var(--mono); font-size: 13px; }
+.tool-desc { font-size: 12px; margin-bottom: 8px; }
+.tool-actions { display: flex; flex-direction: column; gap: 4px; }
+.tool-cmd-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.tool-cmd-label { color: var(--muted); white-space: nowrap; min-width: 90px; }
+.tool-cmd-code { font-family: var(--mono); font-size: 11px; background: var(--bg); padding: 2px 6px; border-radius: 3px; overflow-x: auto; max-width: 400px; white-space: nowrap; }
+.tool-tip { padding: 8px 0 0; }
+
+/* reverse tunnel / SOCKS proxy */
+.tunnel-section { margin-top: 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; }
+.tunnel-start-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tunnel-btn { white-space: nowrap; }
+.tunnel-active { display: flex; flex-direction: column; gap: 8px; }
+.tunnel-status-row { display: flex; align-items: center; gap: 8px; }
+.tunnel-label { font-weight: 600; font-size: 13px; }
+.tunnel-addr { font-family: var(--mono); font-size: 13px; background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+.tunnel-usage { display: flex; flex-direction: column; gap: 3px; padding: 8px; background: var(--surface2); border-radius: var(--radius-sm); }
+.tunnel-usage-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.tunnel-usage-row .muted { min-width: 100px; text-align: right; }
+.tunnel-usage-row code { font-family: var(--mono); font-size: 11px; }
+
+/* port forwarding */
+.portfwd-section { margin-top: 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.portfwd-header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; user-select: none; font-weight: 600; font-size: 13px; }
+.portfwd-header:hover { background: var(--surface2); }
+.portfwd-body { padding: 8px 12px 12px; border-top: 1px solid var(--line); }
+.portfwd-presets { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.portfwd-preset { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface2); color: var(--text); cursor: pointer; }
+.portfwd-preset:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.portfwd-form { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.portfwd-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.portfwd-item { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: var(--surface2); border-radius: var(--radius-sm); font-size: 12px; }
+
+/* services view */
+.svc-list { display: flex; flex-direction: column; gap: 6px; }
+.svc-group { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.svc-group-h { display: flex; gap: 8px; align-items: center; padding: 10px 14px; cursor: pointer;
+  background: var(--surface); user-select: none; transition: background .1s; flex-wrap: wrap; }
+.svc-group-h:hover { background: color-mix(in srgb, var(--accent) 6%, var(--surface2)); }
+.svc-name { font-weight: 700; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; }
+.svc-ports { font-size: 12px; color: var(--muted); }
+.svc-product { font-size: 12px; color: var(--faint); font-style: italic; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.svc-hosts { border-top: 1px solid var(--line); padding: 6px 8px 8px 24px; display: flex; flex-direction: column; gap: 2px; }
+.svc-host-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: var(--radius-sm); font-size: 13px; }
+.svc-host-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.svc-hn { color: var(--muted); font-size: 12px; }
+.svc-host-actions { margin-left: auto; display: flex; gap: 8px; opacity: 0; transition: opacity .1s; }
+.svc-host-row:hover .svc-host-actions { opacity: 1; }
+

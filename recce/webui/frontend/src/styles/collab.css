@@ -1,0 +1,171 @@
+/* ============================ collaboration ============================ */
+/* presence roster */
+.presence { display: flex; align-items: center; margin-left: auto; }
+.avatar { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
+  color: #fff; font-size: 10px; font-weight: 800; letter-spacing: .02em; border: 2px solid var(--surface);
+  margin-left: -7px; box-shadow: var(--shadow-sm); }
+.avatar:first-child { margin-left: 0; }
+.avatar.me { outline: 2px solid var(--accent); }
+.avatar.sm { width: 18px; height: 18px; font-size: 8px; border-width: 1px; margin: 0; }
+.avatar.more { background: var(--surface2); color: var(--muted); }
+.presence + .activity-btn { margin-left: 8px; }
+.activity-btn { font-size: 14px; }
+
+/* activity drawer */
+.activity-drawer { width: min(440px, 94vw); }
+.actfeed { list-style: none; margin: 12px 0 0; padding: 0; }
+.actfeed li { display: flex; align-items: baseline; gap: 10px; padding: 10px 4px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.actfeed li:last-child { border-bottom: 0; }
+.af-i { flex: none; width: 18px; text-align: center; }
+.af-t { flex: 1; color: var(--text); }
+.af-when { flex: none; color: var(--faint); font-size: 11px; font-family: var(--mono); white-space: nowrap; }
+
+/* assignment (claim / owner) */
+.claim { border: 1px dashed var(--line); background: none; color: var(--muted); font-family: var(--sans);
+  font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 20px; cursor: pointer; }
+.claim:hover { border-color: var(--accent); color: var(--accent-ink); border-style: solid; }
+.owner { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700;
+  color: var(--muted); background: var(--surface2); border: 1px solid var(--line); border-radius: 20px;
+  padding: 2px 9px 2px 3px; cursor: pointer; }
+.owner.mine { color: var(--accent-ink); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.owner .rel { color: var(--faint); font-size: 10px; }
+.owner:hover .rel { color: var(--crit); }
+
+/* triage label chips */
+.labelchips { display: inline-flex; gap: 4px; }
+.lchip { border: 1px solid var(--line); background: var(--surface); color: var(--faint); font-family: var(--sans);
+  font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 20px; cursor: pointer; white-space: nowrap; }
+.lchip:hover { border-color: var(--muted); color: var(--muted); }
+.lchip.on.l-interesting { color: #fff; background: var(--accent); border-color: transparent; }
+.lchip.on.l-needs-review { color: #fff; background: var(--high); border-color: transparent; }
+.lchip.on.l-out-of-scope { color: #fff; background: var(--low); border-color: transparent; }
+
+/* per-port tri-state */
+.portstatus { display: inline-flex; gap: 2px; }
+.psbtn { border: 1px solid var(--line); background: var(--surface); color: var(--faint); font-size: 12px;
+  line-height: 1; width: 22px; height: 20px; border-radius: 6px; cursor: pointer; }
+.psbtn:hover { border-color: var(--accent); }
+.psbtn.ps-wip.on { color: #fff; background: var(--med); border-color: transparent; }
+.psbtn.ps-done.on { color: #fff; background: var(--ok); border-color: transparent; }
+.psbtn.ps-todo.on { color: var(--text); background: var(--surface2); }
+
+/* add menu + forms */
+.add-btn { background: color-mix(in srgb, var(--accent) 12%, var(--surface2)); border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); color: var(--accent-ink); font-size: 12px; padding: 6px 12px; }
+.add-menu { min-width: 190px; }
+.addform { display: flex; flex-direction: column; gap: 12px; margin: 14px 0 4px; }
+.addform .frow { display: flex; gap: 12px; }
+.addform .frow .imp-field { flex: 1; }
+.addform input, .addform select { font-family: var(--sans); }
+.addform .imp-paste { height: 80px; }
+
+/* hosts: assignment/label row */
+.host-collab { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.host-filter { display: flex; gap: 4px; }
+
+/* dismissed finding */
+.tbl tbody tr.dismissed .t, .dv.dismissed .dv-title .t { text-decoration: line-through; color: var(--faint); }
+.dismiss-btn { border: 1px solid var(--line); background: none; color: var(--faint); font-size: 11px;
+  font-weight: 700; padding: 2px 8px; border-radius: 6px; cursor: pointer; }
+.dismiss-btn:hover { border-color: var(--crit); color: var(--crit); }
+.dismiss-btn.on { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 40%, var(--line)); }
+
+/* team-coverage panel (Dashboard) */
+.teamlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.teamlist li { display: flex; align-items: center; gap: 10px; padding: 7px 4px; border-radius: 7px; cursor: pointer; }
+.teamlist li:hover { background: var(--surface2); }
+.tm-name { flex: none; width: 150px; font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok) 25%, transparent); }
+.tm-track { flex: 1; height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; }
+.tm-fill { height: 100%; background: var(--accent); border-radius: 4px; }
+.tm-fill.unc { background: var(--faint); }
+.tm-n { flex: none; width: 26px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.tm-unclaimed .tm-name { color: var(--muted); }
+.avatar.clk { cursor: pointer; }
+.avatar.clk:hover { filter: brightness(1.12); transform: translateY(-1px); }
+
+/* team-coverage: two-tone bar (claimed vs done) + clickable activity rows */
+.tm-fill { background: color-mix(in srgb, var(--accent) 28%, var(--surface2)); overflow: hidden; }
+.tm-done { height: 100%; background: var(--accent); border-radius: 4px; }
+.tm-n { width: 40px; }
+.actfeed li.clk { cursor: pointer; margin: 0 -4px; padding-left: 4px; padding-right: 4px; border-radius: 7px; }
+.actfeed li.clk:hover { background: var(--surface2); }
+
+/* my-queue button (header) + owner-progress badge (Targets) + queue chip */
+.myqueue { display: inline-flex; align-items: center; gap: 6px; font-family: var(--sans); font-weight: 700;
+  font-size: 12px; padding: 6px 12px; border-radius: 20px; cursor: pointer; white-space: nowrap;
+  color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 12%, var(--surface2));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.myqueue:hover { background: color-mix(in srgb, var(--accent) 20%, var(--surface2)); }
+.myqueue.clear { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); background: color-mix(in srgb, var(--ok) 10%, var(--surface2)); }
+.mq-n { min-width: 18px; height: 18px; padding: 0 5px; display: inline-grid; place-items: center; border-radius: 10px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 800; }
+.ownerprog { font-size: 11px; font-weight: 700; color: var(--muted); background: var(--surface2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; }
+.ownerprog.full { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+.queue-chip { background: var(--accent); border-color: var(--accent); }
+
+/* ---- buttons (used in collab, addMenu) ---- */
+.btn { font-family: var(--sans); font-weight: 700; font-size: 13px; padding: 9px 15px; border-radius: var(--radius-sm);
+  background: var(--surface2); color: var(--text); border: 1px solid var(--line); cursor: pointer; white-space: nowrap;
+  transition: border-color .12s, background .12s, transform .12s, color .12s; }
+.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); }
+.btn:disabled { opacity: .55; cursor: default; }
+.btn.primary { background: var(--accent); color: #fff; border-color: transparent; box-shadow: 0 1px 2px rgba(17,26,39,.14); }
+.btn.primary:hover:not(:disabled) { background: var(--accent-ink); color: #fff; transform: translateY(-1px); }
+
+/* ---- compact triage tag control + OS truncation (Hosts density) ---- */
+.tagctl { display: inline-flex; align-items: center; gap: 4px; position: relative; }
+.ltag { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 20px; cursor: pointer; color: #fff; white-space: nowrap; }
+.ltag.l-interesting { background: var(--accent); }
+.ltag.l-needs-review { background: var(--high); }
+.ltag.l-out-of-scope { background: var(--low); }
+.ltag:hover { opacity: .82; }
+.tagbtn { border: 1px dashed var(--line); background: none; color: var(--faint); font-size: 12px; line-height: 1; padding: 3px 6px; border-radius: 7px; cursor: pointer; }
+.tagbtn:hover, .tagbtn.has { border-style: solid; color: var(--muted); }
+.tagpop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 31; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 6px; display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
+.tagpop .lchip { text-align: left; width: 100%; }
+.tbl td.os { max-width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- compact density (opt-in via the header toggle) ---- */
+:root[data-density="compact"] .tbl tbody td { padding: 6px 12px; }
+:root[data-density="compact"] .tbl thead th { padding: 6px 12px; }
+:root[data-density="compact"] .stats { gap: 10px; margin-bottom: 14px; }
+:root[data-density="compact"] .stat { padding: 10px 14px; }
+:root[data-density="compact"] .stat .v { font-size: 22px; }
+:root[data-density="compact"] .panel { padding: 12px 15px; }
+:root[data-density="compact"] main { padding-top: 14px; }
+:root[data-density="compact"] .host-collab { gap: 6px; }
+:root[data-density="compact"] .stripe { height: 22px; }
+
+/* ---- branded boot / loading / error screen ---- */
+.boot { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 16px; padding: 40px; text-align: center; }
+.boot-brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 22px; letter-spacing: -.01em; color: var(--text); }
+.boot-bar { width: 190px; height: 4px; border-radius: 4px; background: var(--surface2); overflow: hidden; }
+.boot-bar span { display: block; height: 100%; width: 38%; background: var(--accent); border-radius: 4px; animation: boot 1.1s ease-in-out infinite; }
+@keyframes boot { 0% { transform: translateX(-110%); } 100% { transform: translateX(380%); } }
+@media (prefers-reduced-motion: reduce) { .boot-bar span { animation: none; width: 100%; } }
+.boot-msg { font-family: var(--mono); font-size: 13px; color: var(--muted); max-width: 520px; word-break: break-word; }
+.boot-err { font-weight: 700; color: var(--crit); font-size: 15px; }
+
+/* ---- accessibility: consistent keyboard focus rings ---- */
+:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }
+:focus:not(:focus-visible) { outline: none; }
+.tbl tbody input[type="checkbox"]:focus-visible { outline-offset: 3px; }
+
+/* ---- Findings: reveal the dismiss action on row hover (declutter the list) ---- */
+.tbl tbody tr .dismiss-btn { opacity: 0; transition: opacity .12s; margin-left: 6px; vertical-align: middle; }
+.tbl tbody tr:hover .dismiss-btn, .tbl tbody tr.dismissed .dismiss-btn, .dismiss-btn:focus-visible { opacity: 1; }
+
+/* ---- subtle custom scrollbar for the internal table scroll ---- */
+.tablewrap { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.tablewrap::-webkit-scrollbar { width: 11px; height: 11px; }
+.tablewrap::-webkit-scrollbar-thumb { background: var(--line); border-radius: 7px; border: 3px solid var(--surface); }
+.tablewrap::-webkit-scrollbar-thumb:hover { background: var(--faint); }
+.tablewrap::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- first-run / empty-engagement state ---- */
+.firstrun { display: grid; place-items: center; justify-items: center; text-align: center; gap: 8px; padding: 72px 24px; }
+.firstrun .fr-emoji { font-size: 44px; }
+.firstrun h3 { margin: 6px 0 0; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+.firstrun p { margin: 0; max-width: 520px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+.firstrun p b { color: var(--text); font-weight: 700; }
+.firstrun p.muted { font-size: 12.5px; }
+

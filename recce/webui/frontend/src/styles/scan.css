@@ -1,0 +1,119 @@
+/* ============================ ScanTab v2 ============================ */
+.sv2 { display: flex; flex-direction: column; gap: 16px; }
+.sv2-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.sv2-tab { display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); transition: all .12s; }
+.sv2-tab:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); color: var(--text); }
+.sv2-tab.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); color: var(--accent); }
+.sv2-tab-icon { font-size: 15px; }
+.sv2-tab-name { text-transform: capitalize; }
+.sv2-tab-ct { font-family: var(--mono); font-size: 10px; background: var(--surface2); border-radius: 999px; padding: 1px 7px; color: var(--faint); }
+.sv2-tab.active .sv2-tab-ct { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+
+.sv2-body { display: flex; gap: 18px; }
+@media (max-width: 900px) { .sv2-body { flex-direction: column; } }
+.sv2-main { flex: 1; display: flex; flex-direction: column; gap: 14px; }
+
+/* command list */
+.sv2-cmds { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px; }
+.sv2-cmd { display: flex; flex-direction: column; gap: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; cursor: pointer; text-align: left; font-size: 13px; font-weight: 600; color: var(--text); transition: all .12s; }
+.sv2-cmd:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+.sv2-cmd.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.sv2-cmd:disabled { opacity: .5; cursor: default; }
+.sv2-cmd-name { font-size: 13px; }
+.sv2-cmd-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+.sv2-tag { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 4px; }
+.sv2-tag.need { background: color-mix(in srgb, var(--crit) 15%, transparent); color: var(--crit); }
+.sv2-tag.cred { background: color-mix(in srgb, var(--high) 15%, transparent); color: var(--high); }
+.sv2-tag.lhost { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+
+/* config panel */
+.sv2-config { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 12px; }
+.sv2-config-title { font-size: 16px; font-weight: 800; margin-bottom: 2px; }
+.sv2-field { display: flex; flex-direction: column; gap: 4px; }
+.sv2-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); }
+.sv2-req { color: var(--crit); }
+.sv2-input { font-family: var(--mono); font-size: 13px; padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface2); color: var(--text); }
+.sv2-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent); outline: none; }
+.sv2-input::placeholder { color: var(--faint); }
+.sv2-input:disabled { opacity: .5; }
+select.sv2-input { font-family: var(--sans); appearance: auto; }
+.sv2-cred-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.sv2-flags { display: flex; flex-direction: column; gap: 6px; }
+.sv2-flag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.sv2-flag { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); padding: 4px 10px; border: 1px solid var(--line); border-radius: 20px; cursor: pointer; transition: all .12s; }
+.sv2-flag:hover { border-color: var(--accent); }
+.sv2-flag.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); }
+.sv2-flag input { accent-color: var(--accent); margin: 0; }
+.sv2-flag-hot { color: var(--high); font-size: 10px; font-weight: 700; }
+.sv2-exec { width: 100%; font-weight: 800; font-size: 14px; padding: 12px; border: 0; border-radius: var(--radius-sm); background: var(--accent); color: #fff; cursor: pointer; box-shadow: 0 2px 6px rgba(47,107,255,.25); transition: all .15s; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.sv2-exec:hover:not(:disabled) { background: var(--accent-ink); transform: translateY(-1px); }
+.sv2-exec:disabled { opacity: .55; cursor: default; }
+.sv2-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; }
+.sv2-hint { padding: 32px; text-align: center; color: var(--faint); font-size: 13px; }
+
+/* job queue */
+.sv2-jobs { flex: 0 0 260px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow-sm); max-height: 500px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.sv2-jobs-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.sv2-jobs-h h3 { margin: 0; font-size: 14px; font-weight: 700; }
+.sv2-live { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--accent); }
+.sv2-job { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface2); cursor: default; }
+.sv2-job.live { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface2)); cursor: pointer; }
+.sv2-job.done { }
+.sv2-job.failed .sv2-job-icon { color: var(--crit); }
+.sv2-job-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-top: 4px; flex-shrink: 0; animation: pulse 1.5s ease-in-out infinite; }
+.sv2-job-icon { font-size: 13px; flex-shrink: 0; margin-top: 1px; color: var(--ok); }
+.sv2-job-info { flex: 1; min-width: 0; }
+.sv2-job-cmd { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv2-job-meta { font-size: 11px; color: var(--faint); margin-top: 2px; }
+.sv2-jobs-empty { padding: 24px; text-align: center; color: var(--faint); font-size: 13px; }
+
+
+/* ============================ ScanTab Quick Start Presets ============================ */
+.sv2-presets { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow-sm); }
+.sv2-presets-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.sv2-presets-label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.sv2-presets-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.sv2-preset { display: flex; align-items: center; gap: 10px; background: var(--surface2); border: 1px solid var(--line); border-radius: 9px; padding: 10px 14px; cursor: pointer; text-align: left; transition: all .12s; }
+.sv2-preset:hover:not(:disabled) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface2)); }
+.sv2-preset:disabled { opacity: .5; cursor: default; }
+.sv2-preset-icon { font-size: 20px; flex-shrink: 0; }
+.sv2-preset-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sv2-preset-name { font-size: 13px; font-weight: 700; color: var(--text); }
+.sv2-preset-desc { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv2-preset-ct { font-family: var(--mono); font-size: 10px; background: var(--ground); border: 1px solid var(--line); padding: 2px 6px; border-radius: 999px; color: var(--faint); flex-shrink: 0; }
+
+/* target auto-suggest */
+.sv2-targetbar { position: relative; }
+.sv2-target-field { flex: 1; }
+.sv2-suggest { position: absolute; top: 100%; left: 0; right: 0; z-index: 20; background: var(--surface); border: 1px solid var(--line); border-radius: 0 0 var(--radius) var(--radius); box-shadow: var(--shadow-pop); max-height: 300px; overflow-y: auto; }
+.sv2-suggest-h { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); font-weight: 700; padding: 8px 12px 4px; }
+.sv2-suggest-item { display: flex; gap: 8px; align-items: center; width: 100%; background: none; border: none; padding: 8px 12px; cursor: pointer; font-size: 12px; color: var(--text); text-align: left; transition: background .08s; }
+.sv2-suggest-item:hover { background: var(--surface2); }
+.sv2-suggest-ip { font-family: var(--mono); font-weight: 700; color: var(--accent); min-width: 110px; }
+.sv2-suggest-name { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv2-suggest-os { font-size: 10px; color: var(--faint); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv2-suggest-ports { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+
+/* execute row */
+.sv2-exec-row { display: flex; gap: 8px; }
+.sv2-exec-row .sv2-exec { flex: 1; }
+.sv2-queue-add { font-family: var(--sans); font-weight: 700; font-size: 12px; padding: 8px 14px; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); color: var(--accent); border-radius: var(--radius-sm); cursor: pointer; transition: all .12s; white-space: nowrap; }
+.sv2-queue-add:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, var(--surface)); }
+.sv2-queue-add:disabled { opacity: .5; cursor: default; }
+
+/* scan chain queue */
+.sv2-chain { background: color-mix(in srgb, var(--accent) 6%, var(--surface2)); border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.sv2-chain-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+.sv2-chain-h h4 { margin: 0; font-size: 12px; font-weight: 700; color: var(--accent); }
+.sv2-chain-item { display: flex; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.sv2-chain-item:last-of-type { border-bottom: 0; }
+.sv2-chain-num { font-family: var(--mono); font-size: 10px; font-weight: 800; color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; flex-shrink: 0; }
+.sv2-chain-label { font-weight: 600; color: var(--text); flex: 1; }
+.sv2-chain-target { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.sv2-chain-rm { background: none; border: none; color: var(--faint); font-size: 14px; cursor: pointer; padding: 0 4px; }
+.sv2-chain-rm:hover { color: var(--crit); }
+.sv2-chain-actions { display: flex; gap: 8px; margin-top: 8px; }
+.sv2-chain-run { flex: 1; font-size: 12px; padding: 8px; }
+.sv2-chain-clear { background: none; border: 1px solid var(--line); color: var(--muted); font-size: 11px; font-weight: 700; padding: 6px 12px; border-radius: var(--radius-sm); cursor: pointer; }
+.sv2-chain-clear:hover { border-color: var(--crit); color: var(--crit); }
+
