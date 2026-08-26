@@ -479,6 +479,177 @@ def fingerprint(ip: str, port: int, use_tls: bool) -> dict:
     return out
 
 
+# ---- JavaScript secret scanning ---------------------------------------------
+
+# Same secret patterns as recce/intake/loot.py, tuned for JS files: API keys,
+# tokens, JWTs, DB URLs. High-value hits — a public JS bundle that ships an
+# AWS access key or a hard-coded API endpoint URL is a real finding.
+_JS_SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("aws_access_key",    re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("aws_secret_key",    re.compile(r"(?i)aws.{0,20}(secret|key).{0,20}['\"][A-Za-z0-9/+=]{40}['\"]")),
+    ("github_token",      re.compile(r"gh[oprsu]_[A-Za-z0-9]{36,}")),
+    ("gitlab_token",      re.compile(r"glpat-[A-Za-z0-9_-]{20,}")),
+    ("slack_token",       re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("stripe_key",        re.compile(r"sk_(live|test)_[A-Za-z0-9]{20,}")),
+    ("jwt",               re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
+    ("google_api_key",    re.compile(r"AIza[0-9A-Za-z_-]{35}")),
+    ("firebase_url",      re.compile(r"[a-z0-9-]+\.firebaseio\.com")),
+    ("bearer_hardcoded",  re.compile(r"['\"]Bearer\s+[A-Za-z0-9+/=._-]{20,}['\"]")),
+]
+# API endpoint patterns worth surfacing — often reveals internal URLs the
+# tester didn't know existed.
+_JS_ENDPOINT_PATTERNS: list[re.Pattern] = [
+    re.compile(r"['\"](/(api|v1|v2|v3|graphql|internal|admin)/[A-Za-z0-9._/?-]{2,60})['\"]"),
+    re.compile(r"['\"]https?://[a-zA-Z0-9.-]+\.[a-z]{2,10}/[A-Za-z0-9._/?-]{2,60}['\"]"),
+]
+
+# JS files this size or larger get skipped to keep the scan bounded.
+_JS_MAX_BYTES = 500_000
+# Cap total JS files fetched per host so a page with 50 bundles doesn't
+# stall the whole scan.
+_JS_MAX_FILES = 15
+
+
+def _extract_js_urls(html: str) -> list[str]:
+    """Pull out `src=` attribute values from every <script> tag. Same-origin
+    relative and absolute URLs preserved as-is; relative paths handled by the
+    fetch step."""
+    return re.findall(r'<script[^>]*\bsrc=["\']([^"\'>\s]+)', html, re.I)
+
+
+def js_secret_scan(ip: str, port: int, use_tls: bool,
+                   root_html: str = "") -> list[dict]:
+    """GET the root page (or accept a pre-fetched root_html), enumerate
+    <script src> URLs, fetch each same-host .js file, and grep for secret
+    patterns. Returns list of hits {source, secret_label, snippet}.
+    Silently returns [] on any transport failure."""
+    if not root_html:
+        r = _get(ip, port, use_tls, "/", timeout=_ROOT_TIMEOUT, read_body=True)
+        if r is None or not r.get("body"):
+            return []
+        root_html = (r["body"] or b"").decode("utf-8", "replace")
+    urls = _extract_js_urls(root_html)
+    # Only same-host + relative paths (external CDNs would leak the target's
+    # tokens if any exist there, but they're not attack surface HERE).
+    keep: list[str] = []
+    seen: set[str] = set()
+    for u in urls:
+        if u in seen: continue
+        seen.add(u)
+        if u.startswith("//"):
+            continue
+        if u.startswith("http://") or u.startswith("https://"):
+            # Absolute — must match our host to count.
+            m = re.match(r"^https?://([^/]+)(/.*)?$", u)
+            if not m: continue
+            host_part = m.group(1).split(":")[0]
+            if host_part not in (ip, f"{ip}:{port}"):
+                continue
+            keep.append(m.group(2) or "/")
+        elif u.startswith("/"):
+            keep.append(u)
+        else:
+            keep.append("/" + u.lstrip("./"))
+    hits: list[dict] = []
+    for path in keep[:_JS_MAX_FILES]:
+        r = _get(ip, port, use_tls, path, timeout=_ROOT_TIMEOUT, read_body=True)
+        if r is None or r.get("status") != 200:
+            continue
+        body = r.get("body") or b""
+        if not body or len(body) > _JS_MAX_BYTES:
+            continue
+        text = body.decode("utf-8", "replace")
+        for label, pat in _JS_SECRET_PATTERNS:
+            m = pat.search(text)
+            if m:
+                hits.append({"source": path, "secret": label,
+                             "snippet": m.group(0)[:120]})
+        # Endpoint URLs — high signal, we cap at 5 per file so the report
+        # stays readable.
+        endpoints: set[str] = set()
+        for pat in _JS_ENDPOINT_PATTERNS:
+            for em in pat.finditer(text):
+                url = em.group(1) if em.groups() else em.group(0)
+                if len(endpoints) >= 5: break
+                endpoints.add(url.strip('"\'').strip())
+        if endpoints:
+            hits.append({"source": path, "secret": "endpoint_hint",
+                         "snippet": ", ".join(sorted(endpoints))[:200]})
+    return hits
+
+
+# ---- Backup-file variants on discovered paths --------------------------------
+
+# When path_enum finds a path like /config.php, try common backup suffixes.
+# Backups often contain the same content but bypass application-level access
+# controls (they're served as static files).
+_BACKUP_SUFFIXES = [".bak", ".old", ".orig", "~", ".swp", ".backup", ".save",
+                    ".copy", "1", ".1"]
+
+
+def backup_variants_of(path: str) -> list[str]:
+    """Generate common backup-file variant paths from a discovered path."""
+    variants: list[str] = []
+    for suf in _BACKUP_SUFFIXES:
+        variants.append(path + suf)
+    # ~-in-middle variant for editor swap files (config.php~)
+    if "." in path.rsplit("/", 1)[-1]:
+        base, _, ext = path.rpartition(".")
+        variants.append(f"{base}.bak.{ext}")
+    return variants
+
+
+def probe_backup_variants(ip: str, port: int, use_tls: bool,
+                          seed_paths: list[str],
+                          catchall: set[tuple] | None = None) -> list[dict]:
+    """For each seed path (typically the path_enum disclosure hits), probe
+    its backup-suffix variants. Returns list of variant hits worth
+    reporting. Backup variants of an already-disclosed path are additional
+    exposure — often bypassing app auth."""
+    hits: list[dict] = []
+    for seed in seed_paths[:20]:                # cap seeds to bound the sweep
+        for variant in backup_variants_of(seed):
+            r = _get(ip, port, use_tls, variant, read_body=True)
+            if r is None or r["status"] not in _HIT_STATUSES:
+                continue
+            # Filter catch-alls same way the main path_enum does.
+            if catchall is not None:
+                sig = (r["status"], len(r.get("body", b"")),
+                       (r["headers"].get("content-type") or "")[:60])
+                if sig in catchall:
+                    continue
+            hits.append({
+                "path": variant,
+                "status": r["status"],
+                "length": len(r.get("body", b"")),
+                "seed": seed,
+            })
+    return hits
+
+
+# ---- Directory listing detection --------------------------------------------
+
+# Common markers for auto-generated directory listings — Apache, nginx,
+# IIS, lighttpd, Node.js serve-index all put distinctive strings in their
+# index HTML.
+_DIRLIST_MARKERS = [
+    re.compile(r"<title>Index of /", re.I),
+    re.compile(r"<h1>Index of /", re.I),
+    re.compile(r"<pre>[^<]*Directory listing for /", re.I),
+    re.compile(r"^\s*\[.+\]\s+Parent Directory", re.M),
+    re.compile(r"<h1>Directory listing", re.I),
+]
+
+
+def is_directory_listing(body: bytes) -> bool:
+    """Return True if the HTML body looks like an auto-generated directory
+    listing (Apache mod_autoindex, nginx autoindex, IIS, Python http.server)."""
+    if not body:
+        return False
+    text = body[:8000].decode("utf-8", "replace")
+    return any(pat.search(text) for pat in _DIRLIST_MARKERS)
+
+
 # ---- HTML form discovery (C2) ----------------------------------------------
 
 # Input-name substrings that identify a login form. If two of these appear
@@ -920,6 +1091,75 @@ def enum_findings(host_ip: str, port: Port) -> list[Vuln]:
             host_ip, port, "http-path-enum", h["severity"], title,
             h["cwes"], output, fix,
         ))
+
+    # Backup-file variants of every disclosed path — often served as static
+    # files that bypass application-level access controls (config.php auth-
+    # gated, config.php.bak served as text/plain).
+    disclosure_paths = [h["path"] for h in hits
+                        if h.get("category") == "disclosure" and h.get("status") == 200]
+    if disclosure_paths:
+        catchall = _catchall_signature(host_ip, port.portid, use_tls)
+        backup_hits = probe_backup_variants(host_ip, port.portid, use_tls,
+                                             disclosure_paths, catchall)
+        for bh in backup_hits:
+            out.append(_mk(
+                host_ip, port, "http-backup-variant", "high",
+                f"Backup variant exposed: {bh['path']}",
+                ["CWE-538"],
+                f"HTTP {bh['status']} · derived from disclosed path {bh['seed']} "
+                f"(body {bh['length']} bytes). Backup files are commonly served as "
+                f"static content, bypassing any application-layer auth on the "
+                f"original path.",
+                f"Block *.bak, *.old, *.orig, *~, *.swp, *.backup variants at the "
+                f"web-server layer; consider a nginx `location ~* \\.(bak|old|~)$ "
+                f"{{ deny all; }}` rule."))
+
+    # Directory-listing detection — a 200 on a path with an autoindex response
+    # discloses far more than the single-file finding path_enum saw.
+    for h in hits[:10]:                            # cap refetch cost
+        if h.get("status") != 200 or h.get("category") != "surface":
+            continue
+        r = _get(host_ip, port.portid, use_tls, h["path"], read_body=True)
+        if r is not None and is_directory_listing(r.get("body") or b""):
+            out.append(_mk(
+                host_ip, port, "http-directory-listing", "medium",
+                f"Directory listing enabled: {h['path']}",
+                ["CWE-548"],
+                f"HTTP 200 for {h['path']} returned an auto-generated directory "
+                f"index. Every file in that directory is enumerated; a snapshot "
+                f"often reveals dumps, backups, and unlinked test scripts.",
+                "Apache: `Options -Indexes` in the vhost or .htaccess. "
+                "nginx: remove `autoindex on;` from the location block. "
+                "IIS: turn off Directory Browsing in Features View."))
+
+    # JavaScript secret scanning — pull <script src> from the root page,
+    # fetch same-host bundles, grep for API keys / tokens / hardcoded URLs.
+    # Reuses the fingerprint's root fetch when possible to avoid duplicate work.
+    js_hits = js_secret_scan(host_ip, port.portid, use_tls)
+    # Aggregate by (source, secret) so a bundle with 5 hardcoded JWTs collapses
+    # into one finding rather than five noisy ones.
+    by_source: dict[str, list[dict]] = {}
+    for jh in js_hits:
+        by_source.setdefault(jh["source"], []).append(jh)
+    for source, entries in list(by_source.items())[:8]:
+        # Bail on endpoint-hint-only sources unless something else fires there
+        # too — endpoint URLs alone are informational.
+        real_secrets = [e for e in entries if e["secret"] != "endpoint_hint"]
+        if not real_secrets and not entries:
+            continue
+        sev = "critical" if any(e["secret"] in ("aws_secret_key", "stripe_key",
+                                                 "github_token", "gitlab_token")
+                                for e in real_secrets) else \
+              ("high" if real_secrets else "info")
+        labels = sorted({e["secret"] for e in entries})
+        snippets = "\n".join(f"  [{e['secret']}] {e['snippet']}" for e in entries[:6])
+        out.append(_mk(
+            host_ip, port, "http-js-secrets", sev,
+            f"Secrets/hardcoded endpoints in JS bundle: {source}",
+            ["CWE-798", "CWE-200"] if real_secrets else ["CWE-200"],
+            f"{source}: {len(entries)} pattern hit(s) — {', '.join(labels)}\n{snippets}",
+            "Never commit secrets to client-side JavaScript. Move authentication "
+            "to a server-side proxy; rotate any exposed key immediately."))
 
     # Robots + sitemap — free path list from the server itself. Anything they
     # tell us to disallow is exactly what we want to look at. Emit as info
