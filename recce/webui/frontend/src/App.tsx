@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { postTick, postNote } from "./api";
-import { ImportModal, ShortcutHelp, CommandPalette } from "./modals";
+import { ImportModal, ShortcutHelp, CommandPalette, EncDecModal } from "./modals";
 import { getSessions, getCredentials, getListeners, startListener, SessionInfo, Credential } from "./api";
 import { useEngagement } from "./useEngagement";
 import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Timeline, Nav, FindingFilters } from "./views";
@@ -85,6 +85,7 @@ export default function App() {
 
   // UI state
   const [showImport, setShowImport] = useState(false);
+  const [showEncDec, setShowEncDec] = useState(false);
   const [activeToast, setActiveToast] = useState<Toast | null>(null);
   const [scanRunning, setScanRunning] = useState(false);
   const [, setScanLog] = useState<string[]>([]);
@@ -276,6 +277,9 @@ export default function App() {
             <button className="hdr-btn" onClick={() => setShowImport(!showImport)} title="Import tool output (Alt+I)">
               📥
             </button>
+            <button className="hdr-btn" onClick={() => setShowEncDec((v) => !v)} title="Encoder / Decoder toolbox">
+              🔀
+            </button>
             <ActivityButton />
             <ChatButton />
           </div>
@@ -378,6 +382,8 @@ export default function App() {
       )}
 
       {showShortcuts && <ShortcutHelp onClose={() => setShowShortcuts(false)} />}
+
+      {showEncDec && <EncDecModal onClose={() => setShowEncDec(false)} />}
 
       {showPalette && (
         <CommandPalette
