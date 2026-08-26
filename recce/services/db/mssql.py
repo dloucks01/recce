@@ -236,6 +236,154 @@ def _build_login7_ntlm(sspi: bytes, hostname: str = "recce", appname: str = "rec
     return struct.pack(">BBHHBB", 0x10, 0x01, 8 + len(body), 0, 0, 0) + body
 
 
+def _obfuscate_password(pw: str) -> bytes:
+    """TDS Login7 password obfuscation: encode as UTF-16-LE, then for each byte
+    swap the high/low nibbles and XOR with 0xA5. This is NOT encryption — the
+    server reverses it trivially — but it's the wire format the protocol
+    requires. Empty password returns an empty byte string."""
+    out = bytearray()
+    for b in pw.encode("utf-16-le"):
+        b = ((b << 4) & 0xF0) | ((b >> 4) & 0x0F)
+        out.append(b ^ 0xA5)
+    return bytes(out)
+
+
+def _build_login7_sql(user: str, password: str, hostname: str = "recce",
+                      appname: str = "recce", database: str = "master") -> bytes:
+    """TDS7 LOGIN7 packet for SQL Server authentication (username/password),
+    not Windows/NTLM. Companion to _build_login7_ntlm but with the credential
+    strings in the variable-length section and fIntSecurity NOT set."""
+    host_u = hostname.encode("utf-16-le")
+    user_u = user.encode("utf-16-le")
+    pass_u = _obfuscate_password(password)
+    app_u = appname.encode("utf-16-le")
+    db_u = database.encode("utf-16-le")
+    fixed_len = 94                                # 36-byte fixed header + 58-byte OL block
+    ib_host = fixed_len
+    ib_user = ib_host + len(host_u)
+    ib_pass = ib_user + len(user_u)
+    ib_app = ib_pass + len(pass_u)
+    ib_db = ib_app + len(app_u)
+    data = host_u + user_u + pass_u + app_u + db_u
+    total = fixed_len + len(data)
+
+    fixed = (struct.pack("<I", total)             # Length
+             + struct.pack("<I", 0x74000004)      # TDSVersion 7.4
+             + struct.pack("<I", 4096)            # PacketSize
+             + struct.pack("<I", 7)               # ClientProgVer
+             + struct.pack("<I", 0)               # ClientPID
+             + struct.pack("<I", 0)               # ConnectionID
+             # OptFlags1=0xE0 (use-DB fatal, init-lang fatal, ODBC, ...);
+             # OptFlags2=0x03 (byte-order little, char ASCII); Type=0x00 (default);
+             # Flags3=0x00. fIntSecurity is bit 0x80 of OptFlags2 — NOT set here.
+             + bytes([0xE0, 0x03, 0x00, 0x00])
+             + struct.pack("<i", 0)               # ClientTimeZone
+             + struct.pack("<I", 0))              # ClientLCID
+    # Offsets are byte-offsets from packet start; lengths are CHARACTER counts
+    # (NOT byte counts) for UTF-16 strings. Password uses BYTE length because
+    # it's already been obfuscated post-encode.
+    ol = (struct.pack("<HH", ib_host, len(hostname))
+          + struct.pack("<HH", ib_user, len(user))
+          + struct.pack("<HH", ib_pass, len(password))
+          + struct.pack("<HH", ib_app, len(appname))
+          + struct.pack("<HH", fixed_len, 0)     # ServerName (empty)
+          + struct.pack("<HH", fixed_len, 0)     # Unused/Extension
+          + struct.pack("<HH", fixed_len, 0)     # CltIntName (empty)
+          + struct.pack("<HH", fixed_len, 0)     # Language (empty)
+          + struct.pack("<HH", ib_db, len(database))
+          + b"\x00" * 6                          # ClientID (MAC)
+          + struct.pack("<HH", fixed_len, 0)     # SSPI (empty for SQL auth)
+          + struct.pack("<HH", fixed_len, 0)     # AtchDBFile
+          + struct.pack("<HH", fixed_len, 0)     # ChangePassword
+          + struct.pack("<I", 0))                # cbSSPILong
+    body = fixed + ol + data
+    return struct.pack(">BBHHBB", 0x10, 0x01, 8 + len(body), 0, 0, 0) + body
+
+
+def sqlauth_login(ip: str, port: int, user: str, password: str,
+                  timeout: float = 4.0) -> tuple[bool, str]:
+    """Attempt a SQL Server login with (user, password). Returns (ok, detail)
+    where ok=True means the server accepted the credentials (LOGINACK token
+    seen), detail carries the error message from the ERROR token on failure.
+
+    Native TDS — no external tools needed. Runs against airgapped targets."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(_build_prelogin())
+            s.recv(4096)                          # drain PRELOGIN response
+            s.sendall(_build_login7_sql(user, password))
+            hdr = s.recv(8)
+            if len(hdr) < 8:
+                return (False, "no response header")
+            length = struct.unpack(">H", hdr[2:4])[0]
+            resp = hdr
+            while len(resp) < length and len(resp) < 65536:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+    except OSError as e:
+        return (False, f"connect error: {e}")
+    # Parse tokens from the response body. LOGINACK (0xAD) = success.
+    # ERROR (0xAA) with number ~18456 = auth failure. Body starts at offset 8.
+    body = resp[8:]
+    if b"\xad" in body[:64] or _has_token(body, 0xAD):
+        return (True, "LOGINACK")
+    # Extract error message if present. ERROR token layout: 0xAA, length(2),
+    # number(4), state(1), class(1), msgLen(2), msg(UTF-16LE * msgLen), ...
+    err_msg = _extract_error_message(body)
+    return (False, err_msg or "no LOGINACK; auth failed")
+
+
+def _has_token(body: bytes, token: int) -> bool:
+    """Cheap linear scan for a TDS token byte. Good enough because the token
+    values we care about (0xAD LOGINACK, 0xAA ERROR) are distinctive in the
+    small login-response payloads we're inspecting."""
+    return bytes([token]) in body[:4096]
+
+
+def _extract_error_message(body: bytes) -> str:
+    """If an ERROR token is present in the login response, pull the message
+    string out for the caller. Returns '' if not present or parse fails."""
+    i = body.find(b"\xaa")
+    if i < 0 or i + 12 > len(body):
+        return ""
+    try:
+        msg_len = struct.unpack("<H", body[i + 9:i + 11])[0]
+        msg_bytes = body[i + 11:i + 11 + msg_len * 2]
+        return msg_bytes.decode("utf-16-le", "replace")[:200]
+    except (struct.error, IndexError):
+        return ""
+
+
+# Common MSSQL SQL-auth default credentials. Kept small on purpose — the aim
+# is "did the deploy leave a default", not brute-force. Blank sa is the
+# classic one; the rest are docker-image / quick-start defaults.
+_WEAK_MSSQL_CREDS: list[tuple[str, str]] = [
+    ("sa", ""),
+    ("sa", "sa"),
+    ("sa", "password"),
+    ("sa", "Password1"),
+    ("sa", "P@ssw0rd"),
+    ("sa", "yourStrong(!)Password"),        # Microsoft's docker quick-start
+    ("sa", "MyStrongPass123!"),             # Bitnami default
+]
+
+
+def weak_sa_sweep(ip: str, port: int = _DEFAULT_PORT,
+                  timeout: float = 4.0) -> tuple[str, str] | None:
+    """Try each entry in _WEAK_MSSQL_CREDS with a native TDS SQL-auth login.
+    Returns the first (user, password) that authenticates, None otherwise.
+    ~7 attempts * ~1s = ~7s wall-clock max. MSSQL default lockout is 0
+    (unlimited) unless a policy is applied, so account lockout is unlikely."""
+    for user, password in _WEAK_MSSQL_CREDS:
+        ok, _detail = sqlauth_login(ip, port, user, password, timeout=timeout)
+        if ok:
+            return (user, password)
+    return None
+
+
 def ntlm_info(ip: str, port: int = _DEFAULT_PORT, timeout: float = 4.0) -> dict:
     """Native pre-auth NTLM info leak: drive a TDS integrated-auth login with an NTLM
     Type-1 and parse the server's Type-2 challenge for its NetBIOS/DNS domain + host
@@ -587,6 +735,28 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             # critical "blank password" finding on every instance. Require the
             # script's own "Login Success" marker (an account really logged in with
             # an empty password) or a parsed empty-password vuln the parser vetted.
+            # Native weak-cred sweep hit (from analyze()) beats every other
+            # signal — we PROVED the default works. Emit critical, distinct
+            # from the nmap-script-based blank-password path.
+            wd = (probes.get(tgt) or {}).get("weak_default")
+            if wd:
+                u, pw = wd["user"], wd["password"]
+                pw_show = pw if pw else "(blank)"
+                out.append(_finding(
+                    "critical",
+                    "MSSQL default credentials still active",
+                    tgt,
+                    f"Native SQL-Auth login accepted '{u}' / '{pw_show}' — a well-known "
+                    f"default that was never changed. This account is (or is trivially "
+                    f"made) sysadmin; xp_cmdshell → RCE as the service account.",
+                    "impacket-mssqlclient",
+                    _fill(f"impacket-mssqlclient {u}@<ip> -p <port>"
+                          + (f"   # password: {pw}" if pw else "   # blank password"),
+                          ctx),
+                    "Change every default MSSQL login to a strong unique password; "
+                    "enforce a password policy; consider disabling `sa`.",
+                    ["CWE-521", "CWE-798", "CWE-1392"], kind="mssql_default_creds"))
+
             esp = scripts.get("ms-sql-empty-password", "")
             blank = (any("empty password" in (v.title or "").lower() and v.port == t.portid
                          for v in h.vulns)
@@ -1907,12 +2077,22 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             browser[t["ip"]] = sql_browser(t["ip"])
         probes[key] = probe_target(t["ip"], t["port"], active=active,
                                    instances=browser.get(t["ip"]) if active else None)
-        # Recover the version from the pre-login when nmap missed it.
         pv = probes[key]["prelogin"].get("version")
         if pv and not t.get("version"):
             t["version"] = pv
         t["encryption"] = probes[key]["prelogin"].get("encryption", "")
         t["instances"] = probes[key]["instances"]
+        # Native weak-sa sweep — only when the tester supplied no engagement
+        # credential. Runs a small default-cred list against SQL Auth via
+        # native TDS (no nxc dependency). Hit = default was never changed on
+        # deploy; findings emits a critical mssql_default_creds bug distinct
+        # from the generic blank_login narrative.
+        if active and not creds:
+            weak = weak_sa_sweep(t["ip"], t["port"])
+            if weak:
+                u, pw = weak
+                probes[key]["weak_default"] = {"user": u, "password": pw}
+                t["weak_default"] = {"user": u, "password": pw}
         return None
 
     for _t, _r in svcprobe.iter_probe(targets, _one, budget=budget,
