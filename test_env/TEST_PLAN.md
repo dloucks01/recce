@@ -186,7 +186,7 @@ Modbus. Each is a lean single-container service on 172.20.0.40+.
 | 172.20.0.46  | docker-registry   | v2 anonymous catalog | `dockerreg_anonymous_catalog` (HIGH) |
 | 172.20.0.47  | vnc-noauth        | VNC 5900 (no auth)   | `vnc_no_auth` (CRIT) |
 | 172.20.0.48  | modbus-target     | Modbus/TCP 502       | `modbus_reachable` (HIGH) |
-| 172.20.0.49  | mssql-target      | sa/quick-start pwd   | `mssql_default_creds` (CRIT — matches C4's sweep) |
+| 172.20.0.49  | mssql-target      | sa/quick-start pwd   | `mssql_default_creds` (CRIT — matches C4's sweep, TDS-tunneled TLS working end-to-end) |
 
 Existing T1/T2 targets also cover new probes:
 

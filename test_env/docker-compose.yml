@@ -470,10 +470,10 @@ services:
     restart: unless-stopped
 
   # ── T4: MSSQL (sa with a weak-default cred — heavy, ~2GB RAM) ───────────
-  # SQL Server 2019 image: older TDS behavior — accepts LOGIN7 without the
-  # TDS-tunneled-TLS handshake that 2022 mandates. Recce's native
-  # sqlauth_login (C4) works directly against this image.
-  # NB: comment this out if the dev box is memory-constrained.
+  # SQL Server 2019 image. Recce's native sqlauth_login (C4) speaks
+  # TDS-tunneled TLS so it works against 2016+ servers that mandate the
+  # TLS wrap around LOGIN7. NB: bump the memory limit before starting if
+  # the dev box is memory-constrained.
   mssql-target:
     image: mcr.microsoft.com/mssql/server:2019-latest
     hostname: mssql-target
