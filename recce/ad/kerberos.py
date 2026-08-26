@@ -550,6 +550,30 @@ def candidate_users(hosts: list[Host]) -> list[str]:
     return out
 
 
+# Well-known AD user + service names, tried when the enumerated account list
+# is empty (no LDAP enum yet). Kept short — this is "check the classics",
+# not brute-force. AS-REQ per name is one TCP connection to the DC.
+_WELL_KNOWN_USERS = [
+    # Default / typical admin
+    "administrator", "admin", "guest",
+    # Common service accounts
+    "krbtgt", "svc_mssql", "svc-mssql", "sql_svc", "svc_sql", "sqlsvc",
+    "svc_ldap", "svc-ldap", "svc_web", "svc-web", "svc_backup", "svc-backup",
+    "svc_scan", "svc-scan", "svc_iis", "svc_smb",
+    # Typical operator names
+    "sysadmin", "helpdesk", "backup", "operator", "printer",
+    # Vendor defaults
+    "veeam", "sccm", "exchange", "sharepoint",
+]
+
+
+def well_known_users() -> list[str]:
+    """Fallback user list for `analyze()` when nothing has been enumerated
+    yet — the classic default and service names. Copy is intentional (caller
+    may mutate)."""
+    return list(_WELL_KNOWN_USERS)
+
+
 def dc_ip_for(hosts: list[Host]) -> str:
     for h in hosts:
         if any(is_kerberos(p) for p in h.open_ports):
@@ -686,6 +710,12 @@ def analyze(hosts: list[Host], users: list[str] | None = None,
         doms = ad.derive_domains([h for h in hosts if h.is_up])
         realm = (doms[0].name if doms else "").upper()
     users = users or candidate_users(hosts)
+    # If we STILL have no candidates (no LDAP/AD enum run yet), fall back to
+    # the well-known list so a tester who runs `recce kerberos` first-thing
+    # still gets a meaningful result. Merges with candidate_users() rather
+    # than replacing, so an enumerated list stays authoritative.
+    if not users:
+        users = well_known_users()
     users = users[:max_users]
     results: list[dict] = []
     state: dict = {}
