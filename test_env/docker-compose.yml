@@ -24,6 +24,19 @@
 #   .29  cassandra-tgt  — Cassandra 9042 no auth — T2
 #   .30  ad-dc          — Samba-AD DC (CORP.LOCAL) — LDAP 389 / KDC 88 — T3
 #
+# Newer targets (T4 — coverage for tranches C1-C5, Tier A-D, IPMI, RDP/VNC,
+# containers/orchestration, encdec):
+#   .40  zookeeper      — Zookeeper 2181 (4LW commands all open)
+#   .41  kafka          — Kafka 9092 (no SASL — MetadataRequest v0 leaks all)
+#   .42  etcd           — etcd 2379 v2 + v3 unauth read
+#   .43  consul         — Consul 8500 ACL disabled (services + KV readable)
+#   .44  nomad          — Nomad 4646 ACL disabled (jobs/allocs/nodes)
+#   .45  prometheus     — Prometheus 9090 config + query + reload open
+#   .46  docker-registry — Docker Registry v2 5000 anonymous catalog
+#   .47  vnc-noauth     — VNC 5900 no auth (novnc)
+#   .48  modbus-target  — Modbus/TCP 502 (OT signal)
+#   .49  mssql-target   — MSSQL 1433 with sa:P@ssw0rd — heavy; ~1.5GB RAM
+#
 # T3 also ships sample files in test_env/samples/ that DON'T need the DC up:
 #   sharphound-corp.zip  — feed via ImportModal or `recce ad <path>` (3 findings)
 #   certipy-corp.json    — feed via ImportModal or `recce ad <path>`   (4 findings)
@@ -331,6 +344,146 @@ services:
     tmpfs:
       - /run
       - /run/lock
+    restart: unless-stopped
+
+  # ── T4: Zookeeper 4LW (all commands open) ──────────────────────────────
+  zookeeper:
+    image: zookeeper:3.8
+    hostname: zookeeper
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.40
+    environment:
+      ZOO_4LW_COMMANDS_WHITELIST: "*"
+      ZOO_ADMINSERVER_ENABLED: "false"
+    restart: unless-stopped
+
+  # ── T4: Kafka (Apache official KRaft image, SASL disabled — MetadataRequest
+  # v0 leaks all brokers/topics) ─────────────────────────────────────────
+  kafka:
+    image: apache/kafka:3.7.0
+    hostname: kafka
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.41
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://172.20.0.41:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@127.0.0.1:9093"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    restart: unless-stopped
+
+  # ── T4: etcd (v2 + v3 unauth read) ─────────────────────────────────────
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.11
+    hostname: etcd
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.42
+    command:
+      - "etcd"
+      - "--enable-v2=true"
+      - "--listen-client-urls=http://0.0.0.0:2379"
+      - "--advertise-client-urls=http://172.20.0.42:2379"
+    restart: unless-stopped
+
+  # ── T4: Consul (ACL disabled — services + KV wide open) ─────────────────
+  consul:
+    image: hashicorp/consul:1.17
+    hostname: consul
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.43
+    command: agent -server -bootstrap -ui -client=0.0.0.0
+    restart: unless-stopped
+
+  # ── T4: Nomad (server-only; ACL disabled — dev mode fails on rootless
+  # docker because the client can't write cgroup subtree_control). Server-
+  # only still answers /v1/agent/self and /v1/jobs unauth, which is what
+  # recce's nomad probe tests. ──────────────────────────────────────────
+  nomad:
+    image: hashicorp/nomad:1.7
+    hostname: nomad
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.44
+    command: >
+      agent -server -bootstrap-expect=1 -bind=0.0.0.0
+      -data-dir=/tmp/nomad -node=recce-testenv
+    restart: unless-stopped
+
+  # ── T4: Prometheus (config + query + reload all open) ───────────────────
+  prometheus:
+    image: prom/prometheus:v2.48.1
+    hostname: prometheus
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.45
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-lifecycle"     # exposes /-/reload for admin-writable test
+      - "--web.enable-admin-api"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+  # ── T4: Docker Registry v2 (anonymous catalog) ──────────────────────────
+  docker-registry:
+    image: registry:2
+    hostname: docker-registry
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.46
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    restart: unless-stopped
+
+  # ── T4: VNC no-auth target ─────────────────────────────────────────────
+  vnc-noauth:
+    image: theasp/novnc:latest
+    hostname: vnc-noauth
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.47
+    environment:
+      DISPLAY_WIDTH: "1024"
+      DISPLAY_HEIGHT: "768"
+    restart: unless-stopped
+
+  # ── T4: Modbus/TCP OT simulator (listens on 502 per config override) ────
+  modbus-target:
+    image: oitc/modbus-server:latest
+    hostname: modbus-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.48
+    volumes:
+      - ./modbus_server.json:/app/modbus_server.json:ro
+    restart: unless-stopped
+
+  # ── T4: MSSQL (sa with a weak-default cred — heavy, ~2GB RAM) ───────────
+  # SQL Server 2019 image: older TDS behavior — accepts LOGIN7 without the
+  # TDS-tunneled-TLS handshake that 2022 mandates. Recce's native
+  # sqlauth_login (C4) works directly against this image.
+  # NB: comment this out if the dev box is memory-constrained.
+  mssql-target:
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    hostname: mssql-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.49
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: "yourStrong(!)Password"     # matches C4's weak-default sweep
+      MSSQL_PID: "Developer"
     restart: unless-stopped
 
 volumes:

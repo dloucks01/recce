@@ -1,0 +1,28 @@
+# Test-env Prometheus config for recce's prom_config_readable + prom_query_open
+# probes. Not a real deployment — the scrape config INTENTIONALLY embeds a
+# fake bearer token so recce's finding demonstrates the "config leaked
+# credentials" narrative on a live target.
+global:
+  scrape_interval: 15s
+  external_labels:
+    monitor: "recce-testenv"
+
+scrape_configs:
+  - job_name: "prometheus-self"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: "internal-services"
+    bearer_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlLXNjcmFwZS10YXJnZXQifQ.fakeSignature-for-testenv-do-not-treat-as-real"
+    static_configs:
+      - targets:
+          - "internal-api.corp.local:9100"
+          - "internal-db.corp.local:9100"
+          - "internal-mq.corp.local:9100"
+
+  - job_name: "cadvisor"
+    basic_auth:
+      username: "prometheus"
+      password: "test-env-only-not-a-real-secret"
+    static_configs:
+      - targets: ["cadvisor.corp.local:8080"]

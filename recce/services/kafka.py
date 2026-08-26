@@ -71,10 +71,21 @@ def _build_request(api_key: int, api_version: int,
     return struct.pack(">i", len(payload)) + payload
 
 
-def _build_metadata_request_v0(topics: list | None = None) -> bytes:
-    """MetadataRequest v0: topics=null asks for ALL topics; empty list is
-    invalid in v0 (server errors) — we default to null."""
-    return _build_request(_API_METADATA, 0, 1, _array_nullable(topics))
+def _build_metadata_request_v1(topics: list | None = None) -> bytes:
+    """MetadataRequest v1: topics=null asks for ALL topics. Same request body
+    as v0 but Apache Kafka 3.x KRaft rejects v0 outright despite the
+    ApiVersions handshake claiming min=0 — v1 works on both modern and
+    legacy brokers, and adds broker.rack + controller_id + topic.is_internal
+    to the response (which we skip past — we only need broker/topic names)."""
+    return _build_request(_API_METADATA, 1, 1, _array_nullable(topics))
+
+
+def _build_api_versions_v0() -> bytes:
+    """ApiVersionsRequest v0 — an empty body. Modern Kafka (>= 2.4) refuses
+    to answer any other request from a client that hasn't done ApiVersions
+    first (KIP-511). Sending this handshake keeps the probe working against
+    both legacy and modern brokers."""
+    return _build_request(_API_VERSIONS, 0, 100, b"")
 
 
 def _read_response(sock: socket.socket, timeout: float) -> bytes | None:
@@ -117,16 +128,17 @@ def _parse_string_at(data: bytes, i: int) -> tuple[str, int]:
     return s, i + n
 
 
-def _parse_metadata_v0(body: bytes) -> dict | None:
-    """Parse a MetadataResponse v0 body (post-size, post-correlation-id):
-      correlation_id (int32) — already sliced off before this
-      brokers: [{node_id: int32, host: string, port: int32}]
-      topics:  [{error: int16, name: string, partitions: [...]}]
+def _parse_metadata_v1(body: bytes) -> dict | None:
+    """Parse a MetadataResponse v1 body (post-size):
+      correlation_id (int32)
+      brokers: [{node_id: int32, host: string, port: int32, rack: nullable_string}]
+      controller_id: int32
+      topics: [{error: int16, name: string, is_internal: bool,
+                partitions: [{error, id, leader, replicas[], isr[]}]}]
     Return {brokers, topics} on success; None on parse failure."""
     if len(body) < 4:
         return None
     try:
-        # Skip correlation_id (already consumed by caller? — no, keep it here).
         i = 4  # correlation_id
         # Brokers
         n_brokers = struct.unpack(">i", body[i:i + 4])[0]; i += 4
@@ -137,7 +149,13 @@ def _parse_metadata_v0(body: bytes) -> dict | None:
             node_id = struct.unpack(">i", body[i:i + 4])[0]; i += 4
             host, i = _parse_string_at(body, i)
             port = struct.unpack(">i", body[i:i + 4])[0]; i += 4
+            # v1 adds `rack` as a nullable_string.
+            _rack, i = _parse_string_at(body, i)
             brokers.append({"node_id": node_id, "host": host, "port": port})
+        # controller_id (v1 addition)
+        if i + 4 > len(body):
+            return {"brokers": brokers, "topics": []}
+        i += 4                                # skip controller_id
         # Topics
         if i + 4 > len(body):
             return {"brokers": brokers, "topics": []}
@@ -149,12 +167,13 @@ def _parse_metadata_v0(body: bytes) -> dict | None:
             if i + 2 > len(body): break
             err = struct.unpack(">h", body[i:i + 2])[0]; i += 2
             name, i = _parse_string_at(body, i)
+            # v1 adds is_internal bool
+            if i + 1 > len(body): break
+            i += 1                            # skip is_internal
             # Skip partition array — we don't need per-partition detail.
             if i + 4 > len(body): break
             n_parts = struct.unpack(">i", body[i:i + 4])[0]; i += 4
             for _ in range(max(0, n_parts)):
-                # Each partition: error(2) + partition_id(4) + leader(4) +
-                # replicas array + isr array. Skip past all of it.
                 if i + 14 > len(body): break
                 i += 2 + 4 + 4                # error + partition + leader
                 n_repl = struct.unpack(">i", body[i:i + 4])[0]; i += 4
@@ -168,6 +187,10 @@ def _parse_metadata_v0(body: bytes) -> dict | None:
         return None
 
 
+# Back-compat alias for tests that reference the v0 name.
+_parse_metadata_v0 = _parse_metadata_v1
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
     """Send MetadataRequest v0 and parse the reply. Returns
     {reachable, brokers, topics, error} — brokers/topics empty if the
@@ -176,7 +199,14 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
     try:
         with socket.create_connection((ip, port), timeout=timeout) as s:
             s.settimeout(timeout)
-            s.sendall(_build_metadata_request_v0())
+            # ApiVersions handshake first — modern Kafka (KIP-511) closes
+            # the connection on any non-ApiVersions first request. Read and
+            # discard the response; success/error doesn't matter for our
+            # purpose (we're not negotiating a specific version).
+            s.sendall(_build_api_versions_v0())
+            _av = _read_response(s, timeout)
+            # Now the real query.
+            s.sendall(_build_metadata_request_v1())
             body = _read_response(s, timeout)
     except OSError as e:
         out["error"] = str(e)
@@ -186,7 +216,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         out["reachable"] = True
         out["error"] = "no metadata response — SASL/mTLS may be required"
         return out
-    parsed = _parse_metadata_v0(body)
+    parsed = _parse_metadata_v1(body)
     if parsed is None:
         out["reachable"] = True
         out["error"] = "response parse failed (not Kafka? SASL required?)"

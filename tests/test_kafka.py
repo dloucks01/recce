@@ -18,19 +18,26 @@ def _build_string(s: str) -> bytes:
 
 
 def _build_metadata_response(brokers: list[dict], topics: list[str]) -> bytes:
-    """Assemble a synthetic MetadataResponse v0 body suitable for
-    _read_response to return (post-size, but keep correlation_id at start)."""
+    """Assemble a synthetic MetadataResponse v1 body suitable for
+    _read_response to return (post-size, keep correlation_id at start).
+
+    v1 vs v0: brokers gain a rack (nullable_string, -1 = null), an int32
+    controller_id follows the brokers array, and topics gain an is_internal
+    bool between name and partitions."""
     body = struct.pack(">i", 1)                      # correlation_id
     body += struct.pack(">i", len(brokers))
     for b in brokers:
         body += struct.pack(">i", b["node_id"])
         body += _build_string(b["host"])
         body += struct.pack(">i", b["port"])
+        body += struct.pack(">h", -1)                # rack = null
+    body += struct.pack(">i", 1)                     # controller_id
     body += struct.pack(">i", len(topics))
     for t in topics:
         body += struct.pack(">h", 0)                 # error
         body += _build_string(t)
-        body += struct.pack(">i", 0)                 # no partitions (test simplification)
+        body += b"\x00"                              # is_internal = false
+        body += struct.pack(">i", 0)                 # no partitions
     return struct.pack(">i", len(body)) + body
 
 
@@ -48,6 +55,11 @@ class _KafkaServer:
         self._thread.start()
 
     def _serve(self):
+        # Two exchanges per connection: ApiVersions handshake first (probe
+        # sends this to be compatible with modern Kafka), then MetadataRequest.
+        # We reply with a small valid ApiVersions response, then the fixture
+        # response for the second request.
+        api_versions_resp = self._build_api_versions_v0()
         while not self._stop:
             try:
                 self._srv.settimeout(0.5)
@@ -55,19 +67,36 @@ class _KafkaServer:
             except (socket.timeout, OSError):
                 continue
             try:
-                # Read size (4) + payload
-                sz_bytes = conn.recv(4)
-                if len(sz_bytes) == 4:
-                    n = struct.unpack(">i", sz_bytes)[0]
+                # ApiVersions
+                sz = conn.recv(4)
+                if len(sz) == 4:
+                    n = struct.unpack(">i", sz)[0]
                     if 0 <= n <= 65536:
                         conn.recv(n)
-                if self._resp:
-                    conn.sendall(self._resp)
+                    conn.sendall(api_versions_resp)
+                # MetadataRequest
+                sz = conn.recv(4)
+                if len(sz) == 4:
+                    n = struct.unpack(">i", sz)[0]
+                    if 0 <= n <= 65536:
+                        conn.recv(n)
+                    if self._resp:
+                        conn.sendall(self._resp)
             except OSError:
                 pass
             finally:
                 try: conn.close()
                 except OSError: pass
+
+    @staticmethod
+    def _build_api_versions_v0() -> bytes:
+        """Minimal ApiVersionsResponse v0: no error, one api (Metadata v0-v9)."""
+        # Body: correlation_id(4) + error(2) + num_apis(4) + [key(2)+min(2)+max(2)]
+        body = struct.pack(">i", 100)                 # correlation_id
+        body += struct.pack(">h", 0)                  # error
+        body += struct.pack(">i", 1)                  # 1 api advertised
+        body += struct.pack(">h", 3) + struct.pack(">h", 0) + struct.pack(">h", 9)
+        return struct.pack(">i", len(body)) + body
 
     def close(self):
         self._stop = True
