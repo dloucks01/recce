@@ -109,6 +109,40 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
              "names": [n.lstrip("/") for n in (c.get("Names") or [])],
              "command": c.get("Command", ""), "state": c.get("State", "")}
             for c in cj[1][:25] if isinstance(c, dict)]
+        # For each running container, inspect its HostConfig for host-mount
+        # escape routes (bind mounts to /, /etc, /root, /var/run/docker.sock,
+        # /proc, /sys). Any of these gives full host control from inside
+        # the container — the tester needs to know per-container which
+        # ones are dangerous. Capped at 15 to keep the probe bounded.
+        risky_binds: list[dict] = []
+        for c in cj[1][:15]:
+            if not isinstance(c, dict) or not c.get("Id"):
+                continue
+            insp = _get(ip, port, f"/containers/{c['Id']}/json", timeout)
+            if not insp or insp[0] != 200 or not isinstance(insp[1], dict):
+                continue
+            hc = (insp[1].get("HostConfig") or {})
+            binds = hc.get("Binds") or []
+            privileged = bool(hc.get("Privileged"))
+            for b in binds:
+                # bind format: "hostpath:containerpath[:mode]"
+                hp = str(b).split(":", 1)[0]
+                # Root FS / dangerous paths.
+                if hp in ("/", "/etc", "/root", "/proc", "/sys") or \
+                        hp.startswith(("/etc/", "/root/", "/var/log/")) or \
+                        hp.endswith("docker.sock"):
+                    risky_binds.append({
+                        "container": (c.get("Names") or ["?"])[0].lstrip("/"),
+                        "image": c.get("Image", ""),
+                        "bind": b, "privileged": privileged})
+                    break
+            else:
+                if privileged:
+                    risky_binds.append({
+                        "container": (c.get("Names") or ["?"])[0].lstrip("/"),
+                        "image": c.get("Image", ""),
+                        "bind": "(privileged=true)", "privileged": True})
+        out["risky_binds"] = risky_binds
     ij = _get(ip, port, "/images/json", timeout)
     if ij and ij[0] == 200 and isinstance(ij[1], list):
         tags = []
@@ -116,6 +150,34 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
             if isinstance(im, dict):
                 tags.extend(im.get("RepoTags") or [])
         out["image_tags"] = [t for t in tags if t and t != "<none>:<none>"][:40]
+    # Docker Swarm mode leaks — services, secrets, configs.
+    sw = _get(ip, port, "/swarm", timeout)
+    if sw and sw[0] == 200 and isinstance(sw[1], dict):
+        out["swarm_mode"] = True
+        svcs = _get(ip, port, "/services", timeout)
+        if svcs and svcs[0] == 200 and isinstance(svcs[1], list):
+            out["swarm_services"] = [
+                s.get("Spec", {}).get("Name", "?") for s in svcs[1][:25]
+                if isinstance(s, dict)]
+        secs = _get(ip, port, "/secrets", timeout)
+        if secs and secs[0] == 200 and isinstance(secs[1], list):
+            # We can list names + IDs; the SECRET VALUE itself is only
+            # readable to tasks that mount it, not via GET. Still, a name
+            # list often discloses purpose (db_password, jwt_signing_key).
+            out["swarm_secrets"] = [
+                s.get("Spec", {}).get("Name", "?") for s in secs[1][:25]
+                if isinstance(s, dict)]
+        cfgs = _get(ip, port, "/configs", timeout)
+        if cfgs and cfgs[0] == 200 and isinstance(cfgs[1], list):
+            out["swarm_configs"] = [
+                c.get("Spec", {}).get("Name", "?") for c in cfgs[1][:25]
+                if isinstance(c, dict)]
+    # Volumes — names may disclose purpose (postgres-data, jenkins-home,
+    # secrets-vol). Not by itself a bug, but attack-surface data.
+    vj = _get(ip, port, "/volumes", timeout)
+    if vj and vj[0] == 200 and isinstance(vj[1], dict):
+        vlist = (vj[1].get("Volumes") or [])
+        out["volumes"] = [v.get("Name", "?") for v in vlist[:40] if isinstance(v, dict)]
     return out
 
 
@@ -224,6 +286,68 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Same as above - lock down the API; treat leaked image/registry "
                     "names and env secrets as compromised.",
                     ["CWE-200"], kind="docker_secrets"))
+            # Per-container host-mount / privileged escape routes.
+            risky = pr.get("risky_binds") or []
+            if risky:
+                lines = [
+                    f"  {b['container']} ({b['image']}) "
+                    f"{'PRIVILEGED ' if b.get('privileged') else ''}bind={b['bind']}"
+                    for b in risky[:10]]
+                out.append(_finding(
+                    "critical",
+                    "Docker containers with host-mount / privileged escape route",
+                    tgt,
+                    f"{len(risky)} running container(s) mount a dangerous host path "
+                    f"or run privileged. Any of these hands root on the HOST from "
+                    f"inside the container: docker.sock lets you spawn a new privileged "
+                    f"container, /-mounts let you chroot into the host, /proc + /sys "
+                    f"reach kernel namespaces.\n" + "\n".join(lines)
+                    + (f"\n… (+{len(risky)-10} more)" if len(risky) > 10 else ""),
+                    "docker CLI",
+                    "docker exec <container> nsenter -t 1 -m -u -i -n -p sh   # if privileged",
+                    "Never bind-mount host paths like /, /etc, /root, or "
+                    "/var/run/docker.sock into containers unless absolutely required. "
+                    "Never run containers with --privileged in production.",
+                    ["CWE-284", "CWE-250", "CWE-269"], kind="docker_host_escape"))
+            # Swarm secrets / configs / services enumeration.
+            if pr.get("swarm_mode"):
+                sec_names = pr.get("swarm_secrets") or []
+                cfg_names = pr.get("swarm_configs") or []
+                svc_names = pr.get("swarm_services") or []
+                if sec_names or cfg_names:
+                    bits = []
+                    if sec_names: bits.append(f"secrets={', '.join(sec_names[:15])}")
+                    if cfg_names: bits.append(f"configs={', '.join(cfg_names[:15])}")
+                    if svc_names: bits.append(f"services={', '.join(svc_names[:15])}")
+                    out.append(_finding(
+                        "high", "Docker Swarm secrets/configs enumerated unauth", tgt,
+                        f"Swarm mode active — secret and config NAMES readable via "
+                        f"the unauthenticated API. Values require a task mount, but "
+                        f"the names disclose intent (db_password, jwt_signing_key, "
+                        f"api_tokens, tls_cert). Combined with the RCE via /containers/"
+                        f"create + Binds root-mount, a hostile task can be spawned "
+                        f"that mounts the secrets and exfiltrates them.\n  " +
+                        "  |  ".join(bits),
+                        "docker CLI",
+                        f"docker -H {_scheme(p.portid)}://<ip>:{p.portid} secret ls; "
+                        f"docker -H ...:{p.portid} config ls; docker -H ...:{p.portid} service ls",
+                        "Bind the swarm manager API to a private interface; "
+                        "enable mutual-TLS on the manager listener.",
+                        ["CWE-200", "CWE-306"], kind="docker_swarm_secrets"))
+            vols = pr.get("volumes") or []
+            if vols:
+                # Info only — volume names alone aren't a bug, but they often
+                # disclose data intent (postgres-data, jenkins-home, .aws).
+                out.append(_finding(
+                    "info", "Docker volume inventory readable", tgt,
+                    f"{len(vols)} named volume(s) enumerated: {', '.join(vols[:20])}"
+                    + ("… (truncated)" if len(vols) > 20 else "") +
+                    ". Volume names typically disclose which containers persist data "
+                    "and what kind (secrets-vol, .aws, .kube, ssh-keys).",
+                    "docker CLI",
+                    f"docker -H {_scheme(p.portid)}://<ip>:{p.portid} volume ls",
+                    "Informational — pairs with the api-exposed finding above.",
+                    [], kind="docker_volumes"))
     return out
 
 

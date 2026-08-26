@@ -136,6 +136,43 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
         out["anon_pods"] = pods[0] == 200 and _is_podlist(pods[1])
         out["pod_count"] = _pod_count(pods[1]) if out["anon_pods"] else None
         out["status"] = pods[0]
+        # /stats/summary — resource + container metadata leak. Not
+        # exec-primitive; useful for cluster-node fingerprinting.
+        stats = _get(ip, port, "/stats/summary", tls=tls, timeout=timeout)
+        out["anon_stats"] = bool(stats and stats[0] == 200
+                                 and isinstance(stats[1], dict)
+                                 and "node" in stats[1])
+        # /run/{namespace}/{pod}/{container} is the exec primitive. Just
+        # probing it (GET) returns 405 Method Not Allowed on modern k8s,
+        # which tells us the endpoint IS routed — i.e., a POST would
+        # actually exec a command inside the container. Flag the RCE
+        # capability without actually invoking exec.
+        if out["anon_pods"]:
+            # Sample the first pod/container from /pods to construct a
+            # concrete run URL; a 405 or 200 there = RCE route routed.
+            body = pods[1]
+            first_pod, first_ns, first_container = "", "", ""
+            try:
+                items = body.get("items") if isinstance(body, dict) else None
+                if items and isinstance(items, list) and items:
+                    p0 = items[0]
+                    md = p0.get("metadata") or {}
+                    first_pod = md.get("name", "")
+                    first_ns = md.get("namespace", "")
+                    conts = (p0.get("spec") or {}).get("containers") or []
+                    if conts:
+                        first_container = (conts[0] or {}).get("name", "")
+            except (AttributeError, TypeError, IndexError):
+                pass
+            if first_pod and first_container:
+                run_probe = _get(ip, port,
+                                 f"/run/{first_ns}/{first_pod}/{first_container}",
+                                 tls=tls, timeout=timeout)
+                # 405 = route exists, wrong method. 401/403 = route exists,
+                # but authz denied. Anything but 404 counts as "route present".
+                out["anon_exec_route"] = bool(
+                    run_probe and run_probe[0] not in (404, 0))
+                out["exec_sample"] = (first_ns, first_pod, first_container)
         return out
     if r == "kubelet-ro":
         pods = _get(ip, port, "/pods", tls=False, timeout=timeout)
@@ -162,6 +199,42 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
         if out["anon_list"]:
             sec = _get(ip, port, "/api/v1/secrets", tls=tls, timeout=timeout)
             out["anon_secrets"] = bool(sec and sec[0] == 200 and _is_list(sec[1]))
+            # Additional anonymous surface: configmaps (secrets in plaintext),
+            # serviceaccounts (token targets), pods (privileged/hostPath/hostPID
+            # containers), clusterrolebindings (who's cluster-admin without
+            # authenticating), nodes (host inventory).
+            cm = _get(ip, port, "/api/v1/configmaps", tls=tls, timeout=timeout)
+            out["anon_configmaps"] = bool(cm and cm[0] == 200 and _is_list(cm[1]))
+            sa = _get(ip, port, "/api/v1/serviceaccounts", tls=tls, timeout=timeout)
+            out["anon_serviceaccounts"] = bool(sa and sa[0] == 200 and _is_list(sa[1]))
+            nd = _get(ip, port, "/api/v1/nodes", tls=tls, timeout=timeout)
+            out["anon_nodes"] = bool(nd and nd[0] == 200 and _is_list(nd[1]))
+            crb = _get(ip, port,
+                       "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings",
+                       tls=tls, timeout=timeout)
+            out["anon_clusterrolebindings"] = bool(
+                crb and crb[0] == 200 and _is_list(crb[1]))
+            # Pods listing: check for privileged / hostPath / hostNetwork /
+            # hostPID containers. Each is a straight route to node compromise
+            # from inside the pod, so we surface the count separately.
+            pods = _get(ip, port, "/api/v1/pods", tls=tls, timeout=timeout)
+            if pods and pods[0] == 200 and isinstance(pods[1], dict):
+                privileged = host_mounts = host_pid = host_net = 0
+                items = pods[1].get("items") or []
+                for pod in items[:200]:      # cap for large clusters
+                    spec = pod.get("spec") or {}
+                    if spec.get("hostNetwork"): host_net += 1
+                    if spec.get("hostPID"): host_pid += 1
+                    for c in spec.get("containers") or []:
+                        sc = (c.get("securityContext") or {})
+                        if sc.get("privileged"): privileged += 1
+                    for v in spec.get("volumes") or []:
+                        if isinstance(v, dict) and v.get("hostPath"):
+                            host_mounts += 1
+                            break
+                out["escape_pod_counts"] = {
+                    "privileged": privileged, "hostPath": host_mounts,
+                    "hostPID": host_pid, "hostNetwork": host_net}
         return out
     if r == "etcd":
         ver, tls = _try_get(ip, port, "/version", timeout)
@@ -351,6 +424,64 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "set --anonymous-auth=false.",
                         ["CWE-306", "CWE-284", "CWE-269"] if sec
                         else ["CWE-306", "CWE-284"], kind="api_anon_list"))
+                    # Additional anonymous-readable resources on the apiserver.
+                    extra_reads = []
+                    if pr.get("anon_configmaps"): extra_reads.append("configmaps (often store secrets in plaintext)")
+                    if pr.get("anon_serviceaccounts"): extra_reads.append("serviceaccounts (token pivot targets)")
+                    if pr.get("anon_nodes"): extra_reads.append("nodes (host inventory)")
+                    if pr.get("anon_clusterrolebindings"): extra_reads.append("clusterrolebindings (RBAC map)")
+                    if extra_reads:
+                        out.append(_finding(
+                            "high",
+                            "Kubernetes API leaks additional resources unauth", tgt,
+                            f"Beyond namespaces/secrets, anonymous auth also reads: "
+                            f"{', '.join(extra_reads)}. Combined with the primary "
+                            f"anon-list finding, this maps the entire cluster's "
+                            f"RBAC + workload + token surface for the tester.",
+                            "kubectl",
+                            "kubectl --server https://<ip>:<port> --insecure-skip-tls-verify "
+                            "get configmaps,serviceaccounts,clusterrolebindings -A -o yaml",
+                            "Same fix — remove all bindings for system:anonymous; "
+                            "set --anonymous-auth=false.",
+                            ["CWE-200", "CWE-284"], kind="api_anon_resources"))
+                    # Escape-route pod counts.
+                    ec = pr.get("escape_pod_counts") or {}
+                    if any(ec.get(k, 0) > 0 for k in ("privileged", "hostPath",
+                                                       "hostPID", "hostNetwork")):
+                        bits = ", ".join(f"{k}={v}" for k, v in ec.items() if v > 0)
+                        out.append(_finding(
+                            "critical",
+                            "Kubernetes pods with node-escape configuration", tgt,
+                            f"Pods listed via anonymous API include node-escape-capable "
+                            f"specs: {bits}. Any of these (privileged, hostPath mount, "
+                            f"hostPID, hostNetwork) is a direct route to the host node "
+                            f"from inside the pod. Combined with the anon-exec route on "
+                            f"the kubelet, this is full cluster + node compromise.",
+                            "kubectl",
+                            "kubectl --server https://<ip>:<port> get pods -A "
+                            "-o jsonpath='{range .items[?(@.spec.hostPID==true)]}{.metadata.name}{\"\\n\"}{end}'",
+                            "Apply Pod Security Admission (baseline or restricted) to "
+                            "every namespace; deny hostPath, hostPID, privileged in "
+                            "PodSecurity policy.",
+                            ["CWE-269", "CWE-284"], kind="k8s_escape_pods"))
+                # Kubelet anon-exec route (surfaces even when kubelet is TLS'd
+                # but authorization-mode=AlwaysAllow).
+                if r == "kubelet" and pr.get("anon_exec_route"):
+                    ns, pod, cont = pr.get("exec_sample") or ("<ns>", "<pod>", "<container>")
+                    out.append(_finding(
+                        "critical",
+                        "Kubelet /run exec route reachable without auth", tgt,
+                        f"POST /run/{ns}/{pod}/{cont} is routed by the kubelet — "
+                        f"that endpoint executes an arbitrary command inside the "
+                        f"target container and returns stdout. Anonymous access "
+                        f"means RCE inside every pod on this node.",
+                        "curl",
+                        f"curl -sk -X POST https://<ip>:{p.portid}/run/{ns}/{pod}/{cont}"
+                        f" -d 'cmd=id'",
+                        "Set --anonymous-auth=false AND --authorization-mode=Webhook "
+                        "on the kubelet. Restrict the kubelet port to control-plane "
+                        "traffic only.",
+                        ["CWE-306", "CWE-77", "CWE-284"], kind="kubelet_exec"))
                 elif pr.get("anon_status") == 403:
                     out.append(_finding(
                         "low", "Kubernetes API accepts anonymous requests", tgt,
