@@ -160,6 +160,18 @@ def http_findings(host_ip: str, port: Port) -> list[Vuln]:
             "Server banner discloses software version", ["CWE-200"],
             f"HTTP {status}: {banner}",
             "Suppress version details in Server/X-Powered-By response headers."))
+
+    # Deep HTTP: bundled path enum + framework fingerprint. Lives in
+    # services.http because it will grow with each Tier-A HTTP item (methods,
+    # CORS, robots, JS secret scan, Swagger discovery, vhost enum).
+    # Import lazily so probes.py doesn't take the extra load unless the port
+    # is actually HTTP.
+    try:
+        from .services import http as _svc_http
+        findings.extend(_svc_http.enum_findings(host_ip, port))
+    except Exception:                             # never let deep-scan break header checks
+        pass
+
     return findings
 
 
