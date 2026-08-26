@@ -250,5 +250,47 @@ class ApiSpecTest(unittest.TestCase):
         self.assertGreaterEqual(r["endpoint_count"], 3)
 
 
+class FormDiscoveryTest(unittest.TestCase):
+    def test_login_form_with_csrf_and_default_creds(self):
+        html = (b'<html><head><title>Login :: Damn Vulnerable Web Application (DVWA)</title></head>'
+                b'<body><form method="POST" action="login.php">'
+                b'<input name="username" type="text">'
+                b'<input name="password" type="password">'
+                b'<input name="Login" type="submit" value="Login">'
+                b'<input name="user_token" type="hidden" value="abc123">'
+                b'</form></body></html>')
+        class H(_FixedHandler):
+            ROUTES = {
+                "/":          (302, [("Location", "login.php")], b""),
+                "/login.php": (200, [("Content-Type", "text/html")], html),
+            }
+        srv, _t = _serve(H)
+        try:
+            fp = svc_http.fingerprint("127.0.0.1", srv.server_address[1], False)
+            forms = svc_http.discover_forms("127.0.0.1", srv.server_address[1], False, fp=fp)
+        finally:
+            srv.shutdown()
+        self.assertTrue(any(f["login"] for f in forms), f"no login form detected in {forms}")
+        login = next(f for f in forms if f["login"])
+        self.assertEqual(login["username_field"], "username")
+        self.assertEqual(login["password_field"], "password")
+        self.assertTrue(login["has_csrf"], "user_token should register as csrf hint")
+        self.assertIn(("admin", "password"), login["default_creds"],
+                      f"DVWA default admin:password should be flagged, got {login['default_creds']}")
+
+    def test_non_login_form_not_flagged(self):
+        html = (b'<form action="/search"><input name="q" type="text"><input type="submit"></form>')
+        class H(_FixedHandler):
+            ROUTES = {"/": (200, [("Content-Type","text/html")], html)}
+        srv, _t = _serve(H)
+        try:
+            forms = svc_http.discover_forms("127.0.0.1", srv.server_address[1], False)
+        finally:
+            srv.shutdown()
+        # A search form has no password field — should not be classified as login.
+        for f in forms:
+            self.assertFalse(f["login"], f"non-login form wrongly flagged: {f}")
+
+
 if __name__ == "__main__":
     unittest.main()

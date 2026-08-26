@@ -479,6 +479,188 @@ def fingerprint(ip: str, port: int, use_tls: bool) -> dict:
     return out
 
 
+# ---- HTML form discovery (C2) ----------------------------------------------
+
+# Input-name substrings that identify a login form. If two of these appear
+# in one <form>, we call it a login form. Case-insensitive.
+_LOGIN_USERNAME_HINTS = {"user", "username", "login", "email", "userid", "uid", "acct", "account"}
+_LOGIN_PASSWORD_HINTS = {"pass", "passwd", "password", "pwd"}
+_CSRF_HINTS = {"csrf", "authenticity_token", "__requestverificationtoken", "_token", "xsrf"}
+
+# CMS/app fingerprints keyed off form action or page URL. If we recognize the
+# form's app, we can also flag the common default credentials for it — huge
+# signal for the tester's next step.
+_DEFAULT_CREDS: dict[str, list[tuple[str, str]]] = {
+    "wordpress":    [("admin", "admin"), ("admin", "password")],
+    "tomcat":       [("tomcat", "tomcat"), ("admin", "admin"), ("manager", "manager")],
+    "jenkins":      [("admin", "admin"), ("admin", "password")],
+    "grafana":      [("admin", "admin")],
+    "phpmyadmin":   [("root", ""), ("root", "root"), ("admin", "admin")],
+    "adminer":      [("root", ""), ("root", "root")],
+    "solr":         [("solr", "SolrRocks"), ("admin", "admin")],
+    "dvwa":         [("admin", "password")],
+    "juice-shop":   [("admin@juice-sh.op", "admin123")],
+    "airflow":      [("airflow", "airflow"), ("admin", "admin")],
+    "kibana":       [("elastic", "changeme"), ("kibana", "changeme")],
+    "gitlab":       [("root", "5iveL!fe"), ("root", "password")],
+    "rabbitmq":     [("guest", "guest")],
+    "consul":       [("", "")],
+    "elasticsearch":[("elastic", "changeme")],
+    "jira":         [("admin", "admin")],
+    "confluence":   [("admin", "admin")],
+    "nexus":        [("admin", "admin123")],
+}
+
+
+class _FormParser(HTMLParser):
+    """Extract <form> definitions from an HTML page.
+
+    Each form: {action, method, inputs: [{name, type, placeholder}]}. Only
+    reads standard <input> / <select> / <textarea> children — enough for 99%
+    of authentication surface. Radio/checkbox groups are dedup'd by name."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.forms: list[dict] = []
+        self._cur: dict | None = None
+        self._seen_names: set[str] = set()
+
+    def handle_starttag(self, tag, attrs):
+        t = tag.lower()
+        d = dict(attrs)
+        if t == "form":
+            self._cur = {
+                "action": (d.get("action") or "").strip(),
+                "method": (d.get("method") or "GET").upper(),
+                "id": d.get("id") or "",
+                "inputs": [],
+            }
+            self._seen_names = set()
+        elif t in ("input", "select", "textarea") and self._cur is not None:
+            name = (d.get("name") or "").strip()
+            if not name or name in self._seen_names:
+                return
+            self._seen_names.add(name)
+            self._cur["inputs"].append({
+                "name": name,
+                "type": (d.get("type") or ("text" if t == "input" else t)).lower(),
+                "placeholder": (d.get("placeholder") or "")[:80],
+            })
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "form" and self._cur is not None:
+            self.forms.append(self._cur)
+            self._cur = None
+            self._seen_names = set()
+
+
+def _classify_form(form: dict) -> dict:
+    """Given a parsed form dict, decide if it's a login form and return
+    additional metadata (login=True/False, has_csrf, username_field,
+    password_field)."""
+    input_names = [i["name"].lower() for i in form["inputs"]]
+    input_types = [i["type"].lower() for i in form["inputs"]]
+    result = {"login": False, "has_csrf": False, "username_field": "", "password_field": ""}
+
+    # Locate a password field first — a form without a type=password is
+    # rarely a login form (and if it is, we can't tell reliably).
+    has_pw = False
+    for i in form["inputs"]:
+        if i["type"] == "password":
+            has_pw = True
+            result["password_field"] = i["name"]
+            break
+    if not has_pw:
+        # Fallback: field name explicitly says "password".
+        for i in form["inputs"]:
+            if any(h in i["name"].lower() for h in _LOGIN_PASSWORD_HINTS):
+                has_pw = True
+                result["password_field"] = i["name"]
+                break
+    if not has_pw:
+        return result
+
+    # A username field is any text/email/name-hinted input.
+    for i in form["inputs"]:
+        if i["type"] in ("text", "email") or \
+                any(h in i["name"].lower() for h in _LOGIN_USERNAME_HINTS):
+            result["username_field"] = i["name"]
+            break
+
+    result["login"] = True
+    result["has_csrf"] = any(any(h in n for h in _CSRF_HINTS) for n in input_names) or \
+                        any(t == "hidden" and any(h in input_names[j] for h in _CSRF_HINTS)
+                            for j, t in enumerate(input_types))
+    return result
+
+
+def _match_default_creds(fp: dict, form_action: str, page_url: str) -> list[tuple[str, str]]:
+    """Return default cred candidates if the form's URL or the page fingerprint
+    identifies a known app. Empty list otherwise."""
+    blob = f"{page_url} {form_action} {fp.get('title','')} {(fp.get('generator') or '')} " \
+           f"{' '.join(fp.get('technologies') or [])}".lower()
+    for app, creds in _DEFAULT_CREDS.items():
+        if app in blob:
+            return creds
+    return []
+
+
+# Pages worth GET'ing for form discovery beyond just /. Same list as
+# _PATHS (surface category) plus a few explicit login paths. We DON'T
+# probe /wp-admin/… again since path_enum already told us if it exists.
+_FORM_DISCOVERY_PATHS = [
+    "/", "/login", "/signin", "/sign-in", "/log-in", "/user/login",
+    "/admin", "/admin/login", "/wp-login.php", "/administrator",
+    "/manager/html", "/actuator/login", "/console",
+]
+
+
+def discover_forms(ip: str, port: int, use_tls: bool,
+                   fp: dict | None = None) -> list[dict]:
+    """GET the login-adjacent paths and extract forms from each. Returns list
+    of dicts: {page, form_action, method, login, has_csrf, username_field,
+    password_field, default_creds: [(user, pass)], inputs: [names]}.
+
+    fp is the fingerprint from fingerprint() — reused for default-cred hints
+    so we don't refetch /. If None we recompute it (used from tests)."""
+    if fp is None:
+        fp = fingerprint(ip, port, use_tls)
+    out: list[dict] = []
+    for path in _FORM_DISCOVERY_PATHS:
+        r = _get(ip, port, use_tls, path, timeout=_ROOT_TIMEOUT, read_body=True)
+        if r is None or r["status"] not in _HIT_STATUSES:
+            continue
+        # Follow one same-host redirect (login pages often redirect from /admin).
+        if r["status"] in (301, 302, 303, 307, 308):
+            loc = r["headers"].get("location", "")
+            if loc and not re.match(r"^[a-z]+://", loc, re.I):
+                follow = loc if loc.startswith("/") else "/" + loc.lstrip("./")
+                r2 = _get(ip, port, use_tls, follow, timeout=_ROOT_TIMEOUT, read_body=True)
+                if r2 is not None:
+                    r = r2; path = follow
+        body = r.get("body") or b""
+        if not body or b"<form" not in body.lower():
+            continue
+        parser = _FormParser()
+        try:
+            parser.feed(body.decode("utf-8", "replace"))
+        except Exception:
+            continue
+        for form in parser.forms:
+            meta = _classify_form(form)
+            entry = {
+                "page": path,
+                "form_action": form["action"] or path,
+                "method": form["method"],
+                "inputs": [i["name"] for i in form["inputs"]],
+                **meta,
+            }
+            entry["default_creds"] = _match_default_creds(fp, form["action"], path) \
+                                     if meta["login"] else []
+            out.append(entry)
+    return out
+
+
 # ---- HTTP methods probe (Tier A) -------------------------------------------
 
 # Methods that are notable enough to report if a server actually accepts them.
@@ -783,6 +965,41 @@ def enum_findings(host_ip: str, port: Port) -> list[Vuln]:
             ["CWE-650"],
             f"Server routes: {', '.join(dangerous)} (Allow header: {methods.get('allow_header','') or 'none'})",
             "Restrict methods to GET/HEAD/POST for public endpoints; disable PUT/DELETE/PROPFIND unless the app truly needs them."))
+
+    # C2: form / login discovery. Feed fp so default-cred hints reuse it.
+    forms = discover_forms(host_ip, port.portid, use_tls, fp=fp if fp else None)
+    login_forms = [f for f in forms if f["login"]]
+    if forms:
+        # Compact summary finding: N forms across M pages.
+        pages = sorted({f["page"] for f in forms})
+        summary = f"{len(forms)} form(s) across {len(pages)} page(s)"
+        detail_lines = []
+        for f in forms[:12]:
+            tag = "LOGIN" if f["login"] else "form"
+            csrf = " +csrf" if f.get("has_csrf") else ""
+            detail_lines.append(f"  [{tag}{csrf}] {f['method']} {f['page']} -> "
+                                f"{f['form_action']} inputs={f['inputs']}")
+        out.append(_mk(
+            host_ip, port, "http-forms", "info",
+            f"HTML forms discovered: {summary}",
+            [],
+            summary + "\n" + "\n".join(detail_lines),
+            "Informational — feeds credential-spray candidate list and C5 SQLi targeting."))
+    # Emit one dedicated finding per login form that has default-cred candidates.
+    for f in login_forms:
+        if not f.get("default_creds"):
+            continue
+        creds = ", ".join(f"{u}:{p}" for u, p in f["default_creds"])
+        out.append(_mk(
+            host_ip, port, "http-default-creds", "medium",
+            f"Login form with known default credentials: {f['page']}",
+            ["CWE-521", "CWE-1392"],
+            f"Login form on {f['page']} appears to belong to a recognized app. "
+            f"Default credentials to try: {creds} "
+            f"(fields: user={f['username_field']!r}, pass={f['password_field']!r}, "
+            f"csrf={'yes' if f['has_csrf'] else 'no'})",
+            "Change or disable default credentials. If the app must stay reachable, "
+            "restrict it network-adjacent and force password reset on first login."))
 
     # CORS misconfig — reflect origin + credentials = real cross-origin exfil.
     cors = cors_probe(host_ip, port.portid, use_tls)
