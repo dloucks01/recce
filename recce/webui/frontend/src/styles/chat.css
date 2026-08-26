@@ -465,8 +465,13 @@
 /* payload catalog */
 .listener-block { background: var(--surface2); border: 1px solid var(--line); border-radius: 8px; }
 .listener-block .listener-item { background: transparent; border: 0; }
-.payload-catalog { padding: 8px 14px 16px; display: flex; flex-direction: column; gap: 20px; }
-.payload-group { display: flex; flex-direction: column; gap: 8px; }
+/* Payload catalog sits inside a `surface` panel. Give the catalog itself
+   a `ground` (darkest) bg so each item card at `surface` visibly floats
+   above it — the previous surface2-on-surface contrast was ~4% and read
+   as one continuous slab. */
+.payload-catalog { padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 24px;
+  background: var(--ground); border-radius: 8px; }
+.payload-group { display: flex; flex-direction: column; gap: 10px; }
 .payload-lhost { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .payload-lhost label { display: flex; align-items: center; gap: 6px; }
 .payload-lhost .scan-in { max-width: 200px; }
@@ -490,17 +495,17 @@
    `order: 4` + `margin-left: auto`. Code and note break to their own
    full-width rows via `flex: 1 0 100%`. */
 .payload-item { display: flex; flex-wrap: wrap; align-items: center;
-  gap: 8px 10px; padding: 12px 14px;
-  background: var(--surface2); border: 1px solid var(--line);
-  border-radius: 8px; }
+  gap: 8px 12px; padding: 14px 16px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 8px; box-shadow: var(--shadow-sm); }
 .payload-item > .payload-copy { order: 4; margin-left: auto; align-self: center; }
-.payload-item > .payload-code { order: 5; flex: 1 0 100%; margin-top: 2px; }
+.payload-item > .payload-code { order: 5; flex: 1 0 100%; margin-top: 4px; }
 .payload-item > .payload-note { order: 6; flex: 1 0 100%; margin-top: 2px; }
 .payload-label { font-family: var(--mono); font-size: 12px; font-weight: 700;
   color: var(--accent); letter-spacing: .02em; }
-.payload-code { display: block; background: var(--ground); color: var(--text);
-  padding: 10px 12px; border-radius: 6px; font-family: var(--mono);
-  font-size: 12px; line-height: 1.55;
+.payload-code { display: block; background: var(--surface2); color: var(--text);
+  padding: 12px 14px; border-radius: 6px; font-family: var(--mono);
+  font-size: 12px; line-height: 1.6;
   white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere;
   border: 1px solid var(--line); }
 .payload-note { flex-shrink: 0; font-size: 12px; line-height: 1.4; }
