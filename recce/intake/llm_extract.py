@@ -71,7 +71,13 @@ Rules you must follow:
 * Every regex must be anchored appropriately (^ / $) since parsing uses re.MULTILINE.
 * Backslashes inside JSON strings must be doubled (\\\\d not \\d).
 * Add ONE finding rule per distinct severity/format the sample shows.
-* `title` is a required named group in every marker_re.
+* **`title` MUST be a named group `(?P<title>...)` in every marker_re.**
+  Positional groups like `([\\\\w\\\\s]+)` do NOT count — the parser only
+  reads titles from the named `title` group, so an unnamed group produces
+  zero findings even though the regex matches. Same rule for `port`, `ip`,
+  `cve`: use `(?P<port>\\\\d+)` not `(\\\\d+)`.
+* Concrete correct example for a line like `[CRIT] SQL injection at 8080`:
+  `"^\\\\[CRIT\\\\]\\\\s+(?P<title>.+?)(?:\\\\s+at\\\\s+(?P<port>\\\\d+))?$"`
 * Prefer fewer, higher-quality rules over noisy catch-alls.
 * If you can't infer the target reliably, omit `target_re` and let the
   ImportModal ask the tester later.

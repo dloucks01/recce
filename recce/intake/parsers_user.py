@@ -94,9 +94,18 @@ def _validate(spec: dict, source_path: str) -> tuple[bool, str]:
         if "marker_re" not in f:
             return False, f"findings[{i}] missing marker_re"
         try:
-            re.compile(f["marker_re"], re.M)
+            compiled = re.compile(f["marker_re"], re.M)
         except re.error as e:
             return False, f"findings[{i}].marker_re bad regex: {e}"
+        # A marker_re without a named `title` capture group produces zero
+        # findings at parse time (the loop falls back to group(1), which
+        # for reasoning-model-drafted specs is usually not the title). Reject
+        # at validate time so the tester sees a specific error instead of a
+        # silently-empty parser.
+        if "title" not in compiled.groupindex:
+            return False, (f"findings[{i}].marker_re must include a named "
+                           f"capture group `(?P<title>...)` — that's how the "
+                           f"finding title is extracted")
         sev = f.get("severity", "info")
         if sev not in _SEVERITIES:
             return False, f"findings[{i}].severity must be one of {sorted(_SEVERITIES)}"
