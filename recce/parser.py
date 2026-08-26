@@ -98,20 +98,16 @@ def _script_from_node(node: ET.Element) -> Script:
 
 
 _SMB_FAMILY_PORTS = {139, 445}
-_HTTP_FAMILY_PORTS = {80, 443, 8080, 8443, 8000, 8888}
 
 
 def _family_canonical_port(portid: int | None) -> int | None:
-    """Collapse SMB and HTTP family ports to a single canonical port for
-    dedup purposes — 139/445 → 139, 80/443/8080/8443/8000/8888 → 80. See
-    the identical helper in vulndb; keeping a local copy avoids importing
-    the vuln package from the parser (kept lean by design)."""
-    if portid is None:
-        return None
+    """Collapse the SMB family (139/445 → 139) to a single canonical port
+    for dedup — 139 and 445 are the same SMB service. HTTP ports are left
+    distinct on purpose (different ports routinely host different apps —
+    see intake.dedup._SMB_FAMILY_PORTS). Keeping a local copy avoids
+    importing the vuln package from the parser (kept lean by design)."""
     if portid in _SMB_FAMILY_PORTS:
         return 139
-    if portid in _HTTP_FAMILY_PORTS:
-        return 80
     return portid
 
 

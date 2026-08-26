@@ -1053,20 +1053,16 @@ def _confidence(sig: dict) -> str:
 
 
 _SMB_FAMILY_PORTS = {139, 445}
-_HTTP_FAMILY_PORTS = {80, 443, 8080, 8443, 8000, 8888}
 
 
 def _canonical_family_port(portid: int) -> int:
-    """For a CVE finding, collapse multiple ports of the same service family
-    to one canonical port so we don't emit the same SambaCry/EternalBlue
-    finding twice (once for 139, once for 445 — same SMB service). Same
-    with HTTP CVEs on 80/443/8080/8443 — one HTTP-family instance per host.
-    Returns the canonical port id (lowest in the family) or the port itself
-    when it's not part of a collapsing family."""
+    """For a CVE finding, collapse the SMB family (139/445 → 139) so we
+    don't emit the same SambaCry/EternalBlue finding twice — once for 139,
+    once for 445, the same SMB service. HTTP ports are NOT collapsed:
+    different ports routinely host different apps, so merging their CVEs
+    would hide a genuinely distinct exposure (see intake.dedup)."""
     if portid in _SMB_FAMILY_PORTS:
         return 139
-    if portid in _HTTP_FAMILY_PORTS:
-        return 80
     return portid
 
 
