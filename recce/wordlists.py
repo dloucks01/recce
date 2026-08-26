@@ -56,12 +56,15 @@ BUNDLED_WORDLISTS: list[dict] = [
     {"name": "paths-common", "kind": "paths",
      "blurb": "~290 common paths (dirbuster shape, scoped to entries that "
               "actually hit on modern apps + framework admin routes)."},
+    {"name": "paths-big", "kind": "paths",
+     "blurb": "~30,700 paths — dirbuster-medium territory. Combinatorial "
+              "dir × extension + 700 literals. THOROUGH sweep, minutes."},
     {"name": "paths-api", "kind": "paths",
      "blurb": "~185 API-focused paths (OpenAPI/GraphQL/SOAP, gateways, "
               "spec advertisements, common REST endpoints)."},
     {"name": "paths-secrets", "kind": "paths",
-     "blurb": "~160 secret file names (.env variants, credentials.*, "
-              "private keys, terraform state, CI/CD tokens, DB dumps)."},
+     "blurb": "~1,620 secret file names — comprehensive. .env × stage × "
+              "suffix, cloud SDK creds, Terraform/Ansible, DB dumps × 20 exts."},
     {"name": "paths-lfi", "kind": "paths",
      "blurb": "~70 LFI / path-traversal payloads (../etc/passwd variants, "
               "PHP wrappers, URL-encoded traversal, null-byte tricks)."},
@@ -72,15 +75,18 @@ BUNDLED_WORDLISTS: list[dict] = [
      "blurb": "~100 cloud metadata + SDK config paths (AWS IMDS, GCP, "
               "Azure, DO, OCI + .aws/.docker/.kube/gcloud/terraform)."},
     {"name": "paths-wordpress", "kind": "paths",
-     "blurb": "~95 WordPress admin + plugin + REST API (wp-json user "
-              "enum) + install/backup artefacts."},
+     "blurb": "~830 WordPress paths — every wp-admin handler + AJAX action "
+              "+ REST route + 60+ vulnerable plugins + backup variants."},
     {"name": "paths-tomcat-java", "kind": "paths",
-     "blurb": "~125 Java-stack paths (Tomcat manager, JBoss, WebLogic, "
-              "Jenkins, Spring Actuator, Struts, Jolokia)."},
+     "blurb": "~520 Java admin — Tomcat/JBoss/WebLogic/Jenkins + Spring "
+              "Actuator × 7 context prefixes + Jolokia read/write/exec."},
     # --- credentials -------------------------------------------------------
     {"name": "creds-defaults", "kind": "creds",
-     "blurb": "~100 most-successful default cred pairs across web apps, "
-              "devices, DBs, and infra tooling. `user:password` format."},
+     "blurb": "~800 default cred pairs — curated top-signal × combinatorial "
+              "(17 usernames × 47 top passwords). `user:password` format."},
+    {"name": "creds-top-passwords", "kind": "creds",
+     "blurb": "~360 highest-frequency real-world passwords (HIBP/rockyou/"
+              "NCSC). Password-only; loader pairs each with the default user."},
     {"name": "creds-web-appliances", "kind": "creds",
      "blurb": "~105 router / printer / IPMI / NAS web-admin defaults "
               "(Cisco, HP iLO, Dell iDRAC, Ubiquiti, Synology, Hikvision)."},
@@ -91,24 +97,24 @@ BUNDLED_WORDLISTS: list[dict] = [
      "blurb": "~85 SNMP community strings (public/private + vendor "
               "defaults: Cisco/HP/Ricoh/APC/UPS). Community-only, no user."},
     {"name": "creds-mssql", "kind": "creds",
-     "blurb": "~40 sa passwords from common Docker images (Microsoft, "
-              "Bitnami) + wild recurring defaults."},
+     "blurb": "~610 sa passwords — every documented Docker/Bitnami "
+              "quick-start × seasonal/company variants × 10 SQL Auth users."},
     {"name": "creds-mysql", "kind": "creds",
-     "blurb": "~35 MySQL / MariaDB defaults (root/blank first, then "
-              "Bitnami / Debian / Ubuntu / docker-quick-start conventions)."},
+     "blurb": "~640 MySQL/MariaDB pairs — root/blank first (historical) + "
+              "quick-start × 20 app-user variants (wordpress, drupal, ...)."},
     {"name": "creds-postgres", "kind": "creds",
-     "blurb": "~25 postgres role/password defaults from Docker quick-start "
-              "recipes and Debian/Ubuntu package installs."},
+     "blurb": "~780 postgres pairs — app-role coverage (airflow, gitlab, "
+              "keycloak, jira, wordpress...) × 30 recurring passwords."},
     {"name": "creds-mongodb", "kind": "creds",
-     "blurb": "~25 default admin credentials for MongoDB quick-start + "
-              "Bitnami + Atlas starter-tier examples."},
+     "blurb": "~430 MongoDB pairs — Docker/Bitnami/Atlas + all role names "
+              "(clusterAdmin, dbOwner, userAdmin) × common weak passwords."},
     {"name": "creds-redis", "kind": "creds",
-     "blurb": "~20 Redis requirepass values (foobared, redis, changeme "
-              "class) + ACL user pairs for 6.x."},
+     "blurb": "~180 Redis pairs — foobared/redis/changeme × ACL user names "
+              "(default/admin/app/readonly/readwrite/replica/monitor)."},
     # --- usernames ---------------------------------------------------------
     {"name": "users-common", "kind": "users",
-     "blurb": "~115 accounts every environment tends to have. Feeds SMTP "
-              "enum + Kerberos AS-REP roast + weak-cred sweeps."},
+     "blurb": "~450 accounts (first names + AD LastNameFirstInitial + "
+              "roles + service accounts + Exchange/SCCM/SharePoint)."},
     {"name": "users-linux", "kind": "users",
      "blurb": "~120 standard Linux system users + distro-specific "
               "(pi/kali/ubuntu/ec2-user/oracle) + service DB accounts."},
@@ -123,8 +129,8 @@ BUNDLED_WORDLISTS: list[dict] = [
               "team/dept aliases) — signal-rich for VRFY/EXPN."},
     # --- subdomains --------------------------------------------------------
     {"name": "subdomains-common", "kind": "subdomains",
-     "blurb": "~300 subdomain prefixes for vhost enum + DNS brute — "
-              "Assetnote/SecLists highest-hit names, largest-signal first."},
+     "blurb": "~1,080 subdomain prefixes — curated highest-hit + numbered "
+              "(web1..5) + geo tags (us-web, eu-app) + env tags + vendors."},
 ]
 
 
