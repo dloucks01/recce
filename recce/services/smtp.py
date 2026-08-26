@@ -77,6 +77,75 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
         return res
 
 
+# Small set of usernames that pentesters and admins historically probe first
+# on an SMTP user-enum. Kept short on purpose — a bigger list turns into brute
+# force and looks like an attack. This is a "did anyone leave the classic
+# accounts open" check, not a mail-account audit.
+_SMTP_ENUM_USERS = [
+    "root", "admin", "administrator", "postmaster", "mail", "mailer-daemon",
+    "webmaster", "info", "test", "user", "guest", "backup", "sysadmin",
+    "operator", "support",
+]
+
+
+def enum_users(ip: str, port: int, timeout: float = _TIMEOUT,
+               users: list[str] | None = None) -> dict:
+    """Probe each candidate username via VRFY, EXPN, and RCPT TO. Returns
+    {vrfy:[names], expn:[names], rcpt:[names]} — each list is the subset of
+    users the server confirmed exist via that command.
+
+    RCPT-based enum is the workhorse: even servers with VRFY disabled often
+    leak user existence through RCPT response codes (250 = exists, 550/551 =
+    doesn't). We do envelope-only, no DATA — nothing gets sent.
+
+    Bounded runtime: len(users) * 3 commands * ~200ms = ~10s worst case for
+    the default 15-user list. Skips silently on transport errors."""
+    users = users if users is not None else _SMTP_ENUM_USERS
+    out = {"vrfy": [], "expn": [], "rcpt": []}
+    try:
+        cls = smtplib.SMTP_SSL if port == 465 else smtplib.SMTP
+        srv = cls(timeout=timeout)
+        srv.connect(ip, port)
+    except (OSError, smtplib.SMTPException):
+        return out
+    try:
+        srv.ehlo("recce-enum.local")
+        for u in users:
+            try:
+                vcode, _ = srv.docmd("VRFY", u)
+                if vcode in (250, 251, 252):
+                    out["vrfy"].append(u)
+            except smtplib.SMTPException:
+                pass
+            try:
+                ecode, _ = srv.docmd("EXPN", u)
+                if ecode == 250:
+                    out["expn"].append(u)
+            except smtplib.SMTPException:
+                pass
+            # RCPT-based: fresh envelope per attempt so a persistent MAIL
+            # FROM doesn't inherit the previous RCPT's error state.
+            try:
+                srv.docmd("RSET")
+                srv.docmd("MAIL", "FROM:<recce-enum@example.com>")
+                rcode, _ = srv.docmd("RCPT", f"TO:<{u}@localhost>")
+                if rcode in (250, 251):
+                    out["rcpt"].append(u)
+                srv.docmd("RSET")
+            except smtplib.SMTPException:
+                pass
+        try:
+            srv.quit()
+        except smtplib.SMTPException:
+            srv.close()
+    except (OSError, smtplib.SMTPException):
+        try:
+            srv.close()
+        except Exception:
+            pass
+    return out
+
+
 def smtp_targets(hosts: list[Host]) -> list[dict]:
     out = []
     for h in hosts:
@@ -122,6 +191,32 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"for u in root admin postmaster; do echo VRFY $u | nc {h.ip} {p.portid}; done",
                     "Disable VRFY/EXPN (disable_vrfy_command = yes).",
                     ["CWE-200"], kind="smtp_vrfy"))
+            # Enumerated users — merge VRFY/EXPN/RCPT hits, dedup, and
+            # report each as a name a spray attack now knows exists on
+            # this box. RCPT-based enum in particular still works on
+            # servers with VRFY disabled, so keeping it separate as a
+            # channel signal helps the tester know how it was leaked.
+            enum = pr.get("enum") or {}
+            all_users = sorted(set(enum.get("vrfy", []))
+                               | set(enum.get("expn", []))
+                               | set(enum.get("rcpt", [])))
+            if all_users:
+                channels = []
+                if enum.get("vrfy"): channels.append(f"VRFY:{','.join(enum['vrfy'])}")
+                if enum.get("expn"): channels.append(f"EXPN:{','.join(enum['expn'])}")
+                if enum.get("rcpt"): channels.append(f"RCPT:{','.join(enum['rcpt'])}")
+                out.append(_finding(
+                    "medium", "SMTP user enumeration hits", tgt,
+                    f"{len(all_users)} valid local usernames enumerated: "
+                    f"{', '.join(all_users)}. Channels: {'; '.join(channels)}. "
+                    f"These names now seed password-spray attempts against SSH, SMB, "
+                    f"AD, and web-app login.",
+                    f"smtp-user-enum -M RCPT -U users.txt -t {h.ip} -p {p.portid}",
+                    "Restrict user existence leakage: disable VRFY/EXPN; return the "
+                    "same 250 response for any RCPT regardless of user existence "
+                    "(smtpd_reject_unlisted_recipient = no on some MTAs) or accept "
+                    "and drop non-existent recipients.",
+                    ["CWE-200", "CWE-203"], kind="smtp_user_enum"))
             if not pr.get("starttls") and p.portid in (25, 587):
                 out.append(_finding(
                     "low", "SMTP without STARTTLS (cleartext)", tgt,
@@ -160,6 +255,10 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["open_relay"] = pr.get("open_relay", False)
                 t["vrfy"] = pr.get("vrfy", False)
                 t["version"] = pr.get("banner", "") or t.get("version", "")
+                # Only run the user-enum sweep on servers that answered EHLO.
+                # A dead port shouldn't burn the extra 15 * 3 commands.
+                if pr.get("reachable") and pr.get("esmtp"):
+                    pr["enum"] = enum_users(t["ip"], t["port"])
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
