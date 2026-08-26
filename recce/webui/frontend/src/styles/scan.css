@@ -37,6 +37,22 @@
 .sv2-input::placeholder { color: var(--faint); }
 .sv2-input:disabled { opacity: .5; }
 select.sv2-input { font-family: var(--sans); appearance: auto; }
+
+/* Wordlist selector: dropdown of bundled lists + free-text override, side
+   by side on the same row. Free-text takes remaining width so a long file
+   path stays readable. On narrow columns they stack. */
+.sv2-select { font-family: var(--sans); font-size: 13px; padding: 9px 10px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface2); color: var(--text); cursor: pointer; }
+.sv2-select:focus { border-color: var(--accent); outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent); }
+.sv2-select:disabled { opacity: .5; cursor: default; }
+.sv2-wordlist-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
+.sv2-wordlist-picker { flex: 0 1 240px; min-width: 180px; }
+.sv2-wordlist-input { flex: 1 1 260px; min-width: 200px; }
+.sv2-wordlist-blurb { display: block; margin-top: 6px;
+  font-size: 11.5px; color: var(--muted); line-height: 1.45;
+  font-style: italic; }
 .sv2-cred-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .sv2-flags { display: flex; flex-direction: column; gap: 6px; }
 .sv2-flag-list { display: flex; flex-wrap: wrap; gap: 6px; }

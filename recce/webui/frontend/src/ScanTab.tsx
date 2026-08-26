@@ -145,6 +145,10 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
   // Value-carrying flags (text/int/list). Kept separate from boolean cFlags
   // so both can be sent to the backend independently.
   const [cFlagValues, setCFlagValues] = useState<Record<string, string>>({});
+  // Bundled wordlist catalog, fetched once. Kind → list of {name, blurb,
+  // line_count} entries. Feeds the dropdown next to every "wordlist"-kind
+  // flag input. Empty until the first successful fetch.
+  const [wordlists, setWordlists] = useState<Record<string, Array<{name:string; blurb:string; line_count:number}>>>({});
   const [log, setLog] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [showLog, setShowLog] = useState(false);
@@ -161,6 +165,17 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
       if (groups.length > 0) setActiveGroup(groups[0]);
     }).catch(() => {});
     getJSON<{ items: Host[] }>("/api/hosts?limit=500").then((r) => setHosts(r.items || [])).catch(() => {});
+    // Bundled wordlists — one fetch, group by kind so each scan card's
+    // dropdown filters to the relevant family without re-hitting the API.
+    getJSON<{wordlists: Array<{name:string; kind:string; blurb:string; line_count:number}>}>("/api/wordlists")
+      .then((r) => {
+        const by: Record<string, Array<{name:string; blurb:string; line_count:number}>> = {};
+        for (const w of r.wordlists || []) {
+          if (!by[w.kind]) by[w.kind] = [];
+          by[w.kind].push({ name: w.name, blurb: w.blurb, line_count: w.line_count });
+        }
+        setWordlists(by);
+      }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -510,20 +525,72 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
                       </div>
                       {spec.flags.some(f => (f.kind || "bool") !== "bool") && (
                         <div className="sv2-value-flags">
-                          {spec.flags.filter(f => (f.kind || "bool") !== "bool").map((f) => (
-                            <label key={f.name} className="sv2-field sv2-value-flag">
-                              <span className="sv2-label">
-                                {f.label}
-                                {f.active && <span className="sv2-flag-hot" style={{marginLeft:6}}>active</span>}
-                              </span>
-                              <input className="sv2-input"
-                                     type={f.kind === "int" ? "number" : "text"}
-                                     value={cFlagValues[f.name] || ""}
-                                     placeholder={f.placeholder || f.flag}
-                                     disabled={isBusy}
-                                     onChange={(e) => setCFlagValues({ ...cFlagValues, [f.name]: e.target.value })} />
-                            </label>
-                          ))}
+                          {spec.flags.filter(f => (f.kind || "bool") !== "bool").map((f) => {
+                            // Wordlist flags: dropdown of bundled options
+                            // filtered by wordlist_kind + free-text
+                            // override. The dropdown seeds the input with
+                            // `bundled:<name>`; the input stays editable so
+                            // the operator can type a local file path.
+                            if (f.kind === "wordlist") {
+                              const opts = (wordlists[(f as any).wordlist_kind || ""] || []);
+                              const cur = cFlagValues[f.name] || "";
+                              // Sync dropdown selection to the current
+                              // value (so the operator sees which bundled
+                              // list is active even after page reload).
+                              const selVal = cur.startsWith("bundled:") ? cur : "";
+                              return (
+                                <label key={f.name} className="sv2-field sv2-value-flag">
+                                  <span className="sv2-label">
+                                    {f.label}
+                                    {f.active && <span className="sv2-flag-hot" style={{marginLeft:6}}>active</span>}
+                                  </span>
+                                  <div className="sv2-wordlist-row">
+                                    <select className="sv2-select sv2-wordlist-picker"
+                                            value={selVal}
+                                            disabled={isBusy || opts.length === 0}
+                                            title={opts.length === 0 ? "loading wordlists…" : "pick a bundled wordlist"}
+                                            onChange={(e) => {
+                                              const v = e.target.value;
+                                              setCFlagValues({ ...cFlagValues, [f.name]: v });
+                                            }}>
+                                      <option value="">{opts.length === 0 ? "loading…" : "— bundled list —"}</option>
+                                      {opts.map(o => (
+                                        <option key={o.name} value={`bundled:${o.name}`}
+                                                title={o.blurb}>
+                                          {o.name} ({o.line_count})
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <input className="sv2-input sv2-wordlist-input"
+                                           type="text"
+                                           value={cur}
+                                           placeholder={f.placeholder || "bundled:<name> or /path/to/file"}
+                                           disabled={isBusy}
+                                           onChange={(e) => setCFlagValues({ ...cFlagValues, [f.name]: e.target.value })} />
+                                  </div>
+                                  {selVal && opts.find(o => `bundled:${o.name}` === selVal) && (
+                                    <span className="sv2-wordlist-blurb">
+                                      {opts.find(o => `bundled:${o.name}` === selVal)?.blurb}
+                                    </span>
+                                  )}
+                                </label>
+                              );
+                            }
+                            return (
+                              <label key={f.name} className="sv2-field sv2-value-flag">
+                                <span className="sv2-label">
+                                  {f.label}
+                                  {f.active && <span className="sv2-flag-hot" style={{marginLeft:6}}>active</span>}
+                                </span>
+                                <input className="sv2-input"
+                                       type={f.kind === "int" ? "number" : "text"}
+                                       value={cFlagValues[f.name] || ""}
+                                       placeholder={f.placeholder || f.flag}
+                                       disabled={isBusy}
+                                       onChange={(e) => setCFlagValues({ ...cFlagValues, [f.name]: e.target.value })} />
+                              </label>
+                            );
+                          })}
                         </div>
                       )}
                     </div>

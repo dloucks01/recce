@@ -24,6 +24,15 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
                     ("label", "group", "targets", "profile", "creds", "lhost", "flags")}
                 for k, v in _COMMANDS.items()}
 
+    @app.get("/api/wordlists")
+    def list_wordlists(kind: str | None = None):
+        """The bundled wordlist catalog. Frontend renders these as a
+        dropdown next to the free-text `--wordlist FILE` input. `kind`
+        query param filters to a single family (paths / creds / users) so
+        the postgres card's dropdown doesn't show HTTP path lists."""
+        from ...wordlists import list_bundled
+        return {"wordlists": list_bundled(kind)}
+
     @app.post("/api/scan")
     def start_scan(body: dict = Body(...), x_tester: str = Header(default="someone")):
         # `command` (any catalog entry); `phase` kept for older clients.
@@ -88,6 +97,21 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
                 if toks:
                     argv += [f["flag"], *toks]
                     used_list_flag = True
+            elif kind == "wordlist":
+                # Same wire shape as "text"; the wordlist loader on the
+                # backend resolves `bundled:<name>` to an on-disk path.
+                # Refuse dash-leading values (no flag injection) and refuse
+                # `bundled:<name>` where the name isn't in the registry —
+                # a typo shouldn't silently degrade to "no wordlist".
+                if val.startswith("-"):
+                    continue
+                if val.startswith("bundled:"):
+                    from ...wordlists import BUNDLED_WORDLISTS
+                    name = val[len("bundled:"):].strip()
+                    known = {e["name"] for e in BUNDLED_WORDLISTS}
+                    if name not in known:
+                        continue                # bad bundled name → drop
+                argv += [f["flag"], val]
             else:                                # "text"
                 if not val.startswith("-"):
                     argv += [f["flag"], val]

@@ -16,15 +16,121 @@ URL — the file has to exist on the box, airgap-safe by construction.
 * For path lists (HTTP), each line is a path starting with `/`. Lines
   without a leading `/` are auto-prefixed.
 
+## Bundled wordlists
+
+recce ships a small curated set of best-in-class wordlists under
+`recce/data/wordlists/`. The WebUI presents these as a dropdown; the CLI
+accepts them via the `bundled:<name>` syntax on --wordlist (e.g.
+`--wordlist bundled:paths-quickhits`). `list_bundled()` enumerates them
+by kind; `resolve_wordlist()` turns any user-supplied value (bundled name
+or plain path) into an absolute file path.
+
 ## Env-var fallback
 
-`RECCE_HTTP_WORDLIST` env var: if set to a file path, the HTTP path enum
-uses it even when no CLI --wordlist flag is passed. Useful during enum
-(where the CLI flag can't reach the deep probe layer).
+`RECCE_HTTP_WORDLIST` env var: if set to a file path OR a `bundled:<name>`
+identifier, the HTTP path enum uses it even when no CLI --wordlist flag
+is passed. Useful during enum (where the CLI flag can't reach the deep
+probe layer).
 """
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+
+# Package-relative wordlist directory. Uses __file__ rather than
+# importlib.resources so the same path works whether recce is installed as
+# a wheel, in editable dev mode, or executed straight from the repo.
+_BUNDLED_DIR = Path(__file__).parent / "data" / "wordlists"
+
+
+# Registry describing each shipped wordlist — the WebUI reads this to
+# populate its dropdown. `kind` groups the list by what it's for; the
+# frontend filters by kind so the postgres scan-card only shows credential
+# lists, not path lists. `blurb` is one short sentence describing scope.
+BUNDLED_WORDLISTS: list[dict] = [
+    {"name": "paths-quickhits", "kind": "paths",
+     "blurb": "~150 highest-signal HTTP paths (VCS, .env, actuator, "
+              "admin panels, cloud metadata). Runs in seconds."},
+    {"name": "paths-common", "kind": "paths",
+     "blurb": "~350 common paths (dirbuster shape, scoped to entries that "
+              "actually hit on modern apps + framework admin routes)."},
+    {"name": "paths-api", "kind": "paths",
+     "blurb": "~180 API-focused paths (OpenAPI/GraphQL/SOAP, gateways, "
+              "spec advertisements, common REST endpoints)."},
+    {"name": "creds-defaults", "kind": "creds",
+     "blurb": "~100 most-successful default cred pairs across web apps, "
+              "devices, DBs, and infra tooling. `user:password` format."},
+    {"name": "creds-mssql", "kind": "creds",
+     "blurb": "~35 sa passwords from common Docker images (Microsoft, "
+              "Bitnami) + wild recurring defaults."},
+    {"name": "creds-postgres", "kind": "creds",
+     "blurb": "~22 postgres role/password defaults from Docker quick-start "
+              "recipes and Debian/Ubuntu package installs."},
+    {"name": "creds-mongodb", "kind": "creds",
+     "blurb": "~25 default admin credentials for MongoDB quick-start + "
+              "Bitnami + Atlas starter-tier examples."},
+    {"name": "users-common", "kind": "users",
+     "blurb": "~100 accounts every AD environment / Linux box / SaaS "
+              "console tends to have. Feeds SMTP enum + Kerberos."},
+    {"name": "users-smtp", "kind": "users",
+     "blurb": "~80 SMTP mailbox-enumeration usernames (root, postmaster, "
+              "team/dept aliases) — signal-rich for VRFY/EXPN."},
+]
+
+
+def list_bundled(kind: str | None = None) -> list[dict]:
+    """Return the bundled wordlist registry entries. Each entry adds a
+    `path` (absolute on disk) and `line_count` at read time so the
+    frontend can show the size next to the dropdown label. If `kind` is
+    given (paths / creds / users), only lists of that kind are returned."""
+    out: list[dict] = []
+    for entry in BUNDLED_WORDLISTS:
+        if kind and entry["kind"] != kind:
+            continue
+        path = _BUNDLED_DIR / f"{entry['name']}.txt"
+        item = dict(entry)
+        item["path"] = str(path)
+        item["available"] = path.exists()
+        item["line_count"] = _count_entries(path) if path.exists() else 0
+        out.append(item)
+    return out
+
+
+def _count_entries(path: Path) -> int:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            return sum(1 for ln in fh
+                       if ln.strip() and not ln.strip().startswith("#"))
+    except OSError:
+        return 0
+
+
+def resolve_wordlist(value: str | None) -> str | None:
+    """Turn a --wordlist value into an absolute file path. Accepts:
+    - None or "" → returns None (no wordlist requested)
+    - `bundled:<name>` → resolves to `recce/data/wordlists/<name>.txt`
+      when the name is in BUNDLED_WORDLISTS; returns None (with a
+      warning printed) when the name is unknown so a typo doesn't
+      silently degrade to "no wordlist" and confuse the operator
+    - any other value → returned as-is (treated as a filesystem path)
+    """
+    if not value:
+        return None
+    if value.startswith("bundled:"):
+        name = value[len("bundled:"):].strip()
+        for entry in BUNDLED_WORDLISTS:
+            if entry["name"] == name:
+                path = _BUNDLED_DIR / f"{name}.txt"
+                if path.exists():
+                    return str(path)
+                print(f"[!] bundled wordlist {name!r} is registered but "
+                      f"missing on disk ({path}) — falling back to defaults")
+                return None
+        print(f"[!] unknown bundled wordlist {name!r}; "
+              f"available: {[e['name'] for e in BUNDLED_WORDLISTS]}")
+        return None
+    return value
 
 
 def load_wordlist(path: str | None, *, prefix_slash: bool = False) -> list[str]:
@@ -33,15 +139,19 @@ def load_wordlist(path: str | None, *, prefix_slash: bool = False) -> list[str]:
     its own defaults. Returns [] and prints a warning on read failure
     rather than raising (a bad wordlist must never abort a scan).
 
+    Accepts either a filesystem path OR a `bundled:<name>` identifier —
+    the latter resolves to `recce/data/wordlists/<name>.txt`.
+
     prefix_slash: for HTTP path lists — lines without a leading '/' get
     one prepended (so a dirbuster-style `admin` becomes `/admin`)."""
-    if not path:
+    resolved = resolve_wordlist(path)
+    if not resolved:
         return []
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
+        with open(resolved, encoding="utf-8", errors="replace") as fh:
             lines = [ln.strip() for ln in fh]
     except OSError as e:
-        print(f"[!] wordlist {path!r} not readable ({e}) — using bundled defaults")
+        print(f"[!] wordlist {resolved!r} not readable ({e}) — using bundled defaults")
         return []
     out: list[str] = []
     seen: set[str] = set()

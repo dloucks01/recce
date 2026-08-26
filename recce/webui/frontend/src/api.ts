@@ -118,8 +118,11 @@ export type CmdFlag = {
   active?: boolean;
   // "bool" (checkbox) is the default. "text" / "int" / "list" render as
   // inputs and their values ride on `flag_values` in the scan POST.
-  kind?: "bool" | "text" | "int" | "list";
+  // "wordlist" adds a bundled-list dropdown next to the free-text input;
+  // wordlist_kind ("paths"/"creds"/"users") filters which lists appear.
+  kind?: "bool" | "text" | "int" | "list" | "wordlist";
   placeholder?: string;
+  wordlist_kind?: "paths" | "creds" | "users";
 };
 export type CmdSpec = {
   label: string; group: string;

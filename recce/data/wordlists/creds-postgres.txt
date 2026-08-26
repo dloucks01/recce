@@ -1,0 +1,28 @@
+# PostgreSQL-specific defaults. `trust` auth means no password — the
+# probe module already handles that separately. This list is for the
+# `password not required to be strong` scenarios: docker quick-start,
+# Bitnami, developer README copy-paste, older Debian/Ubuntu defaults.
+postgres:
+postgres:postgres
+postgres:password
+postgres:admin
+postgres:root
+postgres:changeme
+postgres:default
+postgres:pgpass
+postgres:pgsql
+postgres:secret
+postgres:Password1
+postgres:P@ssw0rd
+postgres:mysecretpassword
+postgres:docker
+postgres:1234
+postgres:123456
+postgres:test
+admin:admin
+admin:password
+admin:postgres
+pgadmin:pgadmin
+pgadmin:admin
+root:root
+root:password

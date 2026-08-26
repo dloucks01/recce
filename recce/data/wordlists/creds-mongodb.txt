@@ -1,0 +1,29 @@
+# MongoDB-specific defaults. Modern deployments require auth explicitly;
+# these are the passwords most often set on that first `db.createUser`
+# call and never rotated. Docker quick-start, Bitnami, MongoDB Atlas
+# starter-tier examples.
+admin:admin
+admin:password
+admin:changeme
+admin:secret
+admin:mongo
+admin:mongodb
+admin:root
+admin:P@ssw0rd
+root:root
+root:password
+root:mongo
+mongo:mongo
+mongo:admin
+mongo:password
+mongodb:mongodb
+mongodb:password
+mongoadmin:secret
+mongoadmin:changeme
+mongoadmin:P@ssw0rd
+myUserAdmin:abc123
+test:test
+test:password
+readonly:readonly
+readwrite:readwrite
+backup:backup

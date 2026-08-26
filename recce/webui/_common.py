@@ -19,20 +19,31 @@ def _cmd(label, group, targets="optional", profile=False, creds=False, lhost=Fal
             "creds": creds, "lhost": lhost, "flags": list(flags)}
 
 
-def _f(name, flag, label, active=False, *, kind="bool", placeholder=""):
+def _f(name, flag, label, active=False, *, kind="bool", placeholder="",
+        wordlist_kind=""):
     """Catalog entry for a scan-tab flag.
 
     kind:
-      * "bool"  — checkbox (default). Body sends the name in `flags: []`.
-      * "text"  — single string. Body sends `flag_values: {name: "value"}`.
-      * "int"   — integer. Same wire shape as "text" (validated server-side).
-      * "list"  — whitespace/comma-separated tokens. Splits and passes each
-                  as its own argv token after the flag (e.g. `--skip a b c`).
+      * "bool"     — checkbox (default). Body sends the name in `flags: []`.
+      * "text"     — single string. Body sends `flag_values: {name: "value"}`.
+      * "int"      — integer. Same wire shape as "text" (validated server-side).
+      * "list"     — whitespace/comma-separated tokens. Splits and passes each
+                     as its own argv token after the flag (e.g. `--skip a b c`).
+      * "wordlist" — dropdown of bundled wordlists (filtered by
+                     `wordlist_kind`) + free-text override. Wire shape is
+                     the same as "text": server passes the value through to
+                     the CLI --wordlist argument, and the loader resolves
+                     `bundled:<name>` to an on-disk path.
     `active` marks intrusive flags in the UI (renders an "active" pill).
     `placeholder` is UI-only hint text for non-bool inputs.
+    `wordlist_kind` (paths / creds / users) filters the dropdown for
+    kind="wordlist" flags so a postgres card doesn't show HTTP paths.
     """
-    return {"name": name, "flag": flag, "label": label, "active": active,
-            "kind": kind, "placeholder": placeholder}
+    entry = {"name": name, "flag": flag, "label": label, "active": active,
+             "kind": kind, "placeholder": placeholder}
+    if wordlist_kind:
+        entry["wordlist_kind"] = wordlist_kind
+    return entry
 
 
 # The full command surface the workbench can run. Each entry declares what the UI
@@ -105,22 +116,25 @@ _COMMANDS: dict = {
     "postgres": _cmd("PostgreSQL (deep — weak-default + replication + RCE)", "Databases", "optional", creds=True,
                      flags=[_f("prove", "--prove", "prove RCE with benign id (COPY-FROM-PROGRAM; active)", True),
                             _f("wordlist", "--wordlist",
-                               "extra cred wordlist (user:pass or pass; augments 7 defaults)",
-                               kind="text", placeholder="/path/to/postgres-creds.txt")]),
+                               "credential wordlist (bundled or /path/to/file)",
+                               kind="wordlist", wordlist_kind="creds",
+                               placeholder="bundled:creds-postgres or /path/to/pg-creds.txt")]),
     "mysql": _cmd("MySQL / MariaDB", "Databases", "optional", creds=True),
     "mongodb": _cmd("MongoDB (deep — weak-SCRAM sweep + JS-eval + shard-map + collection inventory)",
                     "Databases", "optional", creds=True,
                     flags=[_f("wordlist", "--wordlist",
-                              "extra cred wordlist (user:pass or pass; augments 6 defaults)",
-                              kind="text", placeholder="/path/to/mongo-creds.txt")]),
+                              "credential wordlist (bundled or /path/to/file)",
+                              kind="wordlist", wordlist_kind="creds",
+                              placeholder="bundled:creds-mongodb or /path/to/mongo-creds.txt")]),
     # MSSQL depth: native TDS-tunneled TLS SQL-Auth probe. C4 weak-default
     # sweep of 7 sa passwords runs when no creds are supplied; credentialed
     # sweep fires xp_cmdshell / CLR / OLE Automation / linked-server walk
     # via nxc.
     "mssql": _cmd("MSSQL (deep — native TDS + C4 weak-sa sweep + xp_cmdshell)", "Databases", "optional", creds=True,
                   flags=[_f("wordlist", "--wordlist",
-                            "extra cred wordlist (user:pass or pass; augments 7 sa defaults)",
-                            kind="text", placeholder="/path/to/mssql-creds.txt")]),
+                            "credential wordlist (bundled or /path/to/file)",
+                            kind="wordlist", wordlist_kind="creds",
+                            placeholder="bundled:creds-mssql or /path/to/sa-passwords.txt")]),
     "redis": _cmd("Redis", "Databases", "optional"),
     "elasticsearch": _cmd("Elasticsearch", "Databases", "optional"),
     "memcached": _cmd("memcached", "Databases", "optional"),
@@ -146,8 +160,9 @@ _COMMANDS: dict = {
                        _f("smuggle", "--smuggle",
                           "CL.TE/TE.CL smuggling probe (active, may disturb proxies)", True),
                        _f("wordlist", "--wordlist",
-                          "extra HTTP path wordlist (augments the 110 bundled paths)",
-                          kind="text", placeholder="/path/to/dirbuster.txt")]),
+                          "HTTP path wordlist (bundled or /path/to/file)",
+                          kind="wordlist", wordlist_kind="paths",
+                          placeholder="bundled:paths-quickhits or /path/to/dirbuster.txt")]),
     "api": _cmd("API — OpenAPI/Swagger/GraphQL/SOAP-WSDL/gRPC introspection", "Web", "optional"),
     # --- other services ---
     "smb": _cmd("SMB", "Services", "optional", creds=True),
@@ -162,8 +177,9 @@ _COMMANDS: dict = {
     "dns": _cmd("DNS", "Services", "optional"),
     "smtp": _cmd("SMTP", "Services", "optional",
                  flags=[_f("wordlist", "--wordlist",
-                           "extra usernames for VRFY/EXPN enum (augments 15 defaults)",
-                           kind="text", placeholder="/path/to/usernames.txt")]),
+                           "username wordlist (bundled or /path/to/file)",
+                           kind="wordlist", wordlist_kind="users",
+                           placeholder="bundled:users-smtp or /path/to/usernames.txt")]),
     # --- T4 scanner-expansion services (from the "everything else" round) ---
     "zookeeper":       _cmd("Zookeeper 4LW", "Services", "optional"),
     "kafka":           _cmd("Kafka MetadataRequest", "Services", "optional"),

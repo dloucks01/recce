@@ -1,0 +1,44 @@
+# MSSQL-specific defaults — the sa passwords that ship on the most
+# common Docker images (Microsoft's own quick-start, Bitnami, others),
+# plus the recurring "we set it once and forgot" passwords found in the
+# wild by AzureAD/Defender scans.
+sa:
+sa:sa
+sa:sql
+sa:mssql
+sa:password
+sa:Password1
+sa:Password123
+sa:P@ssw0rd
+sa:P@ssw0rd1
+sa:P@ssword
+sa:changeme
+sa:admin
+sa:root
+sa:123456
+sa:1234567890
+sa:yourStrong(!)Password
+sa:MyStrongPass123!
+sa:StrongPassword!
+sa:StrongP@ssw0rd
+sa:Password!23
+sa:Welcome1
+sa:Welcome1!
+sa:Winter2024!
+sa:Summer2024!
+sa:Spring2024!
+sa:Fall2024!
+sa:!QAZ2wsx
+sa:qwerty
+sa:qwerty123
+sa:Qaz123456!
+sa:P@55w0rd
+sa:pa$$w0rd
+sa:M$SQL2019!
+sa:Docker!23
+sa:S3cret2024!
+admin:admin
+admin:password
+guest:
+sqlbackup:
+mssql:mssql

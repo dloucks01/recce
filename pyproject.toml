@@ -68,6 +68,7 @@ recce = [
     "local/**/*",
     "scripts/**/*",
     "creds/**/*",
+    "data/wordlists/*.txt",   # curated bundled wordlists (paths/creds/users)
     "webui/static/**/*",
     "*.json",              # KEV/EPSS snapshots (refresh_intel drops these)
 ]
