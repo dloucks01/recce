@@ -8,6 +8,10 @@ import { b64ToBytes, strToB64 } from "../util";
 export function ShellTerminal({ session, tester }: { session: SessionInfo; tester: string }) {
   const host = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  // Kept so the toolbar's "clear" button can call term.clear() — the ref
+  // survives across renders while the xterm instance itself is created
+  // inside the useEffect scope. The on-disk transcript is untouched.
+  const termRef = useRef<Terminal | null>(null);
   const [driver, setDriver] = useState<string | null>(session.driver);
   const [attached, setAttached] = useState<string[]>(session.attached);
   const [live, setLive] = useState(session.status === "live");
@@ -42,6 +46,7 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host.current);
+    termRef.current = term;
     try { fit.fit(); } catch { /* pre-layout */ }
     term.onResize(({ cols, rows }) => {
       wsRef.current?.readyState === WebSocket.OPEN &&
@@ -55,17 +60,36 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
       `${proto}://${location.host}/api/sessions/${session.id}/attach?tester=${encodeURIComponent(tester)}`);
     wsRef.current = ws;
 
+    // Track whether the initial scrollback replay had any content — if
+    // the session is fresh (0 bytes buffered) we send one Enter after
+    // the presence handshake so the shell prints a prompt. Without this
+    // the operator sees a completely blank terminal until they type,
+    // which reads as "is it broken?" on a working brand-new session.
+    let scrollbackHadBytes = false;
+    let sentInitialNewline = false;
     ws.onmessage = (ev) => {
       if (disposed) return;
       try {
         const m = JSON.parse(ev.data);
-        if (m.t === "scrollback" || m.t === "out") {
+        if (m.t === "scrollback") {
+          if (m.data) {
+            const bytes = b64ToBytes(m.data);
+            if (bytes.length > 0) scrollbackHadBytes = true;
+            term.write(bytes);
+          }
+        } else if (m.t === "out") {
           if (m.data) term.write(b64ToBytes(m.data));
         } else if (m.t === "presence") {
           setDriver(m.driver);
           setAttached(m.attached || []);
           if (!m.driver && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ t: "wheel" }));
+          }
+          // First presence message = scrollback replay is done. Nudge
+          // the shell to draw a prompt if nothing was there to see.
+          if (!sentInitialNewline && !scrollbackHadBytes && ws.readyState === WebSocket.OPEN) {
+            sentInitialNewline = true;
+            ws.send(JSON.stringify({ t: "in", data: strToB64("\n") }));
           }
         } else if (m.t === "status") {
           setLive(m.status === "live");
@@ -137,6 +161,11 @@ export function ShellTerminal({ session, tester }: { session: SessionInfo; teste
           </button>
         )}
         <span className="shell-term-watchers" title="attached">👁 {attached.length}</span>
+        <button className="toggle"
+                title="clear the visible terminal (the on-disk transcript is kept)"
+                onClick={() => { termRef.current?.clear(); }}>
+          🧹 clear
+        </button>
         {history.length > 0 && (
           <div className="shell-term-history">
             <button className="toggle" onClick={() => setShowHistory(v => !v)}

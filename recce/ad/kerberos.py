@@ -654,8 +654,19 @@ def findings(dc_ip: str, realm: str, results: list[dict],
     valid = [r for r in results if r["state"] in ("valid", "locked", "roastable")]
     if valid:
         names = ", ".join(r["user"] for r in valid[:15])
+        # Any confirmed username is a direct feed to password spraying — the
+        # attack that survives every lockout policy when kept lockout-safe.
+        # Bump severity as the confirmed list grows: 1 user = medium (proof
+        # of enumeration), >=3 users = high (spray surface), >=10 users =
+        # critical (systematic name-oracle worth immediate mitigation).
+        if len(valid) >= 10:
+            sev = "critical"
+        elif len(valid) >= 3:
+            sev = "high"
+        else:
+            sev = "medium"
         out.append(_finding(
-            "medium", "Kerberos username enumeration (no credential)", tgt,
+            sev, "Kerberos username enumeration (no credential)", tgt,
             f"The DC confirmed {len(valid)} valid username(s) with no credential and no "
             f"logon attempt (no lockouts): {names}. This user list feeds spraying, "
             "AS-REP / Kerberoasting and phishing.",

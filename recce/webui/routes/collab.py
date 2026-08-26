@@ -105,11 +105,18 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
         kind = str(body.get("kind", "password"))
         if kind not in ("password", "nthash", "hash", "blank"):
             kind = "password"
+        # Preserve caller-supplied `source` (e.g. web-secret, weak-default,
+        # anon-share) — losing provenance made it hard to tell paste-imported
+        # creds apart from manual entry, and downstream cred-source-aware
+        # code (spray planner, exploit-plan lookups) couldn't correlate.
+        # Default to "manual" only when the caller didn't specify.
+        supplied_source = str(body.get("source", "")).strip() or "manual"
         with Store(db_path) as st:
             added = st.add_credential(Credential(
                 username=user, secret=secret, kind=kind,
                 domain=str(body.get("domain", "")), origin_ip=str(body.get("origin_ip", "")),
-                source="manual", notes=str(body.get("notes", "")) or "added by hand"))
+                source=supplied_source,
+                notes=str(body.get("notes", "")) or "added by hand"))
             collab.add_activity(st, x_tester, "add", f"{x_tester} added a credential for {user or '(secret)'}")
         broker.publish({"type": "add", "what": "credential", "by": x_tester})
         return {"ok": True, "added": added}

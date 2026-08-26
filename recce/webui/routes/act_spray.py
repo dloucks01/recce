@@ -36,16 +36,52 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
     def act_run():
         """Execute the AUTO (read-only / reversible) links: loot the flagged unauth
         services, refresh the spray plan, feed yields back. Intrusive actions are never
-        run. Returns what was looted so the UI can point the operator at the Loot tab."""
+        run. Returns rich context so the UI can tell the operator EXACTLY what
+        happened, not just "0 new" (which reads as "broken" when the store
+        already holds the harvest from a previous pass)."""
         from ... import act
         from ...store import Store
         with Store(db_path) as st:
+            existing_before = len(st.all_credentials())
             summary = act.execute_auto(st, eng_dir)
+            existing_after = len(st.all_credentials())
+            # Count findings that ALREADY describe credentials so the UI can
+            # say "you have N creds already captured from earlier passes"
+            # instead of a bare "0 new".
+            findings_with_creds = 0
+            for h in st.all_hosts():
+                for v in h.vulns:
+                    if any(k in (v.title or "").lower() for k in (
+                            "hash", "credential", "password", "cred", "trust auth",
+                            "default cred", "sa password")):
+                        findings_with_creds += 1
         spray = summary.get("spray") or {}
-        broker.publish({"type": "act_run", "looted": len(summary["looted"])})
-        return {"looted": len(summary["looted"]),
-                "creds": [{"label": c.label, "source": c.source} for c in summary["looted"]],
-                "spray_files": sorted((spray.get("files") or {}).keys())}
+        looted = summary.get("looted") or []
+        broker.publish({"type": "act_run", "looted": len(looted)})
+        # Build a plain-English summary the frontend can render verbatim.
+        parts: list[str] = []
+        if looted:
+            parts.append(f"Collected {len(looted)} new credential(s)")
+        elif existing_after > 0:
+            parts.append(
+                f"Nothing new — {existing_after} credential(s) already in the store"
+                f" from earlier passes")
+        else:
+            parts.append("Nothing looted — no unauth loot surface was reachable")
+        if spray.get("files"):
+            parts.append(f"Spray plan refreshed ({len(spray['files'])} file(s))")
+        if findings_with_creds:
+            parts.append(f"{findings_with_creds} finding(s) describe recoverable "
+                         "credentials — see Findings")
+        return {
+            "looted": len(looted),
+            "existing_before": existing_before,
+            "existing_after": existing_after,
+            "findings_with_creds": findings_with_creds,
+            "summary": ". ".join(parts) + ".",
+            "creds": [{"label": c.label, "source": c.source} for c in looted],
+            "spray_files": sorted((spray.get("files") or {}).keys()),
+        }
 
     @app.post("/api/spray")
     def spray(body: dict = Body(default=None)):

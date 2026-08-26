@@ -460,6 +460,18 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
                           </span>
                           <span className="badge">{s.status}</span>
                           {s.pty && <span className="badge pty" title="robust PTY (auto-reconnect stager)">PTY</span>}
+                          {typeof (s as any).socks_port === "number" && (
+                            <span className="badge sess-pivot"
+                                  title={`SOCKS5 proxy listening on :${(s as any).socks_port} — proxychains through this shell`}>
+                              SOCKS :{(s as any).socks_port}
+                            </span>
+                          )}
+                          {(s as any).portfwd_count > 0 && (
+                            <span className="badge sess-pivot"
+                                  title={((s as any).portfwd_preview || []).join(" · ") || "port forwards active"}>
+                              {(s as any).portfwd_count} fwd
+                            </span>
+                          )}
                           {s.label && <span className="sess-label" title={s.label}>{s.label}</span>}
                           {s.driver && <span className="muted">▸ {s.driver}</span>}
                           {s.attached.length > 0 && <span className="muted">👁 {s.attached.length}</span>}

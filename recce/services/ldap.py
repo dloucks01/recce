@@ -940,6 +940,14 @@ def _rootdse_summary(pr: dict) -> str:
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
     probes = probes or {}
     out: list[dict] = []
+    # Per-host dedup for HOST-LEVEL findings — anonymous bind, RootDSE
+    # disclosure, and anonymous read pertain to the LDAP SERVICE, not to
+    # individual ports. A DC exposing 389, 636, 3268, 3269 was previously
+    # firing each of those findings 4× per host. Track (ip, kind) and skip
+    # the second and later emissions. Port-specific findings (cleartext
+    # 389, TLS check on 636) are kept per-port unchanged.
+    _HOST_LEVEL_KINDS = {"ldap_anon_bind", "ldap_anon_read", "ldap_rootdse"}
+    emitted_host_level: set[tuple[str, str]] = set()
     for h in hosts:
         for p in h.open_ports:
             if not is_ldap(p):
@@ -949,7 +957,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             if not pr:
                 continue
             summary = _rootdse_summary(pr)
-            if pr.get("anon_read"):
+            if pr.get("anon_read") and (h.ip, "ldap_anon_read") not in emitted_host_level:
+                emitted_host_level.add((h.ip, "ldap_anon_read"))
                 out.append(_finding(
                     "high", "Anonymous LDAP directory read", tgt,
                     "recce bound anonymously and the naming context "
@@ -967,7 +976,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             # *reads* that are denied, flagged separately above as HIGH). Reporting it as
             # a medium finding on every DC is a false positive, so it is info-level and
             # only interesting where it is NOT expected / where no anonymous read fired.
-            if pr.get("anon_bind"):
+            if pr.get("anon_bind") and (h.ip, "ldap_anon_bind") not in emitted_host_level:
+                emitted_host_level.add((h.ip, "ldap_anon_bind"))
                 out.append(_finding(
                     "info", "Anonymous LDAP bind allowed", tgt,
                     "The server accepted a simple bind with an empty username and "
@@ -995,7 +1005,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Require LDAPS/StartTLS; enforce LDAP signing and channel binding "
                     "(LdapEnforceChannelBinding).",
                     ["CWE-319", "CWE-522"], kind="ldap_cleartext"))
-            if pr.get("rootdse_ok") and summary:
+            if (pr.get("rootdse_ok") and summary
+                    and (h.ip, "ldap_rootdse") not in emitted_host_level):
+                emitted_host_level.add((h.ip, "ldap_rootdse"))
                 out.append(_finding(
                     "info", "LDAP RootDSE information disclosure", tgt,
                     f"Pre-authentication RootDSE read exposes: {summary}. Supported SASL: "
