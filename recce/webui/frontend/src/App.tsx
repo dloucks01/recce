@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { postTick, postNote } from "./api";
 import { ImportModal, ShortcutHelp, CommandPalette, EncDecModal } from "./modals";
+import { ToolsMenu } from "./ToolsMenu";
 import { getSessions, getCredentials, getListeners, startListener, SessionInfo, Credential } from "./api";
 import { useEngagement } from "./useEngagement";
 import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Timeline, Nav, FindingFilters } from "./views";
@@ -27,10 +28,24 @@ function useTester() {
   return { tester, who, setWho, nameInput, setNameInput, saveTester };
 }
 
-// Theme & density preferences
+// Theme & density preferences. Density is a tri-state: compact / normal /
+// comfortable — driven by the row-y-* tokens in tokens.css.
+type Density = "compact" | "normal" | "comfortable";
+const DENSITY_ORDER: Density[] = ["compact", "normal", "comfortable"];
+const DENSITY_ICON: Record<Density, string> = { compact: "☰", normal: "≡", comfortable: "⩸" };
+const DENSITY_LABEL: Record<Density, string> = {
+  compact: "compact rows",
+  normal: "normal rows",
+  comfortable: "comfortable rows",
+};
+
 function usePreferences() {
   const [theme, setTheme] = useState(() => localStorage.getItem("recce.theme") || "light");
-  const [density, setDensity] = useState(() => localStorage.getItem("recce.density") || "comfortable");
+  const [density, setDensity] = useState<Density>(() => {
+    const raw = localStorage.getItem("recce.density");
+    return (raw === "compact" || raw === "normal" || raw === "comfortable")
+      ? raw : "comfortable";
+  });
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
@@ -43,6 +58,12 @@ function usePreferences() {
   }, [density]);
 
   return { theme, setTheme, density, setDensity };
+}
+
+// Cycle through the density tri-state on click.
+function cycleDensity(cur: Density): Density {
+  const i = DENSITY_ORDER.indexOf(cur);
+  return DENSITY_ORDER[(i + 1) % DENSITY_ORDER.length];
 }
 
 // Main App
@@ -274,23 +295,32 @@ export default function App() {
           <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
           <div className="header-actions">
             <AddMenu onDone={(m) => note(m)} />
-            <button className="hdr-btn" onClick={() => setShowImport(!showImport)} title="Import tool output (Alt+I)">
-              📥
+            <button className="hdr-search" onClick={() => setShowPalette(true)}
+                    title="Search + jump (Ctrl-K)">
+              <span className="hdr-search-ico">⌕</span>
+              <span className="hdr-search-hint">search</span>
+              <kbd className="hdr-search-key">⌘K</kbd>
             </button>
-            <button className="hdr-btn" onClick={() => setShowEncDec((v) => !v)} title="Encoder / Decoder toolbox">
-              🔀
-            </button>
+            <ToolsMenu
+              onImport={() => setShowImport(true)}
+              onEncDec={() => setShowEncDec(true)}
+            />
             <ActivityButton />
             <ChatButton />
           </div>
           <div className="header-util">
-            <button className="theme-tog" onClick={() => setDensity(density === "compact" ? "comfortable" : "compact")}
-                    title={density === "compact" ? "comfortable rows" : "compact rows"} aria-label="toggle density">
-              {density === "compact" ? "☰" : "≡"}
+            <button className="theme-tog" onClick={() => setDensity(cycleDensity(density))}
+                    title={`Density: ${DENSITY_LABEL[density]} — click to cycle`}
+                    aria-label="cycle density">
+              {DENSITY_ICON[density]}
             </button>
             <button className="theme-tog" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
                     title="toggle light / dark" aria-label="toggle theme">
               {theme === "dark" ? "☀" : "☾"}
+            </button>
+            <button className="theme-tog" onClick={() => setShowShortcuts(true)}
+                    title="Keyboard shortcuts (?)" aria-label="shortcuts help">
+              ?
             </button>
           </div>
           {who ? (

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { Fragment, useState, useEffect, useRef } from "react";
 
 export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "sessions" | "timeline" | "report" | "exploit" | "credentials" | "playbook";
 
@@ -16,14 +16,29 @@ const TAB_LABELS: Record<TabId, string> = {
   playbook: "Playbook",
 };
 
-// Default tab order follows the natural pen-test workflow:
-// dashboard (pulse) → scan (start) → findings (surface) → hosts / services
-// (drill / pivot) → exploit (plan) → sessions (post-ex) → credentials (loot) →
-// playbook (phase tracking) → timeline (retrospective) → report (deliverable).
-// Testers can still drag-and-drop; localStorage remembers their reorder.
+// Default tab order follows the natural pen-test workflow, grouped into
+// three phases separated by visual dividers:
+//   PULSE   → dashboard
+//   RECON   → scan, findings, hosts, services   (surface + drill + pivot)
+//   ATTACK  → exploit, sessions, credentials    (plan + execute + loot)
+//   DELIVER → report                            (final artifact)
+//
+// Playbook + Timeline are secondary — they live in the ⋮ menu by default
+// and can be re-added. Testers who use them daily add them back once and
+// localStorage remembers.
+//
+// Testers can still drag-and-drop within the visible set to reorder.
 const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services",
-                           "exploit", "sessions", "credentials", "playbook",
-                           "timeline", "report"];
+                           "exploit", "sessions", "credentials", "report",
+                           "playbook", "timeline"];
+// The DEFAULT visible set. Everything after "report" is optional.
+const DEFAULT_VISIBLE: TabId[] = ["dashboard", "scan", "findings", "hosts", "services",
+                                   "exploit", "sessions", "credentials", "report"];
+
+// Visual group boundaries — a divider is inserted BEFORE these tab ids
+// when they appear in the visible set. Purely presentational — no
+// impact on ordering, drag, or state.
+const GROUP_BOUNDARIES: Set<TabId> = new Set(["scan", "exploit", "report"]);
 
 interface TabBarProps {
   active: TabId;
@@ -43,15 +58,13 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
       );
       // Dedup after migration (in case both ids were present).
       parsed = Array.from(new Set(parsed)) as TabId[];
-      const missing = ALL_TABS.filter(t => !parsed.includes(t));
-      if (missing.length > 0) {
-        const merged = [...parsed, ...missing];
-        localStorage.setItem("recce.tabs", JSON.stringify(merged));
-        return merged;
-      }
-      return parsed;
+      // Filter out any obsolete ids we no longer support.
+      parsed = parsed.filter(t => ALL_TABS.includes(t));
+      return parsed.length > 0 ? parsed : DEFAULT_VISIBLE;
     }
-    return ALL_TABS;
+    // First visit: show the workflow-natural default set. Playbook +
+    // Timeline live under ⋮ ("more") — testers can add them back.
+    return DEFAULT_VISIBLE;
   });
   const [dragging, setDragging] = useState<TabId | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -105,22 +118,26 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
   return (
     <div className="tabbar">
       <div className="tabs-scroll">
-        {tabs.map((tab) => (
-          <button
-            key={tab}
-            className={`tab ${tab === active ? "active" : ""} ${dragging === tab ? "dragging" : ""}`}
-            onClick={() => onSwitch(tab)}
-            draggable
-            onDragStart={() => handleDragStart(tab)}
-            onDragOver={handleDragOver}
-            onDrop={() => handleDrop(tab)}
-            title={`${TAB_LABELS[tab]}${dragging ? " — drag to reorder" : ""}`}
-          >
-            {TAB_LABELS[tab]}
-            {badges?.[tab] ? (
-              <span className="badge">{badges[tab]}</span>
-            ) : null}
-          </button>
+        {tabs.map((tab, i) => (
+          <Fragment key={tab}>
+            {i > 0 && GROUP_BOUNDARIES.has(tab) &&
+              <span className="tab-group-divider" aria-hidden="true" />
+            }
+            <button
+              className={`tab ${tab === active ? "active" : ""} ${dragging === tab ? "dragging" : ""}`}
+              onClick={() => onSwitch(tab)}
+              draggable
+              onDragStart={() => handleDragStart(tab)}
+              onDragOver={handleDragOver}
+              onDrop={() => handleDrop(tab)}
+              title={`${TAB_LABELS[tab]}${dragging ? " — drag to reorder" : ""}`}
+            >
+              {TAB_LABELS[tab]}
+              {badges?.[tab] ? (
+                <span className="badge">{badges[tab]}</span>
+              ) : null}
+            </button>
+          </Fragment>
         ))}
       </div>
       <div className="tab-menu" ref={menuRef}>

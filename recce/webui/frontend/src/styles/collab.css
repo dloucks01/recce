@@ -124,7 +124,11 @@
 .tagpop .lchip { text-align: left; width: 100%; }
 .tbl td.os { max-width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* ---- compact density (opt-in via the header toggle) ---- */
+/* ---- density tri-state (compact / normal / comfortable) ----
+   "comfortable" is the default = no overrides (base CSS wins).
+   "normal" tightens rows moderately for testers scanning many rows
+   without wanting the maximum-info-density feel of compact.
+   "compact" is the tightest, meant for wall-mounted / large-list use. */
 :root[data-density="compact"] .tbl tbody td { padding: 6px 12px; }
 :root[data-density="compact"] .tbl thead th { padding: 6px 12px; }
 :root[data-density="compact"] .stats { gap: 10px; margin-bottom: 14px; }
@@ -134,6 +138,14 @@
 :root[data-density="compact"] main { padding-top: 14px; }
 :root[data-density="compact"] .host-collab { gap: 6px; }
 :root[data-density="compact"] .stripe { height: 22px; }
+
+:root[data-density="normal"] .tbl tbody td { padding: 8px 12px; }
+:root[data-density="normal"] .tbl thead th { padding: 8px 12px; }
+:root[data-density="normal"] .stats { gap: 12px; margin-bottom: 16px; }
+:root[data-density="normal"] .stat { padding: 12px 15px; }
+:root[data-density="normal"] .stat .v { font-size: 25px; }
+:root[data-density="normal"] .panel { padding: 14px 17px; }
+:root[data-density="normal"] .stripe { height: 26px; }
 
 /* ---- branded boot / loading / error screen ---- */
 .boot { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 16px; padding: 40px; text-align: center; }
