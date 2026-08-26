@@ -133,26 +133,52 @@ def cmd_mssql(args: argparse.Namespace) -> int:
 
     # Deep enumeration via impacket-mssqlclient: run the queries, detect the actual
     # escalation chain per instance, and enrich the findings + runbook from live data.
+    # Auto-promote a weak_default hit into deep-enum credentials — otherwise the
+    # depth features (impersonation chain, TRUSTWORTHY, hash harvest, file-read
+    # via OPENROWSET) never run in a no-creds WebUI scan even when the C4 sweep
+    # already unlocked the instance.
+    deep_creds_per_target: dict[str, dict] = {}
+    for t in tgts:
+        if creds:
+            deep_creds_per_target[t["ip"]] = dict(creds)
+        elif t.get("weak_default"):
+            wd = t["weak_default"]
+            deep_creds_per_target[t["ip"]] = {
+                "user": wd["user"], "secret": wd["password"], "domain": "",
+                "dc_ip": ""}
     ran_impacket = False
-    if creds and not args.no_run and not mssql.mssqlclient_tool():
+    if deep_creds_per_target and not args.no_run and not mssql.mssqlclient_tool():
         print("      [!] impacket-mssqlclient not installed - MSSQL deep enumeration "
-              "(linked servers, data-mine, xp_cmdshell, write-proof) SKIPPED; the sheet "
-              "shows commands only. `recce doctor` flags this; install impacket to run it.")
-    if creds and not args.no_run and mssql.mssqlclient_tool():
+              "(linked servers, data-mine, xp_cmdshell, write-proof, file-read) "
+              "SKIPPED; the sheet shows commands only. `recce doctor` flags this; "
+              "install impacket to run it.")
+    if deep_creds_per_target and not args.no_run and mssql.mssqlclient_tool():
         for t in tgts:
+            deep_creds = deep_creds_per_target.get(t["ip"])
+            if not deep_creds:
+                continue
             if t.get("access") is False:            # nxc already said the creds fail
                 continue
-            enum, err = mssql.run_mssqlclient(t["ip"], creds, port=t["port"],
-                                              windows_auth=not args.local_auth)
+            if not creds and t.get("weak_default"):
+                # No engagement creds — depth is running under the C4-sweep
+                # hit. Force local (SQL) auth path so windows-auth doesn't
+                # eat the credential.
+                windows_auth_this = False
+                print(f"      [+] {t['ip']}: running deep enum with C4-sweep "
+                      f"credential {deep_creds['user']}")
+            else:
+                windows_auth_this = not args.local_auth
+            enum, err = mssql.run_mssqlclient(t["ip"], deep_creds, port=t["port"],
+                                              windows_auth=windows_auth_this)
             if enum is None:
                 print(f"      [!] mssqlclient {t['ip']}: {err}")
                 continue
             ran_impacket = True
-            runner = mssql.link_runner(t["ip"], creds, port=t["port"],
-                                       windows_auth=not args.local_auth)
+            runner = mssql.link_runner(t["ip"], deep_creds, port=t["port"],
+                                       windows_auth=windows_auth_this)
             # Verify db_owner on the TRUSTWORTHY candidates so a chain is CONFIRMED.
             dbo_map = mssql.verify_dbowner(mssql.trustworthy_sysadmin_dbs(enum), runner)
-            live_fs, live_chain, summary = mssql.chains_from_enum(t, enum, creds,
+            live_fs, live_chain, summary = mssql.chains_from_enum(t, enum, deep_creds,
                                                                   dbo_map=dbo_map or None)
             analysis["findings"] = live_fs + analysis["findings"]
             for rb in analysis["runbooks"]:
