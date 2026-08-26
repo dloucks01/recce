@@ -902,6 +902,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     mp.add_argument("-u", "--username", help="credential to try on auth-required "
                     "instances (also sprays looted creds from the datastore)")
     mp.add_argument("-p", "--password", help="password for -u")
+    mp.add_argument("--wordlist", metavar="FILE",
+                    help="path to a credential wordlist (each line 'user:password' "
+                         "or bare password paired with admin). AUGMENTS the "
+                         "bundled 6-cred weak-SCRAM sweep.")
     _add_io(mp)
     _add_budget(mp)
     mp.set_defaults(func=_h("mongodb"))

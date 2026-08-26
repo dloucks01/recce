@@ -108,7 +108,11 @@ _COMMANDS: dict = {
                                "extra cred wordlist (user:pass or pass; augments 7 defaults)",
                                kind="text", placeholder="/path/to/postgres-creds.txt")]),
     "mysql": _cmd("MySQL / MariaDB", "Databases", "optional", creds=True),
-    "mongodb": _cmd("MongoDB", "Databases", "optional", creds=True),
+    "mongodb": _cmd("MongoDB (deep — weak-SCRAM sweep + JS-eval + shard-map + collection inventory)",
+                    "Databases", "optional", creds=True,
+                    flags=[_f("wordlist", "--wordlist",
+                              "extra cred wordlist (user:pass or pass; augments 6 defaults)",
+                              kind="text", placeholder="/path/to/mongo-creds.txt")]),
     # MSSQL depth: native TDS-tunneled TLS SQL-Auth probe. C4 weak-default
     # sweep of 7 sa passwords runs when no creds are supplied; credentialed
     # sweep fires xp_cmdshell / CLR / OLE Automation / linked-server walk

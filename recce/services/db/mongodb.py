@@ -252,6 +252,38 @@ def authenticate(ip: str, port: int = _DEFAULT_PORT, user: str = "", password: s
     return False
 
 
+# Small, targeted default-cred list — same shape as the Postgres/MSSQL weak
+# sweeps. Fires only when the tester supplies no credentials AND the instance
+# rejects the unauth probe (i.e. reachable-but-locked). MongoDB has no
+# built-in lockout by default so a 4-attempt sweep is safe.
+_WEAK_MONGO_CREDS: list[tuple[str, str]] = [
+    ("admin", "admin"),
+    ("admin", "password"),
+    ("root", "root"),
+    ("mongo", "mongo"),
+    ("test", "test"),
+    ("mongoadmin", "secret"),        # bitnami default
+]
+
+
+def weak_password_sweep(ip: str, port: int = _DEFAULT_PORT,
+                        timeout: float = _TIMEOUT,
+                        extra_creds: list[tuple[str, str]] | None = None
+                        ) -> tuple[str, str] | None:
+    """Try each entry in _WEAK_MONGO_CREDS (+ any user-supplied `extra_creds`)
+    via SCRAM. Returns the first (user, password) pair that authenticates, or
+    None. Called only when probe() reports auth-required and no engagement
+    credentials worked."""
+    creds = list(_WEAK_MONGO_CREDS) + list(extra_creds or [])
+    for user, password in creds:
+        try:
+            if authenticate(ip, port, user, password, timeout=timeout):
+                return (user, password)
+        except OSError:
+            continue
+    return None
+
+
 def probe_creds(ip: str, port: int, user: str, password: str,
                 timeout: float = _TIMEOUT) -> dict:
     """Credentialed probe: authenticate, then run the same deep enumeration as the
@@ -403,6 +435,60 @@ def _deep_mongo(sock, out: dict, timeout: float) -> None:
         out["auth_configured"] = bool(sec.get("authorization") == "enabled")
         net = parsed.get("net") if isinstance(parsed.get("net"), dict) else {}
         out["bind_ip"] = str(net.get("bindIp", ""))
+    # replSetGetConfig: full replica-set config including the keyFile-driven
+    # cluster auth secret hash. `getShardMap`: sharded-cluster topology (all
+    # mongos + config server addresses). Both are unauth-readable on legacy
+    # exposures; findings surface them as lateral-target inventory.
+    rsc = _cmd(sock, "replSetGetConfig", 13, timeout)
+    if isinstance(rsc, dict) and rsc.get("ok") == 1.0:
+        cfg = rsc.get("config") or {}
+        if isinstance(cfg, dict):
+            out["replset_config"] = {
+                "id": cfg.get("_id", ""),
+                "version": cfg.get("version"),
+                "protocol_version": cfg.get("protocolVersion"),
+                "member_count": len(cfg.get("members") or []),
+            }
+    sm = _cmd(sock, "getShardMap", 14, timeout)
+    if isinstance(sm, dict) and sm.get("ok") == 1.0 and isinstance(sm.get("map"), dict):
+        # `map` keys: shard names -> "host1:27017,host2:27017". Flatten unique hosts.
+        hosts: set[str] = set()
+        for v in sm["map"].values():
+            if isinstance(v, str):
+                for h in v.split(","):
+                    h = h.strip()
+                    if h:
+                        hosts.add(h)
+        out["shard_hosts"] = sorted(hosts)
+    # Server-side JavaScript surface: getParameter("scripting") tells you if
+    # $where / mapReduce / eval are runnable. Enabled = RCE primitive on old
+    # servers (CVE-2013-1892 era) and a NoSQLi amplifier on modern ones.
+    gp = command(sock, bson_doc(_e_int32("getParameter", 1),
+                                _e_bool("scripting", True),
+                                _e_str("$db", "admin")), 15, timeout)
+    if isinstance(gp, dict) and gp.get("ok") == 1.0 and "scripting" in gp:
+        out["scripting_enabled"] = bool(gp.get("scripting"))
+    # Collection inventory per database — not just secret-field samples the
+    # datamine() step surfaces. Bounded so a huge cluster doesn't stall the
+    # probe; the runbook covers the full dump.
+    dbs = out.get("databases") or []
+    inv: dict[str, list[str]] = {}
+    rid = 20
+    for d in dbs[:8]:
+        name = d.get("name") if isinstance(d, dict) else None
+        if not name or name in ("local", "config"):
+            continue
+        lc = command(sock, bson_doc(_e_int32("listCollections", 1),
+                                    _e_str("$db", name)), rid, timeout)
+        rid += 1
+        colls = [c.get("name", "") for c in _batch(
+            (lc or {}).get("cursor", {}).get("firstBatch"))
+            if isinstance(c, dict) and c.get("name")
+            and not c["name"].startswith("system.")]
+        if colls:
+            inv[name] = colls[:20]
+    if inv:
+        out["collection_inventory"] = inv
 
 
 # --- probe ----------------------------------------------------------------------
@@ -462,6 +548,29 @@ _NARRATIVE = {
         "The MongoDB build is old / end-of-life. Beyond the missing security fixes, "
         "pre-2.6 defaults exposed the HTTP/REST interfaces and pre-3.0 shipped with no "
         "authentication out of the box - confirm the running config and upgrade."),
+    "mongo_weak_default": (
+        "The MongoDB instance is protected by authentication but still accepts a "
+        "well-known default credential (admin/admin, root/root, mongo/mongo class). "
+        "Same blast radius as an unauth exposure — full read/write, credential "
+        "harvest, replica-set pivot. Rotate the credential immediately."),
+    "mongo_scripting_enabled": (
+        "Server-side JavaScript is enabled (scripting=true). The server will execute "
+        "arbitrary JS inside $where clauses, mapReduce jobs, and (on legacy builds) "
+        "the `eval` command. Any endpoint that reflects user input into a query "
+        "becomes an RCE primitive; on 3.x and earlier, `eval` on an unauth instance "
+        "was direct code execution. Disable scripting (--noscripting or "
+        "security.javascriptEnabled: false) unless an application demands it."),
+    "mongo_shard_topology": (
+        "The unauth probe recovered the sharded-cluster topology (getShardMap). All "
+        "mongos + config-server addresses are now known to the attacker — same "
+        "credentials or exposure typically apply cluster-wide, so this is a "
+        "lateral-target inventory. Bind the cluster interfaces to a trusted network."),
+    "mongo_collection_inventory": (
+        "recce enumerated collection names across every accessible database. Even "
+        "when individual documents don't obviously leak PII, the collection names "
+        "themselves reveal the data model — `sessions`, `payments`, `password_reset`, "
+        "`api_keys`, `users` — which is enough to plan a targeted dump. Rate limit "
+        "listCollections at the network layer or lock down the account."),
 }
 
 
@@ -555,18 +664,90 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     extra += (f" Enumerated {len(users)} account(s)"
                               + (f"; {len(hashes)} SCRAM hash(es) extracted (hashcat "
                                  "-m 24100/24200)" if hashes else "") + ".")
+                # A weak-default hit is a bigger deal than a looted-cred hit —
+                # the operator never had to leave the target to log in. Bump
+                # severity to critical and mark the finding distinctly.
+                if pr.get("cred_source") == "weak_default":
+                    out.append(_finding(
+                        "critical", f"MongoDB accepts default credential '{who}'", tgt,
+                        f"recce authenticated as '{who}' with a well-known default "
+                        "password (bundled 6-cred sweep, no engagement credential "
+                        "supplied)"
+                        + (f" - version {ver}" if ver else "")
+                        + f". {len(dbs)} database(s) accessible." + extra
+                        + " Same blast radius as an unauth exposure.",
+                        "mongosh",
+                        f"mongosh 'mongodb://{who}:<pass>@{h.ip}:{p.portid}/"
+                        "?authSource=admin'",
+                        "Rotate this credential IMMEDIATELY, enforce SCRAM-SHA-256, "
+                        "and bind the listener to a trusted interface.",
+                        ["CWE-521", "CWE-798"], kind="mongo_weak_default"))
+                else:
+                    out.append(_finding(
+                        "high", "MongoDB credentialed access (looted / weak credential)", tgt,
+                        f"recce authenticated as '{who}' (SCRAM) with a credential from the "
+                        "engagement"
+                        + (f" (version {ver})" if ver else "")
+                        + f" and read {len(dbs)} database(s)." + extra,
+                        "mongosh",
+                        f"mongosh 'mongodb://{who}:<pass>@{h.ip}:{p.portid}/?authSource=admin' "
+                        "--eval 'db.adminCommand({usersInfo:1,showCredentials:true})'",
+                        "Rotate the credential; enforce least privilege / SCRAM-SHA-256; bind "
+                        "to a trusted interface.",
+                        ["CWE-522", "CWE-284"], kind="mongo_cred_access"))
+            # New probe outputs — surface regardless of the access path above.
+            if pr.get("scripting_enabled"):
                 out.append(_finding(
-                    "high", "MongoDB credentialed access (looted / weak credential)", tgt,
-                    f"recce authenticated as '{who}' (SCRAM) with a credential from the "
-                    "engagement"
-                    + (f" (version {ver})" if ver else "")
-                    + f" and read {len(dbs)} database(s)." + extra,
+                    "high", "MongoDB server-side JavaScript enabled", tgt,
+                    "getParameter reports scripting=true — $where clauses, "
+                    "mapReduce, and (on legacy builds) `eval` will execute "
+                    "server-side JavaScript. NoSQLi in any application query "
+                    "that reflects user input becomes RCE; on <=3.x an unauth "
+                    "instance is direct code execution.",
                     "mongosh",
-                    f"mongosh 'mongodb://{who}:<pass>@{h.ip}:{p.portid}/?authSource=admin' "
-                    "--eval 'db.adminCommand({usersInfo:1,showCredentials:true})'",
-                    "Rotate the credential; enforce least privilege / SCRAM-SHA-256; bind "
-                    "to a trusted interface.",
-                    ["CWE-522", "CWE-284"], kind="mongo_cred_access"))
+                    f"mongosh mongodb://{h.ip}:{p.portid}/ --eval 'db.adminCommand("
+                    "{getParameter:1,scripting:1})'",
+                    "Start mongod with --noscripting (or "
+                    "security.javascriptEnabled: false) unless an application "
+                    "requires server-side JS.",
+                    ["CWE-94", "CWE-95"], kind="mongo_scripting_enabled"))
+            shards = pr.get("shard_hosts") or []
+            if shards:
+                out.append(_finding(
+                    "medium", "MongoDB sharded-cluster topology exposed", tgt,
+                    f"getShardMap returned {len(shards)} cluster host(s) — the "
+                    "mongos + config-server addresses of the sharded deployment: "
+                    + ", ".join(shards[:8])
+                    + (" …" if len(shards) > 8 else "")
+                    + ". Same credentials/exposure typically apply cluster-wide.",
+                    "mongosh",
+                    f"mongosh mongodb://{h.ip}:{p.portid}/ --eval "
+                    "'db.adminCommand({getShardMap:1})'",
+                    "Bind the cluster interfaces to a trusted network; require "
+                    "authentication on every shard and config server.",
+                    ["CWE-200"], kind="mongo_shard_topology"))
+            inv = pr.get("collection_inventory") or {}
+            if inv:
+                sample = []
+                for db, cols in list(inv.items())[:4]:
+                    sample.append(f"{db}: {', '.join(cols[:6])}"
+                                  + (" …" if len(cols) > 6 else ""))
+                total = sum(len(v) for v in inv.values())
+                out.append(_finding(
+                    "medium", "MongoDB collection inventory exposed", tgt,
+                    f"recce enumerated {total} collection(s) across {len(inv)} "
+                    "database(s) via listCollections. The collection names "
+                    "alone reveal the data model — enough to plan a targeted "
+                    "dump:\n\n" + "\n".join(sample),
+                    "mongosh",
+                    f"mongosh mongodb://{h.ip}:{p.portid}/ --eval "
+                    "'db.adminCommand({listDatabases:1}).databases.forEach("
+                    "d => print(d.name, JSON.stringify("
+                    "db.getSiblingDB(d.name).getCollectionNames())))'",
+                    "Restrict listCollections at the RBAC layer (revoke "
+                    "listCollections from the app role); bind to a trusted "
+                    "interface.",
+                    ["CWE-200"], kind="mongo_collection_inventory"))
             dm = pr.get("datamine")
             if dm and dm.get("secret_fields"):
                 sf = dm["secret_fields"]
@@ -633,12 +814,17 @@ def findings_to_vulns(fs: list[dict]) -> dict:
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
-            budget: float | None = None, progress=None) -> dict:
+            budget: float | None = None, progress=None,
+            wordlist: str | None = None, **_ignored) -> dict:
     """Full MongoDB analysis. Returns {targets, findings, runbooks, probes, stats}.
-    `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
+    `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe.
+    `wordlist` = optional path to a user-supplied credential list; augments
+    the bundled weak-SCRAM sweep."""
     from ... import svcprobe
     from ...models import Credential
     from .base import cred_list as _cred_list
+    from ...wordlists import load_cred_wordlist
+    extra_creds = load_cred_wordlist(wordlist, default_user="admin")
     targets = mongodb_targets(hosts)
     probes: dict = {}
     state: dict = {}
@@ -660,6 +846,19 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                         pr = cp
                         acc_user, acc_pw = u, pw
                         break
+                # Nothing from the engagement worked — targeted default-cred
+                # sweep. Distinct marker so findings flags it as a WEAK-DEFAULT
+                # rather than a generic looted-cred access.
+                if not pr.get("cred_access"):
+                    weak = weak_password_sweep(t["ip"], t["port"],
+                                               extra_creds=extra_creds)
+                    if weak:
+                        u, pw = weak
+                        cp = probe_creds(t["ip"], t["port"], u, pw)
+                        if cp.get("cred_access"):
+                            pr = cp
+                            pr["cred_source"] = "weak_default"
+                            acc_user, acc_pw = u, pw
             probes[(t["ip"], t["port"])] = pr
             t["unauth"] = pr.get("unauth", False)
             t["cred_access"] = pr.get("cred_access", False)

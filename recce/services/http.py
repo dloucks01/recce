@@ -485,6 +485,9 @@ def fingerprint(ip: str, port: int, use_tls: bool) -> dict:
         "generator": "",
         "technologies": [],
         "cookies": {},
+        # Full raw header map — feeds header_hygiene_findings() which does
+        # version-disclosure + CSP auditing off the root response.
+        "headers": dict(r["headers"]),
     }
     # Parse Set-Cookie header for framework hints.
     raw_cookies = r["headers"].get("set-cookie", "")
@@ -1072,6 +1075,281 @@ def vhost_probe(ip: str, port: int, use_tls: bool, root_domain: str = "") -> lis
     return hits
 
 
+# ---- Deep probes (Actuator / nginx alias / cache poisoning / headers / CSP) --
+
+# Spring Boot Actuator endpoints. `/actuator/env` and `/actuator/heapdump` are
+# the crown jewels — env exposes every application property including DB
+# credentials and API keys; heapdump gives the raw JVM heap (searchable for
+# secrets). `/actuator/mappings` reveals every endpoint. The default context
+# path is `/actuator` on Spring Boot 2+, `/` on Spring Boot 1.x.
+_ACTUATOR_ENDPOINTS: list[tuple[str, str, str]] = [
+    ("env", "medium",
+     "Application properties + environment variables (DB passwords, API keys, "
+     "AWS creds — anything from application.properties)."),
+    ("heapdump", "critical",
+     "Raw JVM heap dump. `strings heap.hprof | grep -Ei "
+     "'password|secret|key|token'` recovers every credential currently held "
+     "in memory. Multi-megabyte download — the size confirms it's the real "
+     "thing rather than a routed placeholder."),
+    ("configprops", "medium",
+     "@ConfigurationProperties beans — often mirrors env with typed schema."),
+    ("mappings", "low",
+     "Every URL-to-handler mapping the app exposes (attack surface map)."),
+    ("beans", "low",
+     "Full bean graph — reveals framework versions and injected deps."),
+    ("threaddump", "low",
+     "Every thread's stack trace — leaks credentials sitting in method args."),
+    ("loggers", "medium",
+     "Live logger level control. POST to bump root to TRACE and read the "
+     "logs from `/actuator/logfile` — real-time credential capture."),
+    ("trace", "low",
+     "Recent HTTP request/response bodies (Spring Boot 1.x). Cookies + "
+     "Authorization headers of live user sessions in the last 100 requests."),
+    ("httptrace", "low",
+     "Same as `trace` on Spring Boot 2.x."),
+]
+
+
+def actuator_probe(ip: str, port: int, use_tls: bool) -> list[dict]:
+    """Enumerate Spring Boot Actuator endpoints under both `/actuator/…` and
+    `/…` (Boot 1.x). Returns [{path, endpoint, status, length, severity,
+    description}, …] for each responsive endpoint. A 200 with a JSON-shaped
+    body (or a large binary for heapdump) confirms exposure; a 401/403 is
+    also worth flagging because the endpoint IS there and default creds
+    (admin/admin, actuator/actuator) commonly work."""
+    hits: list[dict] = []
+    for base in ("/actuator", ""):
+        for ep, sev, desc in _ACTUATOR_ENDPOINTS:
+            path = f"{base}/{ep}" if base else f"/{ep}"
+            r = _get(ip, port, use_tls, path, read_body=True)
+            if r is None:
+                continue
+            body = r.get("body") or b""
+            blen = len(body)
+            status = r.get("status", 0)
+            # 200 with a JSON-y body OR the multi-megabyte heapdump payload
+            # is a confirmed hit. 401/403 is a partial hit (endpoint exists,
+            # default creds might work).
+            hit = False
+            if status == 200 and blen > 0:
+                if ep == "heapdump" and blen > 100_000:      # real hprof, not a stub
+                    hit = True
+                elif body[:1] in (b"{", b"[") or ep == "heapdump":
+                    hit = True
+            if status in (401, 403):
+                hit = True                                    # partial
+            if not hit:
+                continue
+            hits.append({"path": path, "endpoint": ep, "status": status,
+                         "length": blen, "severity": sev, "description": desc})
+    return hits
+
+
+# nginx alias-traversal (CVE-2018-16843 pattern). When a `location /static/`
+# maps to `alias /var/www/app/static/;` without a trailing slash on the
+# location, `/static../` resolves to `/var/www/app/` — one directory ABOVE
+# the intended root. Requesting `/static../etc/passwd` on such a config
+# returns the file. The probe is safe: reading /etc/passwd is universally
+# non-sensitive and the exact response is diagnostic.
+_ALIAS_TRAVERSAL_PROBES: list[tuple[str, list[str]]] = [
+    # (marker string that must appear in response, list of paths to try)
+    ("root:x:0:0:", ["/static../etc/passwd", "/assets../etc/passwd",
+                       "/media../etc/passwd", "/img../etc/passwd",
+                       "/js../etc/passwd", "/css../etc/passwd",
+                       "/public../etc/passwd", "/uploads../etc/passwd"]),
+]
+
+
+def nginx_alias_traversal_probe(ip: str, port: int, use_tls: bool) -> dict | None:
+    """Try each `<mount>../etc/passwd` probe against known common
+    static-content mount prefixes. Returns the first hit as
+    {path, marker_line} or None."""
+    for marker, paths in _ALIAS_TRAVERSAL_PROBES:
+        for p in paths:
+            r = _get(ip, port, use_tls, p, read_body=True)
+            if r is None or r.get("status") != 200:
+                continue
+            body = r.get("body") or b""
+            if marker.encode() in body:
+                # Return the actual /etc/passwd root line as proof — cannot
+                # be confused with an application 200 that happens to be big.
+                line = next((ln for ln in body.split(b"\n")
+                             if ln.startswith(b"root:")), b"")
+                return {"path": p, "marker": line.decode("utf-8", "replace")}
+    return None
+
+
+# Version-disclosing headers → CVE-hint pairs. `Server` and `X-*-Version`
+# families. Ordered by specificity so we surface the strongest signal first.
+_VERSION_HEADER_KEYS = ("Server", "X-Powered-By", "X-AspNet-Version",
+                          "X-AspNetMvc-Version", "X-Runtime", "X-Generator",
+                          "X-Drupal-Cache", "X-Backend-Server", "Via")
+
+
+def header_hygiene_findings(fp: dict) -> list[dict]:
+    """Derive findings from the root response headers already captured by
+    fingerprint(). Returns [{severity, title, output, remediation, cwes}, …].
+    - Version-disclosing headers = information disclosure (low, but each
+      product name/version fed into a CVE lookup is a real recon win).
+    - Missing / weak CSP = a whole class of client-side bug. Parse and
+      grade what's there rather than only flagging its absence."""
+    out: list[dict] = []
+    headers = (fp or {}).get("headers") or {}
+    # Header keys are case-insensitive; normalise to lower-case lookup.
+    hl = {k.lower(): v for k, v in headers.items()}
+    disclosures = []
+    for key in _VERSION_HEADER_KEYS:
+        v = hl.get(key.lower())
+        if v and any(ch.isdigit() for ch in v):
+            disclosures.append((key, v))
+    if disclosures:
+        pairs = ", ".join(f"{k}: {v}" for k, v in disclosures[:6])
+        out.append({
+            "severity": "low",
+            "title": "Version-disclosing HTTP headers",
+            "output": (f"Response headers reveal product versions: {pairs}. "
+                       "Each version string is a direct CVE lookup for the "
+                       "attacker — remove or shorten these in production."),
+            "cwes": ["CWE-200"],
+            "remediation": ("Strip Server / X-Powered-By / X-AspNet-Version "
+                            "at the reverse-proxy layer; disable "
+                            "`expose_php`, remove ASP.NET version headers "
+                            "(<httpProtocol>), set `server_tokens off` in "
+                            "nginx, `ServerTokens Prod` in Apache."),
+        })
+    csp = hl.get("content-security-policy") or hl.get("content-security-policy-report-only")
+    if csp:
+        weak_directives = []
+        low = csp.lower()
+        if "'unsafe-inline'" in low:
+            weak_directives.append("'unsafe-inline' (defeats XSS defense)")
+        if "'unsafe-eval'" in low:
+            weak_directives.append("'unsafe-eval' (permits eval/Function/setTimeout(str))")
+        if re.search(r"(script-src|default-src)[^;]*\*(?!\.)", low):
+            weak_directives.append("wildcard host in script-src/default-src")
+        if "data:" in low and re.search(r"script-src[^;]*data:", low):
+            weak_directives.append("data: scheme allowed for scripts")
+        if "frame-ancestors" not in low:
+            weak_directives.append("frame-ancestors missing (clickjacking exposure)")
+        if "object-src" not in low:
+            weak_directives.append("object-src missing (plugin content unrestricted)")
+        if weak_directives:
+            out.append({
+                "severity": "low",
+                "title": "Weak Content-Security-Policy",
+                "output": ("The CSP header is present but has weak directives: "
+                           + "; ".join(weak_directives) + ".\n\nFull policy: " + csp[:400]
+                           + ("…" if len(csp) > 400 else "")),
+                "cwes": ["CWE-1021", "CWE-693"],
+                "remediation": ("Remove 'unsafe-inline' and 'unsafe-eval'; replace "
+                                "wildcard sources with explicit hostnames; add "
+                                "`frame-ancestors 'self'` (or `'none'`) and "
+                                "`object-src 'none'`."),
+            })
+    elif fp is not None:                             # explicit absence check
+        out.append({
+            "severity": "info",
+            "title": "No Content-Security-Policy header set",
+            "output": "The root response carries no CSP header. Any reflected "
+                      "or stored XSS runs freely; no clickjacking or plugin "
+                      "restriction.",
+            "cwes": ["CWE-1021"],
+            "remediation": ("Set a Content-Security-Policy header. Start with "
+                            "`default-src 'self'; object-src 'none'; "
+                            "frame-ancestors 'none'; base-uri 'self'` and "
+                            "widen as needed."),
+        })
+    return out
+
+
+# Cache-poisoning primitives — headers that a fronting cache/CDN typically
+# forwards but that also influence the application's response body. If the
+# app reflects Host or X-Forwarded-Host into an absolute URL (canonical link,
+# email link, password-reset), a poisoned cache entry sends every subsequent
+# viewer to attacker-controlled content.
+_CACHE_POISON_HEADERS = ("X-Forwarded-Host", "X-Original-URL",
+                          "X-Rewrite-URL", "X-Forwarded-Scheme",
+                          "X-Forwarded-Proto")
+
+
+def cache_poisoning_probe(ip: str, port: int, use_tls: bool,
+                            path: str = "/") -> list[dict]:
+    """For each cache-influencing header, request `path` with the header set
+    to a syntactically-valid canary host. If the canary appears in the
+    response body or in an absolute-URL response header (Location,
+    Content-Location, Link), the header is reflected — a poisonable
+    surface. Returns [{header, evidence, where}, …]."""
+    canary = "recce-canary.invalid"
+    hits: list[dict] = []
+    for hdr in _CACHE_POISON_HEADERS:
+        r = _get(ip, port, use_tls, path, read_body=True,
+                 extra_headers={hdr: canary})
+        if r is None:
+            continue
+        body = r.get("body") or b""
+        # Direct body reflection (canonical link, email templates, etc.).
+        if canary.encode() in body:
+            idx = body.find(canary.encode())
+            snip = body[max(0, idx-32):idx+len(canary)+32].decode(
+                "utf-8", "replace")
+            hits.append({"header": hdr, "where": "body",
+                          "evidence": snip.strip()})
+            continue
+        # Reflection into location-family response headers.
+        resp_headers = r.get("headers") or {}
+        for hk, hv in resp_headers.items():
+            if canary in str(hv) and hk.lower() in (
+                    "location", "content-location", "link", "refresh"):
+                hits.append({"header": hdr, "where": f"response header {hk}",
+                              "evidence": str(hv)[:200]})
+                break
+    return hits
+
+
+# WebDAV: PROPFIND against discovered directory-ish paths. A 207
+# Multi-Status response confirms WebDAV is enabled AND the current tester
+# can enumerate the directory tree. Common on IIS misconfigs and
+# Apache mod_dav_svn / mod_dav_fs leftovers.
+def webdav_probe(ip: str, port: int, use_tls: bool,
+                   candidate_paths: list[str] | None = None) -> list[dict]:
+    """PROPFIND on each candidate path (defaults to '/' plus a few common
+    WebDAV mounts). Returns [{path, status, contains_multistatus, size}, …]
+    for each responder — 207 or 200 with a `<multistatus` body is a hit."""
+    from urllib.request import Request, urlopen
+    import ssl as _ssl
+    candidates = candidate_paths or ["/", "/webdav/", "/dav/", "/share/",
+                                      "/public/", "/files/", "/uploads/"]
+    hits: list[dict] = []
+    scheme = "https" if use_tls else "http"
+    ctx = _ssl._create_unverified_context() if use_tls else None
+    for path in candidates:
+        url = f"{scheme}://{ip}:{port}{path}"
+        try:
+            req = Request(url, method="PROPFIND", headers={
+                "Depth": "1",
+                "Content-Type": "application/xml",
+                "User-Agent": "recce-webdav-probe",
+            }, data=b"")
+            with urlopen(req, timeout=_REQ_TIMEOUT, context=ctx) as resp:
+                body = resp.read(8192)
+                status = resp.status
+        except Exception as e:
+            # urllib raises HTTPError for 4xx/5xx; the object still carries
+            # the status. Anything else (timeout, DNS) is genuinely absent.
+            from urllib.error import HTTPError
+            if isinstance(e, HTTPError):
+                body = e.read(8192) if hasattr(e, "read") else b""
+                status = e.code
+            else:
+                continue
+        is_multistatus = b"multistatus" in body.lower()
+        if status == 207 or (status == 200 and is_multistatus):
+            hits.append({"path": path, "status": status,
+                          "contains_multistatus": is_multistatus,
+                          "size": len(body)})
+    return hits
+
+
 # ---- Vuln conversion --------------------------------------------------------
 
 def _mk(host_ip: str, port: Port, sid: str, sev: str, title: str,
@@ -1097,6 +1375,13 @@ def enum_findings(host_ip: str, port: Port,
 
     # Framework fingerprint — one root fetch, cheap.
     fp = fingerprint(host_ip, port.portid, use_tls)
+    # Header-hygiene + CSP audit — derived from `fp['headers']` above, no
+    # extra request. Emitted before path-enum so information-disclosure
+    # findings sit near the fingerprint section they relate to.
+    for f in header_hygiene_findings(fp):
+        out.append(_mk(
+            host_ip, port, "http-header-hygiene", f["severity"], f["title"],
+            f["cwes"], f["output"], f["remediation"]))
     if fp:
         techs = list(fp.get("technologies") or [])
         if fp.get("generator"):
@@ -1296,5 +1581,79 @@ def enum_findings(host_ip: str, port: Port,
             "Access-Control-Allow-Origin: * with Allow-Credentials: true — browsers "
             "typically block this combination, but some setups still leak.",
             "Set an explicit origin allowlist instead of '*' when credentials are enabled."))
+
+    # Spring Boot Actuator deep-enum. High-value on Java stacks — /env and
+    # /heapdump dump every credential the app is holding.
+    actuator_hits = actuator_probe(host_ip, port.portid, use_tls)
+    for h in actuator_hits:
+        sev = h["severity"]
+        status_note = "" if h["status"] == 200 else f" (status {h['status']} — endpoint present, auth may be default)"
+        out.append(_mk(
+            host_ip, port, "http-actuator", sev,
+            f"Spring Boot Actuator exposed: {h['path']}",
+            ["CWE-200", "CWE-497"] if h["endpoint"] in ("env", "heapdump")
+            else ["CWE-200"],
+            f"{h['path']} responded with {h['length']} bytes{status_note}. "
+            f"{h['description']}",
+            f"Disable the {h['endpoint']} Actuator endpoint (management."
+            f"endpoints.web.exposure.exclude={h['endpoint']}) or require "
+            "authentication for /actuator/*."))
+
+    # Nginx alias-traversal probe (CVE-2018-16843 pattern). One-shot, safe.
+    alias = nginx_alias_traversal_probe(host_ip, port.portid, use_tls)
+    if alias:
+        out.append(_mk(
+            host_ip, port, "http-nginx-alias", "critical",
+            f"nginx alias-traversal — arbitrary file read via {alias['path']}",
+            ["CWE-22"],
+            f"GET {alias['path']} returned /etc/passwd. First line: "
+            f"{alias['marker']!r}. The nginx `alias` directive is missing a "
+            "trailing slash on its `location` block, so `<mount>../` "
+            "resolves ABOVE the intended root.",
+            "Add a trailing slash to the affected `location` prefix (e.g. "
+            "`location /static/ { alias /var/www/static/; }`) OR switch "
+            "`alias` to `root`, which is not affected."))
+
+    # Cache-poisoning surface — the reflection is the primitive; the actual
+    # cache exploit is fronting-cache dependent, so flag it as medium.
+    cp_hits = cache_poisoning_probe(host_ip, port.portid, use_tls)
+    if cp_hits:
+        seen: set = set()
+        for hit in cp_hits:
+            key = (hit["header"], hit["where"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(_mk(
+                host_ip, port, "http-cache-poison", "medium",
+                f"Reflected header primitive: {hit['header']} → {hit['where']}",
+                ["CWE-444"],
+                f"Setting {hit['header']}: <canary> caused the canary to "
+                f"appear in the response {hit['where']}. Evidence: "
+                f"{hit['evidence']!r}. If a fronting cache/CDN caches the "
+                "response, the next viewer of the cached entry receives "
+                "attacker-controlled content.",
+                f"Do not reflect {hit['header']} into response bodies or "
+                "location-family headers; validate against an allowlist of "
+                "expected hostnames; ensure cache key includes the "
+                "reflected header."))
+
+    # WebDAV method enum — PROPFIND against likely dir paths. A 207 confirms
+    # the tree walks. Distinct from the generic methods_probe finding above
+    # (which only fires if PROPFIND is listed in OPTIONS).
+    dav_hits = webdav_probe(host_ip, port.portid, use_tls)
+    if dav_hits:
+        for h in dav_hits[:4]:
+            out.append(_mk(
+                host_ip, port, "http-webdav", "medium",
+                f"WebDAV PROPFIND accepted at {h['path']}",
+                ["CWE-284"],
+                f"PROPFIND {h['path']} returned status {h['status']} "
+                f"({h['size']} bytes; multistatus="
+                f"{h['contains_multistatus']}). WebDAV is enabled — an "
+                "attacker can walk the directory tree and (if PUT is also "
+                "routed) upload files.",
+                "Disable WebDAV on public endpoints (Apache: `Dav Off`; "
+                "IIS: remove WebDAV module; nginx: remove `dav_methods`)."))
 
     return out

@@ -312,10 +312,14 @@ def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres",
             out["can_read_files"] = _t(p[1])
             out["can_write_files"] = _t(p[2])
         out["can_rce"] = bool(out.get("is_superuser") or out.get("can_copy_program"))
-        # RCE-relevant procedural-language extensions already installed.
+        # RCE-relevant procedural-language extensions already installed +
+        # file-read/write primitives + adminpack (deprecated-but-still-shipped
+        # admin RPCs) + file_fdw (SELECT arbitrary files as foreign tables,
+        # superuser only but scary). One query covers all of them.
         out["extensions"] = [r[0] for r in _simple_query(
             sock, "SELECT extname FROM pg_extension WHERE extname IN "
-            "('plpythonu','plpython3u','plperlu','pltclu','plsh') ORDER BY 1")]
+            "('plpythonu','plpython3u','plperlu','pltclu','plsh',"
+            "'adminpack','file_fdw','plr','plv8') ORDER BY 1")]
         # Replication roles = accounts that can pg_basebackup the entire cluster
         # (physical copy of every DB, every hash, every extension). A weak
         # password on ANY of these = full DB compromise. Enumerate them
@@ -356,6 +360,38 @@ def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres",
         out["can_pivot"] = bool(
             (out.get("pivot_installed") or (out.get("pivot_ext") and out.get("is_superuser")))
             or out.get("foreign_servers"))
+        # PUBLIC schema audit — historically the biggest source of "any
+        # authenticated user is effectively an admin" bugs in Postgres.
+        # (a) CREATE on public granted to PUBLIC = any role can drop tables
+        #     next to real ones and have the search_path resolve to them.
+        # (b) SECURITY DEFINER functions granted EXECUTE to PUBLIC = a
+        #     login-only user can call code that runs as the definer, which
+        #     is often a superuser. Classic privesc primitive.
+        # PG 15+ dropped the default PUBLIC CREATE grant; older servers keep it.
+        try:
+            r = _simple_query(
+                sock, "SELECT has_schema_privilege('public','public','CREATE')")
+            if r and r[0]:
+                out["public_can_create"] = _t(r[0][0])
+        except (OSError, struct.error, ValueError):
+            out["public_can_create"] = None
+        out["security_definer_public"] = []
+        try:
+            for r in _simple_query(
+                    sock,
+                    "SELECT n.nspname||'.'||p.proname, "
+                    "pg_get_userbyid(p.proowner) "
+                    "FROM pg_proc p "
+                    "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                    "WHERE p.prosecdef "
+                    "AND has_function_privilege('public', p.oid, 'EXECUTE') "
+                    "AND n.nspname NOT IN ('pg_catalog','information_schema') "
+                    "ORDER BY 1 LIMIT 40"):
+                fname, owner = (r + ["", ""])[:2]
+                out["security_definer_public"].append(
+                    {"function": fname, "owner": owner})
+        except (OSError, struct.error, ValueError):
+            pass
         try:
             sock.sendall(b"X" + struct.pack("!I", 4))   # Terminate, politely
         except OSError:
@@ -529,6 +565,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 _rce_finding(out, tgt, h.ip, p.portid, lt, proof=pr.get("rce_proof"))
                 _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
                 _pivot_finding(out, tgt, h.ip, p.portid, lt)
+                _public_schema_finding(out, tgt, h.ip, p.portid, lt)
+                _cve_finding(out, tgt, h.ip, p.portid, lt)
             elif pr.get("cred_access"):
                 lt = pr.get("loot") or {}
                 who = pr.get("cred_user", "?")
@@ -578,7 +616,114 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                              proof=pr.get("rce_proof"))
                 _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
                 _pivot_finding(out, tgt, h.ip, p.portid, lt)
+                _public_schema_finding(out, tgt, h.ip, p.portid, lt)
+                _cve_finding(out, tgt, h.ip, p.portid, lt)
     return out
+
+
+def _public_schema_finding(out: list, tgt: str, ip: str, port: int,
+                            lt: dict) -> None:
+    """Emit findings for PUBLIC schema hygiene: (a) CREATE-on-public granted
+    to PUBLIC (any authenticated user can plant tables/functions the search
+    path resolves to before the real ones — classic privesc pattern), and
+    (b) SECURITY DEFINER functions that PUBLIC has EXECUTE on (calling one
+    runs as the function's owner, often a superuser). Both silent by default
+    on older Postgres, both real privesc vectors."""
+    if not lt:
+        return
+    if lt.get("public_can_create") is True:
+        out.append(_finding(
+            "high",
+            "PostgreSQL: PUBLIC schema is CREATE-able by any role", tgt,
+            "The `public` schema still grants CREATE to PUBLIC (the pre-15 "
+            "default). Any authenticated database user can create tables, "
+            "functions and operators inside `public`. Because `public` sits "
+            "first on the default search_path, a hostile object placed there "
+            "resolves BEFORE the real object of the same name — a classic "
+            "trojan-object privesc against `SECURITY DEFINER` code that "
+            "doesn't set search_path explicitly.",
+            f"psql 'host={ip} port={port} user=<any> dbname=postgres' -c "
+            "'REVOKE CREATE ON SCHEMA public FROM PUBLIC'",
+            "REVOKE CREATE ON SCHEMA public FROM PUBLIC (recommended by "
+            "PostgreSQL 15+ default); require every SECURITY DEFINER function "
+            "to `SET search_path`.",
+            ["CWE-732", "CWE-269"], kind="pg_public_create"))
+    sdf = lt.get("security_definer_public") or []
+    if sdf:
+        sample = ", ".join(f["function"] for f in sdf[:8])
+        detail = (f"recce enumerated {len(sdf)} SECURITY DEFINER function(s) "
+                  "with EXECUTE granted to PUBLIC — any authenticated role "
+                  f"can invoke code that RUNS AS the function owner: {sample}"
+                  + (" …" if len(sdf) > 8 else "")
+                  + ".\n\nIf any of these are owned by a superuser (or a role "
+                  "with sensitive grants), calling one is direct privilege "
+                  "escalation.")
+        out.append(_finding(
+            "high",
+            "PostgreSQL: SECURITY DEFINER functions callable by PUBLIC", tgt,
+            detail,
+            f"psql 'host={ip} port={port} user=<any> dbname=<db>' -c "
+            "'\\df+ <schema>.<function>'",
+            "Audit each SECURITY DEFINER function; REVOKE EXECUTE FROM PUBLIC "
+            "and grant it only to the specific roles that need it; ensure "
+            "each definer function starts with `SET search_path = pg_catalog, "
+            "public`.",
+            ["CWE-269", "CWE-732"], kind="pg_secdef_public"))
+
+
+# Version → CVE map. Keyed by (major, minor) tuple ceiling: a server at or
+# BELOW this tuple is vulnerable. Airgap-safe — no external CVE lookup.
+_PG_CVE_MAP: list[tuple[tuple[int, int], str, str, str]] = [
+    # (major, minor)-inclusive-ceiling, CVE, severity, blurb
+    ((11, 4), "CVE-2019-9193", "critical",
+     "COPY FROM PROGRAM was invokable by any role with pg_read_server_files "
+     "or pg_execute_server_program membership (or the default_pg_hba any-user "
+     "case) — post-auth RCE without needing superuser."),
+    ((14, 2), "CVE-2022-1552", "high",
+     "Autovacuum + REINDEX + CLUSTER on tables the attacker owned ran with "
+     "superuser privileges; the attacker could hijack that context to execute "
+     "arbitrary SQL as the superuser."),
+    ((11, 21), "CVE-2023-5869", "high",
+     "Integer overflow in array modification permitted arbitrary memory writes "
+     "as the server user; upgrade to the fixed minor release."),
+]
+
+
+def _parse_pg_version(server_version: str) -> tuple[int, int] | None:
+    """Extract (major, minor) from a `PostgreSQL 11.4 on x86_64-…` banner.
+    Returns None when the version string isn't recognisable — safer to skip
+    the CVE check than false-positive on unknown."""
+    if not server_version:
+        return None
+    m = re.search(r"PostgreSQL\s+(\d+)\.(\d+)", server_version)
+    if not m:
+        # PG10+ dropped the third dotted version; PG9.x had it. Try two-digit
+        # match without a name prefix as a fallback.
+        m = re.search(r"(\d+)\.(\d+)", server_version)
+    if not m:
+        return None
+    try:
+        return (int(m.group(1)), int(m.group(2)))
+    except ValueError:
+        return None
+
+
+def _cve_finding(out: list, tgt: str, ip: str, port: int, lt: dict) -> None:
+    """Emit a finding per applicable CVE for the parsed server version.
+    Silent when the version couldn't be parsed — a false CVE flag is worse
+    than a missed one."""
+    ver = _parse_pg_version(lt.get("server_version", "") if lt else "")
+    if not ver:
+        return
+    for ceiling, cve, sev, blurb in _PG_CVE_MAP:
+        if ver <= ceiling:
+            out.append(_finding(
+                sev, f"PostgreSQL {ver[0]}.{ver[1]} vulnerable to {cve}", tgt,
+                f"Server reports version {ver[0]}.{ver[1]}, at or below the "
+                f"vulnerable ceiling for {cve}. {blurb}",
+                f"psql 'host={ip} port={port} user=postgres' -c 'SELECT version()'",
+                f"Upgrade to a patched minor release addressing {cve}.",
+                ["CWE-1035"], kind=f"pg_cve_{cve.lower().replace('-', '_')}"))
 
 
 def _pivot_finding(out: list, tgt: str, ip: str, port: int, lt: dict) -> None:
