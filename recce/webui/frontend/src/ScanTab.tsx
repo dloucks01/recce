@@ -588,7 +588,7 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
           </div>
 
           {runningJobs.map((j) => (
-            <div key={j.id} className="sv2-job live" onClick={() => streamJob(j.id)}>
+            <div key={j.id} className="sv2-job live" onClick={() => streamJob(j.id)} title={j.cmd}>
               <span className="sv2-job-dot" />
               <div className="sv2-job-info">
                 <div className="sv2-job-cmd">{j.cmd}</div>
@@ -604,7 +604,7 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
           ))}
 
           {recentJobs.map((j) => (
-            <div key={j.id} className={`sv2-job ${j.status}`}>
+            <div key={j.id} className={`sv2-job ${j.status}`} title={j.cmd}>
               <span className="sv2-job-icon">{j.status === "done" ? "✓" : "✗"}</span>
               <div className="sv2-job-info">
                 <div className="sv2-job-cmd">{j.cmd}</div>

@@ -52,7 +52,7 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .sv2-hint { padding: 32px; text-align: center; color: var(--faint); font-size: 13px; }
 
 /* job queue */
-.sv2-jobs { flex: 0 0 260px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow-sm); max-height: 500px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.sv2-jobs { flex: 0 0 340px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow-sm); max-height: 640px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .sv2-jobs-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .sv2-jobs-h h3 { margin: 0; font-size: 14px; font-weight: 700; }
 .sv2-live { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--accent); }
@@ -63,7 +63,12 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .sv2-job-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-top: 4px; flex-shrink: 0; animation: pulse 1.5s ease-in-out infinite; }
 .sv2-job-icon { font-size: 13px; flex-shrink: 0; margin-top: 1px; color: var(--ok); }
 .sv2-job-info { flex: 1; min-width: 0; }
-.sv2-job-cmd { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Commands wrap to as many lines as needed — testers were losing the tail
+   end of long invocations to a single-line ellipsis. Break at any character
+   for slash-separated paths and long flag values. */
+.sv2-job-cmd { font-family: var(--mono); font-size: 12px; font-weight: 600;
+  color: var(--text); word-break: break-all; overflow-wrap: anywhere;
+  line-height: 1.4; }
 .sv2-job-meta { font-size: 11px; color: var(--faint); margin-top: 2px; }
 .sv2-jobs-empty { padding: 24px; text-align: center; color: var(--faint); font-size: 13px; }
 

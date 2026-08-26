@@ -476,9 +476,25 @@
 .payload-warn { padding: 8px 12px; background: color-mix(in srgb, var(--amber) 10%, transparent); border-left: 3px solid var(--amber); border-radius: 0 6px 6px 0; font-size: 12.5px; color: var(--text); }
 .payload-warn code { font-family: var(--mono); background: var(--surface); padding: 1px 5px; border-radius: 3px; }
 .payload-group-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; margin: 6px 0 4px; }
-.payload-item { display: flex; gap: 8px; align-items: center; padding: 4px 0; flex-wrap: wrap; }
-.payload-label { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--accent); min-width: 78px; }
-.payload-code { flex: 1; min-width: 200px; overflow-x: auto; white-space: nowrap; background: var(--ground); color: var(--text); padding: 4px 8px; border-radius: 5px; font-size: 11.5px; }
+/* Two-row payload item: label + badges + copy button on the top row, then
+   the full command wrapping across as many lines as it needs below.
+   Previously the code was a single-line horizontal scroll — testers had to
+   scroll every row to see the tail end of long payload strings. */
+.payload-item { display: grid; grid-template-columns: 1fr auto;
+  grid-template-areas: "meta copy" "code code";
+  gap: 6px 10px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.payload-item:last-child { border-bottom: 0; }
+.payload-item > .payload-label,
+.payload-item > .payload-note,
+.payload-item > .compat-badge,
+.payload-item > .payload-pick-badge { grid-area: meta; align-self: center; }
+.payload-item > .payload-copy { grid-area: copy; align-self: start; justify-self: end; }
+.payload-item > .payload-code { grid-area: code; }
+.payload-label { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--accent); margin-right: 6px; }
+.payload-code { display: block; background: var(--ground); color: var(--text);
+  padding: 8px 10px; border-radius: 6px; font-family: var(--mono);
+  font-size: 11.5px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
 .payload-note { flex-shrink: 0; }
 .payload-copy { font-size: 11px; padding: 3px 9px; border: 1px solid var(--line); background: var(--surface); border-radius: 5px; cursor: pointer; color: var(--muted); }
 .payload-copy:hover { border-color: var(--accent); color: var(--accent); }

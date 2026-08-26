@@ -207,8 +207,15 @@ export function ReportTab({ findings, onRefresh }: ReportTabProps) {
     return `${Math.round(s / 86400)}d ago`;
   };
 
-  const previewSrc = `/api/report/preview/html?_=${previewKey}` +
-    (debouncedInclude ? `&include=${encodeURIComponent(debouncedInclude)}` : "");
+  // When the tester has isolated exactly one finding in the selector, the
+  // preview switches from "combined report" mode to "per-finding writeup"
+  // mode — matching what the ⬇ Writeup .docx button would produce. Same
+  // debouncedInclude keeps re-renders quiet during rapid selection changes.
+  const isSingleWriteup = !!selected && selected.size === 1;
+  const previewSrc = isSingleWriteup
+    ? `/api/report/writeup/preview/html?_=${previewKey}&include=${encodeURIComponent(debouncedInclude || Array.from(selected!)[0])}`
+    : `/api/report/preview/html?_=${previewKey}` +
+      (debouncedInclude ? `&include=${encodeURIComponent(debouncedInclude)}` : "");
 
   return (
     <div className="report-studio">
@@ -281,13 +288,16 @@ export function ReportTab({ findings, onRefresh }: ReportTabProps) {
         {showPreview && (
           <div className="rs-preview">
             <div className="rs-preview-h">
-              <span className="rs-preview-label">Live preview</span>
+              <span className="rs-preview-label">
+                Live preview {isSingleWriteup && <span className="rs-preview-mode">📝 per-finding writeup</span>}
+              </span>
               <span className="muted small">re-renders 800ms after your last change</span>
               <button className="linkish" onClick={() => setPreviewKey(k => k + 1)}
                       title="force re-render">↻</button>
             </div>
-            <iframe key={previewKey} className="rs-preview-frame"
-                    src={previewSrc} title="Report preview" />
+            <iframe key={previewKey + (isSingleWriteup ? "w" : "r")} className="rs-preview-frame"
+                    src={previewSrc}
+                    title={isSingleWriteup ? "Per-finding writeup preview" : "Combined report preview"} />
           </div>
         )}
       </div>

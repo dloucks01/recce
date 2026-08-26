@@ -1,4 +1,13 @@
 /* ============================ Report finding selector ============================ */
+/* Live-preview mode badge — appears when the per-finding writeup preview is
+   active (exactly one finding selected). Signals to the tester that the
+   iframe is showing the writeup shape, not the combined report. */
+.rs-preview-mode { display: inline-block; margin-left: 8px; padding: 2px 8px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 12px; font-size: 11px; font-weight: 600; color: var(--accent);
+  vertical-align: middle; }
+
 .rpt-selector { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow-sm); margin-bottom: 24px; }
 .rpt-selector-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .rpt-selector-header h3 { margin: 0; font-size: 14px; }
