@@ -9,6 +9,7 @@ shell doesn't mean a lost session.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import uuid
 from collections import deque
@@ -19,6 +20,52 @@ from .transport import Transport
 # the COMPLETE transcript is always on disk (store) and downloadable — this is just the
 # live in-memory window replayed on attach. Held as a deque of chunks so trimming is O(1).
 _BUFFER_CAP = 1024 * 1024   # 1 MB of live scrollback
+
+# OOB-command markers emitted onto the PTY by run_and_capture (quickrun,
+# download, on-target enum, portfwd, upgrade). Anything between a matched
+# S/E pair — plus one-off status lines from short OOB commands — is
+# stripped from the operator's terminal view. Raw bytes still feed the
+# capture buffer so run_and_capture keeps working.
+_OOB_START_RE = re.compile(rb"__RECCE_S_[0-9a-f]{6,16}__")
+_OOB_END_RE = re.compile(rb"__RECCE_E_[0-9a-f]{6,16}__")
+_OOB_NOISE_RE = re.compile(
+    # One-off status lines from short OOB commands (portfwd / upgrade)
+    # AND echoed OOB command lines. Command echoes carry the split-marker
+    # form (`__RECCE''_S_tag__`, `__RECCE''_E_tag__`) which the strict
+    # OOB regexes above never match — this catches them plus any line
+    # obviously belonging to OOB choreography (`stty -echo/echo`, `: >
+    # <file>.b64`, `printf '%s' '<base64>' >> <file>.b64`, `base64 -d …
+    # && rm -f …`, `bash /tmp/.re.sh …`).
+    rb"^(?:"
+      rb"RECCE_UPGRADE_SENT"
+      rb"|SOCAT_OK"
+      rb"|rcfwd_[0-9a-f]+_PID_\d+"
+      rb"|.*__RECCE(?:'')?_[SE]_[0-9a-f]+__.*"      # echoed marker cmds
+      rb"|stty (?:-)?echo(?: 2>/dev/null)?"
+      rb"|: > \S+\.b64"
+      rb"|printf '%s' '[A-Za-z0-9+/=]+' >> \S+\.b64"
+      rb"|base64 -d \S+\.b64 > \S+ && rm -f \S+\.b64"
+      rb"|bash /tmp/\.re\.sh 2>/dev/null \| cat; rm -f /tmp/\.re\.sh"
+    rb")[\r\n]*",
+    re.M,
+)
+# Full S/E-block eater (dot matches newlines) — used by the stateless
+# scrubber on scrollback() reads. Handles the entire buffer at once so
+# order-of-arrival TCP fragmentation isn't a concern here.
+_OOB_BLOCK_RE = re.compile(
+    rb"__RECCE_S_[0-9a-f]{6,16}__.*?__RECCE_E_[0-9a-f]{6,16}__[\r\n]*",
+    re.S,
+)
+
+
+def _oob_scrub_stateless(data: bytes) -> bytes:
+    """Best-effort one-shot scrub of a whole buffer — safety net for
+    legacy scrollback chunks written before the incremental filter
+    landed. Removes complete S/E blocks + one-off noise lines."""
+    if not data:
+        return data
+    scrubbed = _OOB_BLOCK_RE.sub(b"", data)
+    return _OOB_NOISE_RE.sub(b"", scrubbed)
 
 # Memorable name = adjective + noun (uppercase, underscored). Every session gets one
 # alongside its UUID so testers can refer to it in chat/notes without pasting hex —
@@ -83,6 +130,10 @@ class Session:
         self._chunks: deque[bytes] = deque()   # scrollback ring (O(1) trim)
         self._blen = 0                         # running byte length of the ring
         self._subs: set[asyncio.Queue] = set() # fan-out to attached WebSockets
+        # OOB-marker filter state (persists across chunks so a marker
+        # split by TCP fragmentation still filters correctly).
+        self._oob_in_block = False             # inside an S..E block
+        self._oob_tail = b""                   # bytes held for the next chunk
 
     @classmethod
     def restore(cls, meta: dict, transcript: bytes) -> "Session":
@@ -132,18 +183,100 @@ class Session:
 
     # --- output fan-out + scrollback --------------------------------------------
     def feed(self, data: bytes) -> None:
-        """Output from the target: append to scrollback (O(1) trim) and fan out to every UI."""
+        """Output from the target: append to scrollback (O(1) trim) and fan out to every UI.
+
+        The out-of-band command channel (`run_and_capture` for quickrun /
+        download / on-session enum / portfwd / PTY-upgrade) shares the
+        PTY with the operator's terminal, so its markers + captured
+        payload would otherwise land in the visible scrollback as noise
+        (`__RECCE_S_xxx__ ... __RECCE_E_xxx__` blocks, `SOCAT_OK`,
+        `RECCE_UPGRADE_SENT`, `rcfwd_xxx_PID_xxx`). Capture bookkeeping
+        for `_cap` sees the RAW bytes; scrollback + subscribers get the
+        FILTERED view so the terminal reads clean."""
         if data:
             self.last_seen = time.time()
-            self._chunks.append(data)
-            self._blen += len(data)
-            while self._blen > _BUFFER_CAP and len(self._chunks) > 1:
-                self._blen -= len(self._chunks.popleft())
-            if self._cap is not None:              # a run_and_capture() is collecting
+            # capture-mode bookkeeping runs on raw bytes so run_and_capture
+            # still extracts its full payload between markers.
+            if self._cap is not None:
                 self._cap += data
                 if self._cap_end in self._cap and self._cap_future and not self._cap_future.done():
                     self._cap_future.set_result(True)
-        self._broadcast({"t": "out", "data": data})
+            visible = self._filter_oob(data)
+            if visible:
+                self._chunks.append(visible)
+                self._blen += len(visible)
+                while self._blen > _BUFFER_CAP and len(self._chunks) > 1:
+                    self._blen -= len(self._chunks.popleft())
+                self._broadcast({"t": "out", "data": visible})
+        else:
+            self._broadcast({"t": "out", "data": data})
+
+    def _filter_oob(self, data: bytes) -> bytes:
+        """Strip OOB command blocks and one-off status markers so the
+        operator's terminal sees only real shell output.
+
+        Marker state persists across chunks (`_oob_in_block`, `_oob_tail`)
+        so a marker split by TCP fragmentation still filters correctly —
+        the tail is only held when the buffer's end looks like it COULD
+        be a partial marker prefix (avoids drowning real output that just
+        happens to be short)."""
+        buf = self._oob_tail + data
+        self._oob_tail = b""
+        out = bytearray()
+        i = 0
+        while i < len(buf):
+            if self._oob_in_block:
+                m = _OOB_END_RE.search(buf, i)
+                if m is None:
+                    # inside a block, no end yet — hold ONLY a tail that
+                    # could still be a partial end marker. If nothing at
+                    # the tail looks like `__RECCE_E_` prefix, we can
+                    # safely drop the whole remainder (it's OOB payload).
+                    self._oob_tail = self._maybe_partial(buf, i, b"__RECCE_E_")
+                    return bytes(_OOB_NOISE_RE.sub(b"", bytes(out)))
+                i = m.end()
+                self._oob_in_block = False
+            else:
+                m = _OOB_START_RE.search(buf, i)
+                if m is None:
+                    # no start marker — flush the rest, holding only a
+                    # tail that could still be a partial start marker.
+                    keep = self._maybe_partial(buf, i, b"__RECCE_S_")
+                    out.extend(buf[i:len(buf) - len(keep)] if keep else buf[i:])
+                    self._oob_tail = keep
+                    return bytes(_OOB_NOISE_RE.sub(b"", bytes(out)))
+                # copy real text before the marker verbatim (preserving
+                # the newline that belongs to that shell output).
+                out.extend(buf[i:m.start()])
+                i = m.end()
+                self._oob_in_block = True
+        return bytes(_OOB_NOISE_RE.sub(b"", bytes(out)))
+
+    @staticmethod
+    def _maybe_partial(buf: bytes, start: int, marker: bytes) -> bytes:
+        """Return the tail bytes from `buf[start:]` that COULD be a partial
+        `marker` — either an incomplete PREFIX at the end (e.g. `__REC`),
+        or the FULL stem plus a partial hex-tag not yet closed (e.g.
+        `__RECCE_S_ab` before the rest of the tag + `__` arrive). Returns
+        empty when no plausible partial exists — the whole remainder is
+        safe to flush."""
+        rest = buf[start:]
+        # Case A: buffer ends with a prefix of the stem (`__RECCE_S`).
+        max_k = min(len(rest), len(marker) - 1)
+        best = 0
+        for k in range(max_k, 0, -1):
+            if rest.endswith(marker[:k]):
+                best = k
+                break
+        # Case B: buffer contains the full stem but the tag+close hasn't
+        # arrived. Hold from that stem onward. Full expected tail is
+        # stem(10) + tag(up to 16 hex) + close(2) = ~28 bytes; anything
+        # longer without a close means the tag itself was noise (drop it
+        # — the regex won't ever match, so holding is pointless).
+        idx = rest.rfind(marker)
+        if idx >= 0 and len(rest) - idx <= len(marker) + 18:
+            best = max(best, len(rest) - idx)
+        return rest[-best:] if best else b""
 
     async def run_and_capture(self, command: bytes, timeout: float = 30.0) -> bytes:
         """Run a command in the shell and return just its output — used for file transfer and
@@ -176,7 +309,14 @@ class Session:
         return data[s + len(start):e] if (s >= 0 and e >= 0) else b""
 
     def scrollback(self) -> bytes:
-        return b"".join(self._chunks)
+        """Return the live scrollback for a fresh WS attach.
+
+        Runs the OOB scrubber on the joined chunks as a safety net: new
+        `feed()` calls already store filtered bytes, but chunks written
+        before a mid-session code deploy (or a persisted transcript that
+        includes raw markers) get cleaned here so a new attacher never
+        sees leaked sentinels."""
+        return _oob_scrub_stateless(b"".join(self._chunks))
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()

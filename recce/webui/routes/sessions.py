@@ -259,14 +259,30 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
 
     async def _push_file(sess, remote_path: str, data: bytes) -> None:
         """Write bytes to a file on the target through the shell, chunked so no single line
-        exceeds the PTY canonical-mode limit (~4 KB) — base64 in small appends, then decode."""
-        import shlex
+        exceeds the PTY canonical-mode limit (~4 KB) — base64 in small appends, then decode.
+
+        The whole sequence is bracketed by RECCE OOB markers so Session
+        `_filter_oob` swallows both the multi-KB base64 chunks AND the
+        PTY-echoed command lines that would otherwise flood the operator's
+        terminal (previously visible as a giant IHOKCiMg... blob). The
+        `''` split in the printf keeps the ECHOED command from containing
+        the literal marker — only the printed OUTPUT does, which is what
+        the filter's regex matches on."""
+        import shlex, uuid
         q = shlex.quote(remote_path).encode()
         b64 = base64.b64encode(data)
+        tag = uuid.uuid4().hex[:8].encode()
+        # S marker + attempt to silence PTY input echo so echoed chunks
+        # don't show even in the intra-marker payload (helps if a viewer
+        # attaches mid-push and the whole block isn't in view yet).
+        await sess.send(b"printf '__RECCE''_S_" + tag + b"__\\n'\n")
+        await sess.send(b"stty -echo 2>/dev/null\n")
         await sess.send(b": > " + q + b".b64\n")            # truncate staging file
         for i in range(0, len(b64), 2048):
             await sess.send(b"printf '%s' '" + b64[i:i + 2048] + b"' >> " + q + b".b64\n")
         await sess.send(b"base64 -d " + q + b".b64 > " + q + b" && rm -f " + q + b".b64\n")
+        await sess.send(b"stty echo 2>/dev/null\n")
+        await sess.send(b"printf '__RECCE''_E_" + tag + b"__\\n'\n")
 
     # Quick recon commands testers run on every fresh shell. Kept as an allowlist
     # so this endpoint can never turn into an arbitrary-cmd runner (that lives at
