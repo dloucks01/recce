@@ -60,6 +60,10 @@ export function Findings(
   // its host (via c.assignments[ip]) — recce doesn't have per-finding
   // assignments yet, so a whole-host claim is what covers its findings too.
   const [assignee, setAssignee] = useState<"all" | "mine" | "unassigned">("all");
+  // useCollab MUST resolve before the useMemo below — that memo's deps array
+  // reads `cst.assignments`, and reading `cst` before its declaration is a
+  // TDZ ReferenceError that crashes the whole Findings render.
+  const { c: cst, me, dismiss } = useCollab();
   const rows = useMemo(() => {
     const n = f.q.toLowerCase();
     return findings.filter((x) => {
@@ -92,7 +96,6 @@ export function Findings(
     }
   }
   const detailFor = (x: Finding) => cache[x.ip]?.find((v) => v.key === x.key);
-  const { c: cst, me, dismiss } = useCollab();
 
   // Bulk selection — checkboxes appear alongside the reviewed tick.
   const [selected, setSelected] = useState<Set<string>>(new Set());

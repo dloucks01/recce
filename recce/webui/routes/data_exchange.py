@@ -525,6 +525,16 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
             hosts = st.all_hosts()
             creds = st.all_credentials()
             act_raw = st.get_meta(_collab._ACTIVITY) or "[]"
+            # `Host.last_scanned` reads from the serialized JSON blob, which
+            # may lag behind the SQL `updated` column (backfills and some
+            # write paths only touch the column). Pull the SQL truth so
+            # Recent-Changes sees hosts that WERE upserted after the JSON
+            # blob was written — otherwise the panel reports "0 hosts
+            # touched" on engagements with real activity.
+            from contextlib import closing as _cl
+            with _cl(st.conn.cursor()) as _cur:
+                _sql_updated = dict(_cur.execute(
+                    "SELECT ip, updated FROM hosts").fetchall())
         import json as _json
         try:
             activity = _json.loads(act_raw)
@@ -537,8 +547,12 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         # don't spam the recent window.
         touched = []
         for h in hosts:
-            try: t = float(h.last_scanned or 0)
-            except ValueError: t = 0
+            # Prefer the SQL column (fresh from upsert_host's auto-stamp);
+            # fall back to the JSON blob for older records or edge cases
+            # where the SQL column is empty but the blob has a value.
+            raw = _sql_updated.get(h.ip) or h.last_scanned or 0
+            try: t = float(raw)
+            except (ValueError, TypeError): t = 0
             if t >= since:
                 sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}
                 for v in h.vulns:

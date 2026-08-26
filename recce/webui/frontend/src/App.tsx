@@ -301,7 +301,7 @@ export default function App() {
     sessions: undefined,
     timeline: undefined,
     report: undefined,
-    exploitation: undefined,
+    exploit: undefined,
     credentials: undefined,
     playbook: undefined,
   };

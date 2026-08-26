@@ -130,6 +130,16 @@ class Store:
             cols = {r[1] for r in cur.execute("PRAGMA table_info(tracking)").fetchall()}
             if "status" not in cols:
                 cur.execute("ALTER TABLE tracking ADD COLUMN status TEXT DEFAULT ''")
+            # Backfill hosts.updated with a synthetic "an hour ago" timestamp
+            # for any host missing one — earlier scan paths never stamped it,
+            # which left "Recent changes" saying "0 hosts touched" even on
+            # engagements with hundreds of scanned hosts. One-time; safe on
+            # empty tables (WHERE updated='' OR updated IS NULL matches none).
+            import time as _time
+            backfill = str(_time.time() - 3600)
+            cur.execute("UPDATE hosts SET updated=? WHERE updated='' OR updated IS NULL",
+                        (backfill,))
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -279,6 +289,16 @@ class Store:
             existing = self.get_host(host.ip)
             if existing and merge:
                 host = self._merge(existing, host)
+            # Auto-stamp last_scanned on every upsert. Ingestion paths (import
+            # tool output, deep-service scans, credential enum) never called
+            # `host.last_scanned = str(time.time())` themselves, which meant
+            # the Dashboard's "Recent changes" panel stayed at "0 hosts
+            # touched" no matter how many scans ran. The parser.py nmap path
+            # sets it from the scan `start` attribute; every other path now
+            # gets the current wall-clock via this fall-through.
+            if not host.last_scanned:
+                import time as _time
+                host.last_scanned = str(_time.time())
             with closing(self.conn.cursor()) as cur:
                 cur.execute(
                     "INSERT INTO hosts(ip, subnet, data, updated) VALUES(?,?,?,?) "
