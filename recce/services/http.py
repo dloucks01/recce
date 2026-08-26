@@ -302,17 +302,49 @@ def _probe_one_path(ip: str, port: int, use_tls: bool,
     }
 
 
-def path_enum(ip: str, port: int, use_tls: bool) -> list[dict]:
-    """Probe the bundled path list against a single HTTP endpoint. Returns the
-    list of hits (paths that responded with any of _HIT_STATUSES), with SPA /
-    wildcard-proxy catch-all responses filtered out. Wall-clock capped at
-    _ENUM_BUDGET_S."""
+def _resolve_extra_paths(extra_paths: list[str] | None) -> list[tuple]:
+    """Merge caller-supplied paths + `RECCE_HTTP_WORDLIST` env-var paths
+    into the tuple shape `_PATHS` uses. Env var is checked every call so a
+    user can set/unset it between scans without re-importing.
+
+    External-list entries get medium severity and CWE-538 by default —
+    catch-all "the user thinks this is worth probing" — leaving the
+    curated bundled list to keep its specific severities/CWEs."""
+    from os import environ as _env
+    from .. import wordlists as _wl
+    merged: list[str] = list(extra_paths or [])
+    env_path = _env.get("RECCE_HTTP_WORDLIST", "").strip()
+    if env_path:
+        merged.extend(_wl.load_wordlist(env_path, prefix_slash=True))
+    if not merged:
+        return []
+    seen_paths = {p[0] for p in _PATHS}
+    out: list[tuple] = []
+    for p in merged:
+        if not p.startswith("/"):
+            p = "/" + p
+        if p in seen_paths:
+            continue
+        seen_paths.add(p)
+        # (path, severity, description, cwes, category)
+        out.append((p, "medium", "user-supplied wordlist entry",
+                    ["CWE-538"], "disclosure"))
+    return out
+
+
+def path_enum(ip: str, port: int, use_tls: bool,
+              extra_paths: list[str] | None = None) -> list[dict]:
+    """Probe the bundled path list (+ any user wordlist) against a single
+    HTTP endpoint. Returns the list of hits (paths that responded with any
+    of _HIT_STATUSES), with SPA / wildcard-proxy catch-all responses
+    filtered out. Wall-clock capped at _ENUM_BUDGET_S."""
     started = time.monotonic()
     catchall = _catchall_signature(ip, port, use_tls)
     hits: list[dict] = []
+    all_entries = list(_PATHS) + _resolve_extra_paths(extra_paths)
     with concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
         futs = {pool.submit(_probe_one_path, ip, port, use_tls, e, catchall): e
-                for e in _PATHS}
+                for e in all_entries}
         for fut in concurrent.futures.as_completed(futs):
             if time.monotonic() - started > _ENUM_BUDGET_S:
                 # cap wall-clock; let outstanding futures die on the pool teardown
@@ -1052,9 +1084,12 @@ def _mk(host_ip: str, port: Port, sid: str, sev: str, title: str,
     )
 
 
-def enum_findings(host_ip: str, port: Port) -> list[Vuln]:
+def enum_findings(host_ip: str, port: Port,
+                  extra_paths: list[str] | None = None) -> list[Vuln]:
     """Run path enum + fingerprint against one HTTP port; produce Vulns.
-    Called from `probes.http_findings` alongside the existing header checks."""
+    Called from `probes.http_findings` alongside the existing header checks.
+    `extra_paths` augments the bundled `_PATHS` list — sourced from either
+    a `--wordlist` CLI flag or `RECCE_HTTP_WORDLIST` env var."""
     from .. import probes
     use_tls = probes._is_tls(port)
 
@@ -1077,8 +1112,9 @@ def enum_findings(host_ip: str, port: Port) -> list[Vuln]:
                  f"server={fp.get('server','')!r} · techs=[{', '.join(techs)}]"),
                 "Informational — feeds default-cred and CVE lookup for the detected stack."))
 
-    # Path enum — the meat.
-    hits = path_enum(host_ip, port.portid, use_tls)
+    # Path enum — the meat. Merges bundled _PATHS with the user's
+    # optional wordlist so both fire in one pool.
+    hits = path_enum(host_ip, port.portid, use_tls, extra_paths=extra_paths)
     for h in hits:
         title = f"Exposed path: {h['path']}"
         output = (f"HTTP {h['status']} · {h['description']} "

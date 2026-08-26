@@ -529,12 +529,17 @@ _WEAK_MSSQL_CREDS: list[tuple[str, str]] = [
 
 
 def weak_sa_sweep(ip: str, port: int = _DEFAULT_PORT,
-                  timeout: float = 4.0) -> tuple[str, str] | None:
-    """Try each entry in _WEAK_MSSQL_CREDS with a native TDS SQL-auth login.
-    Returns the first (user, password) that authenticates, None otherwise.
-    ~7 attempts * ~1s = ~7s wall-clock max. MSSQL default lockout is 0
-    (unlimited) unless a policy is applied, so account lockout is unlikely."""
-    for user, password in _WEAK_MSSQL_CREDS:
+                  timeout: float = 4.0,
+                  extra_creds: list[tuple[str, str]] | None = None
+                  ) -> tuple[str, str] | None:
+    """Try each entry in _WEAK_MSSQL_CREDS (+ any user-supplied
+    `extra_creds`) with a native TDS SQL-auth login. Returns the first
+    (user, password) that authenticates, None otherwise. Wall-clock scales
+    linearly with list size; bundled list is 7 * ~1s. MSSQL default
+    lockout is 0 (unlimited) unless a policy is applied, so account
+    lockout is unlikely."""
+    creds = list(_WEAK_MSSQL_CREDS) + list(extra_creds or [])
+    for user, password in creds:
         ok, _detail = sqlauth_login(ip, port, user, password, timeout=timeout)
         if ok:
             return (user, password)
@@ -2218,11 +2223,16 @@ def findings_to_vulns(fs: list[dict]) -> dict:
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
-            lhost: str = "<LHOST>", budget: float | None = None, progress=None) -> dict:
+            lhost: str = "<LHOST>", budget: float | None = None, progress=None,
+            wordlist: str | None = None, **_ignored) -> dict:
     """Full MSSQL analysis: pre-auth probes, findings, and the per-target runbook +
     chain. JSON-serialisable for the datastore + report. `budget` caps wall-clock
-    seconds; `progress(i, n, target)` fires per target."""
+    seconds; `progress(i, n, target)` fires per target. `wordlist` = optional
+    path to a user-supplied credential list (each line `user:password` or
+    password paired with `sa`); augments the bundled weak-sa sweep."""
     from ... import svcprobe
+    from ...wordlists import load_cred_wordlist
+    extra_creds = load_cred_wordlist(wordlist, default_user="sa")
     targets = mssql_targets(hosts)
     probes: dict = {}
     browser: dict = {}          # SQL Browser (UDP 1434) result cached per IP
@@ -2245,7 +2255,8 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
         # deploy; findings emits a critical mssql_default_creds bug distinct
         # from the generic blank_login narrative.
         if active and not creds:
-            weak = weak_sa_sweep(t["ip"], t["port"])
+            weak = weak_sa_sweep(t["ip"], t["port"],
+                                 extra_creds=extra_creds)
             if weak:
                 u, pw = weak
                 probes[key]["weak_default"] = {"user": u, "password": pw}

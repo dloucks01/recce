@@ -461,6 +461,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "an incomplete body only, never a smuggled second request). Can "
                          "disturb fragile proxies and may affect SHARED front-ends - use "
                          "only against dedicated infra in ROE.")
+    wb.add_argument("--wordlist", metavar="FILE",
+                    help="path to a wordlist of extra HTTP paths to probe (one per "
+                         "line; # comments; leading / auto-added). AUGMENTS the "
+                         "bundled 110-path list — nothing removed. Use a dirbuster/"
+                         "SecLists file to widen coverage on custom apps.")
     _add_budget(wb)
     wb.set_defaults(func=_h("web"))
 
@@ -751,6 +756,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="don't recursively walk the linked-server graph")
     ms.add_argument("--link-depth", type=int, default=4, metavar="N",
                     help="max linked-server chain depth to walk (default 4)")
+    ms.add_argument("--wordlist", metavar="FILE",
+                    help="path to a credential wordlist (each line 'user:password' "
+                         "or bare password paired with sa). AUGMENTS the bundled "
+                         "weak-sa sweep — only runs when no engagement creds set.")
     _add_io(ms)
     _add_budget(ms)
     ms.set_defaults(func=_h("mssql"))
@@ -941,6 +950,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     pgp.add_argument("--prove", dest="prove_rce", action="store_true",
                      help="ACTIVE: on a superuser/COPY-capable instance, run a benign "
                           "`id` via COPY FROM PROGRAM to CONFIRM RCE (opt-in; ROE only)")
+    pgp.add_argument("--wordlist", metavar="FILE",
+                     help="path to a credential wordlist (each line 'user:password' "
+                          "or bare password paired with postgres). AUGMENTS the "
+                          "bundled default-cred sweep — runs only when supplied "
+                          "creds fail.")
     _add_io(pgp)
     _add_budget(pgp)
     pgp.set_defaults(func=_h("postgres"))
@@ -954,6 +968,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "SMTP hosts in the datastore)")
     smp.add_argument("--no-probe", action="store_true",
                      help="skip the live probe; just write the commands")
+    smp.add_argument("--wordlist", metavar="FILE",
+                     help="path to a username wordlist, one per line. AUGMENTS "
+                          "the bundled 15-user VRFY/EXPN enumeration list.")
     _add_io(smp)
     _add_budget(smp)
     smp.set_defaults(func=_h("smtp"))

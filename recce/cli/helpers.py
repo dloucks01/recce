@@ -2866,9 +2866,17 @@ def _probe_progress(label: str):
 
 
 def _probe_kwargs(args, label: str) -> dict:
-    """budget + progress kwargs for a deep module's analyze()."""
-    return {"budget": getattr(args, "budget", None),
-            "progress": _probe_progress(label)}
+    """budget + progress + optional wordlist kwargs for a deep module's
+    analyze(). `wordlist` only gets forwarded when the CLI subparser
+    actually declared --wordlist (postgres/mssql/smtp today); analyze()
+    signatures without that param accept **_ignored so the extra key
+    never breaks the call."""
+    kw: dict = {"budget": getattr(args, "budget", None),
+                "progress": _probe_progress(label)}
+    wl = getattr(args, "wordlist", None)
+    if wl:
+        kw["wordlist"] = wl
+    return kw
 
 
 

@@ -153,17 +153,21 @@ _WEAK_PG_CREDS: list[tuple[str, str]] = [
 ]
 
 
-def weak_password_sweep(ip: str, port: int, timeout: float = _TIMEOUT) -> tuple[str, str] | None:
-    """Try each entry in _WEAK_PG_CREDS. Returns the first (user, password) pair
-    that authenticates, or None. Called ONLY when probe() says auth_required
-    and the tester-supplied credentials all failed — this is a targeted
-    default-cred check, not a general credential attack.
+def weak_password_sweep(ip: str, port: int, timeout: float = _TIMEOUT,
+                        extra_creds: list[tuple[str, str]] | None = None
+                        ) -> tuple[str, str] | None:
+    """Try each entry in _WEAK_PG_CREDS (+ any user-supplied `extra_creds`).
+    Returns the first (user, password) pair that authenticates, or None.
+    Called ONLY when probe() says auth_required and the tester-supplied
+    credentials all failed — this is a targeted default-cred check, not a
+    general credential attack.
 
     Each attempt is a full connection; on failure the socket closes cleanly
     and we move on. No account lockout risk on Postgres — pg_hba failures
-    don't lock users. Total wall-clock: ~5 seconds worst case (7 attempts *
-    ~700ms each) since Postgres closes fast on bad auth."""
-    for user, password in _WEAK_PG_CREDS:
+    don't lock users. Total wall-clock scales linearly with list size;
+    bundled list is 7 entries at ~700ms each."""
+    creds = list(_WEAK_PG_CREDS) + list(extra_creds or [])
+    for user, password in creds:
         try:
             if authenticate(ip, port, user, password, timeout=timeout):
                 return (user, password)
@@ -711,10 +715,15 @@ def findings_to_vulns(fs: list[dict]) -> dict:
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None, prove: bool = False,
-            datamine_data: bool = True) -> dict:
+            datamine_data: bool = True, wordlist: str | None = None,
+            **_ignored) -> dict:
     """`prove=True` runs the OPT-IN benign COPY-FROM-PROGRAM `id` proof on RCE-capable
     instances. `datamine_data=True` (default) samples redacted sensitive rows + harvests
-    embedded credentials."""
+    embedded credentials. `wordlist` = optional path to a user-supplied
+    credential list (each line `user:password` or password paired with
+    `postgres`); augments the bundled default-cred sweep."""
+    from ...wordlists import load_cred_wordlist
+    extra_creds = load_cred_wordlist(wordlist, default_user="postgres")
     from ... import svcprobe
     targets = postgres_targets(hosts)
     probes: dict = {}
@@ -756,7 +765,8 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                     # findings emits a specific "default cred still active" bug
                     # rather than a generic credentialed-access finding.
                     if not pr.get("cred_access"):
-                        weak = weak_password_sweep(t["ip"], t["port"])
+                        weak = weak_password_sweep(t["ip"], t["port"],
+                                                   extra_creds=extra_creds)
                         if weak:
                             u, pw = weak
                             pr["cred_access"] = True

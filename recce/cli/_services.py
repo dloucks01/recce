@@ -46,6 +46,14 @@ def cmd_web(args: argparse.Namespace) -> int:
     workbook; each endpoint gets the exact Kali deep-scan commands."""
     from .. import web
     print(BANNER)
+    # --wordlist FILE augments the bundled 110-path HTTP list. The deep probe
+    # layer (services.http._resolve_extra_paths) reads RECCE_HTTP_WORDLIST at
+    # scan time; setting the env var here is cleaner than threading a param
+    # through web.scan_host -> probes.http_findings -> enum_findings.
+    wl = getattr(args, "wordlist", None)
+    if wl:
+        os.environ["RECCE_HTTP_WORDLIST"] = wl
+        print(f"[*] HTTP path enum will augment bundled list with {wl!r}")
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum` first.")

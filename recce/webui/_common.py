@@ -103,14 +103,20 @@ _COMMANDS: dict = {
     # Authed loot pulls replication_roles, RCE capability, pivot ext,
     # pg_shadow hashes automatically — no flag needed.
     "postgres": _cmd("PostgreSQL (deep — weak-default + replication + RCE)", "Databases", "optional", creds=True,
-                     flags=[_f("prove", "--prove", "prove RCE with benign id (COPY-FROM-PROGRAM; active)", True)]),
+                     flags=[_f("prove", "--prove", "prove RCE with benign id (COPY-FROM-PROGRAM; active)", True),
+                            _f("wordlist", "--wordlist",
+                               "extra cred wordlist (user:pass or pass; augments 7 defaults)",
+                               kind="text", placeholder="/path/to/postgres-creds.txt")]),
     "mysql": _cmd("MySQL / MariaDB", "Databases", "optional", creds=True),
     "mongodb": _cmd("MongoDB", "Databases", "optional", creds=True),
     # MSSQL depth: native TDS-tunneled TLS SQL-Auth probe. C4 weak-default
     # sweep of 7 sa passwords runs when no creds are supplied; credentialed
     # sweep fires xp_cmdshell / CLR / OLE Automation / linked-server walk
     # via nxc.
-    "mssql": _cmd("MSSQL (deep — native TDS + C4 weak-sa sweep + xp_cmdshell)", "Databases", "optional", creds=True),
+    "mssql": _cmd("MSSQL (deep — native TDS + C4 weak-sa sweep + xp_cmdshell)", "Databases", "optional", creds=True,
+                  flags=[_f("wordlist", "--wordlist",
+                            "extra cred wordlist (user:pass or pass; augments 7 sa defaults)",
+                            kind="text", placeholder="/path/to/mssql-creds.txt")]),
     "redis": _cmd("Redis", "Databases", "optional"),
     "elasticsearch": _cmd("Elasticsearch", "Databases", "optional"),
     "memcached": _cmd("memcached", "Databases", "optional"),
@@ -134,7 +140,10 @@ _COMMANDS: dict = {
                        _f("upload-shell", "--upload-shell",
                           "upload benign webshell to prove RCE (active, writes a file)", True),
                        _f("smuggle", "--smuggle",
-                          "CL.TE/TE.CL smuggling probe (active, may disturb proxies)", True)]),
+                          "CL.TE/TE.CL smuggling probe (active, may disturb proxies)", True),
+                       _f("wordlist", "--wordlist",
+                          "extra HTTP path wordlist (augments the 110 bundled paths)",
+                          kind="text", placeholder="/path/to/dirbuster.txt")]),
     "api": _cmd("API — OpenAPI/Swagger/GraphQL/SOAP-WSDL/gRPC introspection", "Web", "optional"),
     # --- other services ---
     "smb": _cmd("SMB", "Services", "optional", creds=True),
@@ -147,7 +156,10 @@ _COMMANDS: dict = {
     "docker": _cmd("Docker API", "Services", "optional"),
     "kubernetes": _cmd("Kubernetes", "Services", "optional"),
     "dns": _cmd("DNS", "Services", "optional"),
-    "smtp": _cmd("SMTP", "Services", "optional"),
+    "smtp": _cmd("SMTP", "Services", "optional",
+                 flags=[_f("wordlist", "--wordlist",
+                           "extra usernames for VRFY/EXPN enum (augments 15 defaults)",
+                           kind="text", placeholder="/path/to/usernames.txt")]),
     # --- T4 scanner-expansion services (from the "everything else" round) ---
     "zookeeper":       _cmd("Zookeeper 4LW", "Services", "optional"),
     "kafka":           _cmd("Kafka MetadataRequest", "Services", "optional"),

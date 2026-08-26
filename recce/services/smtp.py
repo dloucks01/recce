@@ -241,8 +241,15 @@ def findings_to_vulns(fs: list[dict]) -> dict:
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
-            budget: float | None = None, progress=None) -> dict:
+            budget: float | None = None, progress=None,
+            wordlist: str | None = None, **_ignored) -> dict:
+    """`wordlist` = optional path to a user-supplied username list, one
+    per line; augments the bundled `_SMTP_ENUM_USERS`."""
     from .. import svcprobe
+    from ..wordlists import load_wordlist
+    extra_users = load_wordlist(wordlist)
+    enum_list = _SMTP_ENUM_USERS + [u for u in extra_users
+                                     if u not in _SMTP_ENUM_USERS]
     targets = smtp_targets(hosts)
     probes: dict = {}
     state: dict = {}
@@ -256,9 +263,9 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["vrfy"] = pr.get("vrfy", False)
                 t["version"] = pr.get("banner", "") or t.get("version", "")
                 # Only run the user-enum sweep on servers that answered EHLO.
-                # A dead port shouldn't burn the extra 15 * 3 commands.
+                # A dead port shouldn't burn the extra commands.
                 if pr.get("reachable") and pr.get("esmtp"):
-                    pr["enum"] = enum_users(t["ip"], t["port"])
+                    pr["enum"] = enum_users(t["ip"], t["port"], users=enum_list)
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
