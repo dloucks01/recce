@@ -31,7 +31,7 @@ from ..targets import expand_excludes, explicit_targets, ip_matcher, load_target
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
 
-__all__ = ['cmd_doctor', 'cmd_serve', 'cmd_demo', 'cmd_encdec']
+__all__ = ['cmd_doctor', 'cmd_serve', 'cmd_demo', 'cmd_encdec', 'cmd_loot_scan']
 
 
 
@@ -251,6 +251,68 @@ def cmd_encdec(args: argparse.Namespace) -> int:
         sys.stdout.write(out)
     else:
         print(out)
+    return 0
+
+
+def cmd_loot_scan(args: argparse.Namespace) -> int:
+    """Walk the engagement's evidence tree and add loot findings for
+    Kerberos ticket files, credential-bearing files (.aws/credentials,
+    .netrc, id_rsa, browser saved logins), .git repository dumps, and
+    configs with embedded secrets (API keys, DB URLs, private keys,
+    JWTs). Read-only — never mutates evidence files.
+
+    Newly-discovered findings persist to the datastore and show up in
+    the Findings tab / report. Idempotent: re-runs dedup against
+    existing loot findings on the same host by (script_id, title).
+    """
+    from ..intake.loot import scan_evidence
+    from ..store import Store
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    new_vulns = scan_evidence(args.output_dir)
+    if not new_vulns:
+        print("[+] Evidence scanned — no loot findings surfaced. Check that "
+              f"files exist under {args.output_dir}/evidence/<ip>/.")
+        return 0
+    print(f"[+] {len(new_vulns)} loot candidate(s) surfaced from the evidence tree:")
+    by_cat: dict = {}
+    for v in new_vulns:
+        by_cat.setdefault(v.script_id, []).append(v)
+    for sid, vs in sorted(by_cat.items()):
+        print(f"      [{sid}] {len(vs)}")
+        for v in vs[:5]:
+            print(f"        · {v.ip:15}  [{v.severity}]  {v.title[:80]}")
+        if len(vs) > 5:
+            print(f"        · … (+{len(vs)-5} more)")
+    if getattr(args, "dry_run", False):
+        print("[*] --dry-run: findings NOT persisted.")
+        return 0
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    try:
+        hosts_by_ip = {h.ip: h for h in store.all_hosts()}
+        added = 0
+        skipped_dup = 0
+        skipped_noip = 0
+        for v in new_vulns:
+            h = hosts_by_ip.get(v.ip)
+            if not h:
+                skipped_noip += 1
+                continue
+            if any(x.script_id == v.script_id and x.title == v.title
+                   for x in h.vulns):
+                skipped_dup += 1
+                continue
+            h.vulns.append(v)
+            store.upsert_host(h)
+            added += 1
+        print(f"[+] persisted {added} new finding(s) "
+              f"(skipped {skipped_dup} dup, {skipped_noip} on unknown hosts).")
+    finally:
+        store.close()
     return 0
 
 

@@ -1293,6 +1293,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "need one — use the API for per-step keys.")
     ed.set_defaults(func=_h("encdec"))
 
+    ls = sub.add_parser("loot-scan", aliases=["scan-evidence"],
+        help="Scan <engagement>/evidence/** for Kerberos tickets, credential "
+             "files, .git dumps, and configs with embedded secrets — folds "
+             "findings into the engagement.")
+    ls.add_argument("--dry-run", action="store_true",
+        help="Print what WOULD be added, but don't persist to the store.")
+    _add_io(ls)
+    ls.set_defaults(func=_h("loot_scan"))
+
     return p
 
 
