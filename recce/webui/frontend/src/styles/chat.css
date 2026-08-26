@@ -480,16 +480,18 @@
    the full command wrapping across as many lines as it needs below.
    Previously the code was a single-line horizontal scroll — testers had to
    scroll every row to see the tail end of long payload strings. */
-.payload-item { display: grid; grid-template-columns: 1fr auto;
-  grid-template-areas: "meta copy" "code code";
-  gap: 6px 10px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+/* Flex-wrap layout: meta pieces (label + badges) flow on the first row,
+   copy button pins to the right of that row, code and note each break to
+   their own full-width row via `flex-basis: 100%`. Uses `order` to keep
+   copy on the meta row and push code/note below regardless of DOM
+   position. Prior grid version stacked every meta child in the same
+   grid-area cell, which is the "text all overlaps" bug. */
+.payload-item { display: flex; flex-wrap: wrap; align-items: center;
+  gap: 4px 8px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
 .payload-item:last-child { border-bottom: 0; }
-.payload-item > .payload-label,
-.payload-item > .payload-note,
-.payload-item > .compat-badge,
-.payload-item > .payload-pick-badge { grid-area: meta; align-self: center; }
-.payload-item > .payload-copy { grid-area: copy; align-self: start; justify-self: end; }
-.payload-item > .payload-code { grid-area: code; }
+.payload-item > .payload-copy { order: 4; margin-left: auto; align-self: center; }
+.payload-item > .payload-code { order: 5; flex: 1 0 100%; }
+.payload-item > .payload-note { order: 6; flex: 1 0 100%; }
 .payload-label { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--accent); margin-right: 6px; }
 .payload-code { display: block; background: var(--ground); color: var(--text);
   padding: 8px 10px; border-radius: 6px; font-family: var(--mono);
