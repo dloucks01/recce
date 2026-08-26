@@ -31,7 +31,8 @@ from ..targets import expand_excludes, explicit_targets, ip_matcher, load_target
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
 
-__all__ = ['cmd_doctor', 'cmd_serve', 'cmd_demo', 'cmd_encdec', 'cmd_loot_scan']
+__all__ = ['cmd_doctor', 'cmd_serve', 'cmd_demo', 'cmd_encdec',
+           'cmd_loot_scan', 'cmd_sqli']
 
 
 
@@ -314,6 +315,47 @@ def cmd_loot_scan(args: argparse.Namespace) -> int:
     finally:
         store.close()
     return 0
+
+
+def cmd_sqli(args: argparse.Namespace) -> int:
+    """Active SQL injection tester (C5, gated attack tier). Refuses to run
+    unless --active-attacks is passed OR RECCE_ACTIVE_ATTACKS=1 is set,
+    matching the module's own gate. Runs error-based / boolean-blind /
+    time-based checks against each URL supplied as a target. Optional
+    --sqlmap hands off to sqlmap for deeper testing.
+
+    Usage:
+      recce sqli --active-attacks 'http://target/vuln?id=1'
+      recce sqli --active-attacks --sqlmap 'http://target/vuln?id=1'
+    """
+    from ..services import sqli as sqli_svc
+    active = getattr(args, "active_attacks", False)
+    use_sqlmap = getattr(args, "sqlmap", False)
+    urls = args.targets or []
+    if not urls:
+        print("[x] sqli requires at least one URL to test.")
+        return 1
+    total_hits = 0
+    for url in urls:
+        print(f"\n[*] Testing {url}")
+        try:
+            if use_sqlmap:
+                r = sqli_svc.run_sqlmap(url, active_attacks=active)
+                print(f"    sqlmap: ok={r['ok']} injected={r['injected_params']}")
+                total_hits += len(r["injected_params"])
+            else:
+                hits = sqli_svc.test_url_param(url, active_attacks=active)
+                for h in hits:
+                    print(f"    [{h['technique']:14}] param={h.get('param'):15}  "
+                          f"{h.get('evidence','')[:60]}")
+                total_hits += len(hits)
+        except sqli_svc.ActiveAttacksDisabled as e:
+            print(f"[x] {e}")
+            return 2
+        except Exception as e:  # noqa: BLE001
+            print(f"[!] {url} failed: {e}")
+    print(f"\n[+] {total_hits} injection point(s) confirmed across {len(urls)} URL(s).")
+    return 0 if total_hits >= 0 else 1
 
 
 def cmd_demo(args: argparse.Namespace) -> int:

@@ -1302,6 +1302,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_io(ls)
     ls.set_defaults(func=_h("loot_scan"))
 
+    sq = sub.add_parser("sqli",
+        help="Active SQL injection tester (C5 — GATED attack tier). "
+             "Runs error-based + boolean-blind + time-based checks against "
+             "URL parameters. Refuses to run without --active-attacks.")
+    sq.add_argument("targets", nargs="*",
+        help="URL(s) to test — parameters get auto-injected. Example: "
+             "'http://target/vulnerable.php?id=1'")
+    sq.add_argument("--active-attacks", action="store_true",
+        help="REQUIRED — acknowledge that recce will send injection "
+             "payloads to the target(s). No-op safety gate.")
+    sq.add_argument("--sqlmap", action="store_true",
+        help="Hand off to sqlmap for deeper testing (needs sqlmap installed).")
+    _add_io(sq)
+    sq.set_defaults(func=_h("sqli"))
+
     return p
 
 

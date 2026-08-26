@@ -97,11 +97,20 @@ _COMMANDS: dict = {
     "db": _cmd("Database scan (NSE inventory)", "Databases", "optional", creds=True,
                flags=[_f("aggressive", "--aggressive", "aggressive (brute/xp_cmdshell)", True)]),
     # --- databases (native deep modules) ---
-    "postgres": _cmd("PostgreSQL", "Databases", "optional", creds=True,
-                     flags=[_f("prove", "--prove", "prove RCE (benign id, active)", True)]),
+    # Postgres depth: weak-default sweep (7 well-known creds) runs
+    # automatically when auth is required and no creds supplied; --prove
+    # actually executes a benign COPY-FROM-PROGRAM 'id' when superuser.
+    # Authed loot pulls replication_roles, RCE capability, pivot ext,
+    # pg_shadow hashes automatically — no flag needed.
+    "postgres": _cmd("PostgreSQL (deep — weak-default + replication + RCE)", "Databases", "optional", creds=True,
+                     flags=[_f("prove", "--prove", "prove RCE with benign id (COPY-FROM-PROGRAM; active)", True)]),
     "mysql": _cmd("MySQL / MariaDB", "Databases", "optional", creds=True),
     "mongodb": _cmd("MongoDB", "Databases", "optional", creds=True),
-    "mssql": _cmd("MSSQL", "Databases", "optional", creds=True),
+    # MSSQL depth: native TDS-tunneled TLS SQL-Auth probe. C4 weak-default
+    # sweep of 7 sa passwords runs when no creds are supplied; credentialed
+    # sweep fires xp_cmdshell / CLR / OLE Automation / linked-server walk
+    # via nxc.
+    "mssql": _cmd("MSSQL (deep — native TDS + C4 weak-sa sweep + xp_cmdshell)", "Databases", "optional", creds=True),
     "redis": _cmd("Redis", "Databases", "optional"),
     "elasticsearch": _cmd("Elasticsearch", "Databases", "optional"),
     "memcached": _cmd("memcached", "Databases", "optional"),
@@ -111,15 +120,22 @@ _COMMANDS: dict = {
     "oracle": _cmd("Oracle TNS", "Databases", "optional"),
     "db2": _cmd("IBM Db2", "Databases", "optional"),
     # --- web / web-app ---
-    "web": _cmd("Web deep-enum", "Web", "optional",
-                flags=[_f("crawl", "--crawl", "crawl + inject"),
+    # The web module folds in every C1/C2/Tier-A HTTP addition automatically
+    # via probes.http_findings → services/http.py (path enum against 110-
+    # path bundled wordlist, framework fingerprint, form + login discovery,
+    # default-cred hints for 18 apps, JS-secret scan, backup-file variants,
+    # directory-listing detection, methods/CORS/robots-sitemap/OpenAPI/GraphQL/
+    # SOAP-WSDL/vhost). No opt-in needed for those. Flags below toggle the
+    # heavier / active checks.
+    "web": _cmd("Web deep-enum (path enum + forms + JS secrets + CORS + …)", "Web", "optional",
+                flags=[_f("crawl", "--crawl", "crawl + inject (deeper than the standard enum)"),
                        _f("autologin", "--autologin", "auto-login w/ looted creds (active)", True),
-                       _f("sqli-time", "--sqli-time", "time-based SQLi", True),
+                       _f("sqli-time", "--sqli-time", "time-based SQLi on discovered params", True),
                        _f("upload-shell", "--upload-shell",
                           "upload benign webshell to prove RCE (active, writes a file)", True),
                        _f("smuggle", "--smuggle",
                           "CL.TE/TE.CL smuggling probe (active, may disturb proxies)", True)]),
-    "api": _cmd("API — OpenAPI enum / IDOR / BOLA", "Web", "optional"),
+    "api": _cmd("API — OpenAPI/Swagger/GraphQL/SOAP-WSDL/gRPC introspection", "Web", "optional"),
     # --- other services ---
     "smb": _cmd("SMB", "Services", "optional", creds=True),
     "ftp": _cmd("FTP", "Services", "optional", creds=True),
@@ -144,6 +160,24 @@ _COMMANDS: dict = {
     "modbus":          _cmd("Modbus/TCP (OT/ICS)", "Services", "optional"),
     "rdp":             _cmd("RDP (NLA detection)", "Services", "optional"),
     "ipmi":            _cmd("IPMI (cipher-zero + null-user)", "Services", "optional"),
+    # --- Loot & Attack tier ---
+    # Loot scanner mines <engagement>/evidence/** for cred files, Kerberos
+    # tickets, .git dumps, and configs with embedded secrets. Idempotent
+    # (dedups on rerun). Standalone from the sweep chain too.
+    "loot-scan": _cmd("Loot scan — mine evidence/ for creds, tickets, secrets, .git dumps",
+                      "Loot", "none",
+                      flags=[_f("dry-run", "--dry-run",
+                                "preview candidates without persisting to the store")]),
+    # C5 active SQLi tester — GATED. Refuses to run unless the tester sets
+    # the active_attacks flag. Discovered forms + URL params get error /
+    # boolean-blind / time-based checks; optional sqlmap orchestration.
+    "sqli": _cmd("Active SQL injection (GATED — active attack tier)",
+                 "Attack", "required",
+                 flags=[_f("active-attacks", "--active-attacks",
+                           "REQUIRED — acknowledge that recce will send injection "
+                           "payloads to targets", True),
+                        _f("sqlmap", "--sqlmap",
+                           "hand off to sqlmap for deeper testing (needs sqlmap installed)", True)]),
     # --- AD / credentialed ---
     # Credentialed enum accepts AD scoping (--dc-ip / --ldap-*) + a separate
     # admin account for admin-only checks (secretsdump). Surfacing them turns
