@@ -31,7 +31,7 @@ from ..targets import expand_excludes, explicit_targets, ip_matcher, load_target
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
 
-__all__ = ['cmd_doctor', 'cmd_serve', 'cmd_demo']
+__all__ = ['cmd_doctor', 'cmd_serve', 'cmd_demo', 'cmd_encdec']
 
 
 
@@ -189,6 +189,69 @@ def cmd_serve(args: argparse.Namespace) -> int:
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
+
+
+def cmd_encdec(args: argparse.Namespace) -> int:
+    """Apply an encoder/decoder operation to input, or list the catalogue.
+
+    Examples:
+      recce encdec base64-decode 'aGVsbG8='
+      echo 'https://ex.com/?q=hi world' | recce encdec url-encode
+      recce encdec jwt-decode eyJhbGciOi...
+      recce encdec hmac-sha256 -k mysecret 'payload text'
+      recce encdec --chain url-decode json-pretty
+      recce encdec --list
+    """
+    from .. import encdec
+
+    if args.list:
+        ops = encdec.list_ops()
+        print(f"{'operation':<26}  key?  description")
+        print(f"{'-' * 26}  ----  {'-' * 40}")
+        for op in ops:
+            k = "yes" if op["requires_key"] else "no "
+            print(f"{op['name']:<26}  {k}   {op['description']}")
+        return 0
+
+    # Resolve the input: positional arg or stdin.
+    if args.input is not None:
+        input_text = args.input
+    else:
+        if sys.stdin.isatty() and not args.chain:
+            # No stdin, no positional — that's a usage error.
+            print("[!] provide an input string, pipe via stdin, or use --list.")
+            return 2
+        input_text = sys.stdin.read()
+        # Trim the trailing newline that a pipe from `echo` always adds — most
+        # ops treat it as data, and it silently breaks base64 padding.
+        if input_text.endswith("\n"):
+            input_text = input_text[:-1]
+
+    try:
+        if args.chain:
+            steps: list = []
+            for op in args.chain:
+                _fn, _desc, needs_key = encdec.OPERATIONS.get(op, (None, "", False))
+                if needs_key:
+                    steps.append((op, args.key))
+                else:
+                    steps.append(op)
+            out = encdec.chain(steps, input_text)
+        else:
+            if not args.op:
+                print("[!] operation required (or use --list / --chain)")
+                return 2
+            out = encdec.apply(args.op, input_text, key=args.key)
+    except encdec.EncDecError as e:
+        print(f"[x] {e}")
+        return 1
+    # Print without adding a trailing newline if the output already has one —
+    # keeps `recce encdec base64-decode` pipeable cleanly.
+    if out.endswith("\n"):
+        sys.stdout.write(out)
+    else:
+        print(out)
+    return 0
 
 
 def cmd_demo(args: argparse.Namespace) -> int:

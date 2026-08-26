@@ -1249,6 +1249,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     doc.add_argument("--no-self-scan", action="store_true",
                      help="skip the real localhost self-scan")
     doc.set_defaults(func=_h("doctor"))
+
+    ed = sub.add_parser("encdec", aliases=["cyber"],
+        help="encode/decode toolbox — base64 / url / hex / hash / JWT / gzip / XOR / …")
+    ed.add_argument("op", nargs="?",
+        help="Operation name (base64-decode, hex-encode, jwt-decode, sha256, …). "
+             "Use --list to see the full catalogue.")
+    ed.add_argument("input", nargs="?",
+        help="Input text. Reads from stdin if omitted.")
+    ed.add_argument("-k", "--key", default="",
+        help="Key argument for keyed ops (HMAC, XOR, rot-n).")
+    ed.add_argument("--list", action="store_true",
+        help="Print the full op catalogue and exit.")
+    ed.add_argument("--chain", nargs="+", metavar="OP",
+        help="Pipe input through a sequence of ops (each stage's output feeds "
+             "the next). Keyed ops in a chain use --key for all steps that "
+             "need one — use the API for per-step keys.")
+    ed.set_defaults(func=_h("encdec"))
+
     return p
 
 

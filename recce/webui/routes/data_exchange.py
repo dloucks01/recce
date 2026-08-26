@@ -27,6 +27,61 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         with Store(db_path) as st:
             return st.all_hosts(), (st.get_meta("engagement") or "recce engagement")
 
+    @app.get("/api/encdec/ops")
+    def encdec_ops():
+        """List every encoder/decoder operation the /api/encdec endpoint
+        supports. Returns [{name, description, requires_key}]."""
+        from ... import encdec
+        return {"ops": encdec.list_ops()}
+
+
+    @app.post("/api/encdec")
+    def encdec_apply(body: dict = Body(...)):
+        """Apply one op to `input`. body: {op, input, key?}. On failure returns
+        {ok:false, error} instead of HTTPException — the WebUI can render the
+        message inline without the browser turning it into a modal."""
+        from ... import encdec
+        op = str(body.get("op", "")).strip()
+        input_text = str(body.get("input", ""))
+        key = str(body.get("key", ""))
+        if not op:
+            raise HTTPException(400, "op required")
+        try:
+            output = encdec.apply(op, input_text, key=key)
+            return {"ok": True, "op": op, "output": output}
+        except encdec.EncDecError as e:
+            return {"ok": False, "op": op, "error": str(e)}
+
+
+    @app.post("/api/encdec/chain")
+    def encdec_chain(body: dict = Body(...)):
+        """Pipe `input` through a sequence of ops. body: {input, steps:[
+          {op:"...", key?:"..."}, {op:"...", ...}, ...
+        ]}. Each op runs on the previous step's output.
+
+        Returns {ok, output, step_outputs:[str]} on success — step_outputs
+        lets the UI show the intermediate value at each stage of the recipe.
+        On any failure returns {ok:false, error, failed_step_index}."""
+        from ... import encdec
+        input_text = str(body.get("input", ""))
+        steps = body.get("steps") or []
+        if not isinstance(steps, list):
+            raise HTTPException(400, "steps must be a list")
+        cur = input_text
+        outs: list[str] = []
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict) or not step.get("op"):
+                return {"ok": False, "error": f"step {i} missing op",
+                        "failed_step_index": i}
+            try:
+                cur = encdec.apply(step["op"], cur, key=str(step.get("key", "")))
+            except encdec.EncDecError as e:
+                return {"ok": False, "error": str(e),
+                        "failed_step_index": i, "step_outputs": outs}
+            outs.append(cur)
+        return {"ok": True, "output": cur, "step_outputs": outs}
+
+
     @app.get("/api/import/parsers")
     def list_user_parsers():
         """Phase 2 — enumerate loaded user parsers (JSON in ~/.recce/parsers/
