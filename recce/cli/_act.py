@@ -349,13 +349,15 @@ def cmd_prove(args: argparse.Namespace) -> int:
         return 0
     # Fold verdicts back onto the vuln records so the WebUI Findings tab and
     # every downstream report (exploit-plan / attack-path / writeups) can
-    # filter by verdict. Match on (ip, port, vuln title). A stale prove run
-    # gets overwritten — the newest verdict wins. Touched hosts are upserted
+    # filter by verdict. Match on (ip, port, vuln title) — proof results
+    # carry the finding's actual title in the `finding` field (`vuln` is
+    # the proof rule name, not the finding title). A stale prove run gets
+    # overwritten — the newest verdict wins. Touched hosts are upserted
     # once at the end (not per-vuln) to keep the writes cheap.
     touched: set = set()
     by_key: dict = {}
     for r in results:
-        by_key[(r['ip'], r['port'], r['vuln'])] = r
+        by_key[(r['ip'], r['port'], r['finding'])] = r
     for host in hosts:
         for v in host.vulns:
             r = by_key.get((v.ip, v.port, v.title))
@@ -367,7 +369,12 @@ def cmd_prove(args: argparse.Namespace) -> int:
             touched.add(host.ip)
     for host in hosts:
         if host.ip in touched:
-            store.upsert_host(host)
+            # merge=False because we're mutating already-loaded vulns
+            # in-place. Default merge dedups by Vuln.key and KEEPS the
+            # stored copy on collision — which would drop our updated
+            # verdict fields silently. Overwriting with the loaded host
+            # is safe here: prove doesn't add/remove vulns, only annotates.
+            store.upsert_host(host, merge=False)
     icon = {proofs.CONFIRMED: "[+]", proofs.LIKELY: "[~]",
             proofs.INCONCLUSIVE: "[?]", proofs.FALSE_POSITIVE: "[x]"}
     for r in results:
