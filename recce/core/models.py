@@ -114,6 +114,16 @@ class Vuln:
     # Exploitation-in-the-wild prioritization (orthogonal to severity + qod):
     kev: bool = False        # a CVE in CISA's Known Exploited Vulnerabilities catalogue
     epss: float = 0.0        # EPSS 30-day exploitation probability (0-1), when known
+    # `verdict` is the OUTPUT of `recce prove` — a hardened judgement about
+    # whether this finding is real. Distinct from `confidence` (which is set
+    # at detection time from the source method). Empty until prove runs.
+    #   "CONFIRMED"       — evidence positively proves the vuln (non-intrusive)
+    #   "LIKELY"          — high-signal but not directly proven (version match)
+    #   "INCONCLUSIVE"    — needs a manual PoC to decide
+    #   "FALSE POSITIVE"  — evidence disproves the vuln (patched, backported)
+    verdict: str = ""
+    verdict_evidence: list[str] = field(default_factory=list)
+    verdict_finish: str = ""
 
     @property
     def key(self) -> str:

@@ -76,6 +76,11 @@ main { padding: 22px 22px 56px; max-width: 1180px; margin: 0 auto; }
 .badge { font-size: 10px; font-weight: 700; font-family: var(--mono); padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); }
 .badge.kev { color: #fff; background: var(--kev); border-color: transparent; }
 .badge.epss { color: var(--high); border-color: color-mix(in srgb, var(--high) 40%, transparent); }
+.badge.verdict { text-transform: none; letter-spacing: 0; }
+.badge.verdict.verdict-confirmed { color: #fff; background: var(--ok); border-color: transparent; }
+.badge.verdict.verdict-likely { color: var(--med); background: color-mix(in srgb, var(--med) 14%, transparent); border-color: color-mix(in srgb, var(--med) 40%, transparent); }
+.badge.verdict.verdict-inconclusive { color: var(--muted); background: var(--surface2); border-color: var(--line); }
+.badge.verdict.verdict-false-positive { color: var(--faint); background: var(--surface2); border-color: var(--line); text-decoration: line-through; }
 .tier { font-family: var(--mono); font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
 .tier.confirmed { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
 .tier.likely { color: var(--med); background: color-mix(in srgb, var(--med) 16%, transparent); }

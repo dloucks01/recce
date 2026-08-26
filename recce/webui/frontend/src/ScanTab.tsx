@@ -179,6 +179,10 @@ export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProp
   }, []);
 
   useEffect(() => {
+    // Auto-refresh of Dashboard/Findings on scan completion is already
+    // handled by useEngagement.ts subscribing to /api/events SSE and
+    // calling refresh() on `type=scan` events. This poller is just the
+    // Jobs list on the right rail — no cross-tab broadcast needed here.
     async function pollJobs() {
       try {
         const res = await fetch("/api/jobs");

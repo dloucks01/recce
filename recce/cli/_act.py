@@ -347,6 +347,27 @@ def cmd_prove(args: argparse.Namespace) -> int:
               "SeImpersonate / null-session / anon-FTP / weak-TLS).")
         store.close()
         return 0
+    # Fold verdicts back onto the vuln records so the WebUI Findings tab and
+    # every downstream report (exploit-plan / attack-path / writeups) can
+    # filter by verdict. Match on (ip, port, vuln title). A stale prove run
+    # gets overwritten — the newest verdict wins. Touched hosts are upserted
+    # once at the end (not per-vuln) to keep the writes cheap.
+    touched: set = set()
+    by_key: dict = {}
+    for r in results:
+        by_key[(r['ip'], r['port'], r['vuln'])] = r
+    for host in hosts:
+        for v in host.vulns:
+            r = by_key.get((v.ip, v.port, v.title))
+            if not r:
+                continue
+            v.verdict = r['verdict']
+            v.verdict_evidence = list(r.get('evidence') or [])
+            v.verdict_finish = r.get('finish', '')
+            touched.add(host.ip)
+    for host in hosts:
+        if host.ip in touched:
+            store.upsert_host(host)
     icon = {proofs.CONFIRMED: "[+]", proofs.LIKELY: "[~]",
             proofs.INCONCLUSIVE: "[?]", proofs.FALSE_POSITIVE: "[x]"}
     for r in results:

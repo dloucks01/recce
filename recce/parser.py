@@ -97,6 +97,38 @@ def _script_from_node(node: ET.Element) -> Script:
     )
 
 
+_SMB_FAMILY_PORTS = {139, 445}
+_HTTP_FAMILY_PORTS = {80, 443, 8080, 8443, 8000, 8888}
+
+
+def _family_canonical_port(portid: int | None) -> int | None:
+    """Collapse SMB and HTTP family ports to a single canonical port for
+    dedup purposes — 139/445 → 139, 80/443/8080/8443/8000/8888 → 80. See
+    the identical helper in vulndb; keeping a local copy avoids importing
+    the vuln package from the parser (kept lean by design)."""
+    if portid is None:
+        return None
+    if portid in _SMB_FAMILY_PORTS:
+        return 139
+    if portid in _HTTP_FAMILY_PORTS:
+        return 80
+    return portid
+
+
+def _is_dup_across_family(vuln, host) -> bool:
+    """True when `vuln` has the same (script_id, title) as one already on
+    `host` and their ports fold to the same family — the SambaCry-on-both-
+    SMB-ports and vulners-on-both-SMB-ports duplicates the report used to
+    show. Distinct sids / titles / non-family ports are unaffected."""
+    canonical = _family_canonical_port(vuln.port)
+    for existing in host.vulns:
+        if (existing.script_id == vuln.script_id
+                and existing.title == vuln.title
+                and _family_canonical_port(existing.port) == canonical):
+            return True
+    return False
+
+
 def _classify_vuln(host_ip: str, port: Port | None, script: Script) -> Vuln | None:
     """Turn a vuln-flavored NSE script result into a Vuln, or None if not relevant."""
     sid = script.id
@@ -150,10 +182,62 @@ def _classify_vuln(host_ip: str, port: Port | None, script: Script) -> Vuln | No
     else:
         severity = "info"
 
-    title = sid
+    # Derive a real title. NSE default is `title = sid` which surfaces as
+    # "vulners", "http-vuln-cve2011-3192", "http-slowloris-check" in the
+    # report — useless. Explicit precedence:
+    #   1. Explicit `Title:` line in script output (already correct)
+    #   2. `vulners` → format as "<product>: <top CVE> (vulners)" from the
+    #      highest-CVSS row of vulners' output
+    #   3. `http-vuln-<cve-id>` / any sid embedding a CVE → format the CVE
+    #      as the title
+    #   4. Well-known NSE sids get a curated human-friendly label
+    title = ""
     tm = re.search(r"Title:\s*(.+)", out)
     if tm:
         title = tm.group(1).strip()
+    if not title and sid == "vulners":
+        # vulners lines look like:  CVE-2021-42013   9.8   https://vulners.com/...
+        # Pick the highest-CVSS line.
+        best = None
+        for m in re.finditer(r"(CVE-\d{4}-\d+)\s+(\d+\.\d+)", out):
+            score = float(m.group(2))
+            if not best or score > best[1]:
+                best = (m.group(1), score)
+        if best:
+            product = (port.product if port else "") or (port.service if port else "")
+            product = product.strip() or "service"
+            title = f"{product}: {best[0]} (CVSS {best[1]})"
+    if not title:
+        # http-vuln-cve2011-3192 → CVE-2011-3192; ssh-vuln-cve2016-0777, etc.
+        m = re.search(r"cve[-_]?(\d{4})[-_]?(\d{3,7})", sid, re.I)
+        if m:
+            cve = f"CVE-{m.group(1)}-{m.group(2)}"
+            product = sid.split("-")[0]
+            title = f"{product.upper()} vulnerability: {cve}"
+    _SID_TITLES = {
+        "http-slowloris-check": "HTTP Slowloris DoS (CVE-2007-6750)",
+        "http-title": "",  # noise — not a finding
+        "http-methods": "HTTP methods enumeration",
+        "http-enum": "HTTP path enumeration hit",
+        "http-shellshock": "Bash Shellshock (CVE-2014-6271) in CGI",
+        "smb-vuln-ms17-010": "SMB EternalBlue (MS17-010)",
+        "smb-vuln-ms08-067": "SMB MS08-067",
+        "smb-vuln-cve-2017-7494": "Samba SambaCry (CVE-2017-7494)",
+        "smb-double-pulsar-backdoor": "SMB DoublePulsar backdoor",
+        "rdp-vuln-ms12-020": "RDP MS12-020",
+        "ftp-vsftpd-backdoor": "vsftpd 2.3.4 backdoor",
+        "ftp-proftpd-backdoor": "ProFTPD backdoor",
+    }
+    if not title and sid in _SID_TITLES:
+        title = _SID_TITLES[sid]
+    if title is None:
+        title = ""
+    # Drop http-title entirely — it's the page's <title>, not a finding.
+    if sid == "http-title":
+        return None
+    # Absolute fallback: sid only when nothing else worked; better than "".
+    if not title:
+        title = sid
 
     return Vuln(
         ip=host_ip,
@@ -419,7 +503,7 @@ def parse_nmap_xml(path: str) -> list[Host]:
                     script = _script_from_node(snode)
                     port.scripts.append(script)
                     vuln = _classify_any(ip, port, script)
-                    if vuln:
+                    if vuln and not _is_dup_across_family(vuln, host):
                         host.vulns.append(vuln)
                 host.ports.append(port)
 

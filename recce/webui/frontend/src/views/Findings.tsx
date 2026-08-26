@@ -268,6 +268,22 @@ export function Findings(
                   <div className="badges">
                     {x.kev && <span className="badge kev" title="CISA Known Exploited Vulnerability — confirmed exploited in the wild; fix first">🔥 KEV</span>}
                     {x.epss > 0 && <span className="badge epss" title="EPSS — 30-day probability this CVE is exploited (FIRST.org)">EPSS {x.epss}%</span>}
+                    {x.verdict && (
+                      <span className={`badge verdict verdict-${x.verdict.toLowerCase().replace(/\s+/g,'-')}`}
+                            title={
+                              x.verdict === "CONFIRMED" ? "recce prove: evidence positively proves it (non-intrusive)" :
+                              x.verdict === "LIKELY" ? "recce prove: high-signal (version match); run the finish step to confirm" :
+                              x.verdict === "INCONCLUSIVE" ? "recce prove: needs a manual PoC to decide" :
+                              x.verdict === "FALSE POSITIVE" ? "recce prove: evidence disproves the vuln (patched/backported)" :
+                              "recce prove verdict"
+                            }>
+                        {x.verdict === "CONFIRMED" ? "✓ confirmed"
+                          : x.verdict === "LIKELY" ? "≈ likely"
+                          : x.verdict === "INCONCLUSIVE" ? "? needs PoC"
+                          : x.verdict === "FALSE POSITIVE" ? "✗ false pos"
+                          : x.verdict}
+                      </span>
+                    )}
                     {x.kev && nav.toExploitShell && (
                       <button className="kev-shell-btn" title="Get shell — opens Sessions with the msf module + target pre-filled"
                               onClick={async (e) => {

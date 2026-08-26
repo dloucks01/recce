@@ -18,6 +18,11 @@ export type Finding = {
   cve: string; cves: string[]; kev: boolean; epss: number;
   tier: string; source: string; confidence: string;
   sources?: string[]; status?: FindingStatus;
+  // `recce prove` verdict — empty until prove has run. Rendered as a
+  // badge (✓ confirmed / ≈ likely / ? needs PoC / ✗ false pos).
+  verdict?: string;
+  verdict_evidence?: string[];
+  verdict_finish?: string;
 };
 
 export async function setFindingStatus(key: string, status: FindingStatus): Promise<void> {

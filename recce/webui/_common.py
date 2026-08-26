@@ -294,6 +294,11 @@ def _finding_dict(v, reviewed: bool = False, notes: str = "",
         "epss": round((getattr(v, "epss", 0.0) or 0.0) * 100),
         "tier": _tier(v), "source": v.source, "confidence": v.confidence,
         "sources": sources,
+        # `recce prove` verdict — surfaces as a badge on the Findings row.
+        # Empty until prove has run against this engagement.
+        "verdict": getattr(v, "verdict", "") or "",
+        "verdict_evidence": list(getattr(v, "verdict_evidence", []) or []),
+        "verdict_finish": getattr(v, "verdict_finish", "") or "",
     }
 
 

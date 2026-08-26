@@ -1052,20 +1052,39 @@ def _confidence(sig: dict) -> str:
     return "likely"          # a concrete version range matched
 
 
+_SMB_FAMILY_PORTS = {139, 445}
+_HTTP_FAMILY_PORTS = {80, 443, 8080, 8443, 8000, 8888}
+
+
+def _canonical_family_port(portid: int) -> int:
+    """For a CVE finding, collapse multiple ports of the same service family
+    to one canonical port so we don't emit the same SambaCry/EternalBlue
+    finding twice (once for 139, once for 445 — same SMB service). Same
+    with HTTP CVEs on 80/443/8080/8443 — one HTTP-family instance per host.
+    Returns the canonical port id (lowest in the family) or the port itself
+    when it's not part of a collapsing family."""
+    if portid in _SMB_FAMILY_PORTS:
+        return 139
+    if portid in _HTTP_FAMILY_PORTS:
+        return 80
+    return portid
+
+
 def assess_host(host: Host) -> list[Vuln]:
     """Match every service on a host against the offline knowledge base."""
     findings: list[Vuln] = []
-    # Dedup per (title, port): a product exposed on two ports is two distinct
-    # exposures, so both are reported (keyed to their own port) instead of the
-    # second being silently dropped and its port missing from the write-up.
-    seen = {(v.title, v.port) for v in host.vulns}
+    # Dedup per (title, canonical_port): a product exposed on two ports of
+    # the SAME service family (SMB 139+445, HTTP 80+443+8080+8443) is one
+    # finding, not two — same CVE on the same OS service. When it's two
+    # DIFFERENT services (e.g. a product on 8080 AND 9090) both are kept.
+    seen = {(v.title, _canonical_family_port(v.port or 0)) for v in host.vulns}
     for port in host.open_ports:
         for sig in SIGNATURES:
             if not _matches(sig, port, host):
                 continue
-            if (sig["title"], port.portid) in seen:
+            if (sig["title"], _canonical_family_port(port.portid)) in seen:
                 continue
-            seen.add((sig["title"], port.portid))
+            seen.add((sig["title"], _canonical_family_port(port.portid)))
             banner = f"{port.product} {port.version}".strip() or port.service
             conf = _confidence(sig)
             remediation = sig.get("remediation", "")
