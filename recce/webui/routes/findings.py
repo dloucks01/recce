@@ -70,6 +70,39 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
                         "tester": x_tester})
         return {"ok": True, "status": status}
 
+    @app.post("/api/sqli/test")
+    def sqli_test(body: dict = Body(...), x_tester: str = Header(default="someone")):
+        """Active SQL injection test (C5). GATED — the request body MUST set
+        `active_attacks: true` (mirroring the module-level opt-in) or the
+        request refuses with 403.
+
+        body: {url, method?, inputs?[names], defaults?{}, active_attacks:true}
+        Returns {hits:[...], gated_reason?} on success; 403 on missing opt-in.
+        """
+        from ...services import sqli as sqli_svc
+        url = str(body.get("url", "")).strip()
+        if not url:
+            raise HTTPException(400, "url required")
+        active = bool(body.get("active_attacks"))
+        if not active:
+            raise HTTPException(403, "active SQLi requires 'active_attacks': true "
+                                    "in the request body — recce stays passive by default")
+        try:
+            if body.get("inputs"):
+                hits = sqli_svc.test_form(url, str(body.get("method", "POST")),
+                                          list(body.get("inputs") or []),
+                                          active_attacks=True,
+                                          defaults=body.get("defaults") or {})
+            else:
+                hits = sqli_svc.test_url_param(url, active_attacks=True)
+        except sqli_svc.ActiveAttacksDisabled as e:
+            raise HTTPException(403, str(e))
+        if hits:
+            broker.publish({"type": "add", "what": "sqli", "by": x_tester,
+                            "count": len(hits), "url": url})
+        return {"hits": hits, "url": url, "tester": x_tester}
+
+
     @app.post("/api/loot/scan-evidence")
     def loot_scan_evidence(x_tester: str = Header(default="someone")):
         """Walk `<engagement>/evidence/**` and produce Vuln findings for
