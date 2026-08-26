@@ -1919,6 +1919,12 @@ _UNAUTH_SWEEP = [
     ("docker-registry", "cmd_docker_registry"),
     ("vnc", "cmd_vnc"), ("modbus", "cmd_modbus"),
     ("rdp", "cmd_rdp"), ("ipmi", "cmd_ipmi"),
+    # Post-sweep: mine whatever landed under evidence/ during the sweep
+    # (auto-collected loot from container escapes, credential-exposed
+    # configs, .git dumps that path_enum pulled locally, etc.) into
+    # first-class findings. Runs last so it sees anything the earlier
+    # phases wrote.
+    ("loot-scan", "cmd_loot_scan"),
 ]
 
 
@@ -1963,7 +1969,15 @@ def _run_sweep(args: argparse.Namespace, *, authenticated: bool) -> int:
             args.ldap_enum = args.ldap_anon = False
         table, kind, tag = _UNAUTH_SWEEP, "credential-free", "SWEEP"
 
-    modules = [(n, globals()[fn]) for n, fn in table]
+    # Resolve handler names against the top-level `recce.cli` namespace.
+    # `globals()` here is helpers.py's module dict, which does NOT contain
+    # the cmd_* functions (they live in cli/_services.py, cli/_meta.py,
+    # cli/_db.py, cli/_ad.py — wildcard-re-exported from cli/__init__.py).
+    # This lookup path was latently broken: `globals()[fn]` would KeyError
+    # for every entry in _UNAUTH_SWEEP / _AUTH_SWEEP.
+    import sys as _sys
+    _cli_ns = _sys.modules["recce.cli"]
+    modules = [(n, getattr(_cli_ns, fn)) for n, fn in table if hasattr(_cli_ns, fn)]
     skip = {s.strip().lower() for s in (getattr(args, "skip", None) or [])}
     only = {s.strip().lower() for s in (getattr(args, "only_modules", None) or [])}
     if only:
