@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
+import { Modal } from "../ui";
 
 type Op = {
   name: string;
@@ -111,35 +112,27 @@ export function EncDecModal({ onClose }: Props) {
   }
 
   return (
-    <>
-      <div className="modal-overlay" onClick={onClose} />
-      <div className="modal encdec-modal" role="dialog" aria-label="Encoder / Decoder">
-        <div className="modal-header">
-          <h2>Encoder / Decoder</h2>
-          <div className="modal-header-actions">
-            <label style={{ fontSize: 12, marginRight: 12 }}>
-              <input
-                type="checkbox"
-                checked={chainMode}
-                onChange={(e) => {
-                  setChainMode(e.target.checked);
-                  setChainOutputs([]);
-                  setOutput("");
-                }}
-                style={{ marginRight: 6 }}
-              />
-              Recipe (chain steps)
-            </label>
-            <button className="toggle" onClick={onClose}>Close</button>
-          </div>
-        </div>
-
-        <div className="modal-body">
-          <p className="modal-sub">
-            Same toolbox as the CLI (<code>recce encdec &lt;op&gt;</code>). All operations run
-            locally — no data leaves the box. Filter to find an op fast; toggle Recipe mode
-            to chain steps (URL-decode → JSON-pretty, base64-decode → gzip-decode, …).
-          </p>
+    <Modal
+      title="Encoder / Decoder"
+      subtitle="Same toolbox as the CLI (recce encdec <op>). All operations run locally — no data leaves the box. Filter to find an op fast; toggle Recipe mode to chain steps."
+      onClose={onClose}
+      size="lg"
+      headerActions={
+        <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            type="checkbox"
+            checked={chainMode}
+            onChange={(e) => {
+              setChainMode(e.target.checked);
+              setChainOutputs([]);
+              setOutput("");
+            }}
+          />
+          Recipe mode
+        </label>
+      }
+    >
+      <div className="encdec-body">
 
           <label className="imp-field">
             Operation
@@ -317,7 +310,6 @@ export function EncDecModal({ onClose }: Props) {
             </button>
           )}
         </div>
-      </div>
-    </>
+    </Modal>
   );
 }

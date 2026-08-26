@@ -74,7 +74,7 @@ export function CommandPalette(p: CommandPaletteProps) {
       ["Go to Sessions", "sessions shells", () => p.onGoto("sessions")],
       ["Go to Timeline", "timeline events history", () => p.onGoto("timeline")],
       ["Go to Report", "report studio export", () => p.onGoto("report")],
-      ["Go to Exploit", "exploit act plan attack", () => p.onGoto("exploitation")],
+      ["Go to Exploit", "exploit act plan attack", () => p.onGoto("exploit")],
       ["Go to Creds", "credentials creds passwords", () => p.onGoto("credentials")],
       ["Go to Playbook", "playbook phases", () => p.onGoto("playbook")],
       ["Toggle theme", "dark light theme mode", p.onToggleTheme],

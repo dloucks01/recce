@@ -34,6 +34,80 @@ export function useResizableDrawer(storageKey: string, defaultW = 440) {
   return { width, startResize };
 }
 
+/**
+ * Shared modal shell. Every modal in the app should wrap its body in this
+ * component so overlay behavior, Escape-to-close, header styling, and close
+ * button are consistent. Contents render inside `.modal-body`; footer buttons
+ * go in a `.modal-actions` div at the end of children (already convention).
+ *
+ * `size` picks a width preset: sm (400px), md (600px, default), lg (860px).
+ * `subtitle` shows a muted one-liner under the h2.
+ */
+export function Modal(
+  { title, subtitle, onClose, size = "md", children, headerActions, ariaLabel }:
+  {
+    title: string;
+    subtitle?: string;
+    onClose: () => void;
+    size?: "sm" | "md" | "lg";
+    children: React.ReactNode;
+    headerActions?: React.ReactNode;
+    ariaLabel?: string;
+  }
+) {
+  useEscape(onClose);
+  return (
+    <>
+      <div className="modal-overlay" onClick={onClose} />
+      <div className={`modal modal-${size}`} role="dialog"
+           aria-modal="true" aria-label={ariaLabel || title}>
+        <div className="modal-header">
+          <div className="modal-title-block">
+            <h2>{title}</h2>
+            {subtitle && <p className="modal-subtitle">{subtitle}</p>}
+          </div>
+          <div className="modal-header-actions">
+            {headerActions}
+            <button className="modal-close" onClick={onClose}
+                    aria-label="Close" title="Close (Esc)">×</button>
+          </div>
+        </div>
+        <div className="modal-body">
+          {children}
+        </div>
+      </div>
+    </>
+  );
+}
+
+
+/**
+ * Shimmer skeleton placeholder for content that's still loading. Use in
+ * place of a plain "Loading…" string when the shape of the content is
+ * predictable (a table has rows, a card has a title + body). Matches the
+ * theme via var(--surface2) / var(--line) — no explicit colors.
+ *
+ * `variant`: 'line' (default; one-line-of-text), 'block' (a card body),
+ * 'row' (a table row shape).
+ */
+export function Skeleton(
+  { variant = "line", width = "100%", height, count = 1 }:
+  { variant?: "line" | "block" | "row"; width?: string; height?: string; count?: number }
+) {
+  const items = Array.from({ length: count });
+  const heights = { line: "14px", block: "80px", row: "44px" };
+  const h = height || heights[variant];
+  return (
+    <>
+      {items.map((_, i) => (
+        <div key={i} className={`skeleton skeleton-${variant}`}
+             style={{ width, height: h }} aria-hidden="true" />
+      ))}
+    </>
+  );
+}
+
+
 export function Stat(
   { k, v, sub, cls, onClick, title }:
   { k: string; v: string; sub?: string; cls?: string; onClick?: () => void; title?: string }

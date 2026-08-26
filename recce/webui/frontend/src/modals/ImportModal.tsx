@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { postImport, uploadEvidence, getJSON, Host,
          ParserSpec, ParserTestResult,
          testUserParser, saveUserParser, draftParserWithLLM } from "../api";
-import { useEscape } from "../ui";
+import { Modal, useEscape } from "../ui";
 
 // Tool catalog is grouped by category so the dropdown reads like a menu of
 // what recce can eat, not an alphabet soup. Auto-detect stays first — 95% of
@@ -250,17 +250,12 @@ export function ImportModal(
   }
 
   return (
-    <>
-      <div className="modal-backdrop" onClick={onClose} />
-      <div className="modal" role="dialog" aria-label="Import tool output">
-        <div className="modal-h">
-          <h3>Import tool output</h3>
-          <button className="drawer-x" onClick={onClose} aria-label="close">✕</button>
-        </div>
-        <p className="modal-sub">
-          Drop a file or paste output from any supported tool. recce folds it into this engagement and every open
-          browser updates — no terminal needed.
-        </p>
+    <Modal
+      title="Import tool output"
+      subtitle="Drop a file or paste output from any supported tool. recce folds it into this engagement and every open browser updates — no terminal needed."
+      onClose={busy ? () => {} : onClose}
+      size="md"
+    >
         <div className="imp-mode-tabs">
           <button className={"imp-mode-tab" + (mode === "parse" ? " sel" : "")}
                   onClick={() => setMode("parse")} disabled={busy}>
@@ -448,7 +443,6 @@ export function ImportModal(
             </>
           )}
         </div>
-      </div>
-    </>
+    </Modal>
   );
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "sessions" | "timeline" | "report" | "exploitation" | "credentials" | "playbook";
+export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "sessions" | "timeline" | "report" | "exploit" | "credentials" | "playbook";
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
@@ -11,7 +11,7 @@ const TAB_LABELS: Record<TabId, string> = {
   sessions: "Sessions",
   timeline: "Timeline",
   report: "Report",
-  exploitation: "Exploit",
+  exploit: "Exploit",
   credentials: "Creds",
   playbook: "Playbook",
 };
@@ -22,7 +22,7 @@ const TAB_LABELS: Record<TabId, string> = {
 // playbook (phase tracking) → timeline (retrospective) → report (deliverable).
 // Testers can still drag-and-drop; localStorage remembers their reorder.
 const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services",
-                           "exploitation", "sessions", "credentials", "playbook",
+                           "exploit", "sessions", "credentials", "playbook",
                            "timeline", "report"];
 
 interface TabBarProps {
@@ -35,7 +35,14 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
   const [tabs, setTabs] = useState<TabId[]>(() => {
     const saved = localStorage.getItem("recce.tabs");
     if (saved) {
-      const parsed: TabId[] = JSON.parse(saved);
+      // Migrate: earlier versions used "exploitation" as the tab id; the
+      // shorter "exploit" replaced it. Rewrite in-place so returning users
+      // don't see a stale (or duplicate) tab.
+      let parsed: TabId[] = JSON.parse(saved).map((t: string) =>
+        t === "exploitation" ? "exploit" : t
+      );
+      // Dedup after migration (in case both ids were present).
+      parsed = Array.from(new Set(parsed)) as TabId[];
       const missing = ALL_TABS.filter(t => !parsed.includes(t));
       if (missing.length > 0) {
         const merged = [...parsed, ...missing];

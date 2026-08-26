@@ -399,6 +399,40 @@ body { background: var(--ground); color: var(--text); }
 .imp-preview .warn-msg { margin-top: 6px; color: var(--high); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 
+/* Shared modal shell (from ui.tsx <Modal>). Overlay + centered card with a
+   standard title/subtitle header and close-button. Every future modal should
+   render through this shell so behavior + styling stay consistent. */
+.modal-overlay { position: fixed; inset: 0; background: rgba(6,10,18,.55);
+  z-index: 50; animation: fade .12s ease; }
+@keyframes fade { from { opacity: 0; } }
+.modal-sm { width: min(420px, 94vw); }
+.modal-md { width: min(600px, 94vw); }
+.modal-lg { width: min(880px, 96vw); }
+.modal-header { display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; margin-bottom: 12px; }
+.modal-title-block { flex: 1; min-width: 0; }
+.modal-header h2 { margin: 0; font-size: 16px; font-weight: 800; letter-spacing: -.01em; }
+.modal-subtitle { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.modal-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.modal-close { border: 0; background: transparent; color: var(--muted);
+  font-size: 22px; line-height: 1; width: 28px; height: 28px; border-radius: 6px;
+  cursor: pointer; padding: 0; display: grid; place-items: center; }
+.modal-close:hover { background: var(--surface2); color: var(--text); }
+.modal-body { display: flex; flex-direction: column; }
+
+/* Shimmer skeleton — matches theme via var(--surface2)/var(--line), no literals.
+   Reduces motion-sensitivity: the shimmer is gated by prefers-reduced-motion. */
+.skeleton { display: block; border-radius: 6px;
+  background: linear-gradient(90deg,
+    var(--surface2) 0%, var(--line) 50%, var(--surface2) 100%);
+  background-size: 200% 100%; animation: skel 1.4s ease-in-out infinite;
+  margin-bottom: 8px; }
+.skeleton-line { border-radius: 4px; }
+.skeleton-block { border-radius: 8px; }
+.skeleton-row { border-radius: 6px; }
+@keyframes skel { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+
 /* ============================ collaboration ============================ */
 /* presence roster */
 .presence { display: flex; align-items: center; margin-left: auto; }

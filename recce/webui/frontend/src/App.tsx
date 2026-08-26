@@ -46,7 +46,7 @@ function usePreferences() {
 }
 
 // Main App
-const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "sessions", "timeline", "report", "exploitation", "credentials", "playbook"];
+const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "sessions", "timeline", "report", "exploit", "credentials", "playbook"];
 const isTab = (t: string): t is TabId => (VALID_TABS as string[]).includes(t);
 
 // Read the initial UI state from the URL once, so a shared link opens in
@@ -226,7 +226,7 @@ export default function App() {
       setHostCov("all");
       setTab("hosts");
     },
-    toAct: () => setTab("exploitation"),
+    toAct: () => setTab("exploit"),
     openHost: (ip) => setDrawerIp(ip),
     toSessions: () => setTab("sessions"),
     toScan: (target) => { if (target) setScanPrefill(target); setTab("scan"); },
@@ -344,7 +344,7 @@ export default function App() {
             onScanHost={(ip) => { setScanPrefill(ip); setTab("scan"); }}
             onViewHost={(ip) => setDrawerIp(ip)} />}
           {tab === "report" && <ReportTab findings={findings} onRefresh={() => refresh().catch(() => {})} />}
-          {tab === "exploitation" && <Exploitation nav={nav} />}
+          {tab === "exploit" && <Exploitation nav={nav} />}
           {tab === "credentials" && <Credentials nav={nav} />}
           {tab === "playbook" && <Playbook pb={pb} nav={nav} />}
         </div>
