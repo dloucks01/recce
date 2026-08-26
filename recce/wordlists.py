@@ -49,33 +49,82 @@ _BUNDLED_DIR = Path(__file__).parent / "data" / "wordlists"
 # frontend filters by kind so the postgres scan-card only shows credential
 # lists, not path lists. `blurb` is one short sentence describing scope.
 BUNDLED_WORDLISTS: list[dict] = [
+    # --- HTTP paths --------------------------------------------------------
     {"name": "paths-quickhits", "kind": "paths",
-     "blurb": "~150 highest-signal HTTP paths (VCS, .env, actuator, "
-              "admin panels, cloud metadata). Runs in seconds."},
+     "blurb": "~175 highest-signal HTTP paths (VCS, .env, actuator, admin "
+              "panels, cloud metadata). Runs in seconds — start here."},
     {"name": "paths-common", "kind": "paths",
-     "blurb": "~350 common paths (dirbuster shape, scoped to entries that "
+     "blurb": "~290 common paths (dirbuster shape, scoped to entries that "
               "actually hit on modern apps + framework admin routes)."},
     {"name": "paths-api", "kind": "paths",
-     "blurb": "~180 API-focused paths (OpenAPI/GraphQL/SOAP, gateways, "
+     "blurb": "~185 API-focused paths (OpenAPI/GraphQL/SOAP, gateways, "
               "spec advertisements, common REST endpoints)."},
+    {"name": "paths-secrets", "kind": "paths",
+     "blurb": "~160 secret file names (.env variants, credentials.*, "
+              "private keys, terraform state, CI/CD tokens, DB dumps)."},
+    {"name": "paths-lfi", "kind": "paths",
+     "blurb": "~70 LFI / path-traversal payloads (../etc/passwd variants, "
+              "PHP wrappers, URL-encoded traversal, null-byte tricks)."},
+    {"name": "paths-cgi", "kind": "paths",
+     "blurb": "~95 /cgi-bin/ paths (Shellshock era + IoT/printer/router "
+              "admin CGIs still shipping on embedded devices)."},
+    {"name": "paths-cloud", "kind": "paths",
+     "blurb": "~100 cloud metadata + SDK config paths (AWS IMDS, GCP, "
+              "Azure, DO, OCI + .aws/.docker/.kube/gcloud/terraform)."},
+    {"name": "paths-wordpress", "kind": "paths",
+     "blurb": "~95 WordPress admin + plugin + REST API (wp-json user "
+              "enum) + install/backup artefacts."},
+    {"name": "paths-tomcat-java", "kind": "paths",
+     "blurb": "~125 Java-stack paths (Tomcat manager, JBoss, WebLogic, "
+              "Jenkins, Spring Actuator, Struts, Jolokia)."},
+    # --- credentials -------------------------------------------------------
     {"name": "creds-defaults", "kind": "creds",
      "blurb": "~100 most-successful default cred pairs across web apps, "
               "devices, DBs, and infra tooling. `user:password` format."},
+    {"name": "creds-web-appliances", "kind": "creds",
+     "blurb": "~105 router / printer / IPMI / NAS web-admin defaults "
+              "(Cisco, HP iLO, Dell iDRAC, Ubiquiti, Synology, Hikvision)."},
+    {"name": "creds-ssh", "kind": "creds",
+     "blurb": "~100 SSH defaults + IoT device passwords (Mirai-class + "
+              "distro-specific: pi/kali/ubuntu/ec2-user)."},
+    {"name": "creds-snmp", "kind": "creds",
+     "blurb": "~85 SNMP community strings (public/private + vendor "
+              "defaults: Cisco/HP/Ricoh/APC/UPS). Community-only, no user."},
     {"name": "creds-mssql", "kind": "creds",
-     "blurb": "~35 sa passwords from common Docker images (Microsoft, "
+     "blurb": "~40 sa passwords from common Docker images (Microsoft, "
               "Bitnami) + wild recurring defaults."},
+    {"name": "creds-mysql", "kind": "creds",
+     "blurb": "~35 MySQL / MariaDB defaults (root/blank first, then "
+              "Bitnami / Debian / Ubuntu / docker-quick-start conventions)."},
     {"name": "creds-postgres", "kind": "creds",
-     "blurb": "~22 postgres role/password defaults from Docker quick-start "
+     "blurb": "~25 postgres role/password defaults from Docker quick-start "
               "recipes and Debian/Ubuntu package installs."},
     {"name": "creds-mongodb", "kind": "creds",
      "blurb": "~25 default admin credentials for MongoDB quick-start + "
               "Bitnami + Atlas starter-tier examples."},
+    {"name": "creds-redis", "kind": "creds",
+     "blurb": "~20 Redis requirepass values (foobared, redis, changeme "
+              "class) + ACL user pairs for 6.x."},
+    # --- usernames ---------------------------------------------------------
     {"name": "users-common", "kind": "users",
-     "blurb": "~100 accounts every AD environment / Linux box / SaaS "
-              "console tends to have. Feeds SMTP enum + Kerberos."},
+     "blurb": "~115 accounts every environment tends to have. Feeds SMTP "
+              "enum + Kerberos AS-REP roast + weak-cred sweeps."},
+    {"name": "users-linux", "kind": "users",
+     "blurb": "~120 standard Linux system users + distro-specific "
+              "(pi/kali/ubuntu/ec2-user/oracle) + service DB accounts."},
+    {"name": "users-windows-ad", "kind": "users",
+     "blurb": "~170 Windows / AD built-in + high-value (Administrator, "
+              "krbtgt, sqlservice, exchsvc, SCCM, ADSync)."},
+    {"name": "users-service-accounts", "kind": "users",
+     "blurb": "~135 svc_/sql_/db_/backup_/scan_/report_ prefixed service "
+              "account names for AD Kerberoast + LDAP enum."},
     {"name": "users-smtp", "kind": "users",
      "blurb": "~80 SMTP mailbox-enumeration usernames (root, postmaster, "
               "team/dept aliases) — signal-rich for VRFY/EXPN."},
+    # --- subdomains --------------------------------------------------------
+    {"name": "subdomains-common", "kind": "subdomains",
+     "blurb": "~300 subdomain prefixes for vhost enum + DNS brute — "
+              "Assetnote/SecLists highest-hit names, largest-signal first."},
 ]
 
 

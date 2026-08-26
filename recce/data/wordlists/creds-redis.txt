@@ -1,0 +1,23 @@
+# Redis passwords. Modern Redis (>=6) supports ACL users; earlier used a
+# single `requirepass`. Blank-password (no requirepass configured) is
+# handled by the standard unauth probe — this list is only invoked when
+# NOAUTH indicates auth is required and the operator hasn't supplied one.
+# `<user>:<password>` — pre-6.0 accepts anything for user.
+default:redis
+default:password
+default:foobared
+default:changeme
+default:admin
+default:123456
+default:secret
+default:redispass
+default:redisdefaultpassword
+default:redispasswd
+default:P@ssw0rd
+default:Password1
+admin:admin
+admin:password
+admin:redis
+admin:changeme
+user:user
+user:password

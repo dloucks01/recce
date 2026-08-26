@@ -1,0 +1,38 @@
+# MySQL / MariaDB default credentials. root/blank is the historical MySQL
+# default (still shipped by many docker images) — the sweep should always
+# try it first. Bitnami, Debian, and older RPM builds each have their
+# own recurring password conventions.
+root:
+root:root
+root:toor
+root:mysql
+root:password
+root:changeme
+root:admin
+root:default
+root:1234
+root:12345
+root:123456
+root:mariadb
+root:mysqlpass
+root:P@ssw0rd
+root:Password1
+root:MyStrongPass123!
+root:secret
+root:docker
+mysql:mysql
+mysql:password
+mysql:root
+mysql:changeme
+mariadb:mariadb
+mariadb:password
+admin:admin
+admin:password
+admin:mysql
+dba:dba
+dba:password
+webadmin:webadmin
+readonly:readonly
+readwrite:readwrite
+backup:backup
+replica:replica
