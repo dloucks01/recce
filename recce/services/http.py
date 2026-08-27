@@ -160,7 +160,9 @@ _PATHS: list[tuple[str, str, str, list[str], str]] = [
     ("/actuator/configprops", "disclosure","high",     ["CWE-200"], "Actuator configprops — leaks config"),
     ("/actuator/beans",      "disclosure", "medium",   ["CWE-200"], "Actuator beans — leaks internal wiring"),
     ("/actuator/mappings",   "disclosure", "medium",   ["CWE-200"], "Actuator mappings — enumerates all routes"),
-    ("/actuator/heapdump",   "disclosure", "critical", ["CWE-200"], "Actuator heapdump — full memory dump (secrets in cleartext)"),
+    # /actuator/heapdump is NOT in this static table — it's handled by
+    # actuator_probe() which validates the response is a real hprof binary
+    # (>100KB, not an SPA catch-all HTML page). See actuator_probe().
     ("/actuator/threaddump", "disclosure", "medium",   ["CWE-200"], "Actuator threaddump"),
     ("/actuator/loggers",    "disclosure", "medium",   ["CWE-200"], "Actuator loggers — writable log config"),
     ("/actuator/httptrace",  "disclosure", "high",     ["CWE-200"], "Actuator httptrace — session tokens visible"),

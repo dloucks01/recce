@@ -99,20 +99,36 @@ def _lateral_summary(hosts: list[Host]) -> list[dict]:
     return out
 
 
+_SENTINEL_IPS = {"active-directory"}
+
+
 def build(hosts: list[Host]) -> list[dict]:
     """Ordered attack-path steps (by stage), grounded in confirmed findings."""
     steps: list[dict] = []
     seen: set[str] = set()
+    dc_ips = _resolve_sentinel_ips(hosts)
     for a in xp.all_actions(hosts):
         stage = _stage_for_action(a)
         if a["key"] in seen:
             continue
         seen.add(a["key"])
-        steps.append(_step(stage, a["ip"], a["hostname"], a["finding"],
+        ip = a["ip"]
+        if ip in _SENTINEL_IPS:
+            ip = dc_ips.get(ip, ip)
+            a["cmd"] = a["cmd"].replace("active-directory", ip)
+        steps.append(_step(stage, ip, a["hostname"], a["finding"],
                            a["tool"], a["cmd"], a["validate"], a["key"]))
     steps.extend(_lateral_summary(hosts))
     steps.sort(key=lambda s: STAGE_ORDER.index(s["stage"]))
     return steps
+
+
+def _resolve_sentinel_ips(hosts: list[Host]) -> dict[str, str]:
+    """Try to resolve 'active-directory' sentinel to a real DC IP."""
+    for h in hosts:
+        if "Domain Controller" in (h.roles or []) and h.ip not in _SENTINEL_IPS:
+            return {"active-directory": h.ip}
+    return {}
 
 
 def _label(s: str, n: int = 40) -> str:
@@ -243,6 +259,12 @@ def narrative(hosts: list[Host], steps: list[dict] | None = None) -> list[str]:
         if dc and by_stage["Domain Dominance"]:
             chain.append(f"pivot to domain compromise ({dc[0].ip})")
         lines.append("Likely path: " + " -> ".join(chain) + ".")
+    if dc:
+        samba_dc = [h for h in dc if h.os_family != "Windows" or
+                    any("samba" in (p.product or "").lower() for p in h.open_ports)]
+        if samba_dc:
+            lines.append(f"Note: {samba_dc[0].ip} is a Samba-based DC — DRSUAPI/"
+                         "secretsdump may not work; use samba-tool or certipy instead.")
     elif dc and by_stage["Domain Dominance"]:
         lines.append(f"AD attack surface on the DC ({dc[0].ip}): "
                      + "; ".join(s["title"] for s in by_stage["Domain Dominance"][:3]) + ".")
