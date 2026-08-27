@@ -589,7 +589,7 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         ok = b"RECCE_PERSIST_OK" in out
         # the removal command is captured NOW, at install time, so cleanup never has to guess
         remove_cmd = (f"crontab -l 2>/dev/null | grep -v {marker} | crontab - 2>/dev/null; "
-                      f"rm -f {qpath}; pkill -f {marker} 2>/dev/null; echo RECCE_UNPERSIST_OK")
+                      f"rm -f {qpath}; echo RECCE_UNPERSIST_OK; pkill -f {marker} 2>/dev/null || true")
         if mgr.store is not None:                 # record even on reported failure (artifacts may exist)
             mgr.store.add_persistence({
                 "id": pid, "host_ip": sess.host_ip, "mechanism": "cron", "artifact_path": path,
