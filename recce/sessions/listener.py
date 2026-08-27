@@ -15,14 +15,22 @@ _MARKER = b"RECCE1 "
 
 
 async def _read_handshake(transport):
-    """Peek the first bytes: (token, initial_bytes, is_pty). A stager sends
-    `RECCE1 <token>\\n`; anything else is a raw shell whose bytes we hand back untouched."""
+    """Peek the first bytes: (token, initial_bytes, mode).
+
+    `mode` is one of:
+      * "raw" — no handshake line; the bytes we buffered ARE shell output
+      * "pty" — reconnecting PTY stager
+      * "oob" — dedicated out-of-band control channel (see recce/sessions/oob.py)
+      * ""    — legacy bash fallback (has a token but no PTY / no OOB)
+
+    A stager sends `RECCE1 <token> [mode]\\n`; anything else is a raw shell
+    whose bytes we hand back untouched."""
     try:
         data = await asyncio.wait_for(transport.read(), timeout=2.0)
     except (asyncio.TimeoutError, ConnectionError, OSError):
-        return None, b"", False                       # silent raw shell (emits on input)
+        return None, b"", "raw"                       # silent raw shell (emits on input)
     if not data.startswith(_MARKER):
-        return None, data, False                      # raw shell — data IS shell output
+        return None, data, "raw"                      # raw shell — data IS shell output
     buf = bytearray(data)                             # stager line may span reads; accumulate
     while b"\n" not in buf and len(buf) < 512:
         try:
@@ -35,8 +43,12 @@ async def _read_handshake(transport):
     line, _, rest = bytes(buf).partition(b"\n")
     parts = line.split()
     token = parts[1].decode("ascii", "replace") if len(parts) >= 2 else None
-    is_pty = len(parts) >= 3 and parts[2] == b"pty"   # a bash fallback reconnects but has no PTY
-    return token, rest, is_pty
+    mode = ""
+    if len(parts) >= 3:
+        m = parts[2].decode("ascii", "replace").strip().lower()
+        if m in ("pty", "oob"):
+            mode = m
+    return token, rest, mode
 
 
 class Listener:
@@ -70,9 +82,17 @@ class Listener:
                        writer: asyncio.StreamWriter) -> None:
         from .transport import SocketTransport
         transport = SocketTransport(reader, writer)
-        token, initial, pty = await _read_handshake(transport)
+        token, initial, mode = await _read_handshake(transport)
+        if mode == "oob":
+            # OOB control channel — bind to the parent session by token.
+            # Doesn't consume the reader/writer via SocketTransport; the
+            # OobChannel wraps them directly so the framed protocol is
+            # untouched.
+            await self._manager.adopt_oob(reader, writer, token=token)
+            return
         await self._manager.adopt(transport, listener_id=self.id,
-                                  token=token, initial=initial, pty=pty)
+                                  token=token, initial=initial,
+                                  pty=(mode == "pty"))
 
     async def stop(self) -> None:
         self.status = "stopped"

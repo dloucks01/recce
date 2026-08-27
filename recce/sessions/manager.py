@@ -134,6 +134,43 @@ class SessionManager:
                     pass
         return sess
 
+    async def adopt_oob(self, reader, writer, token: str | None) -> None:
+        """Adopt an incoming OOB control-channel connection (see
+        recce/sessions/oob.py). Matches the parent session by token; if
+        no session is found (unknown / expired token) the connection is
+        dropped so a stale agent doesn't linger."""
+        from .oob import OobChannel
+        if not token:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        sess = None
+        for s in self.sessions.values():
+            if s.token == token:
+                sess = s
+                break
+        if sess is None:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        # Close any pre-existing OOB channel first (a re-launched agent
+        # after a shell reconnect wants a fresh binding).
+        existing = getattr(sess, "oob_channel", None)
+        if existing is not None:
+            try:
+                await existing.close()
+            except Exception:  # noqa: BLE001
+                pass
+        peer = writer.get_extra_info("peername")
+        chan = OobChannel(reader, writer, peer_addr=peer)
+        sess.oob_channel = chan
+
     def _match(self, ip: str, token: str | None) -> Session | None:
         """A tokened stager matches its exact session (NAT-safe) or starts fresh — it never
         grabs an unrelated host's stale session. A raw shell (no token) resumes a stale
