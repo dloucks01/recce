@@ -125,6 +125,11 @@ def set_dismissed(st, key: str, tester: str, on: bool) -> dict:
 @_serialized
 def add_activity(st, tester: str, kind: str, text: str) -> dict:
     log = _load(st, _ACTIVITY, [])
+    # UIs render `<tester> <text>` side-by-side; callers historically prefixed
+    # the tester name into text too — strip it so the name doesn't double-print.
+    t = (tester or "").strip()
+    if t and text.startswith(t + " "):
+        text = text[len(t) + 1:]
     entry = {"ts": time.time(), "tester": tester or "someone", "kind": kind, "text": text}
     log.append(entry)
     _save(st, _ACTIVITY, log[-_ACTIVITY_CAP:])

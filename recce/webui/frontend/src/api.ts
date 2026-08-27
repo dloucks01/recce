@@ -361,6 +361,8 @@ export interface SessionInfo {
   id: string; name?: string; host_ip: string; host_port: number; kind: string;
   status: "live" | "stale" | "dead"; pty: boolean; label: string;
   driver: string | null; attached: string[]; created: number; bytes: number;
+  socks_port?: number; portfwd_count?: number; portfwd_preview?: string[];
+  oob_active?: boolean;
 }
 export interface QuickAction { key: string; label: string; cmd: string; }
 export async function getQuickActions(): Promise<QuickAction[]> {

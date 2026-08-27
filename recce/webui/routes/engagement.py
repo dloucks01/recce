@@ -228,8 +228,13 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
 
     @app.get("/api/overview")
     def overview():
-        """Everything the dashboard needs in one cheap, live-pollable call."""
+        """Everything the dashboard needs in one cheap, live-pollable call.
+
+        Counts exclude tier=lead so the Dashboard numbers match the Findings
+        tab default view (which also hides leads). `leads_hidden` carries the
+        excluded count for the sub-line."""
         from ... import tracking
+        from .._common import _tier
         hs, name = _hosts()
         tr = _tracking()
         up = [h for h in hs if h.is_up]
@@ -238,10 +243,14 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
         kev_findings, top_hosts = [], []
         reviewed = 0
         total_findings = 0
+        leads_hidden = 0
         enums = accessed = 0
         for h in up:
             hsev: dict[str, int] = {}
             for v in h.vulns:
+                if _tier(v) == "lead":
+                    leads_hidden += 1
+                    continue
                 total_findings += 1
                 by_sev[v.severity] = by_sev.get(v.severity, 0) + 1
                 hsev[v.severity] = hsev.get(v.severity, 0) + 1
@@ -273,6 +282,7 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
             "scope_subnets": len(scope), "scope_size": scope_size,
             "services": sum(len(h.open_ports) for h in up),
             "by_severity": by_sev, "findings_total": total_findings,
+            "leads_hidden": leads_hidden,
             "kev_total": len(kev_findings), "kev_findings": kev_findings[:12],
             "top_hosts": top_hosts[:8],
             "reviewed": reviewed,

@@ -46,6 +46,16 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
   // open a specific session when jumped here from the host drawer
   useEffect(() => { if (focus) setOpen(focus); }, [focus]);
 
+  // Auto-select the first live session on tab entry: an unselected Sessions
+  // tab renders an empty terminal panel even when sessions exist, which reads
+  // as broken. Only runs when nothing is selected and at least one live shell
+  // is available.
+  useEffect(() => {
+    if (open) return;
+    const first = sessions.find((s) => s.status === "live");
+    if (first) setOpen(first.id);
+  }, [sessions, open]);
+
   // When an "exploit → shell" intent arrives from a KEV finding, auto-expand
   // the first listener's payload catalog so the tester lands on the payload
   // they'll paste on the target — instead of a bare Sessions tab.
@@ -185,6 +195,27 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
       if (open === id) setOpen(null);
       refresh();
     } catch (e2) { setErr(String(e2 instanceof Error ? e2.message : e2)); }
+  }
+
+  async function purgeStale() {
+    const stale = sessions.filter(s => s.status === "stale" || s.status === "dead");
+    if (stale.length === 0) return;
+    if (!window.confirm(`Purge ${stale.length} stale / dead session(s)? Transcripts stay on disk.`)) return;
+    try {
+      await Promise.allSettled(stale.map(s => closeSession(s.id)));
+      if (open && stale.some(s => s.id === open)) setOpen(null);
+      refresh();
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+  }
+
+  async function stopAllListeners() {
+    if (listeners.length === 0) return;
+    if (!window.confirm(`Stop all ${listeners.length} listener(s)? Live sessions stay connected; only the accept ports close.`)) return;
+    try {
+      const r = await fetch("/api/listeners/stop-all", {method: "POST"});
+      if (!r.ok) throw new Error(await r.text());
+      refresh();
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
   }
 
   const hasTerminal = !!openSession;
@@ -332,6 +363,10 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
         <div className="panel-h">
           <h3>Listeners</h3>
           <span className="muted">catch a reverse shell on the shared server</span>
+          {listeners.length > 1 && (
+            <button className="linkish" onClick={stopAllListeners} title="close every accept port at once (live sessions keep their connections)"
+                    style={{marginLeft: "auto"}}>stop all</button>
+          )}
         </div>
         <div className="listener-row">
           <input className="scan-in" value={port} onChange={(e) => setPort(e.target.value)}
@@ -367,6 +402,10 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
             {sessions.filter((s) => s.status === "live").length} live · {sessions.length} total
             {hostGroups.length > 0 && ` · ${hostGroups.length} host${hostGroups.length > 1 ? "s" : ""}`}
           </span>
+          {sessions.some((s) => s.status === "stale" || s.status === "dead") && (
+            <button className="linkish" onClick={purgeStale} title="drop stale + dead session rows (transcripts stay on disk)"
+                    style={{marginLeft: "auto"}}>purge stale</button>
+          )}
         </div>
         {sessions.length === 0 && (
           <div className="empty">
@@ -470,6 +509,12 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
                             <span className="badge sess-pivot"
                                   title={((s as any).portfwd_preview || []).join(" · ") || "port forwards active"}>
                               {(s as any).portfwd_count} fwd
+                            </span>
+                          )}
+                          {(s as any).oob_active && (
+                            <span className="badge sess-pivot"
+                                  title="OOB control channel bound — quickrun / file transfer / enum flow over a dedicated TCP frame protocol instead of the PTY, so the terminal stays clean">
+                              OOB
                             </span>
                           )}
                           {s.label && <span className="sess-label" title={s.label}>{s.label}</span>}
@@ -966,6 +1011,9 @@ function SessionTools({ session }: { session: SessionInfo }) {
         <div className="st-section-label">Networking</div>
         <TunnelPanel session={session} />
         <PortForwardPanel session={session} />
+        <PivotPlannerPanel session={session} />
+        <PivotTrafficPanel session={session} />
+        <BloodHoundPanel session={session} />
       </div>
 
       <div className="st-refs">
@@ -1087,6 +1135,193 @@ function SessionHostSummary({ hostIp, onViewHost }:
               </li>
             ))}
           </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pivot planner: given a target IP + optional ports, ask the server which
+// tools to run through SOCKS vs. which need per-port forwards, and render
+// ready-to-copy commands.
+function PivotPlannerPanel({ session }: { session: SessionInfo }) {
+  const [open, setOpen] = useState(false);
+  const [targetIp, setTargetIp] = useState("");
+  const [targetPorts, setTargetPorts] = useState("445,389,88,1433");
+  const [plan, setPlan] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function run() {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/pivot-plan`,
+        { method: "POST", headers: {"content-type": "application/json"},
+          body: JSON.stringify({ target_ip: targetIp,
+            target_ports: targetPorts.split(",").map(x => x.trim()).filter(Boolean) }) });
+      if (!r.ok) throw new Error(await r.text());
+      setPlan(await r.json());
+    } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="netpanel">
+      <button className="toggle" onClick={() => setOpen(!open)}>
+        {open ? "▾" : "▸"} Pivot planner
+      </button>
+      {open && (
+        <div className="netbody">
+          <div className="netrow">
+            <input className="scan-in" placeholder="target ip (internal)" value={targetIp}
+                   onChange={(e) => setTargetIp(e.target.value)} style={{maxWidth: 180}} />
+            <input className="scan-in" placeholder="ports (comma-sep)" value={targetPorts}
+                   onChange={(e) => setTargetPorts(e.target.value)} style={{maxWidth: 220}} />
+            <button className="run" onClick={run} disabled={busy || !targetIp}>
+              {busy ? "planning…" : "Plan reach"}
+            </button>
+          </div>
+          {msg && <div className="ranmsg warn-msg">{msg}</div>}
+          {plan && (
+            <div className="netresult">
+              <div className="muted small">
+                pivot {plan.pivot_ip} → {plan.target_ip} · SOCKS {plan.socks_active ? `:${plan.socks_port}` : "off"}
+              </div>
+              {plan.socks_cmds?.length > 0 && (
+                <>
+                  <div className="st-section-label">Via SOCKS</div>
+                  {plan.socks_cmds.map((c: any, i: number) => (
+                    <div key={i} className="cmdrow">
+                      <div className="muted small">{c.tool} — {c.note}</div>
+                      <code className="cmd">{c.cmd}</code>
+                    </div>
+                  ))}
+                </>
+              )}
+              {plan.impacket_recipes?.length > 0 && (
+                <>
+                  <div className="st-section-label">Impacket (needs per-port forward)</div>
+                  {plan.impacket_recipes.map((r: any, i: number) => (
+                    <div key={i} className="cmdrow">
+                      <div className="muted small">
+                        {r.label} · fwd {r.recommended_forward.listen_port}
+                        → {r.recommended_forward.remote_host}:{r.recommended_forward.remote_port}
+                      </div>
+                      <code className="cmd">{r.cmd}</code>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Pivot traffic log — what the shell has actually pushed through SOCKS +
+// port-forwards. Directly quotable in the writeup.
+function PivotTrafficPanel({ session }: { session: SessionInfo }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<any>(null);
+  async function refresh() {
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/pivot-traffic`);
+      if (r.ok) setData(await r.json());
+    } catch { /* transient */ }
+  }
+  useEffect(() => {
+    if (!open) return;
+    refresh();
+    const id = window.setInterval(refresh, 4000);
+    return () => window.clearInterval(id);
+  }, [open]);
+  return (
+    <div className="netpanel">
+      <button className="toggle" onClick={() => setOpen(!open)}>
+        {open ? "▾" : "▸"} Pivot traffic
+      </button>
+      {open && (
+        <div className="netbody">
+          {!data && <div className="muted small">loading…</div>}
+          {data && (
+            <>
+              <div className="muted small">
+                SOCKS conns: {data.socks_conn_count} · {data.socks_targets.length} target(s) · {data.portfwds.length} forward(s)
+              </div>
+              {data.socks_targets.length === 0 && data.portfwds.length === 0 && (
+                <div className="muted small">no pivot traffic yet</div>
+              )}
+              {data.socks_targets.length > 0 && (
+                <table className="netfwdtbl">
+                  <thead><tr><th>target</th><th>conns</th><th>up</th><th>down</th></tr></thead>
+                  <tbody>
+                    {data.socks_targets.map((t: any, i: number) => (
+                      <tr key={i}>
+                        <td className="mono">{t.target_host}:{t.target_port}</td>
+                        <td>{t.conns}</td>
+                        <td>{fmtBytes(t.bytes_up)}</td>
+                        <td>{fmtBytes(t.bytes_down)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// BloodHound-python collection — drive a DC collection with creds provided
+// here. Result files land in the engagement's session-loot dir and get
+// auto-ingested through the existing bloodhound recce command.
+function BloodHoundPanel({ session }: { session: SessionInfo }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ domain: "", username: "", password: "", dc_ip: "", dc_host: "" });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  async function run() {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/bloodhound`,
+        { method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(form) });
+      if (!r.ok) throw new Error(await r.text());
+      const j = await r.json();
+      setMsg(`✓ started · job ${j.job_id} · loot → ${j.loot_dir}`);
+    } catch (e) { setMsg(String(e instanceof Error ? e.message : e)); }
+    finally { setBusy(false); }
+  }
+  const upd = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }));
+  return (
+    <div className="netpanel">
+      <button className="toggle" onClick={() => setOpen(!open)}>
+        {open ? "▾" : "▸"} BloodHound (DC collection)
+      </button>
+      {open && (
+        <div className="netbody">
+          <div className="netrow">
+            <input className="scan-in" placeholder="domain (corp.local)" value={form.domain}
+                   onChange={(e) => upd("domain", e.target.value)} style={{maxWidth: 160}} />
+            <input className="scan-in" placeholder="username" value={form.username}
+                   onChange={(e) => upd("username", e.target.value)} style={{maxWidth: 140}} />
+            <input className="scan-in" type="password" placeholder="password" value={form.password}
+                   onChange={(e) => upd("password", e.target.value)} style={{maxWidth: 160}} />
+          </div>
+          <div className="netrow">
+            <input className="scan-in" placeholder="dc_ip" value={form.dc_ip}
+                   onChange={(e) => upd("dc_ip", e.target.value)} style={{maxWidth: 160}} />
+            <input className="scan-in" placeholder="dc_host (fqdn)" value={form.dc_host}
+                   onChange={(e) => upd("dc_host", e.target.value)} style={{maxWidth: 220}} />
+            <button className="run" onClick={run} disabled={busy || !form.domain || !form.username || !form.dc_ip}>
+              {busy ? "collecting…" : "Collect"}
+            </button>
+          </div>
+          {msg && <div className="ranmsg">{msg}</div>}
         </div>
       )}
     </div>

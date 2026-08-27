@@ -307,9 +307,15 @@ def _apply_dedup(hosts) -> None:
     merged Vuln with a `_sources` attribute listing the detectors that
     corroborated it. The dedup engine (intake.dedup) already handles the
     merge — this helper just captures the pre-merge source list so the API
-    can surface it to the UI without changing the Vuln model."""
+    can surface it to the UI without changing the Vuln model.
+
+    Also re-runs KEV annotation: the store doesn't durably round-trip the
+    `v.kev` flag, so hosts loaded here need it stamped again or the
+    Dashboard's KEV counter reads zero even when CVEs are in the catalog."""
     from ..intake import dedup as _dd
+    from ..vuln import kev as _kev
     for h in hosts:
+        _kev.annotate(h)
         pre = h.vulns
         # Bucket by identity BEFORE merge so we know who contributed
         groups: dict = {}

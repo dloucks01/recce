@@ -182,6 +182,12 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
                 info["socks_port"] = tun.socks_port
             fwds = _portfwds.get(s.id, [])
             info["portfwd_count"] = len(fwds)
+            # OOB channel presence — a bound OobChannel means quickrun / file
+            # transfer / enum flow through a dedicated TCP frame protocol
+            # instead of shell-echoing base64 through the PTY. The session
+            # card renders a chip so operators know the channel is clean.
+            oob = getattr(s, "oob_channel", None)
+            info["oob_active"] = bool(oob is not None and getattr(oob, "alive", True))
             if fwds:
                 # Compact preview (first 2) so the frontend can render a
                 # `19005→dc:389` chip without re-fetching /portfwd list.

@@ -172,7 +172,7 @@ export function Findings(
               </button>
             )}
           </div>
-          <input className="search" placeholder="filter: cve, host, port…" value={f.q}
+          <input className="search" placeholder="filter: title, cve, host, port, source…" value={f.q}
                  onChange={(e) => setF({ q: e.target.value })} spellCheck={false} />
         </div>
       </div>
