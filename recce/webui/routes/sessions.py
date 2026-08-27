@@ -853,6 +853,118 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
                 "tunnel_port": state.tunnel_port, "agent_pid": state.agent_pid,
                 "socks_addr": f"127.0.0.1:{state.socks_port}"}
 
+    @app.post("/api/sessions/{session_id}/bloodhound")
+    async def collect_bloodhound(session_id: str, body: dict = Body(...),
+                                  x_tester: str = Header(default="someone")):
+        """Kick off a `bloodhound-python` collection against a DC using
+        credentials the tester supplies. If the DC isn't reachable
+        directly the operator can spin a port-forward via /portfwd first
+        and point `dc_ip` at the pivot's local port. Result files land in
+        the engagement's session-loot dir and get auto-ingested through
+        the existing `ad`/`bloodhound` recce command so findings fold
+        straight into the workbook."""
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        tool = shutil.which("bloodhound-python")
+        if tool is None:
+            raise HTTPException(500, "bloodhound-python not installed on the recce host "
+                                     "(apt install bloodhound.py). "
+                                     "Once installed, this endpoint drives it against the DC.")
+        domain = str(body.get("domain", "")).strip()
+        user = str(body.get("username", "")).strip()
+        pw = str(body.get("password", "")).strip()
+        dc_ip = str(body.get("dc_ip", "")).strip()
+        dc_host = str(body.get("dc_host", "")).strip()
+        if not (domain and user and pw and dc_ip):
+            raise HTTPException(400, "domain, username, password, dc_ip required")
+        # loot dir named after the session so multiple runs coexist
+        loot = os.path.join(ctx.eng_dir, "session-loot",
+                             f"bloodhound-{sess.id}")
+        os.makedirs(loot, exist_ok=True)
+        import shlex
+        prefix = f"recce_{sess.id[:6]}"
+        # Wrap in `bash -c` with cd so bloodhound-python's output files
+        # (SharpHound-shaped JSON + zip) land in the session's loot dir.
+        # jobs.start doesn't currently take a cwd; the wrapper is the
+        # cleanest cross-platform way to control CWD without touching
+        # the shared jobs machinery.
+        bh_cmd = (
+            f"cd {shlex.quote(loot)} && "
+            f"bloodhound-python -d {shlex.quote(domain)} -u {shlex.quote(user)} "
+            f"-p {shlex.quote(pw)} -ns {shlex.quote(dc_ip)} -c All --zip "
+            f"-op {shlex.quote(prefix)}"
+            + (f" -dc {shlex.quote(dc_host)}" if dc_host else "")
+        )
+        argv = ["bash", "-c", bh_cmd]
+
+        def _done(job, _loot=loot):
+            # Auto-ingest the produced .zip / .json into the engagement
+            # via `recce ad`. The bloodhound module already knows how to
+            # parse SharpHound JSON — a zip drop just needs pointing at.
+            try:
+                from ..jobs import recce_argv
+                for f in os.listdir(_loot):
+                    if f.endswith(".zip") or f.endswith(".json"):
+                        p = os.path.join(_loot, f)
+                        ctx.jobs.start(recce_argv("ad", p, "-o", ctx.eng_dir))
+                        break
+            except Exception:  # noqa: BLE001 — never crash the caller
+                pass
+            broker.publish({
+                "type": "session",
+                "event": "bloodhound_done" if job.status == "done" else "bloodhound_failed",
+                "id": sess.id, "status": job.status,
+                "message": (f"BloodHound collection {job.status} for {domain} — "
+                            "results ingested into the engagement"
+                            if job.status == "done"
+                            else f"BloodHound collection {job.status} — "
+                                 f"check /api/jobs/{job.id}/events"),
+            })
+
+        job = ctx.jobs.start(argv, on_done=_done)
+        broker.publish({"type": "session", "event": "bloodhound_started",
+                        "id": sess.id, "job_id": job.id})
+        # Redact the password when reporting the command back to the caller.
+        redacted_cmd = bh_cmd.replace(shlex.quote(pw), "'***'")
+        return {"ok": True, "job_id": job.id, "loot_dir": loot,
+                "cmd": redacted_cmd}
+
+    @app.get("/api/sessions/{session_id}/pivot-traffic")
+    def pivot_traffic(session_id: str):
+        """Per-target traffic log for reporting: which internal endpoints
+        did this session's pivot touch, how many connections, how many
+        bytes. The engagement writeup can cite these numbers directly:
+        'we reached 4 internal targets through 172.20.0.10; 47 conns,
+        99 KB total'. Aggregates SOCKS + port-forward totals."""
+        from ...sessions.tunnel import get_tunnel
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        state = get_tunnel(session_id)
+        socks_targets: list[dict] = []
+        socks_conn_count = 0
+        if state:
+            socks_conn_count = state.socks_conn_count
+            for (host, port), c in state.traffic.items():
+                socks_targets.append({
+                    "target_host": host, "target_port": port,
+                    "conns": c["conns"], "bytes_up": c["up"], "bytes_down": c["down"],
+                    "first_ts": c["first"], "last_ts": c["last"],
+                })
+            socks_targets.sort(key=lambda t: t["bytes_up"] + t["bytes_down"], reverse=True)
+        return {
+            "session_id": sess.id,
+            "pivot_ip": sess.host_ip,
+            "socks_conn_count": socks_conn_count,
+            "socks_targets": socks_targets,
+            "portfwds": _portfwds.get(session_id, []),
+        }
+
     # --- port forwarding through the shell ----------------------------------------
     # In-memory tracking of active forwards per session (not persisted — a forward dies
     # with the shell). Each entry: {id, lport, rhost, rport, pid, method}.

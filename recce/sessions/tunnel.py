@@ -220,9 +220,11 @@ class TunnelMux:
 # --- SOCKS5 proxy (runs on recce server, bridges through TunnelMux) -----------
 
 async def _socks5_handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                         mux: TunnelMux):
+                         state):
     """Handle one SOCKS5 client connection."""
+    mux = state.mux
     peer = writer.get_extra_info("peername")
+    state.socks_conn_count += 1
     try:
         # greeting: version + nauth + methods
         greeting = await asyncio.wait_for(reader.read(258), 5.0)
@@ -267,6 +269,27 @@ async def _socks5_handle(reader: asyncio.StreamReader, writer: asyncio.StreamWri
         writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
         await writer.drain()
 
+        # Traffic counter for this specific target endpoint. Accumulates
+        # across every SOCKS conn that landed on the same (dst_host,
+        # dst_port) so the report can say "hit 172.20.0.30:389 with
+        # 47 conns, 12 KB up, 87 KB down".
+        import time as _t
+        target_key = (dst_host, dst_port)
+        counters = state.traffic.get(target_key)
+        if counters is None:
+            # Bound the log — evict the least-recently-touched entry when
+            # the map grows past 1024. Anything busier than the LRU entry
+            # is kept; this is a coarse cap to prevent unbounded growth
+            # during an engagement that hits thousands of targets.
+            if len(state.traffic) >= 1024:
+                oldest = min(state.traffic.items(), key=lambda kv: kv[1]["last"])
+                state.traffic.pop(oldest[0], None)
+            counters = {"conns": 0, "up": 0, "down": 0,
+                         "first": _t.time(), "last": _t.time()}
+            state.traffic[target_key] = counters
+        counters["conns"] += 1
+        counters["last"] = _t.time()
+
         # bridge: client <-> tunnel channel
         async def client_to_tunnel():
             try:
@@ -274,6 +297,8 @@ async def _socks5_handle(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                     data = await reader.read(8192)
                     if not data:
                         break
+                    counters["up"] += len(data)
+                    counters["last"] = _t.time()
                     await mux.send_data(chan_id, data)
             except (ConnectionError, OSError):
                 pass
@@ -285,6 +310,8 @@ async def _socks5_handle(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                     data = await mux.recv_data(chan_id)
                     if data is None:
                         break
+                    counters["down"] += len(data)
+                    counters["last"] = _t.time()
                     writer.write(data)
                     await writer.drain()
             except (ConnectionError, OSError):
@@ -294,10 +321,21 @@ async def _socks5_handle(reader: asyncio.StreamReader, writer: asyncio.StreamWri
     except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
         pass
     finally:
+        # Close the client writer safely across Python 3.13 which is
+        # stricter about `wait_closed()` — calling it after the transport
+        # is already gone (e.g. during server shutdown / task cancellation)
+        # raises RuntimeError "cannot reuse already awaited coroutine".
+        # Skip wait_closed when the writer is already at close state, and
+        # swallow the runtime + cancelled paths so a dying tunnel never
+        # crashes the surrounding server loop.
         try:
-            writer.close()
+            if not writer.is_closing():
+                writer.close()
+        except (ConnectionError, OSError, RuntimeError):
+            pass
+        try:
             await writer.wait_closed()
-        except (ConnectionError, OSError):
+        except (ConnectionError, OSError, RuntimeError, asyncio.CancelledError):
             pass
 
 
@@ -315,6 +353,13 @@ class TunnelState:
         self.tunnel_server: asyncio.AbstractServer | None = None
         self.socks_server: asyncio.AbstractServer | None = None
         self._agent_connected = asyncio.Event()
+        # Per-target traffic accounting for engagement reporting: the
+        # operator needs to say "we pivoted to X, Y, Z" and cite bytes to
+        # back it up. Key = (dst_host, dst_port), value = counters. Updated
+        # by _socks5_handle as bytes flow. Bounded to 1024 targets per
+        # session; a fresh entry evicts the oldest low-traffic one.
+        self.traffic: dict[tuple[str, int], dict] = {}
+        self.socks_conn_count: int = 0
 
     @property
     def alive(self) -> bool:
@@ -392,7 +437,7 @@ async def start_tunnel(session, push_file_fn, socks_port: int = 1080,
     for port_try in (socks_port, 0):
         try:
             state.socks_server = await asyncio.start_server(
-                lambda r, w: _socks5_handle(r, w, state.mux),
+                lambda r, w: _socks5_handle(r, w, state),
                 "127.0.0.1", port_try)
             break
         except OSError:

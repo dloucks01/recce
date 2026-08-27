@@ -35,17 +35,24 @@ _OOB_NOISE_RE = re.compile(
     # OOB regexes above never match — this catches them plus any line
     # obviously belonging to OOB choreography (`stty -echo/echo`, `: >
     # <file>.b64`, `printf '%s' '<base64>' >> <file>.b64`, `base64 -d …
-    # && rm -f …`, `bash /tmp/.re.sh …`).
+    # && rm -f …`, `bash /tmp/.re.sh …`, `python3 /tmp/.rctun.py …`).
+    # Also catches "any line that is 90%+ base64 characters longer than
+    # 200 chars" — captures leaked base64 payload chunks the strict block
+    # regex missed because their surrounding S/E markers were fragmented
+    # across recovery from a mid-push shell restart.
     rb"^(?:"
       rb"RECCE_UPGRADE_SENT"
       rb"|SOCAT_OK"
       rb"|rcfwd_[0-9a-f]+_PID_\d+"
-      rb"|.*__RECCE(?:'')?_[SE]_[0-9a-f]+__.*"      # echoed marker cmds
+      rb"|rctun_[0-9a-f]+_PID_\d+"                   # tunnel-agent launch marker
+      rb"|.*__RECCE(?:'')?_[SE]_[0-9a-f]+__.*"       # echoed marker cmds
       rb"|stty (?:-)?echo(?: 2>/dev/null)?"
       rb"|: > \S+\.b64"
       rb"|printf '%s' '[A-Za-z0-9+/=]+' >> \S+\.b64"
       rb"|base64 -d \S+\.b64 > \S+ && rm -f \S+\.b64"
       rb"|bash /tmp/\.re\.sh 2>/dev/null \| cat; rm -f /tmp/\.re\.sh"
+      rb"|python3 /tmp/\.rctun\.py \S+ \d+"          # tunnel agent launch
+      rb"|[A-Za-z0-9+/=]{200,}"                      # leaked base64 chunk
     rb")[\r\n]*",
     re.M,
 )

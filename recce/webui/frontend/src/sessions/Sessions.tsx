@@ -521,6 +521,7 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
               </div>
             </div>
             <ShellTerminal key={openSession.id} session={openSession} tester={tester} />
+            <SessionHostSummary hostIp={openSession.host_ip} onViewHost={onViewHost} />
             <SessionTools session={openSession} />
           </section>
         ) : (
@@ -998,6 +999,96 @@ function SessionTools({ session }: { session: SessionInfo }) {
         )}
         {openRef === "tools" && <ToolCatalog />}
       </div>
+    </div>
+  );
+}
+
+// Inline read-only summary of what recce already knows about the host
+// backing this session — findings by severity, port count, best MSF /
+// PoC recommendations. Saves the tester from switching to the Hosts
+// tab mid-shell just to remember "is SambaCry on this box or not?".
+function SessionHostSummary({ hostIp, onViewHost }:
+  { hostIp: string; onViewHost?: (ip: string) => void }) {
+  type HostDetail = {
+    ip: string; hostname?: string; os_name?: string; os_family?: string;
+    open_ports?: Array<{ portid: number; service?: string; product?: string; version?: string }>;
+    vulns?: Array<{ severity: string; title: string; source?: string; verdict?: string }>;
+  };
+  const [detail, setDetail] = useState<HostDetail | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let cancel = false;
+    fetch(`/api/host/${encodeURIComponent(hostIp)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(String(r.status))))
+      .then((d) => { if (!cancel) setDetail(d); })
+      .catch((e) => { if (!cancel) setErr(String(e)); });
+    return () => { cancel = true; };
+  }, [hostIp]);
+  if (err) return null;
+  if (!detail) return null;
+  const sev = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  const criticals: Array<{ title: string; source?: string; verdict?: string }> = [];
+  for (const v of detail.vulns || []) {
+    const s = (v.severity || "info").toLowerCase();
+    if (s in sev) (sev as any)[s]++;
+    if (s === "critical" || (s === "high" && v.verdict === "CONFIRMED")) {
+      criticals.push({ title: v.title, source: v.source, verdict: v.verdict });
+    }
+  }
+  const total = Object.values(sev).reduce((a, b) => a + b, 0);
+  const ports = detail.open_ports || [];
+  if (total === 0 && ports.length === 0) return null;
+  return (
+    <div className="sess-host-summary">
+      <div className="sess-host-summary-h">
+        <span className="mono">{hostIp}</span>
+        {detail.hostname && <span className="muted"> · {detail.hostname}</span>}
+        {(detail.os_name || detail.os_family) && (
+          <span className="muted"> · {detail.os_name || detail.os_family}</span>
+        )}
+        {onViewHost && (
+          <button className="linkish" style={{ marginLeft: "auto" }}
+                  onClick={() => onViewHost(hostIp)}
+                  title="open the full host drawer">full detail →</button>
+        )}
+      </div>
+      <div className="sess-host-summary-row">
+        <div className="sess-host-summary-sev">
+          <span className="muted">Findings:</span>
+          {(["critical", "high", "medium", "low", "info"] as const).map((k) => (
+            (sev as any)[k] > 0 && (
+              <span key={k} className={`sev-chip s-${k}`} title={`${(sev as any)[k]} ${k}`}>
+                {(sev as any)[k]} {k[0].toUpperCase()}
+              </span>
+            )
+          ))}
+        </div>
+        {ports.length > 0 && (
+          <div className="sess-host-summary-ports">
+            <span className="muted">Open ports:</span>
+            {ports.slice(0, 10).map((p, i) => (
+              <span key={i} className="mono port-chip"
+                    title={`${p.service || ""} ${p.product || ""} ${p.version || ""}`.trim()}>
+                {p.portid}{p.service ? `/${p.service}` : ""}
+              </span>
+            ))}
+            {ports.length > 10 && <span className="muted">+{ports.length - 10}</span>}
+          </div>
+        )}
+      </div>
+      {criticals.length > 0 && (
+        <div className="sess-host-summary-crit">
+          <span className="muted">Top exploitable finding{criticals.length > 1 ? "s" : ""}:</span>
+          <ul className="sess-host-crit-list">
+            {criticals.slice(0, 5).map((c, i) => (
+              <li key={i}>
+                {c.verdict === "CONFIRMED" && <span className="verdict-tag">✓</span>}
+                {c.title} {c.source && <span className="muted small">· {c.source}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

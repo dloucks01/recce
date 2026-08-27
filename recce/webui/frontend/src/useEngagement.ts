@@ -50,6 +50,15 @@ export function useEngagement(tester: string, note: (msg: string) => void, colla
       } else if (d.type === "import") {
         if (d.tester !== tester) note(`${d.tester} imported ${d.kind} output`);
         refresh().catch(() => {});
+      } else if (d.type === "session" && d.event === "enum_done") {
+        // Explicit success/failure for on-target enum ingest — used to be
+        // silent, leaving the operator wondering whether their `Enumerate`
+        // click did anything. `refresh()` folds the newly-ingested findings
+        // into the tab that's open.
+        note(d.message || `On-target enum ingested for ${d.host_ip}`);
+        refresh().catch(() => {});
+      } else if (d.type === "session" && d.event === "enum_failed") {
+        note(`⚠️ ${d.message || `On-target enum ingest failed for ${d.host_ip}`}`);
       } else if (["assign", "label", "port_status", "dismiss", "add"].includes(d.type)) {
         collab.refresh();
         if (d.type === "add") refresh().catch(() => {});

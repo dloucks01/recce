@@ -540,6 +540,30 @@
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   font-weight: 700; }
 
+/* Inline "what recce knows about this host" summary — sits between the
+   terminal and the Session Tools rail. Read-only surface for the target
+   context so the tester doesn't have to leave the tab to remember
+   findings/ports. */
+.sess-host-summary { padding: 10px 14px 12px; border-top: 1px solid var(--line);
+  background: var(--surface2); font-size: 13px; }
+.sess-host-summary-h { display: flex; align-items: baseline; gap: 6px; margin-bottom: 8px; }
+.sess-host-summary-row { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 6px; }
+.sess-host-summary-sev, .sess-host-summary-ports { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sev-chip { font-family: var(--mono); font-size: 11px; padding: 1px 7px; border-radius: 4px; font-weight: 700; }
+.sev-chip.s-critical { color: #fff; background: var(--crit); }
+.sev-chip.s-high { color: #fff; background: var(--high); }
+.sev-chip.s-medium { color: var(--text); background: color-mix(in srgb, var(--med) 40%, transparent); }
+.sev-chip.s-low { color: var(--muted); background: var(--surface); border: 1px solid var(--line); }
+.sev-chip.s-info { color: var(--faint); background: var(--surface); border: 1px solid var(--line); }
+.port-chip { font-size: 11px; padding: 1px 6px; border-radius: 4px;
+  background: var(--surface); border: 1px solid var(--line); color: var(--text); }
+.sess-host-summary-crit { margin-top: 6px; }
+.sess-host-crit-list { list-style: none; margin: 4px 0 0 0; padding: 0; }
+.sess-host-crit-list li { padding: 3px 0; color: var(--text); font-size: 12.5px;
+  line-height: 1.35; border-bottom: 1px dashed var(--line); }
+.sess-host-crit-list li:last-child { border-bottom: 0; }
+.verdict-tag { color: var(--ok); font-weight: 700; margin-right: 4px; }
+
 /* host drawer — "what's been done" */
 .host-activity { display: flex; flex-direction: column; gap: 12px; }
 .phase-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
