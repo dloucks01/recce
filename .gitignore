@@ -34,7 +34,7 @@ dump.rdb
 # web frontend dev artifacts
 recce/webui/frontend/node_modules/
 
-# Claude Code / IDE config
+# IDE / editor config
 .claude/
 
 # Test cache
