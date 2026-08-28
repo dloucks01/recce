@@ -1425,7 +1425,12 @@ def _run_sweep(args: argparse.Namespace, *, authenticated: bool) -> int:
         if run_vulns:
             print("\n" + "=" * 64 + "\n[SWEEP] vulns (nmap NSE)\n" + "=" * 64)
             try:
-                cmd_vulns(args)
+                # Late lookup for the same reason as the module table above:
+                # _scan does `from .helpers import *`, and helpers pulls in
+                # _phases, so a top-level `from ._scan import cmd_vulns` here
+                # is circular. Bare `cmd_vulns(args)` was a NameError that the
+                # broad except below swallowed into "vulns failed".
+                _cli_ns.cmd_vulns(args)
                 ran.append("vulns")
             except Exception as e:  # noqa: BLE001 - one module must not abort the sweep
                 failed.append(("vulns", e))

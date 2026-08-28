@@ -316,6 +316,25 @@ class SweepWiringTest(unittest.TestCase):
         self.assertNotIn("[SWEEP] ldap", out)
         self.assertIn("[SWEEP] smb", out)
 
+    def test_sweep_vulns_phase_actually_invokes_cmd_vulns(self):
+        """`--vulns` must reach cmd_vulns. It was referenced as a bare global in
+        _phases (which never imports it - _scan -> helpers -> _phases is
+        circular), so the call raised NameError and the per-module `except
+        Exception` swallowed it into 'vulns failed'. The NSE scan silently never
+        ran while the sweep still reported success."""
+        from unittest import mock
+        calls = []
+        # Patch on recce.cli itself: the fix resolves the handler late via
+        # sys.modules["recce.cli"], so this also pins that lookup path.
+        with mock.patch.object(cli, "cmd_vulns", lambda a: calls.append(a) or 0):
+            rc, out = self._run_capture(
+                ["sweep", "-o", self.dir, "--no-probe", "--vulns",
+                 "--only-modules", "smb"])
+        self.assertIn(rc, (0, 1))
+        self.assertEqual(len(calls), 1, "cmd_vulns was never invoked")
+        self.assertIn("[SWEEP] vulns", out)
+        self.assertNotIn("vulns failed", out)
+
     def test_missing_datastore_is_reported(self):
         empty = self.dir + "_empty"
         shutil.rmtree(empty, ignore_errors=True)
