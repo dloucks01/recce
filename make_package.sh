@@ -42,12 +42,16 @@ if [ "$VERIFY" = 1 ]; then
   echo "[*] Running test suite before packaging ..."
   python3 -m unittest discover -s tests -p "test_*.py" >/dev/null
   echo "[+] tests passed"
-  if python3 -c "import pyflakes" 2>/dev/null; then
-    echo "[*] Running pyflakes lint ..."
-    # Surface issues (was silenced with >/dev/null || true, so the lint did nothing).
-    python3 -m pyflakes recce || echo "[!] pyflakes reported issues (non-fatal) - review above"
+  # Use ruff, matching the CI lint gate. A bare `pyflakes recce` reports ~683
+  # findings here - the star-import warnings the cli/ and services/web/ packages
+  # produce by design - so it printed a wall of non-issues and told the operator
+  # to "review above". Ruff reads the suppressions in pyproject.toml [tool.ruff]
+  # and is clean, so anything it prints is a genuine finding.
+  if command -v ruff >/dev/null 2>&1; then
+    echo "[*] Running ruff lint ..."
+    ruff check recce || echo "[!] ruff reported issues (non-fatal here; CI gates on this) - review above"
   else
-    echo "[!] pyflakes not installed - skipping lint"
+    echo "[!] ruff not installed - skipping lint (pip install ruff)"
   fi
 fi
 
