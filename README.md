@@ -74,9 +74,13 @@ recce/
   data/                 bundled wordlists
   local/                on-target enum scripts (recce-enum.sh/.ps1)
 tools/                  build scripts (airgap bundle, wordlists, intel refresh)
-tests/                  test suite
 docs/                   reference + design notes
+tests/                  test suite            (repo only)
+test_env/               docker lab            (repo only)
 ```
+
+`repo only` = development artifacts. They stay here, where CI runs them, and
+are left out of the airgap burn package built by `make_package.sh`.
 
 ---
 
