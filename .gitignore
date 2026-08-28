@@ -35,7 +35,9 @@ dump.rdb
 recce/webui/frontend/node_modules/
 
 # IDE / editor config
-.claude/
+.vscode/
+.idea/
+*.swp
 
 # Test cache
 .pytest_cache/
