@@ -241,16 +241,6 @@ def nt_hash(s: str) -> str:
     return hashlib.new("md4", s.encode("utf-16-le")).hexdigest()
 
 
-def lm_hash(s: str) -> str:
-    """LM hash — legacy Windows LAN Manager. Weakest hash still occasionally
-    encountered on old domains. Kept for tester convenience; do NOT use for
-    anything real."""
-    from Crypto.Cipher import DES     # optional; falls back below if absent
-    raise EncDecError(
-        "LM hash requires pycryptodome (Crypto.Cipher.DES). Compute externally "
-        "with impacket-nthash or a purpose-built tool.")
-
-
 def hmac_sha256(s: str, key: str) -> str:
     return hmac.new(_to_bytes(key), _to_bytes(s), hashlib.sha256).hexdigest()
 
