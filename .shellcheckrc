@@ -1,0 +1,9 @@
+# shellcheck cannot resolve the dynamic `. "$(cd "$(dirname "$0")/.." && pwd)/lib.sh"`
+# the service scripts use, so it reported every sourced helper as undefined
+# (SC1091) and AGGR as unused (SC2034) - 53 false positives across 35 scripts.
+# Pointing it at the two layouts that exist (services/ sourcing ../lib.sh, and
+# recce-service.sh sourcing its sibling lib.sh) resolves them properly, rather
+# than blanket-disabling the rules and losing real findings with them.
+external-sources=true
+source-path=SCRIPTDIR
+source-path=SCRIPTDIR/..

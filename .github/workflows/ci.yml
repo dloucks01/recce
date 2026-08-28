@@ -119,6 +119,35 @@ jobs:
       - run: pip install ruff==0.16.5
       - run: ruff check recce
 
+  shellcheck:
+    name: shellcheck (warning+)
+    runs-on: ubuntu-latest
+    # BLOCKING at warning severity. shellcheck found a real bug in recce-enum.sh:
+    # `1.9.1*` is a glob, so both sudo CVE checks matched 1.9.10-1.9.19 and
+    # reported PATCHED releases as vulnerable (fixed in 6ccaf19). That class -
+    # SC2221/SC2222, unreachable case patterns - is warning level, so this gate
+    # would have caught it.
+    #
+    # warning+ only. The ~32 note-level findings are all intentional idioms
+    # (literal \n inside guidance text the operator copies, ls-vs-find style,
+    # deliberate word splitting) and gating on them would mean suppressions
+    # without value. Source resolution is configured in .shellcheckrc.
+    steps:
+      - uses: actions/checkout@v7
+      # Pinned for the same reason as ruff: a blocking gate must not start
+      # failing because the runner image shipped a newer shellcheck.
+      - name: Install shellcheck 0.11.0
+        run: |
+          curl -fsSL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz \
+            | tar -xJ
+          sudo install -m755 shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
+          shellcheck --version
+      - name: Lint every shell script
+        run: |
+          find . \( -name '*.sh' -o -path './bin/recce' \) \
+               -not -path './.git/*' -not -path '*/node_modules/*' -print0 \
+            | xargs -0 shellcheck -f gcc -S warning
+
   ad-integration:
     name: credentialed AD (Samba DC)
     runs-on: ubuntu-latest

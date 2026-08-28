@@ -23,6 +23,8 @@ case "$B" in
   *ProFTPD\ 1.3.[0-5]*) find_ "ProFTPD $B -> check mod_copy RCE CVE-2015-3306 (SITE CPFR/CPTO)";;
   *Pure-FTPd*) info "Pure-FTPd - check CVE-2011-0988 / config for chroot escape";;
 esac
+# shellcheck disable=SC2046  # intentional: the banner match ("vsftpd 3.0.3") must
+# split into separate searchsploit terms; quoting would search one literal phrase.
 have searchsploit && [ -n "$B" ] && { info "exploit search:"; run searchsploit --disable-colour $(printf '%s' "$B" | grep -oiE '[a-z-]*ftpd?[ /][0-9.]+' | head -1); }
 
 aggr && { sec "FTP brute (intrusive)"; need hydra && run hydra -L /usr/share/wordlists/metasploit/unix_users.txt -P /usr/share/wordlists/rockyou.txt -f -t 4 "ftp://$T:$P"; } || skip_aggr "hydra credential brute"

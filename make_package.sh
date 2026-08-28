@@ -108,9 +108,14 @@ else
 fi
 
 # Checksums for verifying the transfer/burn.
+# The unquoted $( ... ) is deliberate: when the zip is absent the substitution
+# must expand to NO argument at all. Quoting it would pass an empty string,
+# which sha256sum reports as a missing file. $NAME has no spaces (recce-<ver>).
 if command -v sha256sum >/dev/null 2>&1; then
+  # shellcheck disable=SC2046  # intentional: empty expansion must vanish
   sha256sum "$NAME".tar.gz $( [ -f "$NAME.zip" ] && echo "$NAME.zip" ) > SHA256SUMS
 elif command -v shasum >/dev/null 2>&1; then
+  # shellcheck disable=SC2046  # intentional: empty expansion must vanish
   shasum -a 256 "$NAME".tar.gz $( [ -f "$NAME.zip" ] && echo "$NAME.zip" ) > SHA256SUMS
 fi
 rm -rf "$STAGE"

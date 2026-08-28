@@ -19,6 +19,8 @@ if have nc; then
   printf '%s' "$C" | grep -qi STARTTLS || case "$P" in 110|143) find_ "no STARTTLS on a cleartext mail port -> creds sniffable; brute-able (auth)";; esac
   printf '%s' "$C" | grep -qiE 'USER|LOGIN|PLAIN' && info "password auth available"
 fi
+# shellcheck disable=SC2046  # intentional: the banner match must split into
+# separate searchsploit terms; quoting would search one literal phrase.
 have searchsploit && [ -n "$B" ] && run searchsploit --disable-colour $(printf '%s' "$B" | grep -oiE 'dovecot|courier|cyrus|exchange' | head -1)
 
 if aggr; then sec "Mailbox brute (intrusive)"; need hydra && run hydra -L users.txt -P /usr/share/wordlists/rockyou.txt -f "$([ "$KIND" = pop3 ] && echo pop3 || echo imap)://$T:$P"
