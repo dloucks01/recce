@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # recce/scripts/lib.sh - shared helpers for the per-service enumeration scripts.
 #
 # Sourced by every recce/scripts/services/*.sh. These scripts run FROM Kali

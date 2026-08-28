@@ -299,11 +299,16 @@ if have sudo; then
   sv=$(printf '%s' "$SUV" | grep -oE '1\.[0-9]+\.[0-9]+[a-z]*[0-9]*' | head -1)
   # Baron Samedit (CVE-2021-3156) affects sudo < 1.9.5p2.
   case "$sv" in
-    1.8.*|1.9.0*|1.9.1*|1.9.2*|1.9.3*|1.9.4*|1.9.5|1.9.5p1) find_ "sudo $sv may be vulnerable to CVE-2021-3156 (Baron Samedit) - local root"; flag SUDO_SAMEDIT "$sv";;
+    # Fixed in 1.9.5p2. Match 1.9.0-1.9.4 (with optional pN) plus 1.9.5/1.9.5p1.
+    # NOT `1.9.1*` etc - that glob also swallows 1.9.10 through 1.9.19.
+    1.8.*|1.9.[0-4]|1.9.[0-4]p*|1.9.5|1.9.5p1) find_ "sudo $sv may be vulnerable to CVE-2021-3156 (Baron Samedit) - local root"; flag SUDO_SAMEDIT "$sv";;
   esac
   # CVE-2023-22809 (sudoedit -e arbitrary file write): sudo 1.8.0 - 1.9.12p1.
   case "$sv" in
-    1.8.*|1.9.0*|1.9.1*|1.9.2*|1.9.3*|1.9.4*|1.9.5*|1.9.6*|1.9.7*|1.9.8*|1.9.9*|1.9.10*|1.9.11*|1.9.12|1.9.12p1) find_ "sudo $sv - if you have any sudoedit/-e rule, check CVE-2023-22809 (edit arbitrary files as root)"; flag SUDO_22809 "$sv";;
+    # Fixed in 1.9.12p2. Match 1.9.0-1.9.11 (with optional pN) plus 1.9.12/1.9.12p1.
+    # The old `1.9.1*` shadowed the later 1.9.10*/1.9.11*/1.9.12 branches AND
+    # matched 1.9.13-1.9.19, flagging patched versions as vulnerable.
+    1.8.*|1.9.[0-9]|1.9.[0-9]p*|1.9.1[01]|1.9.1[01]p*|1.9.12|1.9.12p1) find_ "sudo $sv - if you have any sudoedit/-e rule, check CVE-2023-22809 (edit arbitrary files as root)"; flag SUDO_22809 "$sv";;
   esac
   SUDOL=$(sudo -n -l 2>/dev/null)
   if [ -n "$SUDOL" ]; then
