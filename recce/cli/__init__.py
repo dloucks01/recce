@@ -10,6 +10,13 @@ Subcommands (see `recce -h` for the full, authoritative list):
 
 from __future__ import annotations
 
+# NOTE: pyflakes reports most of the imports below as "imported but unused".
+# They are NOT dead - this package __init__ is a NAMESPACE SURFACE. Production
+# code and tests reach these through the package rather than importing the
+# origin module, e.g. `from ...cli import ip_matcher` in webui/routes/
+# act_spray.py and `cli.np.parse_nmap_xml = ...` in tests/test_pipeline.py.
+# Deleting them passes every static check and breaks at runtime. If you are
+# cleaning up unused imports, skip this file (and services/web/__init__.py).
 import argparse
 import copy
 import json

@@ -161,10 +161,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 out.append(_finding(
                     "critical",
                     "Prometheus admin API accepts unauthenticated writes", tgt,
-                    f"POST /-/reload returned success without auth. The server was "
-                    f"started with --web.enable-admin-api; an attacker can overwrite "
-                    f"the config (via /-/reload after a scrape-target/rule swap) to "
-                    f"exfiltrate metrics elsewhere or trigger denial-of-service.",
+                    "POST /-/reload returned success without auth. The server was "
+                    "started with --web.enable-admin-api; an attacker can overwrite "
+                    "the config (via /-/reload after a scrape-target/rule swap) to "
+                    "exfiltrate metrics elsewhere or trigger denial-of-service.",
                     f"curl -X POST http://{h.ip}:{p.portid}/-/reload",
                     "Never run Prometheus with --web.enable-admin-api on an exposed "
                     "port. Bind the admin API to loopback / a management-only interface.",
@@ -188,10 +188,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 out.append(_finding(
                     "medium",
                     "Prometheus query API open (metric-data disclosure)", tgt,
-                    f"/api/v1/query returned metric data anonymously. `query=up` "
-                    f"discloses the full scrape topology; other queries reveal "
-                    f"deployment behavior (traffic patterns, resource usage, "
-                    f"failure rates) usable to plan targeted attacks.",
+                    "/api/v1/query returned metric data anonymously. `query=up` "
+                    "discloses the full scrape topology; other queries reveal "
+                    "deployment behavior (traffic patterns, resource usage, "
+                    "failure rates) usable to plan targeted attacks.",
                     f"curl http://{h.ip}:{p.portid}/api/v1/query?query=up",
                     "Gate /api/v1/* behind authentication (reverse-proxy or a "
                     "Prometheus-native auth layer like caddy).",

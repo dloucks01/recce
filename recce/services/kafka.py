@@ -204,7 +204,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
             # discard the response; success/error doesn't matter for our
             # purpose (we're not negotiating a specific version).
             s.sendall(_build_api_versions_v0())
-            _av = _read_response(s, timeout)
+            _read_response(s, timeout)
             # Now the real query.
             s.sendall(_build_metadata_request_v1())
             body = _read_response(s, timeout)

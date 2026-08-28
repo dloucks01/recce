@@ -9,7 +9,6 @@ import argparse
 import copy
 import json
 import os
-import re
 import sys
 import tempfile
 import time
@@ -19,19 +18,31 @@ from .. import ad
 from ..vuln import exploits
 from ..core import parser as np
 from ..core import scanner
-from ..core import tracking as tr
 from ..core.models import Host
 from ..core.store import Store, StoreError
 from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 from . import _common
 from ._common import (
-    BANNER, _RETRY_HOST_TIMEOUT_CAP_MIN, _Refresher,
-    _disproved_ports_in_xml, _fold_host, _fold_swept_ports,
-    _generate_reports, _import_excel_tracking, _ip_key, _open_paths,
-    _open_store, _persist_host, _ports_for_host, _progress,
-    _record_issues, _relax_perms, _spray_cred_set,
-    _summarize_failures, _swept_ports_for_host, _union_swept,
+    BANNER,
+    _RETRY_HOST_TIMEOUT_CAP_MIN,
+    _Refresher,
+    _disproved_ports_in_xml,
+    _fold_host,
+    _fold_swept_ports,
+    _generate_reports,
+    _import_excel_tracking,
+    _ip_key,
+    _open_paths,
+    _open_store,
+    _persist_host,
+    _ports_for_host,
+    _progress,
+    _record_issues,
+    _spray_cred_set,
+    _summarize_failures,
+    _swept_ports_for_host,
+    _union_swept,
 )
 
 __all__ = ['_apply_profile_overrides', '_split_userdomain', '_creds_of', '_db_login_creds', '_web_login_creds', '_admin_creds_of', '_final_report', '_mkissue', '_enum_worker', '_reconfirm_missed', '_seed_targets', '_discover', '_phase_enum', '_merge_vuln_results', '_vuln_worker', '_selected_hosts', '_vuln_targets', '_phase_vulns', '_db_worker', '_phase_db', '_privesc_worker', '_phase_privesc', '_ssh_creds_of', '_credenum_worker', '_auth_cell', '_print_auth_table', '_phase_credenum', '_setup_scan', '_print_next', '_recovery_hint', '_sweep_defaults', '_UNAUTH_SWEEP', '_AUTH_SWEEP', '_run_sweep']

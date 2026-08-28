@@ -144,9 +144,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"anonymously: {repos_txt}"
                     + ("… (truncated)" if pr['repositories'] > 15 else "") +
                     ". Any of these images can be pulled with `docker pull`, "
-                    f"extracted, and mined for secrets baked into layers "
-                    f"(env variables, config files, private keys committed at "
-                    f"build time).",
+                    "extracted, and mined for secrets baked into layers "
+                    "(env variables, config files, private keys committed at "
+                    "build time).",
                     "docker",
                     f"curl -sk http://{h.ip}:{p.portid}/v2/_catalog?n=1000; "
                     f"docker pull {h.ip}:{p.portid}/<repo>:latest",

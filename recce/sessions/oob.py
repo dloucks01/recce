@@ -49,7 +49,6 @@ from __future__ import annotations
 import asyncio
 import struct
 import time
-from typing import Optional
 
 # Frame type constants — stable wire values; the agent hardcodes them.
 EXEC = 0x01

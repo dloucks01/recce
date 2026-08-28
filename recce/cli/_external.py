@@ -89,7 +89,7 @@ def cmd_certipy(args: argparse.Namespace) -> int:
     """Run `certipy find` against a DC and fold the AD-CS findings via the
     existing `ad` import path. Needs -u, -p, -d, --dc-ip."""
     h = _helpers()
-    paths = h._open_paths(args.output_dir)
+    h._open_paths(args.output_dir)      # side effects: makedirs raw/ + reown
     raw_dir = os.path.join(args.output_dir, "raw")
     print(f"[*] certipy → dc={args.dc_ip} user={args.username}@{args.domain}")
     json_path, err = _ext.run_certipy(

@@ -12,6 +12,11 @@ sslscan). Airgapped, stdlib only.
 
 from __future__ import annotations
 
+# NOTE: pyflakes reports the imports below as "imported but unused". They are
+# NOT dead - this package __init__ is a NAMESPACE SURFACE that the submodules'
+# wildcard re-exports resolve against (see the module docstrings in auth.py,
+# checks.py, crawl.py, ...). Deleting them passes every static check and breaks
+# at runtime. If you are cleaning up unused imports, skip this file.
 import base64
 import difflib
 import hashlib

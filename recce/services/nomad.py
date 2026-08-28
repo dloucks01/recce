@@ -165,7 +165,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"Jobs: {jobs_txt}"
                     + ("… (truncated)" if len(job_names) > 8 else "")
                     + ". Job specs commonly embed secret templates, env variables "
-                    f"with API keys, and DB connection strings.",
+                    "with API keys, and DB connection strings.",
                     f"curl http://{h.ip}:{p.portid}/v1/jobs",
                     "Enable ACLs in the Nomad server config (acl { enabled = true }); "
                     "bind the API to a private interface; require SecretID tokens.",

@@ -104,7 +104,6 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
     if r is not None and r[0] == 200:
         try:
             j = json.loads(r[2].decode("utf-8", "replace"))
-            nodes = (j.get("node") or {}).get("nodes") or []
             out["v2_readable"] = True
             # Rough key count — recurse counted by summing "nodes" lists.
             out["v2_keys"] = _count_v2_nodes(j.get("node") or {})

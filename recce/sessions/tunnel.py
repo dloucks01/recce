@@ -223,7 +223,6 @@ async def _socks5_handle(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                          state):
     """Handle one SOCKS5 client connection."""
     mux = state.mux
-    peer = writer.get_extra_info("peername")
     state.socks_conn_count += 1
     try:
         # greeting: version + nauth + methods

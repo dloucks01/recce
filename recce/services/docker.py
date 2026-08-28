@@ -321,12 +321,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     if svc_names: bits.append(f"services={', '.join(svc_names[:15])}")
                     out.append(_finding(
                         "high", "Docker Swarm secrets/configs enumerated unauth", tgt,
-                        f"Swarm mode active — secret and config NAMES readable via "
-                        f"the unauthenticated API. Values require a task mount, but "
-                        f"the names disclose intent (db_password, jwt_signing_key, "
-                        f"api_tokens, tls_cert). Combined with the RCE via /containers/"
-                        f"create + Binds root-mount, a hostile task can be spawned "
-                        f"that mounts the secrets and exfiltrates them.\n  " +
+                        "Swarm mode active — secret and config NAMES readable via "
+                        "the unauthenticated API. Values require a task mount, but "
+                        "the names disclose intent (db_password, jwt_signing_key, "
+                        "api_tokens, tls_cert). Combined with the RCE via /containers/"
+                        "create + Binds root-mount, a hostile task can be spawned "
+                        "that mounts the secrets and exfiltrates them.\n  " +
                         "  |  ".join(bits),
                         "docker CLI",
                         f"docker -H {_scheme(p.portid)}://<ip>:{p.portid} secret ls; "

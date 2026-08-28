@@ -39,7 +39,6 @@ import time
 from html.parser import HTMLParser
 
 from ..core.models import Port, Vuln
-from ..core import proxy
 from .svccommon import http_connect
 
 
@@ -1396,9 +1395,9 @@ def enum_findings(host_ip: str, port: Port,
                 f"(body {bh['length']} bytes). Backup files are commonly served as "
                 f"static content, bypassing any application-layer auth on the "
                 f"original path.",
-                f"Block *.bak, *.old, *.orig, *~, *.swp, *.backup variants at the "
-                f"web-server layer; consider a nginx `location ~* \\.(bak|old|~)$ "
-                f"{{ deny all; }}` rule."))
+                "Block *.bak, *.old, *.orig, *~, *.swp, *.backup variants at the "
+                "web-server layer; consider a nginx `location ~* \\.(bak|old|~)$ "
+                "{ deny all; }` rule."))
 
     # Directory-listing detection — a 200 on a path with an autoindex response
     # discloses far more than the single-file finding path_enum saw.
@@ -1534,8 +1533,8 @@ def enum_findings(host_ip: str, port: Port,
             host_ip, port, "http-cors-reflect", "high",
             "CORS reflects any origin with credentials",
             ["CWE-346", "CWE-942"],
-            f"Access-Control-Allow-Origin echoes 'https://attacker.example' "
-            f"with Allow-Credentials: true — any origin can read authenticated responses",
+            "Access-Control-Allow-Origin echoes 'https://attacker.example' "
+            "with Allow-Credentials: true — any origin can read authenticated responses",
             "Restrict Access-Control-Allow-Origin to a fixed allowlist. Never combine "
             "wildcard/reflection with Allow-Credentials: true."))
     elif cors.get("wildcard_with_creds"):

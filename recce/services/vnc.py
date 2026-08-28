@@ -148,11 +148,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 out.append(_finding(
                     "medium",
                     "VNC offers only DES-based VNC Authentication (weak)", tgt,
-                    f"Server only offers security type 2 (VNC Authentication) — an "
-                    f"8-byte DES challenge/response. A captured handshake is offline "
-                    f"crackable (hashcat -m 11600); the password itself is truncated "
-                    f"to 8 chars in the auth flow. On a shared network segment this "
-                    f"is a compromised session.",
+                    "Server only offers security type 2 (VNC Authentication) — an "
+                    "8-byte DES challenge/response. A captured handshake is offline "
+                    "crackable (hashcat -m 11600); the password itself is truncated "
+                    "to 8 chars in the auth flow. On a shared network segment this "
+                    "is a compromised session.",
                     f"vncviewer {h.ip}::{p.portid}",
                     "Move to a TLS/VeNCrypt-wrapping VNC variant (TigerVNC + VeNCrypt "
                     "+ x509plain). Tunnel over SSH as an alternative.",

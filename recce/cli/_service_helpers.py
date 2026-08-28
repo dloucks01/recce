@@ -9,19 +9,23 @@ import argparse
 import json
 import os
 import re
-import time
 
 from .. import ad
-from ..vuln import exploits
 from ..core import parser as np
 from ..core import scanner
 from ..core.models import Host
 from ..core.store import Store
 
 from ._common import (
-    _SEV_ORDER, _fold_host, _generate_reports, _import_excel_tracking,
-    _ip_key, _open_paths, _open_store, _persist_host, _ports_for_host,
-    _record_issues, _safe_refresh, _spray_cred_set,
+    _SEV_ORDER,
+    _fold_host,
+    _generate_reports,
+    _import_excel_tracking,
+    _open_paths,
+    _open_store,
+    _persist_host,
+    _ports_for_host,
+    _record_issues,
 )
 from ._phases import _db_login_creds, _merge_vuln_results, _mkissue, _selected_hosts
 

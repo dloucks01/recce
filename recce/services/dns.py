@@ -253,8 +253,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     # Weak SPF — +all = pass everything; ?all = neutral.
                     out.append(_finding(
                         "low", f"Weak SPF policy for {z} ({es['spf'][:60]}...)", tgt,
-                        f"SPF exists but its terminator is +all/?all — anyone still "
-                        f"passes. Effectively equivalent to no SPF for spoofing purposes.",
+                        "SPF exists but its terminator is +all/?all — anyone still "
+                        "passes. Effectively equivalent to no SPF for spoofing purposes.",
                         f"dig TXT {z} @{h.ip}",
                         "Change the SPF terminator to -all (fail) or ~all (softfail).",
                         ["CWE-290"], kind="dns_weak_spf"))
@@ -271,8 +271,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 elif "p=none" in es["dmarc"].lower():
                     out.append(_finding(
                         "low", f"DMARC in monitor-only mode for {z} (p=none)", tgt,
-                        f"DMARC policy is p=none — receivers report spoofed mail but "
-                        f"still deliver it. Effective for reporting, not enforcement.",
+                        "DMARC policy is p=none — receivers report spoofed mail but "
+                        "still deliver it. Effective for reporting, not enforcement.",
                         f"dig TXT _dmarc.{z} @{h.ip}",
                         "Advance policy to p=quarantine (bulk-folder) then p=reject.",
                         ["CWE-290"], kind="dns_dmarc_monitor"))

@@ -16,7 +16,6 @@ import argparse
 import os
 import sys
 
-from ..core import proxy
 from ..core import scanner
 
 

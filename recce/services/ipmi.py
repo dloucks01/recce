@@ -25,7 +25,6 @@ Airgap-safe: stdlib socket + struct. Single send + recv, ~2s timeout.
 from __future__ import annotations
 
 import socket
-import struct
 
 from ..core.models import Host, Port
 

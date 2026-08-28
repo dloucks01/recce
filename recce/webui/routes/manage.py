@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import ipaddress
 import os
-import re
 
 from fastapi import Body, FastAPI, Header, HTTPException
 
@@ -368,7 +367,6 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         """Generate the fieldkit seed folder and return a zip archive."""
         import io
         import json as _json
-        import os
         import time
         import zipfile
         from fastapi.responses import Response

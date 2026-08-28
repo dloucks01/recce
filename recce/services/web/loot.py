@@ -5,17 +5,8 @@ web/__init__.py's wildcard import so `from recce.services.web import X`
 keeps working for the split names too."""
 from __future__ import annotations
 
-import base64
-import difflib
-import hashlib
-import hmac
-import http.client
 import json
 import re
-import socket
-import ssl
-import time
-from urllib.parse import quote, urlencode, urljoin, urlparse
 
 
 # Shared primitives — every probe fetches through _fetch / _mk / etc.

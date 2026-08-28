@@ -873,8 +873,6 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         straight into the workbook."""
         import os
         import shutil
-        import subprocess
-        import tempfile
         sess = mgr.get(session_id)
         if sess is None:
             raise HTTPException(404, "no such session")

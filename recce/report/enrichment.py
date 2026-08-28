@@ -273,12 +273,12 @@ def correlate(hosts: Iterable) -> list[dict]:
             "title": "Kerberoastable admin + SMB signing disabled = coerce+relay chain",
             "severity": "high",
             "hosts": sorted(set(kerb_admins + unsigned_smb)),
-            "description": (f"Fleet has BOTH a kerberoastable admin account (offline "
-                            f"crackable TGS) AND at least one SMB host without signing. "
-                            f"Coerced auth (PetitPotam / PrinterBug) from the SMB host can "
-                            f"be relayed to a domain-joined LDAPS or ADCS endpoint for "
-                            f"immediate privilege escalation, in parallel with the offline "
-                            f"crack of the roasted admin's password."),
+            "description": ("Fleet has BOTH a kerberoastable admin account (offline "
+                            "crackable TGS) AND at least one SMB host without signing. "
+                            "Coerced auth (PetitPotam / PrinterBug) from the SMB host can "
+                            "be relayed to a domain-joined LDAPS or ADCS endpoint for "
+                            "immediate privilege escalation, in parallel with the offline "
+                            "crack of the roasted admin's password."),
             "next_steps": ("ntlmrelayx.py -t ldaps://<dc> -smb2support --escalate-user <user>  "
                            "# in one terminal; petitpotam.py <coercer> <smb-victim>  "
                            "# in another"),

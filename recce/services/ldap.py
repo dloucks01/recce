@@ -946,7 +946,6 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
     # firing each of those findings 4× per host. Track (ip, kind) and skip
     # the second and later emissions. Port-specific findings (cleartext
     # 389, TLS check on 636) are kept per-port unchanged.
-    _HOST_LEVEL_KINDS = {"ldap_anon_bind", "ldap_anon_read", "ldap_rootdse"}
     emitted_host_level: set[tuple[str, str]] = set()
     for h in hosts:
         for p in h.open_ports:

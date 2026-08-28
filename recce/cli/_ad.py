@@ -8,25 +8,10 @@ parser's `_h(...)` lookup finds every handler."""
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import re
-import sys
-import tempfile
-import time
-from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
-from .. import ad
-from ..vuln import exploits
-from ..core import parser as np
-from ..core import scanner
-from ..core import tracking as tr
-from ..core.models import Host
-from ..report.excel import read_workbook_edits, update_workbook
-from ..report.markdown import build_csv, build_markdown
-from ..core.store import Store, StoreError
-from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 

@@ -153,11 +153,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 out.append(_finding(
                     "high",
                     "RDP: Network Level Authentication (NLA) not required", tgt,
-                    f"Server accepted Standard RDP security (selectedProtocol=0). "
-                    f"BlueKeep-family exposure (CVE-2019-0708 on Win7/2008 R2, "
-                    f"CVE-2020-0609/0610 gateway CVEs) is materially larger without "
-                    f"NLA. A cred-harvesting attacker on-path can present a fake "
-                    f"login and receive plaintext credentials.",
+                    "Server accepted Standard RDP security (selectedProtocol=0). "
+                    "BlueKeep-family exposure (CVE-2019-0708 on Win7/2008 R2, "
+                    "CVE-2020-0609/0610 gateway CVEs) is materially larger without "
+                    "NLA. A cred-harvesting attacker on-path can present a fake "
+                    "login and receive plaintext credentials.",
                     f"xfreerdp /v:{h.ip}:{p.portid} /sec:rdp",
                     "Require NLA on every RDP host (Group Policy: Computer "
                     "Configuration > Admin Templates > Windows Components > "

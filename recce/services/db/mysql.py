@@ -16,7 +16,7 @@ import socket
 import struct
 
 from ...core.models import Host, Port
-from .base import recvn as _recvn, cred_list as _base_cred_list, finding as _base_finding
+from .base import recvn as _recvn, finding as _base_finding
 
 _PORTS = (3306, 3307, 33060)
 _DEFAULT_PORT = 3306

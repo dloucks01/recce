@@ -5,11 +5,7 @@ web/__init__.py's wildcard import so `from recce.services.web import X`
 keeps working for the split names too."""
 from __future__ import annotations
 
-import base64
-import difflib
 import hashlib
-import hmac
-import http.client
 import json
 import re
 import socket
@@ -17,9 +13,8 @@ import ssl
 import time
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
-from ...core.models import Host, Port, Vuln
+from ...core.models import Port, Vuln
 from .. import probes
-from ...core import proxy
 
 
 # Shared primitives — every probe fetches through _fetch / _mk / etc.
@@ -947,7 +942,7 @@ def _check_dom_xss(ip: str, port: Port, body: str, auth: dict | None) -> list[Vu
         if re.search(sink, body, re.I):
             return [_mk(ip, port, "web-dom-xss", "high",
                 f"DOM-based XSS sink detected: {sink.split(chr(92))[0]}", ["CWE-79"],
-                f"JavaScript contains dangerous sink pattern. If source is user-controlled, DOM XSS possible.",
+                "JavaScript contains dangerous sink pattern. If source is user-controlled, DOM XSS possible.",
                 "Use textContent instead of innerHTML; avoid eval; use Content Security Policy",
                 confidence="potential")]
     return []
