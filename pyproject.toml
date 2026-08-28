@@ -72,3 +72,28 @@ recce = [
     "webui/static/**/*",
     "*.json",              # KEV/EPSS snapshots (refresh_intel drops these)
 ]
+
+# --- lint ---------------------------------------------------------------------
+# Ruff runs the pyflakes (F) rule set. It replaced a bare `pyflakes` call because
+# pyflakes has no suppression mechanism at all - it ignores `# noqa` - so the
+# job could never be made blocking while the architectural findings below exist.
+[tool.ruff]
+target-version = "py39"        # matches requires-python
+
+[tool.ruff.lint]
+select = ["F"]                 # pyflakes-equivalent only; not an style reformat
+# F403/F405 = "star import used" / "may be undefined, from star imports".
+# The cli and services/web packages are built on `from .helpers import *` and
+# `from .http import *` on purpose (the wildcard is what lets the private _*
+# helpers resolve across the split modules), so these fire ~636 times by design.
+# Everything else in F stays on - notably F821 (undefined name), which is what
+# caught `sweep --vulns` calling an unimported cmd_vulns.
+ignore = ["F403", "F405"]
+
+[tool.ruff.lint.per-file-ignores]
+# These two package __init__ files are NAMESPACE SURFACES: production code and
+# tests reach imports through the package rather than the origin module (e.g.
+# `from ...cli import ip_matcher`, `cli.np.parse_nmap_xml = ...`). The imports
+# read as unused and are load-bearing. See the comment at the top of each.
+"recce/cli/__init__.py" = ["F401"]
+"recce/services/web/__init__.py" = ["F401"]

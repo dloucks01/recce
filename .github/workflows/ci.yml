@@ -104,18 +104,20 @@ jobs:
           fi
 
   lint:
-    name: pyflakes
+    name: ruff (pyflakes rules)
     runs-on: ubuntu-latest
-    # Informational for now (the runtime is stdlib-only and the suite is the gate);
-    # flip continue-on-error off to make lint blocking once it's confirmed clean.
-    continue-on-error: true
+    # BLOCKING. Ruff runs the same F rule set pyflakes did, but honours the
+    # suppressions configured in pyproject.toml - pyflakes has none, so the job
+    # could only ever be informational. Config + rationale live in [tool.ruff].
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install pyflakes
-      - run: python -m pyflakes recce
+      # Pinned: this gate is blocking, so a ruff release that adds an F rule
+      # must not fail an unrelated push. Bump deliberately.
+      - run: pip install ruff==0.16.5
+      - run: ruff check recce
 
   ad-integration:
     name: credentialed AD (Samba DC)
