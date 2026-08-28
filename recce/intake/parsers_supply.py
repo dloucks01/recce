@@ -99,8 +99,7 @@ def parse_gobuster(text: str) -> list[Vuln]:
     else:
         # Text output — no target header, so we can't ID the host from output alone.
         # Best-effort: use a synthetic host "web-discovery" for now; the operator
-        # can reassign in the UI. TODO: sniff CLI arg headers when gobuster leaves
-        # them (older versions do).
+        # can reassign in the UI.
         for path, status in _GB_TEXT_RE.findall(text):
             entries.append({"path": path, "status": int(status)})
     if not entries:
