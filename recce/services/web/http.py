@@ -20,6 +20,7 @@ from urllib.parse import quote, urlencode, urljoin, urlparse
 from ...core.models import Host, Port, Vuln
 from .. import probes
 from ...core import proxy
+from ..svccommon import http_connect
 
 
 __all__ = ['_TIMEOUT', '_UA', 'is_web', 'scheme_for', 'url_for', '_mk', '_fetch', '_fetch_raw', '_post_multipart', '_TITLE', '_GENERATOR', '_TECH_BODY', '_COOKIE_TECH', 'fingerprint', 'product_version', '_SECRET_RE', '_looks_like_html', '_leaked_secrets', '_resp_same']
@@ -73,11 +74,7 @@ def _fetch(ip: str, port: Port, path: str = "/", method: str = "GET", read: int 
     use_tls = probes._is_tls(port)
     conn = None
     try:
-        if use_tls:
-            conn = http.client.HTTPSConnection(
-                ip, port.portid, timeout=proxy.scaled(_TIMEOUT), context=ssl._create_unverified_context())
-        else:
-            conn = http.client.HTTPConnection(ip, port.portid, timeout=proxy.scaled(_TIMEOUT))
+        conn = http_connect(ip, port.portid, use_tls, _TIMEOUT)
         req_headers = {"User-Agent": _UA, "Connection": "close", "Accept": "*/*"}
         if auth:
             req_headers.update(auth)
@@ -117,12 +114,7 @@ def _fetch_raw(ip: str, port: Port, path: str, auth: dict | None = None,
     use_tls = probes._is_tls(port)
     conn = None
     try:
-        if use_tls:
-            conn = http.client.HTTPSConnection(
-                ip, port.portid, timeout=proxy.scaled(_TIMEOUT),
-                context=ssl._create_unverified_context())
-        else:
-            conn = http.client.HTTPConnection(ip, port.portid, timeout=proxy.scaled(_TIMEOUT))
+        conn = http_connect(ip, port.portid, use_tls, _TIMEOUT)
         req_headers = {"User-Agent": _UA, "Connection": "close", "Accept": "*/*"}
         if auth:
             req_headers.update(auth)
@@ -161,12 +153,7 @@ def _post_multipart(ip: str, port: Port, path: str, fields: dict, file_field: st
     use_tls = probes._is_tls(port)
     conn = None
     try:
-        if use_tls:
-            conn = http.client.HTTPSConnection(
-                ip, port.portid, timeout=proxy.scaled(_TIMEOUT),
-                context=ssl._create_unverified_context())
-        else:
-            conn = http.client.HTTPConnection(ip, port.portid, timeout=proxy.scaled(_TIMEOUT))
+        conn = http_connect(ip, port.portid, use_tls, _TIMEOUT)
         hdrs = {"User-Agent": _UA, "Connection": "close", "Accept": "*/*",
                 "Content-Type": f"multipart/form-data; boundary={boundary}"}
         if auth:

@@ -40,6 +40,7 @@ from html.parser import HTMLParser
 
 from ..core.models import Port, Vuln
 from ..core import proxy
+from .svccommon import http_connect
 
 
 # ---- request helpers --------------------------------------------------------
@@ -53,10 +54,7 @@ _ENUM_BUDGET_S = 45.0                 # hard wall-clock cap on the whole enum
 
 
 def _connect(ip: str, port: int, use_tls: bool, timeout: float):
-    if use_tls:
-        ctx = ssl._create_unverified_context()
-        return http.client.HTTPSConnection(ip, port, timeout=proxy.scaled(timeout), context=ctx)
-    return http.client.HTTPConnection(ip, port, timeout=proxy.scaled(timeout))
+    return http_connect(ip, port, use_tls, timeout)
 
 
 def _get(ip: str, port: int, use_tls: bool, path: str, timeout: float = _REQ_TIMEOUT,

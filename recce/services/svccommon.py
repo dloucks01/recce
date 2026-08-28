@@ -6,9 +6,21 @@ so that one conversion lives here instead of in five near-identical copies.
 
 from __future__ import annotations
 
+import http.client
 import socket
+import ssl
 
+from ..core import proxy
 from ..core.models import Evidence, Vuln
+
+
+def http_connect(ip: str, port: int, use_tls: bool, timeout: float):
+    """Open an HTTP(S) connection through the optional proxy, with TLS
+    certificate verification disabled (pentest scanner, not a browser)."""
+    if use_tls:
+        ctx = ssl._create_unverified_context()
+        return http.client.HTTPSConnection(ip, port, timeout=proxy.scaled(timeout), context=ctx)
+    return http.client.HTTPConnection(ip, port, timeout=proxy.scaled(timeout))
 
 
 def recvn(sock, n: int, timeout: float | None = None):
