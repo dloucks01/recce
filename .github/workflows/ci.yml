@@ -24,10 +24,10 @@ jobs:
         # widened to 3.9/3.10 if you want to verify the floor.
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -56,8 +56,8 @@ jobs:
     # nightly schedule, not on every PR (the fast job gates PRs).
     if: github.event_name != 'pull_request'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Install nmap
@@ -77,8 +77,8 @@ jobs:
     # users don't need Node. If a src/ change lands without rebuilding, this
     # job fails — no more stale bundles served from the ASGI mount.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -110,8 +110,8 @@ jobs:
     # suppressions configured in pyproject.toml - pyflakes has none, so the job
     # could only ever be informational. Config + rationale live in [tool.ruff].
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       # Pinned: this gate is blocking, so a ruff release that adds an F rule
@@ -131,8 +131,8 @@ jobs:
     # a test - so there is no green history to justify making it blocking yet.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install recce + AD tooling
