@@ -123,11 +123,12 @@ jobs:
     name: credentialed AD (Samba DC)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # The tier is a real signal now: 5 pass (LDAP, SMB, both kerberoast paths via
-    # recce's native RC4 roast) + 1 documented xfail (secretsdump/DRSUAPI, an
-    # impacket-vs-Samba issue). continue-on-error stays only because Samba DC
-    # provisioning ON A GITHUB RUNNER isn't yet confirmed reliable (timing/DNS); flip
-    # it off once a few runs are green end-to-end.
+    # 5 meaningful cases (LDAP, SMB, both kerberoast paths via recce's native RC4
+    # roast) + 1 documented xfail (secretsdump/DRSUAPI, an impacket-vs-Samba issue).
+    # continue-on-error stays for two reasons: Samba DC provisioning ON A GITHUB
+    # RUNNER isn't confirmed reliable (timing/DNS), and until the netexec install
+    # below was fixed this job died at the install step and had never once reached
+    # a test - so there is no green history to justify making it blocking yet.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -137,7 +138,18 @@ jobs:
       - name: Install recce + AD tooling
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[test]" pytest impacket netexec
+          pip install -e ".[test]" pytest impacket
+      - name: Install NetExec (optional)
+        # NetExec is NOT on PyPI under any name - the old `pip install ... netexec`
+        # line failed every single run ("No matching distribution found"), taking
+        # the whole job with it before any test ran. It builds from source instead.
+        # Kept non-fatal and in its own step: the nxc case self-skips via
+        # shutil.which(), and the five impacket-based cases don't need it at all,
+        # so a NetExec build problem must not mask the rest of the tier again.
+        continue-on-error: true
+        run: |
+          pipx install git+https://github.com/Pennyw0rth/NetExec.git
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Stand up the Samba AD DC
         run: |
           docker compose -f tests/integration/docker-compose.ad.yml up -d
