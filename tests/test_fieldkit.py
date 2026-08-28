@@ -13,9 +13,9 @@ import tempfile
 import unittest
 
 from recce import cli
-from recce import fieldkit
-from recce.models import Account, Credential, Host, Port, Vuln
-from recce.store import Store
+from recce.intake import fieldkit
+from recce.core.models import Account, Credential, Host, Port, Vuln
+from recce.core.store import Store
 
 
 def _win_host():
@@ -246,7 +246,7 @@ class RoundTripCliTest(unittest.TestCase):
         # platform whose default text encoding isn't UTF-8 (e.g. cp1252 on Windows,
         # which recce explicitly ships an airgap build for) - with ZERO scan-derived
         # non-ASCII content needed to trigger it.
-        from recce.models import Credential
+        from recce.core.models import Credential
         paths = cli._open_paths(self.eng)
         store = Store(paths["db"])
         store.add_credential(Credential(username="alice", secret="Pw!", kind="password"))

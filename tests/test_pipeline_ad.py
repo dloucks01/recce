@@ -16,14 +16,16 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recce import ad, exploits, parser, scanner
-from recce import tracking as tr
-from recce import xlsx
-from recce.models import Account, Host, Port, Script, Vuln
-from recce.report_excel import (build_workbook, read_workbook_tracking,
+from recce import ad
+from recce.core import parser, scanner
+from recce.vuln import exploits
+from recce.core import tracking as tr
+from recce.report.formats import xlsx
+from recce.core.models import Account, Host, Port, Script, Vuln
+from recce.report.excel import (build_workbook, read_workbook_tracking,
                                        update_workbook)
-from recce.store import Store
-from recce.targets import apply_exclusions, load_targets
+from recce.core.store import Store
+from recce.core.targets import apply_exclusions, load_targets
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
@@ -152,14 +154,14 @@ class NtlmTest(unittest.TestCase):
     """NTLMSSP / NTLMv2 crypto, validated against the MS-NLMP 4.2.4 worked example."""
 
     def test_md4_and_nt_hash_vectors(self):
-        from recce import ntlm as N
+        from recce.ad import ntlm as N
         self.assertEqual(N.md4(b"").hex(), "31d6cfe0d16ae931b73c59d7e0c089c0")
         # NT hash of "password" (MD4 of the UTF-16LE password).
         self.assertEqual(N.nt_hash("password").hex(),
                          "8846f7eaee8fb117ad06bdd830b7586c")
 
     def test_ntlmv2_matches_ms_nlmp_vector(self):
-        from recce import ntlm as N
+        from recce.ad import ntlm as N
         nthash = N.nt_hash("Password")               # MS-NLMP example password
         # ResponseKeyNT = HMAC-MD5(NT hash, UPPER(user)+domain).
         self.assertEqual(N._ntv2_key("User", "Domain", nthash).hex(),
@@ -175,7 +177,7 @@ class NtlmTest(unittest.TestCase):
         self.assertEqual(resp[:16].hex(), "68cd0ab851e51c96aabc927bebef6a1c")
 
     def test_rc4_known_answer_vectors(self):
-        from recce import ntlm as N
+        from recce.ad import ntlm as N
         self.assertEqual(N.rc4k(b"Key", b"Plaintext").hex(), "bbf316e8d940af0ad3")
         self.assertEqual(N.rc4k(b"Wiki", b"pedia").hex(), "1021bf0420")
         self.assertEqual(N.rc4k(b"Secret", b"Attack at dawn").hex(),
@@ -185,7 +187,7 @@ class NtlmTest(unittest.TestCase):
         import hmac
         import hashlib
         import struct
-        from recce import ntlm as N
+        from recce.ad import ntlm as N
         exported = bytes(range(16))
         ctx = N.SecurityContext(exported)
         token = ctx.wrap(b"hello ldap")
@@ -214,7 +216,7 @@ class NtlmTest(unittest.TestCase):
             ctx2.unwrap(b"\x01\x00\x00\x00" + b"\x00" * 8 + struct.pack("<I", 0) + sealed)
 
     def test_message_structure_and_hash_normalize(self):
-        from recce import ntlm as N
+        from recce.ad import ntlm as N
         self.assertEqual(N.type1()[:8], N._SIG)
         ch = {"challenge": b"\x01" * 8, "target_info": b"", "flags": N._TYPE1_FLAGS}
         t3 = N.type3("u", "d", b"\x00" * 16, ch)
@@ -237,7 +239,7 @@ class LdapTest(unittest.TestCase):
     def setUpClass(cls):
         import socketserver
         import threading
-        from recce import ldap as L
+        from recce.services import ldap as L
 
         def tlv(tag, val):
             return bytes([tag]) + L._ber_len(len(val)) + val
@@ -286,7 +288,7 @@ class LdapTest(unittest.TestCase):
         cls.srv.shutdown()
 
     def test_ber_encode_decode_roundtrip(self):
-        from recce import ldap as L
+        from recce.services import ldap as L
         self.assertEqual(L.build_bind_request(1, "", "")[0], 0x30)
         self.assertEqual(L.build_search_request(2, "", 0, ["dnsHostName"])[0], 0x30)
         # A synthetic searchResEntry parses into {attr: [values]}.
@@ -300,7 +302,7 @@ class LdapTest(unittest.TestCase):
         self.assertEqual(L._dn_to_domain("DC=corp,DC=local"), "corp.local")
 
     def test_probe_reads_rootdse_and_detects_anon(self):
-        from recce import ldap as L
+        from recce.services import ldap as L
         pr = L.probe("127.0.0.1", self.port)
         self.assertIsNotNone(pr)
         self.assertTrue(pr["anon_bind"])
@@ -311,7 +313,8 @@ class LdapTest(unittest.TestCase):
         self.assertTrue(pr["is_gc"])
 
     def test_findings_and_prove_confirm(self):
-        from recce import ldap as L, proofs
+        from recce.services import ldap as L
+        from recce.vuln import proofs
         pr = L.probe("127.0.0.1", self.port)
         h = Host(ip="10.0.10.10", ports=[Port(portid=389, service="ldap", state="open")])
         fs = L.findings([h], {("10.0.10.10", 389): pr})
@@ -330,7 +333,7 @@ class LdapTest(unittest.TestCase):
         replies. Returns (server, port); caller shuts it down."""
         import socketserver
         import threading
-        from recce import ldap as L
+        from recce.services import ldap as L
         state = {"n": 0}
         lock = threading.Lock()
 
@@ -351,8 +354,8 @@ class LdapTest(unittest.TestCase):
         return srv, srv.server_address[1]
 
     def test_authenticated_enum_pages_and_derives_accounts(self):
-        from recce import ldap as L
-        from recce.models import Host
+        from recce.services import ldap as L
+        from recce.core.models import Host
 
         def tlv(t, v):
             return bytes([t]) + L._ber_len(len(v)) + v
@@ -423,7 +426,8 @@ class LdapTest(unittest.TestCase):
         import threading
         import hmac as _h
         import hashlib as _hl
-        from recce import ldap as L, ntlm as N
+        from recce.ad import ntlm as N
+        from recce.services import ldap as L
 
         def tlv(t, v):
             return bytes([t]) + L._ber_len(len(v)) + v
@@ -482,8 +486,9 @@ class LdapTest(unittest.TestCase):
         return srv, srv.server_address[1]
 
     def test_ntlm_sealed_pth_end_to_end(self):
-        from recce import ldap as L, ntlm as N
-        from recce.models import Host
+        from recce.ad import ntlm as N
+        from recce.services import ldap as L
+        from recce.core.models import Host
 
         def tlv(t, v):
             return bytes([t]) + L._ber_len(len(v)) + v
@@ -525,8 +530,9 @@ class LdapTest(unittest.TestCase):
             srv.shutdown()
 
     def test_authenticated_accounts_feed_ad_quick_wins(self):
-        from recce import ldap as L, ad
-        from recce.models import Host
+        from recce import ad
+        from recce.services import ldap as L
+        from recce.core.models import Host
         h = Host(ip="10.0.10.10", hostnames=["dc01"])
         en = {"users": [
             {"sAMAccountName": ["svc_sql"], "servicePrincipalName": ["MSSQL/db"],
@@ -539,8 +545,10 @@ class LdapTest(unittest.TestCase):
         self.assertIn("noPreAuth", [a.name for a in ad.asrep_roastable([h])])
 
     def test_cmd_ldap_authenticated_e2e_persists_accounts(self):
-        from recce import cli, xlsx, ldap as L
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services import ldap as L
+        from recce.core.store import Store
 
         # This test drives the native BER client end-to-end via a scripted fake server;
         # force the native path (the ldap3-preferred path would connect to the fake
@@ -618,8 +626,10 @@ class LdapTest(unittest.TestCase):
             srv.shutdown()
 
     def test_cmd_ldap_end_to_end(self):
-        from recce import cli, xlsx, ldap as L
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services import ldap as L
+        from recce.core.store import Store
         orig = L.is_ldap
         L.is_ldap = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
         try:
@@ -648,7 +658,7 @@ class LdapTest(unittest.TestCase):
 
     def test_no_endpoints_is_graceful(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -668,7 +678,7 @@ class FtpTest(unittest.TestCase):
                                 version="2.3.4", state="open")])
 
     def test_findings_from_probe(self):
-        from recce import ftp
+        from recce.services import ftp
         pr = {("10.0.0.80", 21): {"banner": "(vsFTPd 2.3.4)", "anonymous": True,
                                   "auth_tls": False}}
         fs = ftp.findings([self._host()], pr)
@@ -679,8 +689,8 @@ class FtpTest(unittest.TestCase):
         self.assertTrue(all(f.get("narrative") for f in fs))
 
     def test_findings_to_vulns_have_classified_cwes(self):
-        from recce import ftp
-        from recce.report_docx import _vuln_type
+        from recce.services import ftp
+        from recce.report.docx import _vuln_type
         pr = {("10.0.0.80", 21): {"banner": "(vsFTPd 2.3.4)", "anonymous": True,
                                   "auth_tls": False}}
         by_ip = ftp.findings_to_vulns(ftp.findings([self._host()], pr))
@@ -690,7 +700,8 @@ class FtpTest(unittest.TestCase):
             self.assertTrue(vt, v.cwes)
 
     def test_prove_engine_adjudicates_ftp(self):
-        from recce import ftp, proofs
+        from recce.services import ftp
+        from recce.vuln import proofs
         pr = {("10.0.0.80", 21): {"banner": "(vsFTPd 2.3.4)", "anonymous": True,
                                   "auth_tls": False}}
         h = self._host()
@@ -702,7 +713,7 @@ class FtpTest(unittest.TestCase):
         self.assertEqual(back, proofs.LIKELY)                      # banner-based
 
     def test_write_proof_finding(self):
-        from recce import ftp
+        from recce.services import ftp
         f = ftp.write_proof_finding("10.0.0.80", 21,
                                     {"writable": True, "evidence": "STOR ok\nDELE ok"},
                                     None)
@@ -716,7 +727,7 @@ class FtpTest(unittest.TestCase):
         # A ProFTPD version on the SECOND 220 line must still be captured + matched.
         import socket
         import threading
-        from recce import ftp
+        from recce.services import ftp
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("127.0.0.1", 0))
@@ -758,8 +769,9 @@ class FtpTest(unittest.TestCase):
         self.assertTrue(any("mod_copy" in f["title"].lower() for f in fs))
 
     def test_cmd_ftp_end_to_end(self):
-        from recce import cli, xlsx
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -781,7 +793,7 @@ class FtpTest(unittest.TestCase):
 
     def test_no_endpoints_is_graceful(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -803,7 +815,7 @@ class SmbTest(unittest.TestCase):
 
     def test_smb2_negotiate_roundtrips(self):
         import struct
-        from recce import smb
+        from recce.services import smb
         req = smb._build_smb2_negotiate()
         self.assertEqual(req[4:8], b"\xfeSMB")
         self.assertEqual(struct.unpack(">I", req[:4])[0], len(req) - 4)
@@ -820,7 +832,7 @@ class SmbTest(unittest.TestCase):
 
     def test_smb1_negotiate_detection(self):
         import struct
-        from recce import smb
+        from recce.services import smb
         req = smb._build_smb1_negotiate()
         self.assertEqual(req[4:8], b"\xffSMB")
         # SMBv1 answer with a selected dialect index -> enabled.
@@ -835,7 +847,7 @@ class SmbTest(unittest.TestCase):
             struct.pack(">I", 8) + b"\xfeSMB" + b"\x00" * 4)["smbv1"])
 
     def test_findings_from_probe(self):
-        from recce import smb
+        from recce.services import smb
         pr = {("10.0.0.60", 445): {"smbv1": True, "signing_required": False,
                                    "dialect_name": "SMB 3.1.1"}}
         fs = smb.findings([self._host()], pr)
@@ -845,8 +857,8 @@ class SmbTest(unittest.TestCase):
         self.assertTrue(all(f.get("narrative") for f in fs))       # narratives attached
 
     def test_findings_to_vulns_have_classified_cwes(self):
-        from recce import smb
-        from recce.report_docx import _vuln_type
+        from recce.services import smb
+        from recce.report.docx import _vuln_type
         pr = {("10.0.0.60", 445): {"smbv1": True, "signing_required": False,
                                    "dialect_name": "SMB 3.1.1"}}
         by_ip = smb.findings_to_vulns(smb.findings([self._host()], pr))
@@ -856,7 +868,8 @@ class SmbTest(unittest.TestCase):
             self.assertTrue(vt, v.cwes)                             # every CWE classifies
 
     def test_prove_engine_adjudicates_smb(self):
-        from recce import smb, proofs
+        from recce.services import smb
+        from recce.vuln import proofs
         pr = {("10.0.0.60", 445): {"smbv1": True, "signing_required": False,
                                    "dialect_name": "SMB 3.1.1"}}
         h = self._host()
@@ -870,7 +883,7 @@ class SmbTest(unittest.TestCase):
 
     def test_writable_shares_do_not_collapse(self):
         # Two writable shares on one host must survive as two distinct findings/Vulns.
-        from recce import smb
+        from recce.services import smb
         f1 = smb.write_proof_finding("10.0.0.60", 445, "data",
                                      {"writable": True, "evidence": "e"}, None)
         f2 = smb.write_proof_finding("10.0.0.60", 445, "backups",
@@ -880,7 +893,8 @@ class SmbTest(unittest.TestCase):
         self.assertEqual(len({v.key for v in vulns}), 2)          # both survive dedup
 
     def test_writable_share_confirmed_by_prove_engine(self):
-        from recce import smb, proofs
+        from recce.services import smb
+        from recce.vuln import proofs
         f = smb.write_proof_finding("10.0.0.60", 445, "data",
                                     {"writable": True, "evidence": "e"}, None)
         h = Host(ip="10.0.0.60", ports=[Port(portid=445, state="open")],
@@ -889,7 +903,7 @@ class SmbTest(unittest.TestCase):
         self.assertIn(proofs.CONFIRMED, verdicts)                 # dedicated recipe
 
     def test_prove_writable_judges_the_put_and_cleans_up(self):
-        from recce import smb
+        from recce.services import smb
         orig_tool, orig_run = smb.smbclient_tool, smb._run
         smb.smbclient_tool = lambda: "/usr/bin/smbclient"
         try:
@@ -924,7 +938,7 @@ class SmbTest(unittest.TestCase):
             smb.smbclient_tool, smb._run = orig_tool, orig_run
 
     def test_null_session_findings(self):
-        from recce import smb
+        from recce.services import smb
         session = {"ran": True, "error": None,
                    "shares": [{"name": "backups", "perms": "READ"},
                               {"name": "IPC$", "perms": "READ"}],
@@ -935,8 +949,9 @@ class SmbTest(unittest.TestCase):
         self.assertIn("readable without credentials", titles)       # backups (not IPC$)
 
     def test_cmd_smb_end_to_end(self):
-        from recce import cli, xlsx
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -959,7 +974,7 @@ class SmbTest(unittest.TestCase):
 
     def test_no_endpoints_is_graceful(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -973,7 +988,7 @@ class SmbTest(unittest.TestCase):
 
 class MssqlTest(unittest.TestCase):
     def _host(self):
-        from recce.models import Vuln
+        from recce.core.models import Vuln
         return Host(ip="10.0.0.50", subnet="10.0.0.0/24", hostnames=["SQL01"],
                     os_family="Windows", enumerated=True,
                     ports=[Port(portid=1433, service="ms-sql-s",
@@ -987,7 +1002,7 @@ class MssqlTest(unittest.TestCase):
                                 source="nse")])
 
     def test_sql_browser_parse(self):
-        from recce import mssql
+        from recce.services.db import mssql
         insts = mssql._parse_browser(
             "ServerName;WINSQL;InstanceName;SQLEXPRESS;IsClustered;No;"
             "Version;15.0.2000.5;tcp;1433;;")
@@ -997,7 +1012,7 @@ class MssqlTest(unittest.TestCase):
 
     def test_prelogin_request_is_wellformed_and_response_parses(self):
         import struct
-        from recce import mssql
+        from recce.services.db import mssql
         req = mssql._build_prelogin()
         self.assertEqual(req[0], 0x12)                              # PRELOGIN type
         self.assertEqual(struct.unpack(">H", req[2:4])[0], len(req))  # length field
@@ -1012,7 +1027,7 @@ class MssqlTest(unittest.TestCase):
         self.assertIn("SQL Server 2019", mssql.version_name(p["version"]))
 
     def test_findings_from_nse_and_version(self):
-        from recce import mssql
+        from recce.services.db import mssql
         fs = mssql.findings([self._host()])
         titles = " ".join(f["title"] for f in fs)
         self.assertIn("blank password", titles)                    # ms-sql-empty-password
@@ -1023,7 +1038,7 @@ class MssqlTest(unittest.TestCase):
         self.assertIn("impacket-mssqlclient", blank["command"])
 
     def test_runbook_commands_prefilled_with_creds(self):
-        from recce import mssql
+        from recce.services.db import mssql
         an = mssql.analyze([self._host()], creds={"user": "alice", "secret": "P@ss",
                            "domain": "corp.local", "dc_ip": "10.0.0.9"}, active=False)
         cmds = " ".join(s["cmd"] for s in an["runbooks"][0]["credentialed"])
@@ -1033,15 +1048,15 @@ class MssqlTest(unittest.TestCase):
         self.assertIn("EXECUTE AS LOGIN", cmds)                    # impersonation chain
 
     def test_parse_nxc_mssql(self):
-        from recce import mssql
+        from recce.services.db import mssql
         r = mssql.parse_nxc_mssql("MSSQL 10.0.0.50 1433 SQL01 [+] CORP\\alice:P@ss (Pwn3d!)")
         self.assertTrue(r["access"] and r["admin"])
         r2 = mssql.parse_nxc_mssql("MSSQL 10.0.0.50 1433 SQL01 [-] CORP\\bob:x")
         self.assertFalse(r2["access"])
 
     def test_findings_to_vulns_have_classified_cwes(self):
-        from recce import mssql
-        from recce.report_docx import _vuln_type
+        from recce.services.db import mssql
+        from recce.report.docx import _vuln_type
         fs = mssql.findings([self._host()])
         by_ip = mssql.findings_to_vulns(fs)
         self.assertIn("10.0.0.50", by_ip)
@@ -1050,8 +1065,9 @@ class MssqlTest(unittest.TestCase):
             self.assertTrue(vt, v.cwes)                            # every CWE classifies
 
     def test_cmd_mssql_end_to_end(self):
-        from recce import cli, xlsx
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -1076,7 +1092,7 @@ class MssqlTest(unittest.TestCase):
 
     def test_no_endpoints_is_graceful(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -1095,7 +1111,7 @@ class MssqlTest(unittest.TestCase):
              "@@B:hashes\nsa|0x0200ABCD\n@@E:hashes\n")
 
     def test_parse_enum_extracts_sections(self):
-        from recce import mssql
+        from recce.services.db import mssql
         e = mssql.parse_enum(self._LIVE)
         self.assertEqual(e["server"][0][0], "SQL01")
         self.assertEqual([r for r in e["logins"] if r[1] == "1"][0][0], "sa")
@@ -1103,14 +1119,14 @@ class MssqlTest(unittest.TestCase):
         self.assertEqual(e["links"][0][0], "DW01")
 
     def test_build_enum_script_wraps_sentinels(self):
-        from recce import mssql
+        from recce.services.db import mssql
         script = mssql.build_enum_script()
         self.assertIn("@@B:databases", script)
         self.assertIn("@@E:impersonate", script)
         self.assertTrue(script.strip().endswith("exit"))
 
     def test_chains_from_enum_detects_concrete_chain(self):
-        from recce import mssql
+        from recce.services.db import mssql
         e = mssql.parse_enum(self._LIVE)
         t = {"ip": "10.0.0.50", "port": 1433}
         fs, chain, summary = mssql.chains_from_enum(
@@ -1129,7 +1145,7 @@ class MssqlTest(unittest.TestCase):
         self.assertIn("USE [payroll]", tw["command"])
 
     def test_chains_direct_sysadmin(self):
-        from recce import mssql
+        from recce.services.db import mssql
         e = mssql.parse_enum(
             "@@B:server\nSQL01|sa|1|0|15.0.2000.5\n@@E:server\n"
             "@@B:logins\nsa|1\n@@E:logins\n")
@@ -1141,7 +1157,7 @@ class MssqlTest(unittest.TestCase):
         self.assertTrue(any("sysadmin on this MSSQL" in f["title"] for f in fs))
 
     def test_nested_exec_at_quote_doubling(self):
-        from recce import mssql
+        from recce.services.db import mssql
         self.assertEqual(mssql._nested_at(["DW01"], "SELECT 1"),
                          "EXEC ('SELECT 1') AT [DW01]")
         d2 = mssql._nested_at(["DW01", "DW02"], "SELECT x+'|'+y")
@@ -1150,7 +1166,7 @@ class MssqlTest(unittest.TestCase):
         self.assertEqual(mssql._nested_at([], "SELECT 1"), "SELECT 1")
 
     def test_walk_links_bfs_with_cycle(self):
-        from recce import mssql
+        from recce.services.db import mssql
         calls = {"n": 0}
 
         def fake(script):
@@ -1168,7 +1184,7 @@ class MssqlTest(unittest.TestCase):
         self.assertEqual(calls["n"], 2)                         # cycle stopped the walk
 
     def test_walk_links_respects_depth_bound(self):
-        from recce import mssql
+        from recce.services.db import mssql
         calls = {"n": 0}
 
         def fake(script):                                       # each hop leads to a NEW server
@@ -1180,7 +1196,7 @@ class MssqlTest(unittest.TestCase):
         self.assertEqual(calls["n"], 3)                         # and stopped there
 
     def test_link_findings_flag_sysadmin_node_with_rce(self):
-        from recce import mssql
+        from recce.services.db import mssql
         nodes = [{"path": ["DW01"], "depth": 1, "server": "DW01SRV",
                   "login": "CORP\\svc", "sysadmin": False, "links": ["DW02"]},
                  {"path": ["DW01", "DW02"], "depth": 2, "server": "DW02SRV",
@@ -1195,8 +1211,10 @@ class MssqlTest(unittest.TestCase):
 
     def test_linked_server_walk_flows_into_sheet_and_totals(self):
         from unittest import mock
-        from recce import cli, mssql, xlsx
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services.db import mssql
+        from recce.core.store import Store
         enum = mssql.parse_enum(
             "@@B:server\nSQL01|CORP\\alice|0|1|15.0.2000.5\n@@E:server\n"
             "@@B:logins\nsa|1\n@@E:logins\n@@B:databases\nmaster|0|sa\n@@E:databases\n"
@@ -1236,7 +1254,7 @@ class MssqlTest(unittest.TestCase):
             self.assertIn("chain to SYSADMIN on DW02SRV", v)     # in the main totals
 
     def test_verify_dbowner_confirms_and_guards_context(self):
-        from recce import mssql
+        from recce.services.db import mssql
         # db_owner=1 and DB_NAME() matches -> confirmed.
         ok = mssql.parse_dbowner("@@DBO:0\n1|payroll\n@@DBOE:0\n", ["payroll"])
         self.assertTrue(ok["payroll"])
@@ -1248,7 +1266,7 @@ class MssqlTest(unittest.TestCase):
         self.assertFalse(no["payroll"])
 
     def test_trustworthy_chain_confirmed_vs_candidate(self):
-        from recce import mssql
+        from recce.services.db import mssql
         enum = mssql.parse_enum(
             "@@B:server\nSQL01|CORP\\alice|0|1|15.0.2000.5\n@@E:server\n"
             "@@B:logins\nsa|1\n@@E:logins\n"
@@ -1273,7 +1291,7 @@ class MssqlTest(unittest.TestCase):
                           or "CONFIRMED" in f["title"]])
 
     def test_server_level_deep_checks(self):
-        from recce import mssql
+        from recce.services.db import mssql
         enum = mssql.parse_enum(
             "@@B:server\nSQL01|CORP\\alice|0|0|15.0.2000.5\n@@E:server\n"
             "@@B:logins\nsa|1\n@@E:logins\n@@B:databases\nmaster|0|sa\n@@E:databases\n"
@@ -1300,7 +1318,7 @@ class MssqlTest(unittest.TestCase):
         self.assertEqual(summary["public_server"], ["ALTER ANY LOGIN"])
 
     def test_permission_mining_guest_and_public_grants(self):
-        from recce import mssql
+        from recce.services.db import mssql
         dbs = ["master", "payroll", "hr"]
         script = mssql.build_permmine_script(dbs)
         self.assertIn("USE [payroll]", script)
@@ -1320,14 +1338,15 @@ class MssqlTest(unittest.TestCase):
         self.assertIn("dbo.sp_Pay", obj["detail"])
 
     def test_permmine_context_guard(self):
-        from recce import mssql
+        from recce.services.db import mssql
         # Rows tagged with the wrong DB_NAME (failed USE) are rejected.
         out = "@@GST:0\nmaster|guest_enabled\n@@GSTE:0\n@@PBP:0\n@@PBPE:0\n"
         perms = mssql.parse_permmine(out, ["payroll"])
         self.assertFalse(perms["payroll"]["guest"])
 
     def test_proof_screenshot_html_and_gating(self):
-        from recce import mssql, cli
+        from recce import cli
+        from recce.services.db import mssql
         from types import SimpleNamespace
         html = mssql.proof_html(["EXEC xp_cmdshell 'whoami'"], "nt service\\mssql <b>x</b>",
                                 banner="impacket-mssqlclient alice@10.0.0.50")
@@ -1347,7 +1366,7 @@ class MssqlTest(unittest.TestCase):
             SimpleNamespace(screenshots=False), "10.0.0.50", "n", "b", "c", "o"))
 
     def test_datamine_finds_tables_and_sensitive_columns(self):
-        from recce import mssql
+        from recce.services.db import mssql
         dbs = ["master", "payroll", "appdb"]
         script = mssql.build_datamine_script(dbs)
         self.assertIn("USE [payroll]", script)
@@ -1370,14 +1389,14 @@ class MssqlTest(unittest.TestCase):
         self.assertGreater(len(f["narrative"]), 120)
 
     def test_datamine_context_guard_rejects_wrong_db(self):
-        from recce import mssql
+        from recce.services.db import mssql
         # A failed USE leaves rows tagged with the wrong DB_NAME -> not attributed.
         out = "@@TBL:0\nmaster|dbo.x|1\n@@TBLE:0\n@@COL:0\n@@COLE:0\n"
         mined = mssql.parse_datamine(out, ["payroll"])
         self.assertEqual(mined["payroll"]["tables"], [])         # 'master' != 'payroll'
 
     def test_write_proof_is_reversible_and_evidenced(self):
-        from recce import mssql
+        from recce.services.db import mssql
         s = mssql.build_write_proof_script("ab12cd")
         # Proves create/insert/update AND reverts everything.
         self.assertIn("CREATE TABLE ##recce_ab12cd", s)
@@ -1395,7 +1414,7 @@ class MssqlTest(unittest.TestCase):
         self.assertIn("role", f["detail"])
 
     def test_write_proof_requires_actual_modification(self):
-        from recce import mssql
+        from recce.services.db import mssql
         from unittest import mock
         # If UPDATE didn't round-trip, prove_write reports failure (no false claim).
         with mock.patch.object(mssql, "_mssqlclient_cmd", return_value=["x"]), \
@@ -1406,8 +1425,10 @@ class MssqlTest(unittest.TestCase):
 
     def test_data_and_prove_write_flow_into_totals(self):
         from unittest import mock
-        from recce import cli, mssql, xlsx
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services.db import mssql
+        from recce.core.store import Store
         enum = mssql.parse_enum(
             "@@B:server\nSQL01|sa|1|0|15.0.2000.5\n@@E:server\n@@B:logins\nsa|1\n@@E:logins\n"
             "@@B:databases\nmaster|0|sa\npayroll|0|sa\n@@E:databases\n@@B:links\n@@E:links\n"
@@ -1448,7 +1469,7 @@ class MssqlTest(unittest.TestCase):
             self.assertIn("SENSITIVE COLUMNS", m)
 
     def test_findings_carry_detailed_narratives(self):
-        from recce import mssql
+        from recce.services.db import mssql
         # A rich enum that exercises many finding kinds.
         enum = mssql.parse_enum(
             "@@B:server\nSQL01|CORP\\alice|0|1|12.0.2000.5\n@@E:server\n"
@@ -1471,14 +1492,14 @@ class MssqlTest(unittest.TestCase):
             self.assertIn(phrase, xp["narrative"])
 
     def test_narrative_folds_into_vuln_evidence(self):
-        from recce import mssql
+        from recce.services.db import mssql
         fs = mssql.findings([self._host()])
         by_ip = mssql.findings_to_vulns(fs)
         blob = "\n".join(v.output for v in by_ip["10.0.0.50"])
         self.assertIn("What this enables", blob)                # narrative in evidence
 
     def test_testing_methodology_narrative(self):
-        from recce import mssql
+        from recce.services.db import mssql
         phases = [p for p, _t in mssql.TESTING_NARRATIVE]
         self.assertTrue(any("Discovery" in p for p in phases))
         self.assertTrue(any("Escalation" in p for p in phases))
@@ -1488,8 +1509,8 @@ class MssqlTest(unittest.TestCase):
             self.assertGreater(len(text), 100)
 
     def test_credential_and_linked_login_secret_extraction(self):
-        from recce import mssql
-        from recce.report_docx import _vuln_type
+        from recce.services.db import mssql
+        from recce.report.docx import _vuln_type
         enum = mssql.parse_enum(
             "@@B:server\nSQL01|CORP\\alice|0|1|15.0.2000.5\n@@E:server\n"
             "@@B:logins\nsa|1\n@@E:logins\n@@B:databases\nmaster|0|sa\n@@E:databases\n"
@@ -1518,7 +1539,7 @@ class MssqlTest(unittest.TestCase):
             self.assertTrue(vt, f["cwes"])
 
     def test_exec_script_builders_per_method(self):
-        from recce import mssql
+        from recce.services.db import mssql
         xp = mssql.build_exec_script("whoami", "xp")
         self.assertIn("EXEC xp_cmdshell 'whoami'", xp)
         self.assertIn("sp_configure 'xp_cmdshell',1", xp)
@@ -1534,12 +1555,12 @@ class MssqlTest(unittest.TestCase):
         self.assertIn("echo ''hi''", mssql.build_exec_script("echo 'hi'", "ole"))
 
     def test_parse_exec_strips_chrome(self):
-        from recce import mssql
+        from recce.services.db import mssql
         out = mssql.parse_exec("SQL>\n@@X:out\n--------\noutput\ncorp\\alice\nNULL\n@@XE:out\n")
         self.assertEqual(out, "corp\\alice")
 
     def test_exec_command_clr_is_a_handoff_not_executed(self):
-        from recce import mssql
+        from recce.services.db import mssql
         o, e, ref = mssql.exec_command("10.0.0.50",
                                        {"user": "alice", "secret": "P@ss", "domain": "corp.local"},
                                        "whoami", method="clr")
@@ -1550,8 +1571,10 @@ class MssqlTest(unittest.TestCase):
 
     def test_exec_rce_flows_into_totals(self):
         from unittest import mock
-        from recce import cli, mssql, xlsx
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services.db import mssql
+        from recce.core.store import Store
         enum = mssql.parse_enum(
             "@@B:server\nSQL01|sa|1|0|15.0.2000.5\n@@E:server\n@@B:logins\nsa|1\n@@E:logins\n"
             "@@B:databases\nmaster|0|sa\n@@E:databases\n@@B:links\n@@E:links\n"
@@ -1580,7 +1603,7 @@ class MssqlTest(unittest.TestCase):
             self.assertIn("nt service\\mssqlserver", v)    # captured output
 
     def test_relay_targets_and_finding(self):
-        from recce import mssql
+        from recce.services.db import mssql
         hosts = [
             Host(ip="10.0.0.50", ports=[Port(portid=1433, service="ms-sql-s")]),
             Host(ip="10.0.0.9", roles=["Domain Controller"],
@@ -1603,8 +1626,10 @@ class MssqlTest(unittest.TestCase):
 
     def test_live_enum_flows_into_sheet_and_totals(self):
         from unittest import mock
-        from recce import cli, mssql, xlsx
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services.db import mssql
+        from recce.core.store import Store
         enum = mssql.parse_enum(self._LIVE)
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
@@ -1683,7 +1708,7 @@ class BloodHoundTest(unittest.TestCase):
                 fh.write(_json.dumps(blob))
 
     def test_load_graph_builds_nodes_and_edges(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             g = bh.load_graph(d)
@@ -1695,7 +1720,7 @@ class BloodHoundTest(unittest.TestCase):
         self.assertTrue(any(lbl == "DCSync" for _s, lbl, _d in g["edges"]))
 
     def test_is_sharphound_detects_collection(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             self.assertTrue(bh.is_sharphound(d))
@@ -1705,7 +1730,7 @@ class BloodHoundTest(unittest.TestCase):
             self.assertFalse(bh.is_sharphound(d2))
 
     def test_findings_cover_the_classics(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             fs = bh.findings(bh.load_graph(d))
@@ -1717,7 +1742,7 @@ class BloodHoundTest(unittest.TestCase):
         self.assertIn("secretsdump", dcsync["command"])
 
     def test_attack_path_owned_user_to_domain_admin(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             g = bh.load_graph(d)
@@ -1732,7 +1757,7 @@ class BloodHoundTest(unittest.TestCase):
                             for p in paths for s in p["steps"]))
 
     def test_architecture_is_curated_tier0(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             arch = bh.architecture(bh.load_graph(d))
@@ -1755,7 +1780,7 @@ class BloodHoundTest(unittest.TestCase):
         self.assertFalse(arch["truncated"])
 
     def test_architecture_truncates_large_graph(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             g = bh.load_graph(d)
@@ -1764,7 +1789,7 @@ class BloodHoundTest(unittest.TestCase):
         self.assertLessEqual(len(arch["nodes"]), 2)
 
     def test_architecture_persisted_in_analysis(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             analysis = bh.analyze(d)
@@ -1775,9 +1800,9 @@ class BloodHoundTest(unittest.TestCase):
         _json.loads(_json.dumps(analysis))
 
     def test_architecture_embedded_in_assets_page(self):
-        from recce import bloodhound as bh
-        from recce import report_html
-        from recce.models import Host
+        from recce.ad import bloodhound as bh
+        from recce.report import html as report_html
+        from recce.core.models import Host
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             analysis = bh.analyze(d)
@@ -1797,7 +1822,7 @@ class BloodHoundTest(unittest.TestCase):
             self.assertNotIn(bad, html)
 
     def test_kerberos_actions_with_hash(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             g = bh.load_graph(d)
@@ -1810,7 +1835,7 @@ class BloodHoundTest(unittest.TestCase):
         self.assertTrue(any("-hashes :" in a["command"] for a in acts))
 
     def test_live_kerberos_parsers(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         tgs = ("[*] Getting TGS for svc_sql\n"
                "$krb5tgs$23$*svc_sql$CORP.LOCAL$MSSQLSvc/db.corp.local:1433*$"
                "a1b2c3d4e5f6a7b8c9d0e1f2$deadbeef" * 1 + "\n"
@@ -1838,8 +1863,8 @@ class BloodHoundTest(unittest.TestCase):
         # deterministically even on a Kali box that has impacket installed (recce's
         # own target platform), instead of assuming an impacket-free CI runner.
         from unittest import mock
-        from recce import bloodhound as bh
-        from recce import credenum
+        from recce.ad import bloodhound as bh
+        from recce.creds import credenum
         creds = {"domain": "CORP.LOCAL", "user": "bob", "secret": "Pw",
                  "is_hash": False, "dc_ip": "10.0.0.1"}
         # _kerb_tool=None disables bloodhound's impacket fallbacks, but live_kerberoast
@@ -1858,7 +1883,7 @@ class BloodHoundTest(unittest.TestCase):
     def test_live_capture_findings_fold_into_vulns(self):
         # A captured TGS -> a proven 'roasted' finding -> a confirmed Vuln that reaches
         # the main totals with the real hash as evidence and the right CWE.
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         out = bh.parse_tgs("$krb5tgs$23$*svc_sql$CORP.LOCAL$MSSQLSvc/db*$aa$bb\n")
         # Simulate a successful capture by exercising the finding-builder path.
         creds = {"user": "bob", "domain": "CORP.LOCAL"}
@@ -1878,7 +1903,7 @@ class BloodHoundTest(unittest.TestCase):
         _ = creds
 
     def test_analyze_is_json_serialisable(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         import json as _json
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
@@ -1889,7 +1914,9 @@ class BloodHoundTest(unittest.TestCase):
         self.assertTrue(an["paths"])
 
     def test_report_sheets_render(self):
-        from recce import bloodhound as bh, report_excel, xlsx
+        from recce.ad import bloodhound as bh
+        from recce.report import excel as report_excel
+        from recce.report.formats import xlsx
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             an = bh.analyze(d, owned={"BOB@CORP.LOCAL"},
@@ -1910,7 +1937,7 @@ class BloodHoundTest(unittest.TestCase):
 
     def test_cmd_bloodhound_end_to_end(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             out = os.path.join(d, "eng")
@@ -1929,8 +1956,8 @@ class BloodHoundTest(unittest.TestCase):
             self.assertIn("bloodhound", doms["corp.local"].sources)
 
     def test_findings_to_vulns_feed_main_findings_and_writeups(self):
-        from recce import bloodhound as bh
-        from recce.report_docx import group_findings, list_findings, _vuln_type
+        from recce.ad import bloodhound as bh
+        from recce.report.docx import group_findings, list_findings, _vuln_type
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             an = bh.analyze(d, owned={"BOB@CORP.LOCAL"})
@@ -1955,7 +1982,8 @@ class BloodHoundTest(unittest.TestCase):
         self.assertTrue(any("DCSync" in x["title"] for x in lf))
 
     def test_ad_findings_reach_vulnerabilities_sheet_e2e(self):
-        from recce import cli, xlsx
+        from recce import cli
+        from recce.report.formats import xlsx
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             out = os.path.join(d, "eng")
@@ -1985,8 +2013,8 @@ class BloodHoundTest(unittest.TestCase):
 
     def test_replace_ad_clears_remediated_findings_but_keeps_scan_vulns(self):
         from recce import cli
-        from recce.models import Host, Vuln
-        from recce.store import Store
+        from recce.core.models import Host, Vuln
+        from recce.core.store import Store
 
         def db(out):
             st = Store(os.path.join(out, "results.sqlite"))
@@ -2027,7 +2055,7 @@ class BloodHoundTest(unittest.TestCase):
     def test_distinct_findings_are_not_deduped_in_main_totals(self):
         # Two kerberoastable users share the generic title but must produce TWO
         # Vulns (distinct keys) so the main severity totals aren't undercounted.
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         B = self.BASE
         analysis = {"findings": [
             {"category": "kerberoast", "severity": "medium",
@@ -2041,7 +2069,7 @@ class BloodHoundTest(unittest.TestCase):
         _ = B  # silence
 
     def test_domain_controller_not_flagged_for_unconstrained_delegation(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         B = self.BASE
         with tempfile.TemporaryDirectory() as d:
             # DC01 has unconstrained delegation AND is a member of Domain Controllers
@@ -2074,7 +2102,7 @@ class BloodHoundTest(unittest.TestCase):
         self.assertTrue([f for f in fs if f["category"] == "delegation"])
 
     def test_enabled_null_is_treated_as_enabled(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         B = self.BASE
         with tempfile.TemporaryDirectory() as d:
             users = {"meta": {"type": "users"}, "data": [
@@ -2088,7 +2116,7 @@ class BloodHoundTest(unittest.TestCase):
         self.assertTrue([f for f in fs if f["category"] == "kerberoast"])
 
     def test_bare_string_members_do_not_crash(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         B = self.BASE
         with tempfile.TemporaryDirectory() as d:
             # Members / LocalAdmins as bare SID strings (older SharpHound).
@@ -2108,7 +2136,7 @@ class BloodHoundTest(unittest.TestCase):
         self.assertIn(("1001", "AdminTo", "1000"), labels)
 
     def test_fill_creds_password_containing_a_token_is_safe(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         an = {"findings": [{"command": "run <DOMAIN>/<user>:<pass> against <dc>"}],
               "kerberos": [], "paths": []}
         # Password literally contains "<dc>" - must NOT be re-substituted.
@@ -2119,7 +2147,7 @@ class BloodHoundTest(unittest.TestCase):
         self.assertTrue(cmd.endswith("against 10.0.0.1"))        # real <dc> filled
 
     def test_fill_creds_makes_commands_copy_paste_ready(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
             self._collection(d)
             an = bh.analyze(d, owned={"BOB@CORP.LOCAL"})
@@ -2150,7 +2178,7 @@ class BloodHoundTest(unittest.TestCase):
                 paths=[d], username="alice", password="Passw0rd!", domain="CORP.LOCAL",
                 owned=None, creds=None, dc_ip="10.0.0.1", output_dir=out, title="T"))
             self.assertEqual(rc, 0)
-            from recce import xlsx
+            from recce.report.formats import xlsx
             sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
             paths_txt = "\n".join(" ".join(map(str, r))
                                   for r in sheets.get("AD Attack Paths", []))
@@ -2184,7 +2212,7 @@ class AdcsCertipyTest(unittest.TestCase):
             fh.write(_json.dumps(data))
 
     def test_is_certipy_detects_file(self):
-        from recce import adcs
+        from recce.ad import adcs
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "20260101_Certipy.json")
             self._certipy(p)
@@ -2195,7 +2223,7 @@ class AdcsCertipyTest(unittest.TestCase):
             self.assertFalse(adcs.is_certipy(other))
 
     def test_findings_map_esc_to_exact_commands(self):
-        from recce import adcs
+        from recce.ad import adcs
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "c.json")
             self._certipy(p)
@@ -2210,7 +2238,7 @@ class AdcsCertipyTest(unittest.TestCase):
         self.assertIn("Domain Users", esc1["principal"])         # who can enroll
 
     def test_enrollment_rights_as_dict_does_not_crash(self):
-        from recce import adcs
+        from recce.ad import adcs
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "c.json")
             data = {"Certificate Templates": {"0": {
@@ -2226,7 +2254,8 @@ class AdcsCertipyTest(unittest.TestCase):
         self.assertIn("Domain Users", fs[0]["principal"])
 
     def test_certipy_flows_into_workbook_with_creds(self):
-        from recce import cli, xlsx
+        from recce import cli
+        from recce.report.formats import xlsx
         with tempfile.TemporaryDirectory() as d:
             cp = os.path.join(d, "certipy.json")
             self._certipy(cp)
@@ -2248,7 +2277,7 @@ class AdcsCertipyTest(unittest.TestCase):
 
 class AttackPathTest(unittest.TestCase):
     def _hosts(self):
-        from recce.models import Vuln, Account
+        from recce.core.models import Vuln, Account
         dc = Host(ip="10.0.10.5", hostnames=["dc01"], os_family="Windows",
                   roles=["Domain Controller"], smb_signing="not required",
                   accounts=[Account(ip="10.0.10.5", source="nse", kind="domain",
@@ -2266,7 +2295,7 @@ class AttackPathTest(unittest.TestCase):
         return [dc]
 
     def test_stages_and_ordering(self):
-        from recce import attackpath as ap
+        from recce.act import attackpath as ap
         steps = ap.build(self._hosts())
         stages = [s["stage"] for s in steps]
         # ordered by STAGE_ORDER
@@ -2278,28 +2307,28 @@ class AttackPathTest(unittest.TestCase):
         self.assertIn("Lateral Movement", stages)        # SMB/WinRM present
 
     def test_narrative_grounded(self):
-        from recce import attackpath as ap
+        from recce.act import attackpath as ap
         hosts = self._hosts()
         text = " ".join(ap.narrative(hosts))
         self.assertIn("Likely path", text)
         self.assertIn("10.0.10.5", text)                 # names the real host
 
     def test_attackpath_sheet(self):
-        from recce.report_excel import _spec_attackpath
+        from recce.report.excel import _spec_attackpath
         spec = _spec_attackpath(self._hosts())
         self.assertEqual(spec.title, "Attack Path")
         self.assertIn("Stage", [c[0] for c in spec.cols])
         self.assertTrue(spec.rows)
 
     def test_empty_when_no_confirmed(self):
-        from recce import attackpath as ap
+        from recce.act import attackpath as ap
         h = Host(ip="10.0.0.1", os_family="Linux",
                  ports=[Port(portid=23, service="telnet")])
         self.assertEqual(ap.build([h]), [])              # no confirmed findings
 
     def test_svg_graph(self):
         import xml.dom.minidom as md
-        from recce import attackpath as ap
+        from recce.act import attackpath as ap
         hosts = self._hosts()
         s = ap.svg(hosts)
         self.assertTrue(s.startswith("<svg"))
@@ -2311,7 +2340,7 @@ class AttackPathTest(unittest.TestCase):
 
     def test_svg_empty_is_valid(self):
         import xml.dom.minidom as md
-        from recce import attackpath as ap
+        from recce.act import attackpath as ap
         h = Host(ip="10.0.0.1", os_family="Linux",
                  ports=[Port(portid=23, service="telnet")])
         s = ap.svg([h])
@@ -2321,7 +2350,7 @@ class AttackPathTest(unittest.TestCase):
 
     def test_cmd_writes_svg_diagram(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as dd:
             db = os.path.join(dd, "results.sqlite")
             st = Store(db)
@@ -2350,7 +2379,7 @@ class KerberosTest(unittest.TestCase):
         import socketserver
         import struct
         import threading
-        from recce import kerberos as K
+        from recce.ad import kerberos as K
 
         def asrep():
             cipher = bytes(range(40))                   # 16 checksum + 24 edata
@@ -2389,12 +2418,12 @@ class KerberosTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        from recce import kerberos as K
+        from recce.ad import kerberos as K
         K._PORT = cls._orig_port
         cls.srv.shutdown()
 
     def test_der_roundtrip(self):
-        from recce import kerberos as K
+        from recce.ad import kerberos as K
         err = K._tlv(0x7E, K._seq(K._ctx(6, K._int(25))))
         self.assertEqual(K.parse_response(err), {"type": "error", "code": 25})
         cipher = bytes(range(40))
@@ -2408,7 +2437,7 @@ class KerberosTest(unittest.TestCase):
                         .startswith("$krb5asrep$23$jdoe@CORP.LOCAL:"))
 
     def test_roast_classification(self):
-        from recce import kerberos as K
+        from recce.ad import kerberos as K
         self.assertEqual(K.roast_user("127.0.0.1", "CORP.LOCAL", "svc_roast")["state"],
                          "roastable")
         self.assertEqual(K.roast_user("127.0.0.1", "CORP.LOCAL", "jdoe")["state"],
@@ -2417,7 +2446,8 @@ class KerberosTest(unittest.TestCase):
                          "unknown_user")
 
     def test_findings_and_prove(self):
-        from recce import kerberos as K, proofs
+        from recce.ad import kerberos as K
+        from recce.vuln import proofs
         analysis = K.analyze(
             [Host(ip="127.0.0.1", state="up", up_reason="syn-ack",
                   ports=[Port(portid=self.port, state="open", service="kerberos")])],
@@ -2432,9 +2462,11 @@ class KerberosTest(unittest.TestCase):
         self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
 
     def test_cmd_kerberos_end_to_end(self):
-        from recce import cli, xlsx, kerberos as K
-        from recce.models import Account
-        from recce.store import Store
+        from recce import cli
+        from recce.ad import kerberos as K
+        from recce.report.formats import xlsx
+        from recce.core.models import Account
+        from recce.core.store import Store
         orig = K.is_kerberos
         K.is_kerberos = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
         try:

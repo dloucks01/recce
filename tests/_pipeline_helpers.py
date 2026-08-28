@@ -13,14 +13,16 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recce import ad, exploits, parser, scanner
-from recce import tracking as tr
-from recce import xlsx
-from recce.models import Account, Host, Port, Script, Vuln
-from recce.report_excel import (build_workbook, read_workbook_tracking,
+from recce import ad
+from recce.core import parser, scanner
+from recce.vuln import exploits
+from recce.core import tracking as tr
+from recce.report.formats import xlsx
+from recce.core.models import Account, Host, Port, Script, Vuln
+from recce.report.excel import (build_workbook, read_workbook_tracking,
                                        update_workbook)
-from recce.store import Store
-from recce.targets import apply_exclusions, load_targets
+from recce.core.store import Store
+from recce.core.targets import apply_exclusions, load_targets
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
@@ -60,7 +62,7 @@ def _docx_text(path):
 
 def _self_response():
     """Tiny well-formed GetResponse so a bare parse_response smoke-check has input."""
-    from recce import snmp as S
+    from recce.services import snmp as S
     varbind = S._tlv(0x30, S.encode_oid("1.3.6.1.2.1.1.1.0") + S._octet("x"))
     pdu = S._tlv(0xA2, S._int(1) + S._int(0) + S._int(0) + S._tlv(0x30, varbind))
     return S._tlv(0x30, S._int(1) + S._octet("public") + pdu)

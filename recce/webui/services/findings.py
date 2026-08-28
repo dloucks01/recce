@@ -8,9 +8,9 @@ from __future__ import annotations
 import re
 import time
 
-from ... import epss, kev
-from ...models import Host, Vuln
-from ...store import Store
+from ...vuln import epss, kev
+from ...core.models import Host, Vuln
+from ...core.store import Store
 from .. import collab
 
 

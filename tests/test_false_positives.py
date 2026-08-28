@@ -11,8 +11,9 @@ Two reported classes:
 
 import unittest
 
-from recce import credenum, mssql
-from recce.models import Host, Port, Script, Vuln
+from recce.creds import credenum
+from recce.services.db import mssql
+from recce.core.models import Host, Port, Script, Vuln
 
 
 def _mssql_host(script_output=None, vuln_title=None):
@@ -43,7 +44,7 @@ class MixedVerdictNseTest(unittest.TestCase):
              "    IDs:  CVE:CVE-2021-2222\n")
 
     def test_not_present_cve_is_dropped_from_positive_finding(self):
-        from recce.parser import _classify_vuln
+        from recce.core.parser import _classify_vuln
         p = Port(portid=443, protocol="tcp", state="open", service="https")
         v = _classify_vuln("10.0.0.1", p, Script(id="http-vuln-multi", output=self.MIXED))
         self.assertIsNotNone(v)
@@ -51,7 +52,7 @@ class MixedVerdictNseTest(unittest.TestCase):
         self.assertNotIn("CVE-2021-2222", v.ids)       # the NOT-VULNERABLE one is dropped
 
     def test_single_verdict_keeps_all_referenced_cves(self):
-        from recce.parser import _classify_vuln
+        from recce.core.parser import _classify_vuln
         out = "  State: VULNERABLE\n  IDs: CVE:CVE-2020-0001\n  Refs: CVE-2020-0002\n"
         p = Port(portid=445, protocol="tcp", state="open", service="microsoft-ds")
         v = _classify_vuln("10.0.0.1", p, Script(id="smb-vuln-x", output=out))

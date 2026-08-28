@@ -13,7 +13,7 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from recce.store import Store
+from recce.core.store import Store
 from recce.webui.app import create_app
 
 

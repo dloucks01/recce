@@ -20,7 +20,7 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
     # --- engagement hook: caught shell → its host + the activity feed ------------
     def _link_host(session):
         import logging
-        from ...store import Store
+        from ...core.store import Store
         from .. import collab
         try:
             with Store(db_path) as st:
@@ -596,7 +596,7 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
                 "remove_cmd": remove_cmd, "installed_by": x_tester, "installed_at": time.time(),
                 "removed_at": None})
         from .. import collab
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             collab.add_activity(st, x_tester, "add",
                                 f"{x_tester} installed cron persistence on {sess.host_ip} (intrusive)")
@@ -666,8 +666,8 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
                   x_tester: str = Header(default="someone")):
         """Fold a credential found in this shell into the store — auto-attributed to the
         session's host, so it lands in Loot and the spray plan (feeds the Act loop)."""
-        from ...models import Credential
-        from ...store import Store
+        from ...core.models import Credential
+        from ...core.store import Store
         from .. import collab
         sess = mgr.get(session_id)
         if sess is None:

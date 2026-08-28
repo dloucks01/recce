@@ -7,7 +7,7 @@ from __future__ import annotations
 
 
 def test_enum_session_uses_local_auth_for_workgroup_and_d_for_domain(monkeypatch):
-    from recce import smb
+    from recce.services import smb
     monkeypatch.setattr(smb, "smb_tool", lambda: "nxc")
     seen: dict = {}
     monkeypatch.setattr(smb, "_run", lambda cmd: (seen.__setitem__("cmd", cmd), ("", ""))[1])
@@ -26,7 +26,7 @@ def test_enum_session_uses_local_auth_for_workgroup_and_d_for_domain(monkeypatch
 
 
 def _fake_sessions(monkeypatch, *, null=None, guest=None, creds=None):
-    from recce import smb
+    from recce.services import smb
     calls = []
 
     def fake(ip, user="", password="", port=445, domain=""):
@@ -82,7 +82,7 @@ def test_tool_missing_short_circuits(monkeypatch):
 # --- share spidering for secrets -------------------------------------------------
 
 def test_flag_secret_files_matches_the_right_things():
-    from recce import smb
+    from recce.services import smb
     files = [
         "Public\\readme.txt",                       # ignore
         "IT\\unattend.xml",                         # answer file
@@ -105,7 +105,7 @@ def test_flag_secret_files_matches_the_right_things():
 
 
 def test_parse_smbclient_ls_extracts_files_not_dirs():
-    from recce import smb
+    from recce.services import smb
     out = (
         "\\\n"
         "  .                                   D        0  Mon Jan  1 00:00:00 2024\n"
@@ -120,7 +120,7 @@ def test_parse_smbclient_ls_extracts_files_not_dirs():
 
 
 def test_spider_shares_flags_readable_share(monkeypatch):
-    from recce import smb
+    from recce.services import smb
     monkeypatch.setattr(smb, "smbclient_tool", lambda: "smbclient")
     ls = ("\\\n  web.config   A   200   Mon Jan  1 00:00:00 2024\n"
           "  index.html    A   100   Mon Jan  1 00:00:00 2024\n")

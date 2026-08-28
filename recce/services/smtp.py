@@ -13,7 +13,7 @@ from __future__ import annotations
 import smtplib
 import socket
 
-from ..models import Host, Port
+from ..core.models import Host, Port
 
 _PORTS = (25, 465, 587, 2525)
 _DEFAULT_PORT = 25
@@ -236,7 +236,7 @@ def runbook(ip: str, port: int) -> list[dict]:
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from ..svccommon import findings_to_vulns as _f2v
+    from .svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "smtp", _DEFAULT_PORT)
 
 
@@ -245,8 +245,8 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             wordlist: str | None = None, **_ignored) -> dict:
     """`wordlist` = optional path to a user-supplied username list, one
     per line; augments the bundled `_SMTP_ENUM_USERS`."""
-    from .. import svcprobe
-    from ..wordlists import load_wordlist
+    from . import svcprobe
+    from .wordlists import load_wordlist
     extra_users = load_wordlist(wordlist)
     enum_list = _SMTP_ENUM_USERS + [u for u in extra_users
                                      if u not in _SMTP_ENUM_USERS]

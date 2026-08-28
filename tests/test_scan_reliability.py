@@ -6,7 +6,7 @@ same -T level would have found - the "recce misses ports vs manual nmap" bug.
 """
 from __future__ import annotations
 
-from recce import scanner
+from recce.core import scanner
 
 
 def test_nmap_default_retries_table():

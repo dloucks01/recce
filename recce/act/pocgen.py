@@ -25,7 +25,7 @@ import shutil
 import subprocess
 
 from . import poc
-from .. import epss, exploitref, kev, vulndb
+from ..vuln import epss, exploitref, kev, vulndb
 
 _CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
 

@@ -16,8 +16,8 @@ import argparse
 import os
 import sys
 
-from .. import proxy
-from .. import scanner
+from ..core import proxy
+from ..core import scanner
 
 
 def _h(name: str):
@@ -1398,7 +1398,7 @@ def _setup_proxy(args) -> int | None:
     proxychains so its whole process tree is proxied (unless already wrapped). A run that
     is already under proxychains (our re-exec, or the operator's own wrap) just switches
     on safe/honest mode. See docs/design/PROXY-PIVOT.md."""
-    from .. import proxy
+    from ..core import proxy
     url = getattr(args, "proxy", None)
     if not url and not proxy.already_proxied():
         return None                              # the common, direct path: nothing to do

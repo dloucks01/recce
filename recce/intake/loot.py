@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 import re
-from ..models import Vuln
+from ..core.models import Vuln
 
 
 # File-name / extension patterns for each category. Case-insensitive.

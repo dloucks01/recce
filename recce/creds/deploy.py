@@ -28,7 +28,7 @@ import shutil
 import subprocess
 
 from .credenum import impacket_tool, smb_tool
-from ..models import Host
+from ..core.models import Host
 
 _SCRIPT_DIR = os.path.join(os.path.dirname(__file__), "local")
 LINUX_SCRIPT = os.path.join(_SCRIPT_DIR, "recce-enum.sh")

@@ -15,8 +15,8 @@ All against recce's real vulndb.assess_host_inplace over a synthetic banner.
 """
 import unittest
 
-from recce import vulndb
-from recce.models import Host, Port
+from recce.vuln import vulndb
+from recce.core.models import Host, Port
 
 
 def _assess(product, version, service="", extra=""):

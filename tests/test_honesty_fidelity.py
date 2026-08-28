@@ -9,8 +9,10 @@ inference can never be laundered into a CONFIRMED exploit anywhere downstream.
 """
 import unittest
 
-from recce import exploitplan, proofs, qod
-from recce.models import Host, Port, Vuln
+from recce.act import exploitplan
+from recce.core import qod
+from recce.vuln import proofs
+from recce.core.models import Host, Port, Vuln
 
 
 def _v(port, title, source, **kw):

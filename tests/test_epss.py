@@ -2,9 +2,10 @@
 
 import unittest
 
-from recce import epss, kev, qod
-from recce.models import Host, Port, Vuln
-from recce.report_excel import _priority_cell, _spec_vulns
+from recce.core import qod
+from recce.vuln import epss, kev
+from recce.core.models import Host, Port, Vuln
+from recce.report.excel import _priority_cell, _spec_vulns
 
 
 class EpssTest(unittest.TestCase):

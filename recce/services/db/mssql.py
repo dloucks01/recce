@@ -26,8 +26,8 @@ from __future__ import annotations
 import socket
 import struct
 
-from ...models import Host, Port
-from ...svccommon import finding_builder
+from ...core.models import Host, Port
+from ..svccommon import finding_builder
 
 SQLBROWSER_PORT = 1434
 _DEFAULT_PORT = 1433
@@ -87,7 +87,7 @@ def _parse_browser(text: str) -> list[dict]:
 def sql_browser(ip: str, timeout: float = 3.0) -> list[dict]:
     """Enumerate SQL Server instances via the SQL Browser (UDP 1434) - instance
     names, versions and TCP ports, NO credentials. Returns [] on any failure."""
-    from ... import proxy
+    from ...core import proxy
     if proxy.is_active():
         # UDP can't traverse the proxy and a datagram would leak from the real IP.
         # Skip the browser; the TCP 1433 enum below still works through the tunnel.
@@ -551,7 +551,7 @@ def ntlm_info(ip: str, port: int = _DEFAULT_PORT, timeout: float = 4.0) -> dict:
     Type-1 and parse the server's Type-2 challenge for its NetBIOS/DNS domain + host
     and OS version. No credentials sent (we never complete the auth). Returns {} on any
     failure. Mirrors nmap's ms-sql-ntlm-info without needing nmap."""
-    from ... import ntlm
+    from ...ad import ntlm
     try:
         with socket.create_connection((ip, port), timeout=timeout) as s:
             s.settimeout(timeout)
@@ -1155,7 +1155,7 @@ def attack_chain(target: dict, fs: list[dict], creds: dict | None) -> list[str]:
 # --- live nxc mssql (access + privilege matrix; auto-run when present) ----------
 
 def nxc_tool() -> str | None:
-    from ... import credenum
+    from ...creds import credenum
     return credenum.smb_tool()             # nxc / netexec / crackmapexec / cme
 
 
@@ -1182,7 +1182,7 @@ def run_nxc_mssql(ip: str, creds: dict, port: int = _DEFAULT_PORT,
                   local_auth: bool = False) -> tuple[dict | None, str | None]:
     """Run nxc mssql for the access/privilege check. Returns (parsed, error).
     (parsed is None when nxc isn't installed - the caller falls back to commands.)"""
-    from ... import credenum
+    from ...creds import credenum
     tool = nxc_tool()
     if not tool:
         return None, "netexec/nxc not installed"
@@ -1287,7 +1287,7 @@ _BASELINE_PUBLIC_SERVER = {"CONNECT SQL", "VIEW ANY DATABASE"}
 
 
 def mssqlclient_tool() -> str | None:
-    from ... import credenum
+    from ...creds import credenum
     return credenum.impacket_tool("mssqlclient")
 
 
@@ -2315,7 +2315,7 @@ def proof_html(command, output: str, prompt: str = "SQL>", banner: str = "") -> 
 def findings_to_vulns(fs: list[dict]) -> dict:
     """Convert MSSQL findings into Vuln objects, keyed by target ip, so they feed
     the main severity totals / Vulnerabilities sheet / writeups. Returns {ip:[Vuln]}."""
-    from ...svccommon import findings_to_vulns as _f2v
+    from ..svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "mssql", 1433)
 
 
@@ -2327,8 +2327,8 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     seconds; `progress(i, n, target)` fires per target. `wordlist` = optional
     path to a user-supplied credential list (each line `user:password` or
     password paired with `sa`); augments the bundled weak-sa sweep."""
-    from ... import svcprobe
-    from ...wordlists import load_cred_wordlist
+    from .. import svcprobe
+    from ..wordlists import load_cred_wordlist
     extra_creds = load_cred_wordlist(wordlist, default_user="sa")
     targets = mssql_targets(hosts)
     probes: dict = {}

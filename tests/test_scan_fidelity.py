@@ -21,10 +21,10 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from recce import parser
-from recce import scanner
-from recce.models import Host, Port
-from recce.store import Store
+from recce.core import parser
+from recce.core import scanner
+from recce.core.models import Host, Port
+from recce.core.store import Store
 
 
 # --- deterministic nmap-XML fixtures --------------------------------------------
@@ -75,7 +75,7 @@ class PortStateFidelityTest(unittest.TestCase):
 
     def test_udp_open_filtered_survives_parse_store_report(self):
         # End-to-end: a UDP open|filtered port must reach the workbook, not vanish.
-        from recce import report_excel
+        from recce.report import excel as report_excel
         h = _parse_xml_str(_xml(_port_xml(161, "open|filtered", proto="udp",
                                           service="snmp")))[0]
         with tempfile.TemporaryDirectory() as d:
@@ -472,7 +472,7 @@ class LiveServiceLabelFidelityTest(unittest.TestCase):
         p = next((p for p in hosts[0].open_ports if p.portid == self.port), None)
         self.assertIsNotNone(p, "the live web port was not found open")
         # Either nmap labels it http directly, or recce's svcdetect recovers it.
-        from recce import svcdetect
+        from recce.services import svcdetect
         svcdetect.enrich_host(hosts[0])
         blob = f"{p.service} {p.product} {p.tunnel}".lower()
         self.assertIn("http", blob,

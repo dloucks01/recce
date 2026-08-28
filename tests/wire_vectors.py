@@ -14,11 +14,11 @@ the same "real" message, so a fuzz failure and a golden failure are comparable.
 """
 import struct
 
-from recce import snmp as S
-from recce import mongodb as M
-from recce import ldap as L
-from recce import ntlm as N
-from recce import smb as SMB
+from recce.services import snmp as S
+from recce.services.db import mongodb as M
+from recce.services import ldap as L
+from recce.ad import ntlm as N
+from recce.services import smb as SMB
 
 
 # --- SNMP -----------------------------------------------------------------------

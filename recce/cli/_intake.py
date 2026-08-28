@@ -18,15 +18,15 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from .. import ad
-from .. import exploits
-from .. import parser as np
-from .. import scanner
-from .. import tracking as tr
-from ..models import Host
-from ..report_excel import read_workbook_edits, update_workbook
-from ..report_markdown import build_csv, build_markdown
-from ..store import Store, StoreError
-from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from ..vuln import exploits
+from ..core import parser as np
+from ..core import scanner
+from ..core import tracking as tr
+from ..core.models import Host
+from ..report.excel import read_workbook_edits, update_workbook
+from ..report.markdown import build_csv, build_markdown
+from ..core.store import Store, StoreError
+from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
@@ -35,7 +35,7 @@ __all__ = ['cmd_ingest', 'cmd_import', 'cmd_fieldkit_export', 'cmd_fieldkit_impo
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    from .. import ingest
+    from ..intake import ingest
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum` first so there's a "
@@ -94,7 +94,7 @@ def cmd_import(args: argparse.Namespace) -> int:
     update the workbook - no scanning, no network. Folds hosts into the datastore,
     runs the offline enrichment (version->CVE, AD roles, SMB signing), sets the
     checkmarks, and preserves any existing tracking."""
-    from .. import vulndb
+    from ..vuln import vulndb
     files = _collect_scan_files(args.files)
     if not files:
         print("[x] No nmap scan files found. Point at .xml (-oX) or .gnmap (-oG) "
@@ -191,7 +191,7 @@ def cmd_import(args: argparse.Namespace) -> int:
 
 def cmd_fieldkit_export(args: argparse.Namespace) -> int:
     """Export the engagement as a seed for the fieldkit exploitation kit."""
-    from .. import fieldkit
+    from ..intake import fieldkit
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']} - run `enum` first.")
@@ -254,8 +254,8 @@ def cmd_fieldkit_export(args: argparse.Namespace) -> int:
 
 def cmd_fieldkit_import(args: argparse.Namespace) -> int:
     """Fold a fieldkit findings.json (proven exploitation) back into the workbook + report."""
-    from .. import fieldkit
-    from ..models import Host
+    from ..intake import fieldkit
+    from ..core.models import Host
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']} - run `enum` first, or `import` a scan.")
@@ -264,7 +264,7 @@ def cmd_fieldkit_import(args: argparse.Namespace) -> int:
         print(f"[x] No such file: {args.findings}")
         return 1
     try:
-        from .. import importers
+        from ..intake import importers
         with open(args.findings, "rb") as fh:
             data = json.loads(importers.decode_bytes(fh.read()))   # UTF-16/BOM-safe (Windows tooling)
     except (OSError, ValueError) as e:

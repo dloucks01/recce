@@ -26,8 +26,8 @@ import shlex
 import socket
 import struct
 
-from ..models import Host, Port
-from ..svccommon import finding_builder
+from ..core.models import Host, Port
+from .svccommon import finding_builder
 
 _SMB_PORTS = (445, 139)
 _DEFAULT_PORT = 445
@@ -381,7 +381,7 @@ def smbclient_tool():
 
 
 def _run(cmd, timeout: int = 120) -> tuple[str, str | None]:
-    from ..util import run_tool
+    from ..core.util import run_tool
     return run_tool(cmd, timeout)
 
 
@@ -407,7 +407,7 @@ def enum_session(ip: str, user: str = "", password: str = "",
     if err:
         return {"ran": True, "error": err, "shares": [], "users": [], "auth": False,
                 "output": out}
-    from ..credenum import parse_nxc_smb
+    from ..creds.credenum import parse_nxc_smb
     data = parse_nxc_smb(out)
     data["ran"] = True
     data["error"] = None
@@ -664,7 +664,7 @@ def write_proof_finding(ip: str, port: int, share: str, proof: dict,
 # --- proof screenshot -----------------------------------------------------------
 
 def proof_html(command, output, banner: str = "") -> str:
-    from .. import mssql
+    from ..services.db import mssql
     return mssql.proof_html(command, output, prompt="# ", banner=banner)
 
 
@@ -672,7 +672,7 @@ def proof_html(command, output, banner: str = "") -> str:
 
 def findings_to_vulns(fs: list[dict]) -> dict:
     """SMB findings -> {ip: [Vuln]} (source='smb'), for the main totals + writeups."""
-    from ..svccommon import findings_to_vulns as _f2v
+    from .svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "smb", _DEFAULT_PORT)
 
 
@@ -682,7 +682,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     When active, runs the stdlib negotiate probe against each target (no creds/tools
     needed); the live tool layer (share enum / write proof) is driven from cmd_smb.
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
-    from .. import svcprobe
+    from . import svcprobe
     targets = smb_targets(hosts)
     probes: dict = {}
     state: dict = {}

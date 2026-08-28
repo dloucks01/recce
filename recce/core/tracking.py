@@ -113,7 +113,7 @@ def step_applies(host, step: str) -> bool:
     if step == "ad":
         return _has_ad_surface(host)
     if step == "db":
-        from .. import db as dbmod
+        from ..services import db as dbmod
         return bool(dbmod.db_ports(host))
     if step == "privesc":
         # Only relevant once there's a foothold to escalate from - which the tool
@@ -221,7 +221,7 @@ def item_keys(hosts: list) -> dict[str, list[str]]:
             seen.add(key)
             out[cat].append(key)
 
-    from .. import web
+    from ..services import web
 
     for h in hosts:
         # Only CONFIRMED-up hosts get a reviewable "hosts"/subnet key - the Checklist

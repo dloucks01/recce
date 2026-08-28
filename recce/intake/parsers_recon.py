@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 
-from ..models import Vuln
+from ..core.models import Vuln
 
 
 def _safe_json(text: str):

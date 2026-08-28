@@ -6,7 +6,7 @@ import csv
 from collections import defaultdict
 
 from .. import ad
-from ..models import Domain, Host
+from ..core.models import Domain, Host
 
 
 def _ip_key(ip: str):
@@ -100,7 +100,7 @@ def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration R
     lines.append("")
 
     # MITRE ATT&CK coverage - techniques the findings map to, along the kill chain.
-    from .. import attack
+    from ..act import attack
     cov = attack.coverage(hosts)
     if cov["by_tactic"]:
         lines += ["## MITRE ATT&CK coverage", "",
@@ -119,7 +119,7 @@ def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration R
         lines.append("")
 
     # CWE weakness coverage - the weakness classes the findings map to.
-    from .. import cwe as _cwe
+    from ..core import cwe as _cwe
     wcov = _cwe.coverage(hosts)
     if wcov["weaknesses"]:
         lines += ["## CWE weakness coverage", "",

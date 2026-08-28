@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from ...models import Host, Port
+from ...core.models import Host, Port
 
 # port -> engine
 DB_PORTS = {

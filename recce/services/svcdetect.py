@@ -25,7 +25,7 @@ import re
 import socket
 import ssl
 
-from .models import Host, Port
+from ..core.models import Host, Port
 
 # --- layer 2: curated port -> (service, human description) ----------------------
 # Deliberately scoped to the gaps nmap habitually leaves blank/unknown - mostly
@@ -167,7 +167,7 @@ _RDP_CR = bytes.fromhex("0300000b06e00000000000")
 def grab_banner(ip: str, port: Port, timeout: float | None = None) -> str:
     """Connect, (optionally nudge), read up to 512 bytes. Returns the raw bytes
     decoded latin-1 (lossless), or "" on any failure. Never raises."""
-    from . import proxy
+    from ..core import proxy
     if timeout is None:
         timeout = proxy.scaled(_BANNER_TIMEOUT)     # slower through a pivot
     pid = port.portid
@@ -215,7 +215,7 @@ def tls_http_probe(ip: str, port: Port, timeout: float | None = None) -> str:
     plaintext fallback fixed for cleartext HTTP. This is the TLS twin: handshake
     first, then HEAD. Certs are not verified (we're fingerprinting, not trusting).
     Never raises - any handshake/socket failure just means "not HTTPS here"."""
-    from . import proxy
+    from ..core import proxy
     if timeout is None:
         timeout = proxy.scaled(_BANNER_TIMEOUT)     # slower through a pivot
     ctx = ssl._create_unverified_context()

@@ -7,8 +7,8 @@ import socketserver
 import struct
 import threading
 
-from recce import mysql, postgres
-from recce.models import Host, Port
+from recce.services.db import mysql, postgres
+from recce.core.models import Host, Port
 
 
 def _serve(handler_fn):
@@ -136,7 +136,7 @@ def test_version_writeback_replaces_open_ended_nmap_banner(tmp_path):
     # a deep module's real version read is adopted onto the port when nmap left an
     # open-ended fingerprint, so the report shows the true build.
     from recce.cli import _fold_service_findings, _open_paths
-    from recce.store import Store
+    from recce.core.store import Store
     eng = tmp_path / "e"
     st = Store(_open_paths(str(eng))["db"])
     try:
@@ -178,7 +178,7 @@ class _FakeSock:
 
 
 def test_mysql_query_parses_a_result_set():
-    from recce import mysql
+    from recce.services.db import mysql
 
     def pkt(payload, seq):
         return struct.pack("<I", len(payload))[:3] + bytes([seq]) + payload
@@ -199,7 +199,7 @@ def test_mysql_query_parses_a_result_set():
 
 
 def test_postgres_simple_query_parses_datarows():
-    from recce import postgres
+    from recce.services.db import postgres
 
     def msg(t, body):
         return t + struct.pack("!I", len(body) + 4) + body
@@ -228,7 +228,7 @@ def test_postgres_simple_query_survives_truncated_datarow():
     # of _simple_query -> loot() -> analyze() and abort the whole Postgres phase (which
     # would drop the critical trust-auth finding for every host). It degrades to the
     # rows parsed so far.
-    from recce import postgres
+    from recce.services.db import postgres
 
     def msg(t, body):
         return t + struct.pack("!I", len(body) + 4) + body

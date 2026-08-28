@@ -15,9 +15,9 @@ import time
 import unittest
 
 from recce import cli
-from recce import netmap
-from recce.models import Domain, Host, Port
-from recce.store import Store
+from recce.report import netmap
+from recce.core.models import Domain, Host, Port
+from recce.core.store import Store
 
 _SUBNETS = 10
 _PER = 40

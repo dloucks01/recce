@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-from ..models import Vuln
+from ..core.models import Vuln
 
 _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -88,7 +88,7 @@ def _qod(v: Vuln) -> int:
     if getattr(v, "qod", 0):
         return v.qod
     try:
-        from .. import qod as _q
+        from ..core import qod as _q
         return _q.qod_of(v)
     except Exception:  # noqa: BLE001 - ranking helper must never break dedup
         return 0

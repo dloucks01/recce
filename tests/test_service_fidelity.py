@@ -24,7 +24,7 @@ import tempfile
 import threading
 import unittest
 
-from recce.models import Host, Port
+from recce.core.models import Host, Port
 
 
 # --- responder scaffolding ------------------------------------------------------
@@ -130,7 +130,7 @@ def _selfsigned(dirpath):
 
 class ElasticsearchFidelityTest(unittest.TestCase):
     def test_unauth_cluster_is_detected_and_flagged(self):
-        from recce import elasticsearch as es
+        from recce.services.db import elasticsearch as es
         routes = {
             "/": (200, {"name": "node-1", "cluster_name": "prod-logs",
                         "version": {"number": "7.10.2", "lucene_version": "8.7.0"},
@@ -153,7 +153,7 @@ class ElasticsearchFidelityTest(unittest.TestCase):
         self.assertTrue(fs, "no Elasticsearch finding produced from a live unauth cluster")
 
     def test_secured_cluster_is_not_flagged_unauth(self):
-        from recce import elasticsearch as es
+        from recce.services.db import elasticsearch as es
         with _HttpJson({"/": (401, {"error": "unauthorized"})}) as s:
             pr = es.probe("127.0.0.1", s.port)
         self.assertTrue(pr["reachable"])
@@ -163,7 +163,7 @@ class ElasticsearchFidelityTest(unittest.TestCase):
 
 class DockerFidelityTest(unittest.TestCase):
     def test_exposed_docker_api_is_detected(self):
-        from recce import docker
+        from recce.services import docker
         routes = {
             "/version": (200, {"Version": "24.0.5", "ApiVersion": "1.43",
                                "Os": "linux", "Arch": "amd64",
@@ -258,7 +258,7 @@ def _redis_handler(sock):
 
 class RedisFidelityTest(unittest.TestCase):
     def test_unauth_redis_is_fingerprinted_and_flagged(self):
-        from recce import redis
+        from recce.services.db import redis
         with _LineServer(_redis_handler) as s:
             pr = redis.probe("127.0.0.1", s.port)
             host = Host(ip="127.0.0.1", ports=[Port(portid=s.port, service="redis",
@@ -301,7 +301,7 @@ def _ftp_handler(sock):
 
 class FtpFidelityTest(unittest.TestCase):
     def test_anonymous_cleartext_ftp_is_detected(self):
-        from recce import ftp
+        from recce.services import ftp
         with _LineServer(_ftp_handler) as s:
             pr = ftp.probe("127.0.0.1", s.port)
             host = Host(ip="127.0.0.1", ports=[Port(portid=s.port, service="ftp",
@@ -319,7 +319,7 @@ class FtpFidelityTest(unittest.TestCase):
 
 class TlsProbeFidelityTest(unittest.TestCase):
     def test_self_signed_cert_is_flagged(self):
-        from recce import probes
+        from recce.services import probes
         with tempfile.TemporaryDirectory() as d:
             cert = _selfsigned(d)
             if not cert:
@@ -334,7 +334,7 @@ class TlsProbeFidelityTest(unittest.TestCase):
 
 class HttpHeaderFidelityTest(unittest.TestCase):
     def test_missing_security_headers_are_flagged(self):
-        from recce import probes
+        from recce.services import probes
         with _HttpJson({"/": (200, "<html>ok</html>")}) as s:
             # server returns no HSTS/CSP/X-Frame-Options/X-Content-Type-Options
             fs = probes.http_findings("127.0.0.1", Port(portid=s.port, service="http",
@@ -344,7 +344,8 @@ class HttpHeaderFidelityTest(unittest.TestCase):
         self.assertIn("content-security-policy", titles)
 
     def test_http_on_nonstandard_port_classifies_as_web(self):
-        from recce import web, probes
+        from recce.services import probes
+        from recce.services import web
         with _HttpJson({"/": (200, "<html>ok</html>")}) as s:
             p = Port(portid=s.port, service="http", state="open")
             self.assertTrue(web.is_web(p))
@@ -358,7 +359,7 @@ class BannerVulnMatchFidelityTest(unittest.TestCase):
     right CVE - and must NOT fire on a patched version (false-positive guard)."""
 
     def _assess(self, product, version, portid=21, service="ftp", extrainfo=""):
-        from recce import vulndb
+        from recce.vuln import vulndb
         h = Host(ip="10.0.0.1", ports=[Port(portid=portid, protocol="tcp",
                  state="open", service=service, product=product, version=version,
                  extrainfo=extrainfo)])
@@ -400,7 +401,9 @@ class MultiServiceSystemFidelityTest(unittest.TestCase):
     enumerate EVERY one, not stop at the first. Models the real scan target."""
 
     def test_host_with_web_ftp_redis_elasticsearch_all_enumerated(self):
-        from recce import ftp, redis, elasticsearch as es, web, probes
+        from recce.services import probes
+        from recce.services import ftp, web
+        from recce.services.db import redis, elasticsearch as es
         with _HttpJson({"/": (200, "<html>ok</html>")}) as webs, \
                 _LineServer(_ftp_handler) as ftps, \
                 _LineServer(_redis_handler) as reds, \

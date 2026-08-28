@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import re
 
-from .models import Host
-from . import ad
-from . import web
-from . import db as dbmod
-from . import smb
+from ..core.models import Host
+from .. import ad
+from ..services import web
+from ..services import db as dbmod
+from ..services import smb
 
 _MAIL_PORTS = {25, 465, 587, 110, 143, 993, 995}
 _ROLE_ORDER = ["DC", "DB", "Web", "Mail", "File/SMB", "Workstation", "Host"]
@@ -97,7 +97,7 @@ def worst_severity(host: Host) -> str:
     """Highest severity among the host's *confirmed* vulns (excludes unverified
     'potential' version guesses), or '' if none. Grounds the map's risk overlay."""
     best = ""
-    from . import qod
+    from ..core import qod
     for v in getattr(host, "vulns", []) or []:
         if not qod.is_visible(v):      # single QoD authority (was: confidence == potential)
             continue

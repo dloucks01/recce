@@ -16,8 +16,8 @@ import time
 import unittest
 from pathlib import Path
 
-from recce import web
-from recce.models import Port, Vuln
+from recce.services import web
+from recce.core.models import Port, Vuln
 
 
 # ------------------------------- pure extractor ----------------------------------
@@ -353,7 +353,7 @@ class AuthenticatedAutoLogin(unittest.TestCase):
         self.assertIsNone(auth)
 
     def test_autologin_host_helper(self):
-        from recce.models import Host
+        from recce.core.models import Host
         srv = self._serve()
         try:
             port = srv.server_address[1]
@@ -765,7 +765,7 @@ class CorsGraphqlDeep(unittest.TestCase):
         self.assertTrue(any("batching" in t for t in titles), titles)
         self.assertTrue(any("field-suggestion" in t for t in titles), titles)
         # every one still gets a prove verdict (web-exposure recipe)
-        from recce import proofs
+        from recce.vuln import proofs
         for f in fs:
             if f.script_id in ("web-cors", "web-graphql", "web-graphql-batch"):
                 self.assertIsNotNone(proofs.recipe_for(f), f.title)
@@ -811,7 +811,7 @@ class DeserialMarkers(unittest.TestCase):
         self.assertEqual(fs, [])
 
     def test_every_marker_has_prove_recipe(self):
-        from recce import proofs
+        from recce.vuln import proofs
         for title in ("Java serialized object in client-controllable data",
                       "PHP serialized object in client-controllable data",
                       "ASP.NET ViewState is not encrypted"):
@@ -868,7 +868,7 @@ class CachePoison(unittest.TestCase):
         self.assertEqual(fs[0].script_id, "web-cache-poison")
         self.assertEqual(fs[0].severity, "high")
         self.assertIn("CWE-349", fs[0].cwes)
-        from recce import proofs
+        from recce.vuln import proofs
         self.assertEqual(proofs.recipe_for(fs[0])["id"], "web-cache-poison")
 
     def test_reflected_but_not_cacheable_no_finding(self):
@@ -957,7 +957,7 @@ class UploadShell(unittest.TestCase):
         self.assertTrue(rce, [f.script_id for f in fs])
         self.assertEqual(rce[0].severity, "critical")
         self.assertEqual(rce[0].confidence, "confirmed")
-        from recce import proofs
+        from recce.vuln import proofs
         self.assertEqual(proofs.recipe_for(rce[0])["fn"](None, 80, rce[0])[0], "CONFIRMED")
 
     def test_stored_not_executed_is_medium(self):

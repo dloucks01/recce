@@ -22,8 +22,8 @@ from __future__ import annotations
 import socket
 import struct
 
-from ...models import Host, Port
-from ...svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
+from ...core.models import Host, Port
+from ..svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
 
 _PORTS = (9042, 9142)              # 9042 CQL, 9142 CQL-over-TLS (native SSL)
 _DEFAULT_PORT = 9042
@@ -303,7 +303,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
 
 
 def _old_version(ver: str) -> bool:
-    from ... import vulndb
+    from ...vuln import vulndb
     try:
         if not ver:
             return False
@@ -342,7 +342,7 @@ findings_to_vulns = make_findings_to_vulns_wrapper("cassandra", _DEFAULT_PORT)
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     """Full Cassandra analysis. Returns {targets, findings, runbooks, probes, stats}."""
-    from ... import svcprobe
+    from .. import svcprobe
     targets = cassandra_targets(hosts)
     probes: dict = {}
     state: dict = {}

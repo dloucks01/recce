@@ -12,8 +12,9 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from recce import cassandra, couchdb, db2, influxdb, memcached, oracle, vulndb
-from recce.models import Host, Port
+from recce.services.db import cassandra, couchdb, db2, influxdb, memcached, oracle
+from recce.vuln import vulndb
+from recce.core.models import Host, Port
 
 
 def _host(port, service):
@@ -295,7 +296,7 @@ class PostgresDeepRce(unittest.TestCase):
     """Trust-auth + superuser/COPY-FROM-PROGRAM capability -> a critical RCE finding."""
 
     def test_findings_emit_pg_rce_when_capable(self):
-        from recce import postgres
+        from recce.services.db import postgres
         h = _host(5432, "postgresql")
         probes = {("127.0.0.1", 5432): {
             "unauth": True, "version": "16.2",
@@ -312,7 +313,7 @@ class PostgresDeepRce(unittest.TestCase):
         self.assertIn("COPY", rce["title"])
 
     def test_no_rce_finding_when_not_superuser(self):
-        from recce import postgres
+        from recce.services.db import postgres
         h = _host(5432, "postgresql")
         probes = {("127.0.0.1", 5432): {"unauth": True, "version": "16.2",
                   "loot": {"databases": ["app"], "roles": [], "hashes": [],
@@ -323,7 +324,7 @@ class PostgresDeepRce(unittest.TestCase):
     def test_loot_reads_rce_capability_over_the_wire(self):
         # Full v3 server: trust auth, then answer loot()'s queries in order so the
         # superuser / COPY-FROM-PROGRAM / extension capability is read live.
-        from recce import postgres
+        from recce.services.db import postgres
 
         def msg(t, body):
             return t + struct.pack("!I", len(body) + 4) + body
@@ -376,7 +377,7 @@ class ScramVector(unittest.TestCase):
     """The SCRAM client must match the RFC 5802 published test vector."""
 
     def test_rfc5802_sha1(self):
-        from recce import scram
+        from recce.ad import scram
         c = scram.ScramClient("user", "pencil", "SCRAM-SHA-1",
                               nonce="fyko+d2lbbFgONRv9qkxdawL")
         self.assertEqual(c.first_message(), "n,,n=user,r=fyko+d2lbbFgONRv9qkxdawL")
@@ -486,12 +487,12 @@ class PostgresScramCredentialed(unittest.TestCase):
         self.port = _tcp_once(handle)
 
     def test_authenticate_and_loot(self):
-        from recce import postgres
+        from recce.services.db import postgres
         self.assertTrue(postgres.authenticate("127.0.0.1", self.port, "app_svc", "Hunter2!"))
         self.assertFalse(postgres.authenticate("127.0.0.1", self.port, "app_svc", "wrong"))
 
     def test_credentialed_analyze_emits_rce(self):
-        from recce import postgres
+        from recce.services.db import postgres
         h = _host(self.port, "postgresql")
         # probe() will see SASL -> auth_required; analyze sprays the supplied credential.
         analysis = postgres.analyze([h], creds=[{"username": "app_svc", "secret": "Hunter2!"}])
@@ -566,7 +567,7 @@ class PostgresDatamine(unittest.TestCase):
         return []
 
     def test_datamine_extracts_and_harvests(self):
-        from recce import postgres
+        from recce.services.db import postgres
         port = _pg_trust_server(self._dispatch)
         dm = postgres.datamine("127.0.0.1", port, ["app_prod"], user="postgres")
         tables = {c["table"] for c in dm["secret_columns"]}
@@ -582,7 +583,7 @@ class PostgresDatamine(unittest.TestCase):
         self.assertIn("postgres://svc:hunter2@db2.internal:5432/app", dm["harvested"])
 
     def test_analyze_emits_datamine_finding_and_cred(self):
-        from recce import postgres
+        from recce.services.db import postgres
         port = _pg_trust_server(self._dispatch)
         h = _host(port, "postgresql")
         analysis = postgres.analyze([h])
@@ -614,13 +615,13 @@ class PostgresRceProof(unittest.TestCase):
         return []
 
     def test_prove_rce_runs_id(self):
-        from recce import postgres
+        from recce.services.db import postgres
         port = _pg_trust_server(self._dispatch)
         out = postgres.prove_rce("127.0.0.1", port, user="postgres")
         self.assertIn("uid=114(postgres)", out)
 
     def test_analyze_prove_confirms_rce(self):
-        from recce import postgres
+        from recce.services.db import postgres
         port = _pg_trust_server(self._dispatch)
         h = _host(port, "postgresql")
         analysis = postgres.analyze([h], prove=True, datamine_data=False)
@@ -631,7 +632,7 @@ class PostgresRceProof(unittest.TestCase):
 
     def test_default_analyze_does_not_prove(self):
         # RCE proof is OPT-IN: a plain analyze() must NOT execute COPY FROM PROGRAM.
-        from recce import postgres
+        from recce.services.db import postgres
         port = _pg_trust_server(self._dispatch)
         h = _host(port, "postgresql")
         analysis = postgres.analyze([h], datamine_data=False)   # prove defaults False
@@ -644,8 +645,8 @@ class PostgresProveEngine(unittest.TestCase):
     """The prove/verify engine recognizes the postgres RCE / datamine / access findings."""
 
     def _verdict(self, title, output=""):
-        from recce import proofs
-        from recce.models import Vuln
+        from recce.vuln import proofs
+        from recce.core.models import Vuln
         v = Vuln(ip="1.1.1.1", port=5432, protocol="tcp", script_id="postgres",
                  title=title, output=output)
         r = proofs.recipe_for(v)
@@ -673,7 +674,7 @@ class PostgresProveEngine(unittest.TestCase):
 
 
 def proofs_CONFIRMED():
-    from recce import proofs
+    from recce.vuln import proofs
     return proofs.CONFIRMED
 
 
@@ -699,7 +700,7 @@ class RedisDeepPrimitives(unittest.TestCase):
         return args
 
     def test_module_load_and_replication_surface(self):
-        from recce import redis
+        from recce.services.db import redis
         info = ("# Server\r\nredis_version:6.2.7\r\nos:Linux\r\n"
                 "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n"
                 "# Keyspace\r\ndb0:keys=3,expires=0\r\n")
@@ -751,7 +752,7 @@ class MongoDeepLoot(unittest.TestCase):
     """Unauth MongoDB deep pass: captured users, replica-set members, config leak."""
 
     def setUp(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
 
         def e_double(n, v):
             return b"\x01" + M._cstr(n) + struct.pack("<d", v)
@@ -809,7 +810,7 @@ class MongoDeepLoot(unittest.TestCase):
         self.port = _tcp_once(handle)
 
     def test_deep_fields_captured(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         pr = M.probe("127.0.0.1", self.port)
         self.assertTrue(pr["unauth"])
         self.assertEqual(pr["js_engine"], "mozjs")
@@ -864,7 +865,7 @@ class MssqlNtlmLeak(unittest.TestCase):
         self.port = _tcp_once(handle)
 
     def test_ntlm_info_extracts_identity(self):
-        from recce import mssql
+        from recce.services.db import mssql
         nt = mssql.ntlm_info("127.0.0.1", self.port)
         self.assertEqual(nt["nb_domain"], "CONTOSO")
         self.assertEqual(nt["nb_computer"], "SQL01")
@@ -873,7 +874,7 @@ class MssqlNtlmLeak(unittest.TestCase):
         self.assertEqual(nt["os_version"], "10.0.17763")
 
     def test_finding_uses_native_ntlm(self):
-        from recce import mssql
+        from recce.services.db import mssql
         nt = mssql.ntlm_info("127.0.0.1", self.port)
         h = _host(1433, "ms-sql-s")
         fs = mssql.findings([h], {"127.0.0.1:1433": {"ntlm": nt, "prelogin": {}}})
@@ -887,7 +888,7 @@ class MysqlGreetingDepth(unittest.TestCase):
     """Handshake parsing surfaces the auth plugin + TLS capability; no-TLS is flagged."""
 
     def test_greeting_parses_ssl_and_plugin(self):
-        from recce import mysql
+        from recce.services.db import mysql
         # v10 greeting: version, conn id, auth1(8), filler, caps_lo(SSL+PLUGIN_AUTH),
         # charset, status, caps_hi, ...  ending in the auth-plugin name.
         caps_lo = 0x0800 | 0x0200          # CLIENT_SSL | CLIENT_PROTOCOL_41
@@ -902,7 +903,7 @@ class MysqlGreetingDepth(unittest.TestCase):
         self.assertEqual(g["auth_plugin"], "caching_sha2_password")
 
     def test_no_tls_finding(self):
-        from recce import mysql
+        from recce.services.db import mysql
         h = _host(3306, "mysql")
         probes = {("127.0.0.1", 3306): {"reachable": True, "version": "5.7.30",
                   "ssl": False, "unauth": False, "auth_required": True}}
@@ -944,7 +945,7 @@ class ElasticDeep(unittest.TestCase):
         self.port = _http_server(H)
 
     def test_deep_fields_in_finding(self):
-        from recce import elasticsearch as es
+        from recce.services.db import elasticsearch as es
         pr = es.probe("127.0.0.1", self.port)
         self.assertTrue(pr["unauth"])
         self.assertEqual(pr["os_name"], "Ubuntu 20.04")
@@ -960,7 +961,7 @@ class MongoScramCredentialed(unittest.TestCase):
     """SCRAM login + hashcat-format extraction of MongoDB SCRAM credentials."""
 
     def test_hashcat_format(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         line = M._scram_hashcat("admin", "SCRAM-SHA-256",
                                 {"iterationCount": 15000, "salt": "c2FsdA==",
                                  "serverKey": "c2s=", "storedKey": "c3Q="})
@@ -973,7 +974,7 @@ class MongoScramCredentialed(unittest.TestCase):
         self.assertEqual(M._scram_hashcat("u", "SCRAM-SHA-1", {}), "")  # missing material
 
     def _server(self, password, want_creds=True):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         server_first, verify_and_sign = _scram_server(password)
 
         def e_double(n, v):
@@ -1052,13 +1053,13 @@ class MongoScramCredentialed(unittest.TestCase):
         return _tcp_once(handle)
 
     def test_authenticate(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         port = self._server("Secret1!")
         self.assertTrue(M.authenticate("127.0.0.1", port, "admin", "Secret1!"))
         self.assertFalse(M.authenticate("127.0.0.1", port, "admin", "wrong"))
 
     def test_credentialed_probe_extracts_hashcat(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         port = self._server("Secret1!")
         cp = M.probe_creds("127.0.0.1", port, "admin", "Secret1!")
         self.assertTrue(cp["cred_access"])
@@ -1067,7 +1068,7 @@ class MongoScramCredentialed(unittest.TestCase):
         self.assertTrue(cp["hashes"][0]["hashcat"].startswith("$mongodb-scram$*1*"))
 
     def test_analyze_credentialed_finding_and_loot(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         port = self._server("Secret1!")
         # probe() (unauth listDatabases) will fail auth -> analyze sprays the credential.
         h = _host(port, "mongodb")
@@ -1082,7 +1083,7 @@ class MongoDatamine(unittest.TestCase):
     """Exfil: sample documents, flag sensitive fields, harvest connection strings."""
 
     def setUp(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
 
         def e_double(n, v):
             return b"\x01" + M._cstr(n) + struct.pack("<d", v)
@@ -1129,7 +1130,7 @@ class MongoDatamine(unittest.TestCase):
         self.port = _http_or_tcp = _tcp_once(handle)
 
     def test_datamine_fields_and_harvest(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         dm = M.datamine("127.0.0.1", self.port, ["prod"])
         fields = {f["field"] for f in dm["secret_fields"]}
         self.assertIn("email", fields)
@@ -1141,7 +1142,7 @@ class MongoDatamine(unittest.TestCase):
         self.assertNotIn("SEKRET-TOKEN-9999", str(dm["samples"]))
 
     def test_analyze_emits_datamine_finding_and_cred(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         h = _host(self.port, "mongodb")
         analysis = M.analyze([h])
         kinds = {f["kind"] for f in analysis["findings"]}
@@ -1243,20 +1244,20 @@ class MysqlCredentialedDatamine(unittest.TestCase):
         return []
 
     def test_native_scramble_and_authenticate(self):
-        from recce import mysql
+        from recce.services.db import mysql
         port = _mysql_server(self._dispatch, password="Hunter2x")
         self.assertTrue(mysql.authenticate("127.0.0.1", port, "root", "Hunter2x"))
         self.assertFalse(mysql.authenticate("127.0.0.1", port, "root", "wrong"))
 
     def test_loot_detects_file_priv(self):
-        from recce import mysql
+        from recce.services.db import mysql
         port = _mysql_server(self._dispatch)
         lt = mysql.loot("127.0.0.1", port, user="root")
         self.assertTrue(lt["file_priv"])
         self.assertEqual(lt["secure_file_priv"], "")
 
     def test_datamine_and_finding(self):
-        from recce import mysql
+        from recce.services.db import mysql
         port = _mysql_server(self._dispatch)
         dm = mysql.datamine("127.0.0.1", port, ["app"], user="root")
         cols = {c["column"] for c in dm["secret_columns"]}
@@ -1276,7 +1277,7 @@ class DbPocRecipes(unittest.TestCase):
     """Confirmed DB findings must scaffold an initial-PoC harness (the poc phase)."""
 
     def test_finding_text_maps_to_recipe(self):
-        from recce import poc
+        from recce.act import poc
         cases = {
             "Redis exposed without authentication. Write primitive available "
             "(dir=/var/lib/redis) -> arbitrary file write / RCE.": "redis_rce",
@@ -1292,7 +1293,7 @@ class DbPocRecipes(unittest.TestCase):
     def test_recipes_write_runnable_files(self):
         import os
         import tempfile
-        from recce import poc
+        from recce.act import poc
         recipes = {k: poc.RECIPES[k] for k in
                    ("redis_rce", "couchdb_rce", "postgres_rce", "db_unauth_read")}
         d = tempfile.mkdtemp()
@@ -1334,7 +1335,7 @@ class PostgresLateralPivot(unittest.TestCase):
         return []
 
     def test_pivot_finding_and_fdw_cred(self):
-        from recce import postgres
+        from recce.services.db import postgres
         port = _pg_trust_server(self._dispatch)
         h = _host(port, "postgresql")
         analysis = postgres.analyze([h])
@@ -1351,7 +1352,7 @@ class MongoReplicaAutoProbe(unittest.TestCase):
     """A replica-set member advertised by the primary is auto-probed as a new target."""
 
     def _mongo_server(self, member=None):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
 
         def e_double(n, v):
             return b"\x01" + M._cstr(n) + struct.pack("<d", v)
@@ -1389,7 +1390,7 @@ class MongoReplicaAutoProbe(unittest.TestCase):
         return _tcp_once(handle)
 
     def test_replica_member_auto_probed(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         member_port = self._mongo_server()                     # the second node
         primary_port = self._mongo_server(member=f"127.0.0.1:{member_port}")
         h = _host(primary_port, "mongodb")

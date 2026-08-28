@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import socket
 
-from ...models import Host, Port
-from ...svccommon import finding_builder
+from ...core.models import Host, Port
+from ..svccommon import finding_builder
 
 _PORTS = (6379, 6380, 16379)
 _DEFAULT_PORT = 6379
@@ -419,7 +419,7 @@ def proof_html(command, output, banner: str = "") -> str:
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from ...svccommon import findings_to_vulns as _f2v
+    from ..svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "redis", _DEFAULT_PORT)
 
 
@@ -427,7 +427,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     """Full Redis analysis. Returns {targets, findings, runbooks, probes, stats}.
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
-    from ... import svcprobe
+    from .. import svcprobe
     targets = redis_targets(hosts)
     probes: dict = {}
     state: dict = {}

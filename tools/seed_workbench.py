@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from recce.store import Store                      # noqa: E402
+from recce.core.store import Store                  # noqa: E402
 from recce.webui import collab                     # noqa: E402
 from tools.mock_engagement import build            # noqa: E402
 

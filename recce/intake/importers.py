@@ -11,7 +11,7 @@ import json
 import re
 import xml.etree.ElementTree as ET
 
-from ..models import Vuln
+from ..core.models import Vuln
 
 # --- upload decoding + shared classifiers ---------------------------------------
 # CSI + a few OSC/other escape sequences a piped tool log can carry.

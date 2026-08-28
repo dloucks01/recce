@@ -21,9 +21,9 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from .. import ad
-from .. import exploits
-from .. import parser as np
-from .. import scanner
+from ..vuln import exploits
+from ..core import parser as np
+from ..core import scanner
 from .helpers import *  # noqa: F401,F403 — private-helper re-export
 from .parser import (  # noqa: F401 — some re-exported for callers
     build_arg_parser, _print_quickstart, _setup_proxy,
@@ -38,12 +38,12 @@ from ._db import *  # noqa: F401,F403
 from ._ad import *  # noqa: F401,F403
 from ._external import *  # noqa: F401,F403
 from ._meta import *  # noqa: F401,F403
-from .. import tracking as tr
-from ..models import Host
-from ..report_excel import read_workbook_edits, update_workbook
-from ..report_markdown import build_csv, build_markdown
-from ..store import Store, StoreError
-from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from ..core import tracking as tr
+from ..core.models import Host
+from ..report.excel import read_workbook_edits, update_workbook
+from ..report.markdown import build_csv, build_markdown
+from ..core.store import Store, StoreError
+from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 # Canonical severity ordering for sorting findings worst-first (shared by every
 # finding-fold path: the deep-service commands and the AD/bloodhound merge).

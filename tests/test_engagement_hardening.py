@@ -11,7 +11,8 @@ open ports:
 """
 from __future__ import annotations
 
-from recce import scanner, svcprobe
+from recce.core import scanner
+from recce.services import svcprobe
 
 
 def test_iter_probe_isolates_a_crashing_target():

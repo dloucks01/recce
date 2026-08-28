@@ -12,8 +12,8 @@ from pathlib import Path
 
 from recce import act
 from recce.cli import _open_paths
-from recce.models import Credential, Host, Port, Vuln
-from recce.store import Store
+from recce.core.models import Credential, Host, Port, Vuln
+from recce.core.store import Store
 
 
 def _vuln(ip, port, sid, title, sev, **kw):
@@ -92,8 +92,8 @@ def test_sqli_finding_bridges_to_sqlmap():
 
 
 def test_web_bridge_offers_sqlmap():
-    from recce import web
-    from recce.models import Port
+    from recce.services import web
+    from recce.core.models import Port
     cmds = web.bridge_commands("http://10.0.0.5:8080", "Apache",
                                Port(portid=8080, service="http", state="open"))
     assert "sqlmap -u http://10.0.0.5:8080" in cmds

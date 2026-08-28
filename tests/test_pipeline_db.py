@@ -16,14 +16,16 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recce import ad, exploits, parser, scanner
-from recce import tracking as tr
-from recce import xlsx
-from recce.models import Account, Host, Port, Script, Vuln
-from recce.report_excel import (build_workbook, read_workbook_tracking,
+from recce import ad
+from recce.core import parser, scanner
+from recce.vuln import exploits
+from recce.core import tracking as tr
+from recce.report.formats import xlsx
+from recce.core.models import Account, Host, Port, Script, Vuln
+from recce.report.excel import (build_workbook, read_workbook_tracking,
                                        update_workbook)
-from recce.store import Store
-from recce.targets import apply_exclusions, load_targets
+from recce.core.store import Store
+from recce.core.targets import apply_exclusions, load_targets
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
@@ -36,15 +38,15 @@ from _pipeline_helpers import header_index, _docx_text, _self_response, SAMPLE  
 
 class DatabaseModuleTest(unittest.TestCase):
     def test_engine_detection(self):
-        from recce import db
+        from recce.services import db
         self.assertEqual(db.engine_for(Port(portid=3306)), "mysql")
         self.assertEqual(db.engine_for(Port(portid=1433)), "mssql")
         self.assertEqual(db.engine_for(Port(portid=9999, service="postgresql")), "postgresql")
         self.assertIsNone(db.engine_for(Port(portid=80, service="http")))
 
     def test_db_instances(self):
-        from recce import db
-        from recce.models import Vuln
+        from recce.services import db
+        from recce.core.models import Vuln
         h = Host(ip="10.0.0.9", ports=[Port(portid=3306, service="mysql",
                  product="MySQL", version="5.7.38")])
         h.vulns = [Vuln(ip="10.0.0.9", port=3306, protocol="tcp",
@@ -56,7 +58,7 @@ class DatabaseModuleTest(unittest.TestCase):
         self.assertEqual(inst[0]["auth"], "EMPTY PASSWORD")
 
     def test_script_selection_aggressive(self):
-        from recce import db
+        from recce.services import db
         safe = db.script_selection(False)
         aggr = db.script_selection(True)
         self.assertIn("mysql-info", safe)
@@ -75,7 +77,7 @@ class MongodbTest(unittest.TestCase):
         import socketserver
         import threading
         import struct
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
 
         def e_double(name, v):
             return b"\x01" + M._cstr(name) + struct.pack("<d", v)
@@ -136,13 +138,13 @@ class MongodbTest(unittest.TestCase):
         cls.srv.shutdown()
 
     def test_bson_roundtrip(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         doc = M.bson_doc(M._e_int32("a", 7), M._e_str("b", "hi"))
         parsed, _ = M.bson_parse(doc, 0)
         self.assertEqual(parsed, {"a": 7, "b": "hi"})
 
     def test_probe_detects_unauth(self):
-        from recce import mongodb as M
+        from recce.services.db import mongodb as M
         pr = M.probe("127.0.0.1", self.port, timeout=3.0)
         self.assertIsNotNone(pr)
         self.assertEqual(pr["version"], "6.0.1")
@@ -151,7 +153,8 @@ class MongodbTest(unittest.TestCase):
                          ["admin", "config", "loot"])
 
     def test_findings_and_prove(self):
-        from recce import mongodb as M, proofs
+        from recce.services.db import mongodb as M
+        from recce.vuln import proofs
         pr = M.probe("127.0.0.1", self.port, timeout=3.0)
         h = Host(ip="10.0.7.7",
                  ports=[Port(portid=27017, service="mongodb", state="open")])
@@ -165,8 +168,10 @@ class MongodbTest(unittest.TestCase):
         self.assertIn(proofs.CONFIRMED, verdicts)
 
     def test_cmd_mongodb_end_to_end(self):
-        from recce import cli, xlsx, mongodb as M
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services.db import mongodb as M
+        from recce.core.store import Store
         orig = M.is_mongodb
         M.is_mongodb = lambda p: (p.state == "open"
                                   and (p.portid == self.port or orig(p)))
@@ -195,7 +200,7 @@ class MongodbTest(unittest.TestCase):
 
     def test_no_endpoints_is_graceful(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -245,7 +250,7 @@ class RedisTest(unittest.TestCase):
                     # Parse each complete command (array of bulk strings) we have.
                     while True:
                         try:
-                            val, n = __import__("recce.redis", fromlist=["_parse"])._parse(buf, 0)
+                            val, n = __import__("recce.services.db.redis", fromlist=["_parse"])._parse(buf, 0)
                         except Exception:
                             break
                         buf = buf[n:]
@@ -270,7 +275,7 @@ class RedisTest(unittest.TestCase):
         cls.srv.shutdown()
 
     def test_resp_parse_types(self):
-        from recce import redis as R
+        from recce.services.db import redis as R
         self.assertEqual(R._parse(b"+OK\r\n")[0], "OK")
         self.assertEqual(R._parse(b":7\r\n")[0], 7)
         self.assertEqual(R._parse(b"$3\r\nabc\r\n")[0], "abc")
@@ -280,7 +285,7 @@ class RedisTest(unittest.TestCase):
             R._parse(b"$5\r\nab")
 
     def test_probe_detects_unauth(self):
-        from recce import redis as R
+        from recce.services.db import redis as R
         pr = R.probe("127.0.0.1", self.port, timeout=3.0)
         self.assertTrue(pr["reachable"])
         self.assertTrue(pr["unauth"])
@@ -289,7 +294,8 @@ class RedisTest(unittest.TestCase):
         self.assertEqual(pr["dir"], "/var/lib/redis")
 
     def test_findings_and_prove(self):
-        from recce import redis as R, proofs
+        from recce.services.db import redis as R
+        from recce.vuln import proofs
         pr = R.probe("127.0.0.1", self.port, timeout=3.0)
         h = Host(ip="10.0.9.9", ports=[Port(portid=6379, service="redis", state="open")])
         fs = R.findings([h], {("10.0.9.9", 6379): pr})
@@ -300,8 +306,10 @@ class RedisTest(unittest.TestCase):
         self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
 
     def test_cmd_redis_end_to_end(self):
-        from recce import cli, xlsx, redis as R
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services.db import redis as R
+        from recce.core.store import Store
         orig = R.is_redis
         R.is_redis = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
         try:
@@ -369,7 +377,7 @@ class ElasticsearchTest(unittest.TestCase):
         cls.srv.shutdown()
 
     def test_probe_detects_unauth(self):
-        from recce import elasticsearch as E
+        from recce.services.db import elasticsearch as E
         pr = E.probe("127.0.0.1", self.port, timeout=3.0)
         self.assertTrue(pr["reachable"])
         self.assertTrue(pr["unauth"])
@@ -379,7 +387,8 @@ class ElasticsearchTest(unittest.TestCase):
         self.assertEqual(pr["status"], "green")
 
     def test_findings_and_prove(self):
-        from recce import elasticsearch as E, proofs
+        from recce.services.db import elasticsearch as E
+        from recce.vuln import proofs
         pr = E.probe("127.0.0.1", self.port, timeout=3.0)
         h = Host(ip="10.0.9.8", ports=[Port(portid=9200, service="http", state="open")])
         fs = E.findings([h], {("10.0.9.8", 9200): pr})
@@ -390,8 +399,10 @@ class ElasticsearchTest(unittest.TestCase):
         self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
 
     def test_cmd_elasticsearch_end_to_end(self):
-        from recce import cli, xlsx, elasticsearch as E
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services.db import elasticsearch as E
+        from recce.core.store import Store
         orig = E.is_elasticsearch
         E.is_elasticsearch = lambda p: (p.state == "open"
                                         and (p.portid == self.port or orig(p)))

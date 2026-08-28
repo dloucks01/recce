@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import unittest
 
-from recce import encdec
+from recce.core import encdec
 
 
 class RoundTripTest(unittest.TestCase):

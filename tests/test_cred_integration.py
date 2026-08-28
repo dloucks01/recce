@@ -12,11 +12,11 @@ import shutil
 import stat
 import unittest
 
-from recce import credenum
-from recce import mssql
+from recce.creds import credenum
+from recce.services.db import mssql
 from recce import cli
-from recce.models import Host, Port
-from recce.store import Store
+from recce.core.models import Host, Port
+from recce.core.store import Store
 from tests import wire_vectors as W
 
 
@@ -95,7 +95,7 @@ class CredenumCliIntegrationTest(_FakeToolMixin):
                                 f"recce_credcli_{os.getpid()}")
         shutil.rmtree(self.dir, ignore_errors=True)
         os.makedirs(self.dir)
-        sample = os.path.join(os.path.dirname(recce.__file__), "sample_scan.xml")
+        sample = os.path.join(os.path.dirname(recce.__file__), "core", "sample_scan.xml")
         self.assertEqual(cli.main(["import", sample, "-o", self.dir]), 0)
 
     def tearDown(self):

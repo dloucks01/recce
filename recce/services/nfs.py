@@ -22,8 +22,8 @@ import shlex
 import socket
 import struct
 
-from ..models import Host, Port
-from ..svccommon import finding_builder, recvn as _recvn
+from ..core.models import Host, Port
+from .svccommon import finding_builder, recvn as _recvn
 
 _PORTS = (2049, 111)
 _DEFAULT_PORT = 2049
@@ -416,12 +416,12 @@ def runbook(ip: str) -> list[dict]:
 
 
 def proof_html(command, output, banner: str = "") -> str:
-    from .. import mssql
+    from ..services.db import mssql
     return mssql.proof_html(command, output, prompt="$ ", banner=banner)
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from ..svccommon import findings_to_vulns as _f2v
+    from .svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "nfs", _DEFAULT_PORT)
 
 
@@ -429,7 +429,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     """Full NFS analysis. Returns {targets, findings, runbooks, probes, stats}.
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
-    from .. import svcprobe
+    from . import svcprobe
     targets = nfs_targets(hosts)
     probes: dict = {}
     state: dict = {}

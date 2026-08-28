@@ -18,15 +18,15 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from .. import ad
-from .. import exploits
-from .. import parser as np
-from .. import scanner
-from .. import tracking as tr
-from ..models import Host
-from ..report_excel import read_workbook_edits, update_workbook
-from ..report_markdown import build_csv, build_markdown
-from ..store import Store, StoreError
-from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from ..vuln import exploits
+from ..core import parser as np
+from ..core import scanner
+from ..core import tracking as tr
+from ..core.models import Host
+from ..report.excel import read_workbook_edits, update_workbook
+from ..report.markdown import build_csv, build_markdown
+from ..core.store import Store, StoreError
+from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
@@ -44,7 +44,7 @@ def cmd_web(args: argparse.Namespace) -> int:
     non-intrusive checks (exposed .git/.env, server-status/actuator, directory
     listing, dangerous methods, cookie flags, headers/TLS). Findings fold into the
     workbook; each endpoint gets the exact Kali deep-scan commands."""
-    from .. import web
+    from ..services import web
     print(BANNER)
     # --wordlist FILE augments the bundled 110-path HTTP list. The deep probe
     # layer (services.http._resolve_extra_paths) reads RECCE_HTTP_WORDLIST at
@@ -178,7 +178,7 @@ def cmd_smb(args: argparse.Namespace) -> int:
     """SMB offensive enumeration: credential-free stdlib negotiate probes (dialect /
     signing / SMBv1), then anonymous & credentialed share enumeration, a reversible
     writable-share proof, and the full runbook - folded into the main totals."""
-    from .. import smb
+    from ..services import smb
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -322,7 +322,7 @@ def cmd_ftp(args: argparse.Namespace) -> int:
     """FTP offensive enumeration: credential-free stdlib probe (banner / anonymous /
     AUTH-TLS + known-backdoor match), then a reversible writable-directory proof -
     folded into the main totals."""
-    from .. import ftp
+    from ..services import ftp
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -403,7 +403,7 @@ def cmd_docker(args: argparse.Namespace) -> int:
     """Docker Engine API enumeration: read the API unauthenticated (stdlib HTTP) and,
     if it answers, report the CONFIRMED critical exposure (remote root RCE on the
     host). recce reads the API to prove it - it never creates a container."""
-    from .. import docker
+    from ..services import docker
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -463,7 +463,7 @@ def cmd_kubernetes(args: argparse.Namespace) -> int:
     """Kubernetes attack-surface enumeration: unauthenticated reads of the kubelet
     (10250/10255), kube-apiserver (6443/8443) and etcd (2379). recce only READS to
     prove exposure - it never execs into a pod or writes to etcd."""
-    from .. import kubernetes as k8s
+    from ..services import kubernetes as k8s
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -510,7 +510,7 @@ def cmd_ldap(args: argparse.Namespace) -> int:
     binds, reads the RootDSE (domain/forest/DC/functional level), and tests whether
     the directory is anonymously readable. Read-only - it never writes to the
     directory. Credentialed follow-on commands are staged, not run."""
-    from .. import ldap as _ldap
+    from ..services import ldap as _ldap
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
@@ -590,7 +590,7 @@ def cmd_api(args: argparse.Namespace) -> int:
     """API enumeration over the web services enum found: OpenAPI/Swagger specs,
     interactive API docs (Swagger UI / ReDoc / GraphiQL), and GraphQL introspection.
     Read-only GETs plus one GraphQL introspection POST."""
-    from .. import api
+    from ..services import api
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")

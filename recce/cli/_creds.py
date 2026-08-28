@@ -18,15 +18,15 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from .. import ad
-from .. import exploits
-from .. import parser as np
-from .. import scanner
-from .. import tracking as tr
-from ..models import Host
-from ..report_excel import read_workbook_edits, update_workbook
-from ..report_markdown import build_csv, build_markdown
-from ..store import Store, StoreError
-from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from ..vuln import exploits
+from ..core import parser as np
+from ..core import scanner
+from ..core import tracking as tr
+from ..core.models import Host
+from ..report.excel import read_workbook_edits, update_workbook
+from ..report.markdown import build_csv, build_markdown
+from ..core.store import Store, StoreError
+from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
@@ -97,8 +97,8 @@ def cmd_credenum(args: argparse.Namespace) -> int:
 def cmd_creds(args: argparse.Namespace) -> int:
     """Stack credentials (auto-harvested + manually captured) and build/run a spray
     across the discovered SMB/WinRM/LDAP/MSSQL/RDP/SSH surface."""
-    from .. import credentials as cr
-    from ..models import Credential
+    from ..creds import credentials as cr
+    from ..core.models import Credential
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
@@ -211,7 +211,7 @@ def cmd_creds(args: argparse.Namespace) -> int:
 def cmd_deploy(args: argparse.Namespace) -> int:
     """Push + run recce's read-only local-enum / priv-esc scripts across every host
     we have credentials for (SSH / WinRM / SMB), then fold the results in."""
-    from .. import deploy
+    from ..creds import deploy
     print(BANNER)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -293,7 +293,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # Optional HTTP stager for in-memory Windows exec.
     stager = None
     if use_stager:
-        from ..stager import Stager, detect_lhost
+        from ..creds.stager import Stager, detect_lhost
         lhost = getattr(args, "lhost", None) or detect_lhost()
         if not lhost:
             print("[x] --stager needs --lhost <your-ip that targets can reach>; "

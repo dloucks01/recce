@@ -18,7 +18,7 @@ from __future__ import annotations
 import socket
 from typing import Any, Protocol, runtime_checkable
 
-from ...models import Host, Port
+from ...core.models import Host, Port
 
 
 # --- constants ---------------------------------------------------------------

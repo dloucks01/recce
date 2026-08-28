@@ -3,14 +3,14 @@ import os
 import tempfile
 import unittest
 
-from recce import netmap
-from recce.models import Host, Port
-from recce.models import Domain
+from recce.report import netmap
+from recce.core.models import Host, Port
+from recce.core.models import Domain
 
 
 def _h(ip, subnet="10.0.10.0/24", ports=(), roles=(), os_name="", hostname="",
        access=False, vulns=()):
-    from recce.models import Vuln
+    from recce.core.models import Vuln
     return Host(ip=ip, subnet=subnet, state="up", up_reason="syn-ack",
                 hostnames=[hostname] if hostname else [], os_name=os_name,
                 roles=list(roles), access_gained=access,
@@ -205,7 +205,7 @@ class AdArchitectureSvgTest(unittest.TestCase):
 class ReportEmbedTest(unittest.TestCase):
 
     def test_network_map_in_assets_page(self):
-        from recce import report_html
+        from recce.report import html as report_html
         hosts = [_h("10.0.10.10", ports=[(445, "microsoft-ds")],
                     roles=["Domain Controller"], hostname="dc01")]
         with tempfile.TemporaryDirectory() as d:
@@ -299,7 +299,7 @@ class ReachabilityTest(unittest.TestCase):
     """Observed host-to-host reachability from on-target topology (ground truth)."""
 
     def _hosts(self):
-        from recce import ingest
+        from recce.intake import ingest
         foot = _h("10.0.20.5", subnet="10.0.20.0/24",
                   ports=[(445, "microsoft-ds")], os_name="Windows 10 Pro",
                   hostname="ws01", access=True)
@@ -314,7 +314,7 @@ class ReachabilityTest(unittest.TestCase):
         return [foot, dc]
 
     def test_parse_topology_drops_loopback_and_computes_subnet(self):
-        from recce import ingest
+        from recce.intake import ingest
         t = ingest.parse_topology("NET-IFACE eth0 10.0.20.5/24\nNET-NEIGH 127.0.0.1 x\n"
                                   "NET-NEIGH 10.0.10.10 aa\nNET-PEER 10.0.10.10:445 E")
         self.assertEqual(t["interfaces"][0]["subnet"], "10.0.20.0/24")

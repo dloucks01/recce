@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from recce.models import Account, Exploit, Host, Port, Vuln
-from recce import tracking
+from recce.core.models import Account, Exploit, Host, Port, Vuln
+from recce.core import tracking
 
 
 # --- helpers: build hosts quickly -------------------------------------------

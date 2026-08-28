@@ -17,11 +17,11 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from .. import playbook as _pb
-from .. import exploitplan as _xp
+from ..act import playbook as _pb
+from ..act import exploitplan as _xp
 from .formats.docx import Document
-from ..exploitref import proven_exploit_ref
-from ..models import Host, Vuln
+from ..vuln.exploitref import proven_exploit_ref
+from ..core.models import Host, Vuln
 
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -63,18 +63,20 @@ _CWE_TYPE = [
       "CWE-266", "CWE-276"),
      "Privilege Escalation", "Confidentiality, Integrity"),
     (("CWE-319",), "Cleartext Transmission of Sensitive Data", "Confidentiality"),
-    (("CWE-327", "CWE-326", "CWE-295", "CWE-297", "CWE-298", "CWE-330", "CWE-347"),
+    (("CWE-327", "CWE-326", "CWE-295", "CWE-297", "CWE-298", "CWE-330", "CWE-347",
+      "CWE-916"),
      "Cryptographic / TLS Weakness", "Confidentiality, Integrity"),
     (("CWE-522", "CWE-312", "CWE-256", "CWE-257", "CWE-260", "CWE-200", "CWE-538",
       "CWE-527", "CWE-540", "CWE-532", "CWE-203", "CWE-204", "CWE-215", "CWE-548",
-      "CWE-615", "CWE-489", "CWE-209"),
+      "CWE-615", "CWE-489", "CWE-209", "CWE-497"),
      "Information / Credential Disclosure", "Confidentiality"),
     (("CWE-693", "CWE-1021", "CWE-16", "CWE-650", "CWE-441", "CWE-284", "CWE-1004",
-      "CWE-614", "CWE-942", "CWE-799", "CWE-1275", "CWE-349", "CWE-1321"),
+      "CWE-614", "CWE-942", "CWE-799", "CWE-1275", "CWE-349", "CWE-1321",
+      "CWE-346", "CWE-923"),
      "Security Misconfiguration", "Integrity"),
     (("CWE-364", "CWE-362"), "Race Condition", "Integrity, Availability"),
     (("CWE-406", "CWE-400", "CWE-770"), "Resource Exhaustion / Denial of Service", "Availability"),
-    (("CWE-1104", "CWE-1392", "CWE-477"), "Unmaintained / Default Components", _CIA),
+    (("CWE-1104", "CWE-1392", "CWE-477", "CWE-1035"), "Unmaintained / Default Components", _CIA),
     (("CWE-506",), "Embedded Malicious Code / Backdoor", _CIA),
     (("CWE-20", "CWE-1025"), "Improper Input Validation", "Integrity"),  # generic - keep last
 ]
@@ -164,16 +166,21 @@ _CWE_NAME = {
     "CWE-1188": "Insecure Default Initialization of Resource",
     "CWE-1321": "Prototype Pollution",
     "CWE-1392": "Use of Default Credentials",
+    "CWE-346": "Origin Validation Error",
     "CWE-362": "Race Condition",
+    "CWE-497": "Exposure of Sensitive System Information",
     "CWE-770": "Uncontrolled Resource Consumption",
+    "CWE-916": "Use of Password Hash With Insufficient Computational Effort",
+    "CWE-923": "Improper Restriction of Communication Channel to Intended Endpoints",
     "CWE-1025": "Type Confusion",
+    "CWE-1035": "Using Components with Known Vulnerabilities",
 }
 
 
 def cwe_label(cwe: str) -> str:
     """'CWE-22 (Path Traversal)' - the id plus its short name for reference. Falls back
     to the fuller recce.cwe name table so more CWEs resolve to a name, not a bare id."""
-    from .. import cwe as _cwe
+    from ..core import cwe as _cwe
     name = _CWE_NAME.get(cwe) or _cwe.NAMES.get(cwe)
     return f"{cwe} ({name})" if name else cwe
 
@@ -1037,7 +1044,7 @@ def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
               widths=[900, 1100, 3860, 1500, 2000])
 
     # MITRE ATT&CK coverage - techniques mapped from the findings, by tactic.
-    from .. import attack
+    from ..act import attack
     _cov = attack.coverage(hosts)
     if _cov["by_tactic"]:
         doc.heading("MITRE ATT&CK Coverage", 1)

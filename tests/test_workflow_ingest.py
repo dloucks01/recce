@@ -23,14 +23,16 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recce import ad, parser, xlsx
-from recce import tracking as tr
-from recce.models import Host, Port, Vuln
-from recce.report_excel import (build_workbook, read_key_order,
+from recce import ad
+from recce.core import parser
+from recce.report.formats import xlsx
+from recce.core import tracking as tr
+from recce.core.models import Host, Port, Vuln
+from recce.report.excel import (build_workbook, read_key_order,
                                  read_workbook_edits, read_workbook_tracking,
                                  update_workbook, STATUS_WIP, STATUS_TODO)
-from recce.store import Store
-from recce.targets import _subnet_of
+from recce.core.store import Store
+from recce.core.targets import _subnet_of
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
@@ -96,7 +98,7 @@ from _workflow_helpers import SAMPLE, FACTS, sample_hosts, header_index, rows_by
 
 class NmapImportTest(unittest.TestCase):
     def test_split_product_version(self):
-        from recce.parser import _split_product_version
+        from recce.core.parser import _split_product_version
         self.assertEqual(_split_product_version("OpenSSH 8.2p1 Ubuntu"),
                          ("OpenSSH", "8.2p1"))
         self.assertEqual(_split_product_version("Apache httpd 2.4.49"),
@@ -105,7 +107,7 @@ class NmapImportTest(unittest.TestCase):
                          ("Microsoft Windows RPC", ""))
 
     def test_parse_gnmap(self):
-        from recce import parser
+        from recce.core import parser
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "s.gnmap")
             with open(f, "w") as fh:
@@ -122,7 +124,7 @@ class NmapImportTest(unittest.TestCase):
             self.assertEqual(h.os_family, "Linux")
 
     def test_parse_normal_text(self):
-        from recce import parser
+        from recce.core import parser
         normal = ("Nmap scan report for web02 (10.0.20.6)\n"
                   "Host is up (0.00042s latency).\n"
                   "PORT   STATE SERVICE VERSION\n"
@@ -143,7 +145,7 @@ class NmapImportTest(unittest.TestCase):
             self.assertEqual((ftp.product, ftp.version), ("vsftpd", "2.3.4"))
 
     def test_parse_normal_bare_ip(self):
-        from recce import parser
+        from recce.core import parser
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "s.nmap")
             with open(f, "w") as fh:
@@ -153,7 +155,7 @@ class NmapImportTest(unittest.TestCase):
             self.assertEqual(hosts[0].hostnames, [])
 
     def test_parse_nmap_file_autodetects_all_formats(self):
-        from recce import parser
+        from recce.core import parser
         with tempfile.TemporaryDirectory() as d:
             # grepable content, no extension -> sniffed
             g = os.path.join(d, "noext_grep")
@@ -175,7 +177,7 @@ class NmapImportTest(unittest.TestCase):
             self.assertEqual(parser.parse_nmap_file(x)[0].ip, "1.2.3.4")
 
     def test_masscan_xml_is_nmap_compatible(self):
-        from recce import parser
+        from recce.core import parser
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "mass.xml")
             with open(f, "w") as fh:
@@ -208,7 +210,7 @@ class NmapImportTest(unittest.TestCase):
 
     def test_import_builds_workbook_with_checkmarks_and_findings(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "s.gnmap")
             with open(f, "w") as fh:
@@ -231,7 +233,7 @@ class NmapImportTest(unittest.TestCase):
         # Several scans (different subnets, then an overlapping host) must APPEND
         # new hosts and MERGE overlaps - never duplicate a host or a port.
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             eng = os.path.join(d, "eng")
 
@@ -262,7 +264,7 @@ class NmapImportTest(unittest.TestCase):
 
     def test_import_merges_and_preserves_tracking(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "s.gnmap")
             with open(f, "w") as fh:
@@ -293,7 +295,7 @@ class NmapImportTest(unittest.TestCase):
 
 class IngestParserTest(unittest.TestCase):
     def test_parse_findings_and_skip_howto(self):
-        from recce import ingest
+        from recce.intake import ingest
         p = ingest.parse_loot(_LOOT_LINUX)
         self.assertTrue(p["is_recce"])
         self.assertEqual(p["hostname"], "web01")
@@ -305,13 +307,13 @@ class IngestParserTest(unittest.TestCase):
         self.assertTrue({"sudo", "suid", "kernel", "writable"} <= cats)
 
     def test_windows_detection(self):
-        from recce import ingest
+        from recce.intake import ingest
         p = ingest.parse_loot(_LOOT_WIN)
         self.assertEqual(p["os"], "windows")
         self.assertEqual(p["hostname"], "DBSRV01")
 
     def test_strips_ansi_colour(self):
-        from recce import ingest
+        from recce.intake import ingest
         coloured = ("recce-enum  host=h1\n\x1b[1;36m==== Sudo ====\x1b[0m\n"
                     "\x1b[1;33m[!] NOPASSWD sudo entries present\x1b[0m\n")
         p = ingest.parse_loot(coloured)
@@ -319,12 +321,12 @@ class IngestParserTest(unittest.TestCase):
         self.assertEqual(p["findings"][0]["text"], "NOPASSWD sudo entries present")
 
     def test_dedup(self):
-        from recce import ingest
+        from recce.intake import ingest
         dupe = ("recce-enum host=h\n==== Sudo ====\n[!] same\n[!] same\n")
         self.assertEqual(len(ingest.parse_loot(dupe)["findings"]), 1)
 
     def test_empty_and_garbage_input_no_crash(self):
-        from recce import ingest
+        from recce.intake import ingest
         for blob in ("", "\n\n\n", "not recce output at all\nrandom text\n",
                      "\x00\x01\x02 binary-ish \xff\xfe", "=" * 5000,
                      "[!] finding with no banner and no section\n"):
@@ -333,13 +335,13 @@ class IngestParserTest(unittest.TestCase):
             self.assertIsInstance(p["findings"], list)
 
     def test_findings_without_banner_still_parse(self):
-        from recce import ingest
+        from recce.intake import ingest
         p = ingest.parse_loot("==== Sudo ====\n[!] NOPASSWD present\n")
         self.assertFalse(p["is_recce"])          # no banner
         self.assertEqual(len(p["findings"]), 1)  # but [!] lines still harvested
 
     def test_malformed_section_headers_tolerated(self):
-        from recce import ingest
+        from recce.intake import ingest
         # Ragged '=' fences and stray '=' in finding text must not break parsing.
         blob = ("recce-enum host=h\n=== Weird ==\n[!] a = b = c finding\n"
                 "======\n[!] another\n")
@@ -351,7 +353,7 @@ class IngestParserTest(unittest.TestCase):
 
 class IngestCommandTest(unittest.TestCase):
     def _eng(self, d, host=None):
-        from recce.store import Store
+        from recce.core.store import Store
         os.makedirs(os.path.join(d, "raw"), exist_ok=True)
         s = Store(os.path.join(d, "results.sqlite"))
         s.set_meta("engagement", "T")
@@ -371,7 +373,7 @@ class IngestCommandTest(unittest.TestCase):
         return rc
 
     def test_ingest_folds_network_topology_and_survives_merge(self):
-        from recce.store import Store
+        from recce.core.store import Store
         loot = ("recce-enum host=web01 user=root now\n"
                 "==== NETWORK ====\n"
                 "NET-IFACE eth0 10.0.20.5/24\nNET-IFACE eth1 10.0.10.9/24\n"
@@ -397,7 +399,7 @@ class IngestCommandTest(unittest.TestCase):
     def test_ingest_auto_resolves_host_from_own_interface_ip(self):
         # No --host: the box's own NET-IFACE IP must land the loot on the real
         # enumerated host in scope, not synthesize a local: entry.
-        from recce.store import Store
+        from recce.core.store import Store
         loot = ("recce-enum host=web01 user=root now\n"
                 "==== NETWORK ====\n"
                 "NET-IFACE eth0 10.0.20.5/24\n"
@@ -414,7 +416,7 @@ class IngestCommandTest(unittest.TestCase):
             self.assertIsNone(s.get_host("local:web01"))          # nothing synthesized
 
     def test_ingest_matches_host_by_hostname(self):
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"],
                               os_family="Linux", enumerated=True))
@@ -424,7 +426,7 @@ class IngestCommandTest(unittest.TestCase):
             self.assertTrue(h.privesc_checked)
 
     def test_ingest_is_idempotent(self):
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"]))
             self._ingest(d, _LOOT_LINUX)
@@ -433,7 +435,7 @@ class IngestCommandTest(unittest.TestCase):
             self.assertEqual(len(h.local_findings), 5)  # not doubled
 
     def test_ingest_synthesizes_host_when_unknown(self):
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             self._eng(d)                                # empty engagement
             self.assertEqual(self._ingest(d, _LOOT_WIN), 0)
@@ -443,7 +445,7 @@ class IngestCommandTest(unittest.TestCase):
             self.assertEqual(len(h.local_findings), 2)
 
     def test_ingest_host_flag_records_hostname(self):
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50"))          # no hostname stored
             self._ingest(d, _LOOT_LINUX, extra=["--host", "10.0.0.50"])
@@ -455,7 +457,7 @@ class IngestCommandTest(unittest.TestCase):
     def test_ingest_dedups_incoming_rows_on_new_host(self):
         # Two sections that map to the same category with identical finding text
         # must not create duplicate rows, even on a brand-new (unmerged) host.
-        from recce.store import Store
+        from recce.core.store import Store
         loot = ("recce-enum host=h1\n"
                 "==== SUID / SGID / capabilities ====\n[!] same finding text\n"
                 "==== Capabilities ====\n[!] same finding text\n")
@@ -466,7 +468,7 @@ class IngestCommandTest(unittest.TestCase):
             self.assertEqual(len(h.local_findings), 1)
 
     def test_exploitation_sheet_lists_confirmed_findings(self):
-        from recce.report_excel import build_workbook
+        from recce.report.excel import build_workbook
         try:
             import openpyxl
         except ImportError:
@@ -474,7 +476,7 @@ class IngestCommandTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
             self._ingest(d, _LOOT_LINUX)      # sudo/suid/shadow -> confirmed
-            from recce.store import Store
+            from recce.core.store import Store
             hosts = Store(os.path.join(d, "results.sqlite")).all_hosts()
             p = os.path.join(d, "wb.xlsx")
             build_workbook(hosts, p)
@@ -489,7 +491,7 @@ class IngestCommandTest(unittest.TestCase):
             self.assertGreaterEqual(ws.max_row - 1, 2)
 
     def test_high_signal_findings_promoted_to_vulns(self):
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
             self._ingest(d, _LOOT_LINUX)
@@ -504,7 +506,7 @@ class IngestCommandTest(unittest.TestCase):
                                 for v in local_vulns))
 
     def test_promotion_is_idempotent(self):
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
             self._ingest(d, _LOOT_LINUX)
@@ -543,9 +545,9 @@ class IngestCommandTest(unittest.TestCase):
     def test_triaged_vuln_counts_toward_coverage(self):
         """Regression: the Vulnerabilities sheet's row key and the coverage
         counter's key must be identical, or ticking Triaged is never counted."""
-        from recce import tracking as tr
-        from recce.models import Vuln
-        from recce.report_excel import _spec_vulns
+        from recce.core import tracking as tr
+        from recce.core.models import Vuln
+        from recce.report.excel import _spec_vulns
         h = Host(ip="10.0.0.5", ports=[Port(portid=445, service="microsoft-ds")],
                  vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
                              script_id="smb-vuln-ms17-010", title="ms17-010 RCE",
@@ -565,9 +567,9 @@ class IngestCommandTest(unittest.TestCase):
         more coarsely than the store's dedup key (models.Vuln.key uses [:60]),
         or two store-distinct findings collapse to one Vulnerabilities row and
         coverage undercounts."""
-        from recce import tracking as tr
-        from recce.models import Vuln
-        from recce.report_excel import _spec_vulns
+        from recce.core import tracking as tr
+        from recce.core.models import Vuln
+        from recce.report.excel import _spec_vulns
         # Two findings identical for 40 chars, differing only at chars 41-60.
         base = "Apache httpd 2.4.49 Path Traversal RCE - "  # 41 chars
         v1 = Vuln(ip="10.0.0.5", port=443, protocol="tcp", script_id="version-db",

@@ -2,8 +2,10 @@
 
 import unittest
 
-from recce import bloodhound, credenum, smb
-from recce.util import run_tool
+from recce.ad import bloodhound
+from recce.creds import credenum
+from recce.services import smb
+from recce.core.util import run_tool
 
 
 class RunToolTest(unittest.TestCase):

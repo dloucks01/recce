@@ -9,11 +9,15 @@ and subnets, normalizes everything into a resumable datastore, and produces an
 It is designed for mixed **Linux + Windows / Active Directory** environments:
 full TCP port sweeps, service/version + OS detection, vulnerability
 identification (curated detection NSE + a built-in **offline** version→CVE/CWE
-database, so it works airgapped), and deep **Active Directory** analysis — DC
+database, so it works airgapped), deep **Active Directory** analysis — DC
 identification, NTLM-relay target discovery, credentialed LDAP enumeration of
 users, SPNs, roastable accounts, delegation, groups and trusts, and offline
 **BloodHound (SharpHound) + Certipy (ADCS/ESC)** import that maps the shortest
-paths from your account to Domain Admin.
+paths from your account to Domain Admin — plus **exploit plan generation** (ready-
+to-run Metasploit `.rc` files and tool commands), **attack-path synthesis** (a
+prioritized kill-chain grounded in confirmed findings), and a built-in
+**reverse-shell listener** with team-shared browser terminals, persistence
+tracking, and engagement-native session management.
 
 > 🚀 **New here? Read [QUICKSTART.md](QUICKSTART.md)** — a one-page guide that
 > gets you from zero to a filled-in workbook in five commands. Prefer a
@@ -87,6 +91,21 @@ is separate, resumable, and safe-by-default; follow the links for the full detai
   read-only enum you fold back in with `ingest`, runnable msf/tool artifacts
   for **confirmed** findings, and per-CVE PoC dossiers + harness scaffolds
   (`recce poc`, offline — vulndb/KEV/EPSS/Exploit-DB/msf). → [privesc](docs/reference/privesc.md)
+- **Exploit plans & attack paths** — `recce exploitplan` maps confirmed findings
+  to ready-to-run **Metasploit `.rc` files** and tool commands (impacket, netexec,
+  sqlmap, …), with credential-aware substitution and SambaCry/SMBv1 validation.
+  `recce attackpath` synthesizes a prioritized **kill-chain** (Initial Access →
+  Privilege Escalation → Credential Access → Lateral Movement → Domain Dominance)
+  grounded entirely in what recce confirmed — rendered as an inline **SVG diagram**
+  and a narrative summary, with Samba-DC-specific guidance. → [privesc](docs/reference/privesc.md)
+- **Shell sessions** — `recce serve` includes a built-in **reverse-shell listener**
+  and session manager. Caught shells become first-class engagement objects: team-shared
+  with a browser-based **xterm.js terminal**, automatic **PTY upgrade** (Python pty →
+  bash `/dev/tcp` fallback), **OOB data channel**, per-session **transcript
+  persistence**, host auto-linking, and a **persistence tracker** that records every
+  backdoor dropped so `cleanup` can remove them all. Sessions are driven from the
+  workbench's Sessions tab — the whole team shares one view of every foothold. Entirely
+  stdlib (asyncio TCP); no implant framework required.
 - **Track & report** — one filterable **Excel workbook** with persistent
   `Reviewed`/`Checked` columns, self-contained HTML reports, network diagrams, and
   per-finding Word write-ups. → [reporting](docs/reference/reporting.md)
@@ -176,13 +195,18 @@ It serves the **same datastore** the CLI writes, so terminal and browser stay in
 sync. Run `enum`/`vulns`/`run` from the UI with live progress and work the
 **Dashboard** (*Next moves* + team coverage), **Hosts** (coverage/ownership filters,
 per-host progress), **Findings** (tiered by confidence), **Act** (ranked action cards +
-attack-path graph) and **Credentials** (captured creds + a lockout-safe spray) tabs,
-then export the report in one click.
+attack-path graph), **Sessions** (live reverse shells with browser terminals), and
+**Credentials** (captured creds + a lockout-safe spray) tabs, then export the report
+in one click.
 
 Built for a **team on one engagement**, live over SSE:
 
 - **Coordinate** — claim/assign hosts, triage labels, a presence roster, an activity
   feed, per-tester progress, and a **My queue** of your unreviewed hosts.
+- **Shell sessions** — a built-in reverse-shell listener and session manager. Catch
+  shells, auto-upgrade to PTY, and drive them from a browser-based **xterm.js**
+  terminal the whole team shares. Persistence tracking, host auto-linking, transcript
+  persistence, and `cleanup` to remove every backdoor when you're done.
 - **Import from anywhere** — drop or paste output from ~14 tools (nmap/masscan, Nessus,
   OpenVAS, nuclei, testssl, netexec, impacket roast/secretsdump, BloodHound+Certipy,
   on-target loot, fieldkit…) straight into the live engagement.
@@ -217,13 +241,19 @@ QUICKSTART.md        one-page user guide
 TROUBLESHOOTING.md   symptom -> cause -> fix, per phase
 CHANGELOG.md         release notes
 recce/               the package (python -m recce) — see docs/reference/ for the phases
-  cli.py             command-line interface (all subcommands)
+  cli/               command-line interface (subcommand dispatch + per-phase modules)
+  core/              models, SQLite datastore, targets, tracking
   scanner.py         nmap / masscan orchestration
   parser.py          nmap XML -> normalized model
-  store.py           SQLite datastore (merge-on-rescan, resume)
-  vulndb.py          offline version->CVE/CWE engine
-  report_excel.py    the Excel workbook  ·  report_html.py  self-contained HTML report
-  webui/             the web workbench (`recce serve`)
+  vuln/              vulndb (offline CVE/CWE engine), qod, dedup, verify, KEV/EPSS
+  services/          deep per-service modules (db/, web/, smb, ftp, ldap, snmp, ...)
+  ad/                Active Directory (bloodhound, certipy, kerberos, LDAP/NTLM)
+  act/               exploit plan + attack-path synthesis
+  sessions/          reverse-shell listener, session manager, tasking, persistence
+  intake/            parsers for external tool output (nmap, nessus, nuclei, netexec, ...)
+  report/            Excel workbook, HTML, Markdown, CSV, DOCX write-ups
+  creds/             credential store, spray engine, default-cred probe
+  webui/             the web workbench (`recce serve` — FastAPI + React/xterm.js)
   local/             on-target read-only enum scripts (recce-enum.sh / .ps1)
   scripts/           per-service enumeration commands
 docs/                full reference + design notes (see docs/README.md)

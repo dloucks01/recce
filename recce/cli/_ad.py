@@ -18,15 +18,15 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from .. import ad
-from .. import exploits
-from .. import parser as np
-from .. import scanner
-from .. import tracking as tr
-from ..models import Host
-from ..report_excel import read_workbook_edits, update_workbook
-from ..report_markdown import build_csv, build_markdown
-from ..store import Store, StoreError
-from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from ..vuln import exploits
+from ..core import parser as np
+from ..core import scanner
+from ..core import tracking as tr
+from ..core.models import Host
+from ..report.excel import read_workbook_edits, update_workbook
+from ..report.markdown import build_csv, build_markdown
+from ..core.store import Store, StoreError
+from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
@@ -44,8 +44,8 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     Simple credentialed run:  recce ad loot.zip -u alice -p 'Passw0rd' -d corp.local
     Add ADCS:                 recce ad loot.zip certipy.json -u alice -p ... -d corp.local
     Airgapped, stdlib-only; every command is pre-filled with your credentials."""
-    from .. import bloodhound as bh
-    from .. import adcs
+    from ..ad import bloodhound as bh
+    from ..ad import adcs
 
     srcs = args.paths if isinstance(args.paths, list) else [args.paths]
     for s in srcs:
@@ -153,7 +153,7 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     store.set_meta("ad_bloodhound", json.dumps(analysis))
     # Merge domain facts (trusts, functional level, MachineAccountQuota) so the
     # Active Directory sheet reflects the import even without a network scan.
-    from ..models import Domain
+    from ..core.models import Domain
     for dom in analysis["domains"]:
         name = (dom.get("name") or "").lower()
         if not name:
@@ -174,7 +174,7 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     # Vulns on the DC / domain host (keyed by --dc-ip when given, so they merge
     # onto the scanned DC rather than creating a duplicate).
     if analysis["findings"]:
-        from ..models import Host
+        from ..core.models import Host
         dom_name = analysis["domains"][0]["name"] if analysis["domains"] else ""
         ad_ip = (creds and creds.get("dc_ip")) or dom_name or "active-directory"
         vulns = bh.findings_to_vulns(analysis, ad_ip, dom_name)
@@ -230,7 +230,7 @@ def cmd_kerberos(args: argparse.Namespace) -> int:
     every pre-auth-disabled account (capture a crackable hash with NO credential), and
     validate usernames via the KDC's pre-auth response. Read-only - no logon, no
     lockouts."""
-    from .. import kerberos as _krb
+    from ..ad import kerberos as _krb
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` (and, for the "

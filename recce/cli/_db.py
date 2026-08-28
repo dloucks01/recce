@@ -18,15 +18,15 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from .. import ad
-from .. import exploits
-from .. import parser as np
-from .. import scanner
-from .. import tracking as tr
-from ..models import Host
-from ..report_excel import read_workbook_edits, update_workbook
-from ..report_markdown import build_csv, build_markdown
-from ..store import Store, StoreError
-from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from ..vuln import exploits
+from ..core import parser as np
+from ..core import scanner
+from ..core import tracking as tr
+from ..core.models import Host
+from ..report.excel import read_workbook_edits, update_workbook
+from ..report.markdown import build_csv, build_markdown
+from ..core.store import Store, StoreError
+from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
@@ -61,7 +61,7 @@ def cmd_mssql(args: argparse.Namespace) -> int:
     """MSSQL offensive enumeration: credential-free pre-auth probes (SQL Browser +
     TDS pre-login), then - with credentials - the nxc access/privilege matrix and
     the full MSSQLPwner-style runbook + attack chain, pre-filled with your creds."""
-    from .. import mssql
+    from ..services.db import mssql
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "

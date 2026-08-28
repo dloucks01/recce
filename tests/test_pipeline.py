@@ -12,14 +12,16 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recce import ad, exploits, parser, scanner
-from recce import tracking as tr
-from recce import xlsx
-from recce.models import Account, Host, Port, Script, Vuln
-from recce.report_excel import (build_workbook, read_workbook_tracking,
+from recce import ad
+from recce.core import parser, scanner
+from recce.vuln import exploits
+from recce.core import tracking as tr
+from recce.report.formats import xlsx
+from recce.core.models import Account, Host, Port, Script, Vuln
+from recce.report.excel import (build_workbook, read_workbook_tracking,
                                        update_workbook)
-from recce.store import Store
-from recce.targets import apply_exclusions, load_targets
+from recce.core.store import Store
+from recce.core.targets import apply_exclusions, load_targets
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
@@ -69,7 +71,7 @@ class TargetsTest(unittest.TestCase):
         self.assertEqual(hosts, ["10.200.37.0"])
 
     def test_exclude_accepts_ips_cidrs_and_file(self):
-        from recce.targets import apply_exclusions, expand_excludes
+        from recce.core.targets import apply_exclusions, expand_excludes
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "ex.txt")
             with open(f, "w") as fh:
@@ -134,8 +136,8 @@ class ParserTest(unittest.TestCase):
         """Regression: a CVSS vector string ('CVSS:3.1/AV:N/...') must not be
         read as base score 3.1 (which downgraded criticals to 'low'); the
         'Base Score' phrasing must be recognized."""
-        from recce.parser import _classify_vuln
-        from recce.models import Script, Port
+        from recce.core.parser import _classify_vuln
+        from recce.core.models import Script, Port
         p = Port(portid=443, protocol="tcp", service="https")
         # Vector + explicit base score 9.8 -> must classify critical, not low.
         out = ("VULNERABLE\nCVE-2021-44228\n"
@@ -152,8 +154,8 @@ class ParserTest(unittest.TestCase):
         """Regression (audit): a patched host whose NSE script prints
         'State: NOT VULNERABLE' must NOT produce a Vuln — the substring
         'VULNERABLE' inside 'NOT VULNERABLE' previously created a false high."""
-        from recce.parser import _classify_vuln
-        from recce.models import Script, Port
+        from recce.core.parser import _classify_vuln
+        from recce.core.models import Script, Port
         p = Port(portid=445, protocol="tcp", service="microsoft-ds")
         self.assertIsNone(_classify_vuln(
             "10.0.0.9", p, Script(id="smb-vuln-ms17-010",
@@ -176,8 +178,8 @@ class VulnDbRangeTest(unittest.TestCase):
     """Regression (audit): version-range accuracy for false-finding-prone sigs."""
 
     def _ssh(self, ver):
-        from recce import vulndb
-        from recce.models import Host, Port
+        from recce.vuln import vulndb
+        from recce.core.models import Host, Port
         h = Host(ip="1.1.1.1", ports=[Port(portid=22, protocol="tcp", service="ssh",
                                            product="OpenSSH", version=ver)])
         vulndb.assess_host_inplace(h)
@@ -190,8 +192,8 @@ class VulnDbRangeTest(unittest.TestCase):
 
     def test_os_version_maps_windows_product_names(self):
         # BlueKeep os_lt gate needs an NT version from nmap's product-name OS string.
-        from recce import vulndb
-        from recce.models import Host
+        from recce.vuln import vulndb
+        from recce.core.models import Host
         self.assertEqual(vulndb._os_version(Host(ip="x", os_name="Microsoft Windows 7")), "6.1")
         self.assertEqual(vulndb._os_version(
             Host(ip="x", os_name="Microsoft Windows Server 2008 R2")), "6.1")
@@ -318,7 +320,7 @@ class CredEnumTest(unittest.TestCase):
     )
 
     def test_parse_nxc_smb(self):
-        from recce import credenum as c
+        from recce.creds import credenum as c
         d = c.parse_nxc_smb(self.NXC)
         self.assertTrue(d["admin"])
         self.assertIn("ADMIN$", [s["name"] for s in d["shares"]])
@@ -326,7 +328,7 @@ class CredEnumTest(unittest.TestCase):
         self.assertEqual(d["passpol"]["account lockout threshold"], "none")
 
     def test_parse_roasting(self):
-        from recce import credenum as c
+        from recce.creds import credenum as c
         spns = c.parse_getuserspns(
             "MSSQL/dc.corp.local  sqlsvc  Domain Users  2020\n"
             "$krb5tgs$23$*sqlsvc$CORP.LOCAL$MSSQL*$deadbeef")
@@ -336,7 +338,7 @@ class CredEnumTest(unittest.TestCase):
         self.assertEqual(asrep[0]["name"], "svc-web")
 
     def test_parse_secretsdump_and_ssh(self):
-        from recce import credenum as c
+        from recce.creds import credenum as c
         sd = c.parse_secretsdump(
             "Administrator:500:aad3b435b51404eeaad3b435b51404ee:"
             "31d6cfe0d16ae931b73c59d7e0c089c0:::")
@@ -350,7 +352,7 @@ class CredEnumTest(unittest.TestCase):
         self.assertIn("/usr/bin/find", ssh["suid"])
 
     def test_fold_into_host_and_quickwins(self):
-        from recce import credenum as c
+        from recce.creds import credenum as c
         d = c.parse_nxc_smb(self.NXC)
         h = Host(ip="10.0.0.10", os_family="Windows", roles=["Domain Controller"],
                  ports=[Port(portid=445, state="open"),
@@ -369,7 +371,7 @@ class CredEnumTest(unittest.TestCase):
     def test_dual_account_user_enumerates_admin_dumps(self):
         """Low-priv account enumerates; privileged account does the admin-only
         power moves (confirm admin reach + secretsdump), labelled per account."""
-        from recce import credenum as c
+        from recce.creds import credenum as c
         used = []
 
         def fake_nxc(ip, creds):
@@ -404,7 +406,7 @@ class CredEnumTest(unittest.TestCase):
     def test_missing_tool_is_not_reported_as_auth_fail(self):
         """A missing netexec (run_nxc_smb -> (None, None)) must NOT record a FAIL
         cell nor attempt secretsdump - it's a tooling gap, not a bad credential."""
-        from recce import credenum as c
+        from recce.creds import credenum as c
         dumped = []
         onx, osd = c.run_nxc_smb, c.run_secretsdump
         c.run_nxc_smb = lambda ip, creds: (None, None)          # tool absent
@@ -422,7 +424,7 @@ class CredEnumTest(unittest.TestCase):
 
     def test_secretsdump_skipped_when_admin_auth_rejected(self):
         """secretsdump must not run where the admin bind was rejected."""
-        from recce import credenum as c
+        from recce.creds import credenum as c
         dumped = []
         onx, osd, odc = c.run_nxc_smb, c.run_secretsdump, c._is_dc
         # Both accounts authenticate but neither is admin (auth True, admin False).
@@ -448,7 +450,7 @@ class CredEnumTest(unittest.TestCase):
 
     def test_smb_error_records_err_not_fail(self):
         """A tool/connection error (None, err) is ERR, distinct from a FAIL."""
-        from recce import credenum as c
+        from recce.creds import credenum as c
         onx = c.run_nxc_smb
         c.run_nxc_smb = lambda ip, creds: (None, "connection refused")
         try:
@@ -461,7 +463,7 @@ class CredEnumTest(unittest.TestCase):
         self.assertFalse(auth["user"]["auth"])
 
     def test_ssh_finding_and_facts_recorded(self):
-        from recce import credenum as c
+        from recce.creds import credenum as c
         h = Host(ip="10.0.0.5", ports=[Port(portid=22, state="open")])
         c._fold_ssh(h, {"id": "uid=0(root)", "kernel": "Linux 5.4", "os": "Ubuntu",
                         "sudo": ["(ALL) NOPASSWD: ALL"], "suid": ["/opt/weird"]})
@@ -472,7 +474,7 @@ class CredEnumTest(unittest.TestCase):
 
     def test_tool_gating_no_crash_when_absent(self):
         # With no external tools present, runners return (None/[], None) - no raise.
-        from recce import credenum as c
+        from recce.creds import credenum as c
         h = Host(ip="10.0.0.9", os_family="Windows",
                  ports=[Port(portid=445, state="open")])
         issues, auth = c.enrich_host(h, {"username": "u", "password": "p"}, None)
@@ -500,7 +502,7 @@ class RobustnessTest(unittest.TestCase):
         self.assertEqual(outcome.returncode, 127)
 
     def test_credenum_run_survives_non_utf8(self):
-        from recce import credenum
+        from recce.creds import credenum
         out, err = credenum._run(
             ["python3", "-c",
              "import sys; sys.stdout.buffer.write(b'\\xff\\xfe done')"])
@@ -542,7 +544,7 @@ class RobustnessTest(unittest.TestCase):
     def test_docx_survives_control_chars(self):
         import xml.etree.ElementTree as ET
         import zipfile
-        from recce.docx import Document
+        from recce.report.formats.docx import Document
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "t.docx")
             doc = Document()
@@ -554,7 +556,7 @@ class RobustnessTest(unittest.TestCase):
                 ET.fromstring(z.read("word/document.xml"))
 
     def test_store_raises_clean_error_on_corrupt_db(self):
-        from recce.store import Store, StoreError
+        from recce.core.store import Store, StoreError
         with tempfile.TemporaryDirectory() as d:
             bad = os.path.join(d, "results.sqlite")
             with open(bad, "wb") as fh:
@@ -567,7 +569,7 @@ class RobustnessTest(unittest.TestCase):
         # result (caller exits 1), not a traceback. Exercised via _discover so the
         # test doesn't depend on nmap being installed.
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             paths = cli._open_paths(d)
             store = Store(paths["db"])
@@ -677,7 +679,7 @@ class ScanHardeningTest(unittest.TestCase):
 
 class ProbesTest(unittest.TestCase):
     def test_port_classification(self):
-        from recce import probes
+        from recce.services import probes
         self.assertTrue(probes._is_tls(Port(portid=443, service="https")))
         self.assertTrue(probes._is_tls(Port(portid=8443, service="http", tunnel="ssl")))
         self.assertFalse(probes._is_tls(Port(portid=80, service="http")))
@@ -686,7 +688,7 @@ class ProbesTest(unittest.TestCase):
         self.assertFalse(probes._is_http(Port(portid=22, service="ssh")))
 
     def test_http_header_findings_flag_missing_headers(self):
-        from recce import probes
+        from recce.services import probes
         port = Port(portid=80, service="http")
         # Server present with a version, but security headers absent.
         headers = {"server": "Apache/2.4.41", "content-type": "text/html"}
@@ -708,7 +710,7 @@ class ProbesTest(unittest.TestCase):
                 self.assertTrue(f.cwes)
 
     def test_http_findings_none_when_unreachable(self):
-        from recce import probes
+        from recce.services import probes
         orig = probes._fetch_headers
         probes._fetch_headers = lambda ip, p, tls: None
         try:
@@ -717,13 +719,13 @@ class ProbesTest(unittest.TestCase):
             probes._fetch_headers = orig
 
     def test_parse_cert_time(self):
-        from recce import probes
+        from recce.services import probes
         epoch = probes._parse_cert_time("Jun  1 12:00:00 2030 GMT")
         self.assertIsNotNone(epoch)
         self.assertIsNone(probes._parse_cert_time("not a date"))
 
     def test_probe_host_dedups(self):
-        from recce import probes
+        from recce.services import probes
         h = Host(ip="10.0.0.9", ports=[Port(portid=80, service="http")])
         headers = {"server": "nginx"}
         orig = probes._fetch_headers
@@ -764,7 +766,7 @@ class ExploitsTest(unittest.TestCase):
 
     def test_exploit_tracking_key_and_coverage(self):
         h = Host(ip="10.0.0.9", subnet="10.0.0.0/24")
-        from recce.models import Exploit
+        from recce.core.models import Exploit
         h.exploits = [Exploit(ip="10.0.0.9", port=21, edb_id="17491")]
         keys = tr.item_keys([h])
         self.assertIn(tr.exploit_key("10.0.0.9", 21, "17491"), keys["exploits"])
@@ -773,8 +775,8 @@ class ExploitsTest(unittest.TestCase):
 
 class SubnetCoverageTest(unittest.TestCase):
     def test_overview_includes_empty_scope_subnet(self):
-        from recce.report_excel import build_workbook
-        from recce import xlsx
+        from recce.report.excel import build_workbook
+        from recce.report.formats import xlsx
         hosts = [Host(ip="10.0.10.5", subnet="10.0.10.0/24", enumerated=True)]
         scope = {"10.0.10.0/24": 254, "10.0.99.0/24": 254}  # 2nd has no live hosts
         with tempfile.TemporaryDirectory() as d:
@@ -786,7 +788,7 @@ class SubnetCoverageTest(unittest.TestCase):
         self.assertIn("10.0.10.0/24", subnets)
 
     def test_checklist_grouped_by_subnet(self):
-        from recce.report_excel import _spec_checklist
+        from recce.report.excel import _spec_checklist
         # up_reason set: a real discovery reply keeps a 0-port host on the list (the
         # Checklist shows only confirmed-up hosts).
         hosts = [Host(ip="10.0.20.9", subnet="10.0.20.0/24", up_reason="syn-ack"),
@@ -801,9 +803,10 @@ class SubnetCoverageTest(unittest.TestCase):
         self.assertNotIn("Subnet", rows[0]["data"])
 
     def test_checklist_collapsible_band_rollup_and_risk_sort(self):
-        from recce.report_excel import build_workbook
-        from recce.models import Vuln
-        from recce import xlsx as _x, tracking as _tr
+        from recce.report.excel import build_workbook
+        from recce.core.models import Vuln
+        from recce.core import tracking as _tr
+        from recce.report.formats import xlsx as _x
         crit = Host(ip="10.0.10.9", subnet="10.0.10.0/24", state="up", enumerated=True,
                     ports=[Port(portid=445, service="smb")],
                     vulns=[Vuln(ip="10.0.10.9", port=445, protocol="tcp", script_id="x",
@@ -842,7 +845,7 @@ class AuditRegressionTest(unittest.TestCase):
     def test_store_merge_preserves_port_enrichment_fields(self):
         # binary/detect_source/banner (set by ingest/deploy on an existing port) must
         # survive a later merge, not be dropped.
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             st = Store(os.path.join(d, "s.sqlite"))
             st.upsert_host(Host(ip="10.0.0.5",
@@ -857,8 +860,8 @@ class AuditRegressionTest(unittest.TestCase):
             st.close()
 
     def test_store_merge_folds_account_attrs(self):
-        from recce.store import Store
-        from recce.models import Account
+        from recce.core.store import Store
+        from recce.core.models import Account
         with tempfile.TemporaryDirectory() as d:
             st = Store(os.path.join(d, "s.sqlite"))
             st.upsert_host(Host(ip="10.0.0.5", accounts=[Account(
@@ -873,7 +876,7 @@ class AuditRegressionTest(unittest.TestCase):
 
     def test_smb2_negotiate_rejects_error_response(self):
         import struct
-        from recce import smb
+        from recce.services import smb
         # A valid NEGOTIATE OK (command 0, status 0, StructureSize 65) parses...
         hdr = b"\xfeSMB" + b"\x40\x00" + b"\x00\x00" + b"\x00\x00\x00\x00" + \
               b"\x00\x00" + b"\x01\x00" + b"\x00" * (64 - 16)
@@ -889,7 +892,7 @@ class AuditRegressionTest(unittest.TestCase):
             b"\x00\x00\x00\x00" + err_hdr + b"\x09\x00" + b"\x00" * 6))
 
     def test_ftp_write_proof_flags_failed_cleanup(self):
-        from recce import ftp
+        from recce.services import ftp
         ok = ftp.write_proof_finding("1.2.3.4", 21,
                                      {"writable": True, "cleanup_ok": True,
                                       "evidence": "x", "marker": "m.txt"}, None)
@@ -901,8 +904,8 @@ class AuditRegressionTest(unittest.TestCase):
         self.assertNotIn("fully reversible", bad["detail"])
 
     def test_nullsession_verdict_needs_anonymous_marker(self):
-        from recce import proofs
-        from recce.models import Vuln, Host
+        from recce.vuln import proofs
+        from recce.core.models import Vuln, Host
         h = Host(ip="1.1.1.1")
         # A credentialed share listing (no anon marker) -> LIKELY, not a false CONFIRMED.
         cred = Vuln(ip="1.1.1.1", port=445, protocol="tcp", script_id="smb-enum-shares",
@@ -916,7 +919,7 @@ class AuditRegressionTest(unittest.TestCase):
         self.assertEqual(proofs._v_nullsession(h, None, anon)[0], proofs.CONFIRMED)
 
     def test_checklist_sqref_is_range_compressed(self):
-        from recce.report_excel import _col_sqref, build_workbook
+        from recce.report.excel import _col_sqref, build_workbook
         # Unit: contiguous rows collapse to one range token; gaps split runs.
         self.assertEqual(_col_sqref("A", [4, 5, 6, 8, 9]), "A4:A6 A8:A9")
         self.assertEqual(_col_sqref("J", [4]), "J4")
@@ -945,8 +948,8 @@ class AuditRegressionTest(unittest.TestCase):
         # The shared deep-service fold helper must replace THIS source's prior vulns
         # (a re-run doesn't duplicate) while leaving other sources untouched.
         from recce import cli
-        from recce.store import Store
-        from recce.models import Vuln
+        from recce.core.store import Store
+        from recce.core.models import Vuln
 
         def mk(src, title):
             return Vuln(ip="10.0.0.5", port=445, protocol="tcp", script_id="x",
@@ -963,7 +966,7 @@ class AuditRegressionTest(unittest.TestCase):
             import contextlib as _c
             with _c.redirect_stdout(_io.StringIO()):
                 cli._fold_service_findings(st, [st.get_host("10.0.0.5")], analysis,
-                                           "smb", __import__("recce.smb", fromlist=["x"]).findings_to_vulns,
+                                           "smb", __import__("recce.services.smb", fromlist=["x"]).findings_to_vulns,
                                            "SMB")
             got = st.get_host("10.0.0.5")
             titles = {v.title for v in got.vulns}
@@ -977,7 +980,7 @@ class AuditRegressionTest(unittest.TestCase):
         # The 5 service modules now delegate to svccommon; the source label, the
         # script_id prefix (k8s differs from its 'kubernetes' source) and the default
         # port must survive.
-        from recce import smb, kubernetes, docker
+        from recce.services import smb, kubernetes, docker
         f = {"target": "1.2.3.4", "title": "X", "severity": "high",
              "detail": "d", "cwes": ["CWE-306"]}
         vs = smb.findings_to_vulns([dict(f)])["1.2.3.4"][0]
@@ -990,8 +993,8 @@ class AuditRegressionTest(unittest.TestCase):
         self.assertEqual((dv.source, dv.port), ("docker", 2375))
 
     def test_eol_recipe_does_not_swallow_rce_findings(self):
-        from recce import proofs
-        from recce.models import Vuln
+        from recce.vuln import proofs
+        from recce.core.models import Vuln
 
         def mk(t):
             return Vuln(ip="1.1.1.1", port=445, protocol="tcp", script_id="x",
@@ -1013,7 +1016,7 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
     def test_vuln_key_distinguishes_udp_from_tcp(self):
         # A udp finding must not collapse onto a distinct tcp finding on the same
         # port/script/title; the tcp key stays byte-for-byte stable (backward compat).
-        from recce.models import Vuln
+        from recce.core.models import Vuln
         common = dict(ip="10.0.0.1", port=161, script_id="svc", title="Unencrypted service")
         tcp = Vuln(protocol="tcp", **common)
         udp = Vuln(protocol="udp", **common)
@@ -1024,7 +1027,7 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
     def test_from_json_tolerates_explicit_null_lists(self):
         # A hand-edited/corrupt results.sqlite with explicit JSON null for the list
         # fields must load (the whole point of from_json's tolerance), not TypeError.
-        from recce.models import Host
+        from recce.core.models import Host
         h = Host.from_json({"ip": "10.0.0.2", "ports": None, "vulns": None,
                             "accounts": None, "exploits": None, "host_scripts": None})
         self.assertEqual(h.ip, "10.0.0.2")
@@ -1038,7 +1041,7 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
         self.assertEqual(h2.vulns[0].evidence, [])
 
     def test_gnmap_preserves_version_containing_slash(self):
-        from recce import parser
+        from recce.core import parser
         line = ("Host: 10.0.0.4 ()\tPorts: 443/open/tcp//http//Apache httpd 2.2.14 "
                 "((Ubuntu) mod_ssl/2.2.14 OpenSSL/0.9.8k)/\n")
         with tempfile.NamedTemporaryFile("w", suffix=".gnmap", delete=False) as f:
@@ -1052,7 +1055,7 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
         self.assertEqual(p.version, "2.2.14")           # was silently truncated/lost
 
     def test_parse_normal_reads_ipv6_target(self):
-        from recce import parser
+        from recce.core import parser
         txt = "Nmap scan report for 2001:db8::1\n22/tcp open ssh OpenSSH 8.2p1\n"
         with tempfile.NamedTemporaryFile("w", suffix=".nmap", delete=False) as f:
             f.write(txt); path = f.name
@@ -1065,7 +1068,7 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
         self.assertEqual(len(hosts[0].ports), 1)
 
     def test_xml_import_refuses_entity_declaration(self):
-        from recce import parser
+        from recce.core import parser
         bomb = ('<?xml version="1.0"?><!DOCTYPE r [<!ENTITY a "x">]>'
                 '<nmaprun><host><status state="up"/>'
                 '<address addr="10.0.0.5" addrtype="ipv4"/></host></nmaprun>')
@@ -1077,7 +1080,7 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
             os.unlink(path)
 
     def test_script_args_quote_credentials(self):
-        from recce import scanner
+        from recce.core import scanner
         self.assertEqual(scanner._script_arg_val("a,b{c}"), '"a,b{c}"')
         args = scanner._creds_args({"username": "u", "password": "p,w{d}"})
         joined = args[1]                                 # the --script-args value
@@ -1087,7 +1090,7 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
     def test_ftp_cleartext_finding_reachable_without_anonymous(self):
         # The "no AUTH TLS" cleartext finding must fire for an auth-REQUIRED server
         # (the common case), not only when anonymous login is open.
-        from recce import ftp
+        from recce.services import ftp
         h = Host(ip="10.0.0.6", ports=[Port(portid=21, service="ftp", state="open")])
         pr = {("10.0.0.6", 21): {"anonymous": False, "auth_tls": False,
                                  "banner": "vsftpd 3.0.3"}}
@@ -1095,13 +1098,13 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
         self.assertTrue(any("cleartext" in t for t in titles))
 
     def test_redis_single_component_version_not_flagged_eol(self):
-        from recce import redis
+        from recce.services.db import redis
         self.assertFalse(redis._old_version("6"))        # was True ([6] < [6,0])
         self.assertFalse(redis._old_version("6.2"))
         self.assertTrue(redis._old_version("5.9"))
 
     def test_docx_labels_jpeg_by_magic_bytes(self):
-        from recce import docx
+        from recce.report.formats import docx
         self.assertEqual(docx._img_format(b"\xff\xd8\xff\xe0" + b"\x00" * 20), "jpg")
         self.assertEqual(docx._img_format(b"\x89PNG\r\n\x1a\n"), "png")
         d = docx.Document()
@@ -1112,7 +1115,7 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
         self.assertTrue(any(name.endswith(".jpg") for name, _ in d._media))
 
     def test_mask_short_secret_hides_chars_and_length(self):
-        from recce import report_html as rh
+        from recce.report import html as rh
         masked = rh._mask_secret("P@ss", "password")     # 4 chars
         self.assertNotIn("P", masked)                    # no boundary char
         self.assertNotIn("chars", masked)                # no exact length
@@ -1120,7 +1123,7 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
         self.assertIn("[9 chars]", rh._mask_secret("longsec99", "password"))
 
     def test_poc_url_strips_shell_metacharacters(self):
-        from recce import poc
+        from recce.act import poc
 
         class V:
             output = "reachable at http://evil$(reboot)/path"
@@ -1150,7 +1153,7 @@ class ArgvCredentialDisclosureTest(unittest.TestCase):
     via env (sshpass), a 0600 file (ldapsearch -y), or stdin (impacket getpass)."""
 
     def test_run_tool_env_extra_delivered_and_off_argv(self):
-        from recce import util
+        from recce.core import util
         script = ("import os,sys;"
                   "print('ARGV='+repr(sys.argv[1:]));"
                   "print('ENVPW='+repr(os.environ.get('SSHPASS','')))")
@@ -1163,7 +1166,7 @@ class ArgvCredentialDisclosureTest(unittest.TestCase):
     def test_run_tool_stdin_answers_getpass_off_argv(self):
         # The mechanism impacket relies on: password answered to getpass() over stdin,
         # new_session detaches the tty so getpass falls back to stdin.
-        from recce import util
+        from recce.core import util
         script = ("import sys,getpass;"
                   "print('ARGV='+repr(sys.argv[1:]));"
                   "pw=getpass.getpass('Password:');"
@@ -1177,7 +1180,7 @@ class ArgvCredentialDisclosureTest(unittest.TestCase):
         self.assertNotIn("p@ss", out.split("PW=")[0])    # never on argv
 
     def test_impacket_targets_carry_no_password(self):
-        from recce import credenum
+        from recce.creds import credenum
         captured = {}
 
         def fake_run(cmd, timeout=120, **kw):
@@ -1193,7 +1196,7 @@ class ArgvCredentialDisclosureTest(unittest.TestCase):
         self.assertTrue(captured["kw"].get("new_session"))
 
     def test_mssqlclient_target_has_no_password(self):
-        from recce import mssql
+        from recce.services.db import mssql
         with mock.patch.object(mssql, "mssqlclient_tool", return_value="impacket-mssqlclient"):
             cmd = mssql._mssqlclient_cmd("10.0.0.5",
                                          {"user": "sa", "secret": "S3cret!", "domain": ""},
@@ -1222,13 +1225,13 @@ class ArgvCredentialDisclosureTest(unittest.TestCase):
         self.assertEqual(seen["filecontent"], "S3cret!")    # whole file, no newline
 
     def test_deploy_sshpass_password_via_env_not_argv(self):
-        from recce import deploy
+        from recce.creds import deploy
         seen = {}
 
         def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
             seen["argv"], seen["env"] = argv, env
             return 0, "recce-enum host=x\n", ""
-        with mock.patch("recce.deploy.shutil.which", return_value="/usr/bin/sshpass"), \
+        with mock.patch("recce.creds.deploy.shutil.which", return_value="/usr/bin/sshpass"), \
                 mock.patch.object(deploy, "_run", side_effect=fake_run):
             deploy.run_ssh("1.2.3.4", {"username": "u", "password": "S3cret!"}, "SCRIPT", 60)
         self.assertIn("sshpass", seen["argv"])
@@ -1237,7 +1240,7 @@ class ArgvCredentialDisclosureTest(unittest.TestCase):
         self.assertEqual(seen["env"], {"SSHPASS": "S3cret!"})
 
     def test_bloodhound_impacket_target_password_via_stdin(self):
-        from recce import bloodhound as bh
+        from recce.ad import bloodhound as bh
         creds = {"domain": "CORP.LOCAL", "user": "alice", "secret": "S3cret!",
                  "is_hash": False, "dc_ip": "10.0.0.1"}
         base, flags, stdin_pw = bh._impacket_target(creds)
@@ -1251,7 +1254,7 @@ class ArgvCredentialDisclosureTest(unittest.TestCase):
         self.assertIsNone(hstdin)
 
     def test_deploy_wmiexec_password_via_stdin_not_argv(self):
-        from recce import deploy
+        from recce.creds import deploy
         seen = {}
 
         def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
@@ -1271,7 +1274,7 @@ class HostUpCertaintyTest(unittest.TestCase):
     write a live host off as down. is_up is the single source of that judgement."""
 
     def test_is_up_only_on_positive_evidence(self):
-        from recce.models import Vuln
+        from recce.core.models import Vuln
         # An open port is unambiguous proof.
         self.assertTrue(Host(ip="1.1.1.1",
                              ports=[Port(portid=22, state="open")]).is_up)
@@ -1297,7 +1300,7 @@ class HostUpCertaintyTest(unittest.TestCase):
         self.assertFalse(Host(ip="1.1.1.1").is_up)
 
     def test_checklist_hides_unconfirmed_keeps_confirmed(self):
-        from recce.report_excel import build_workbook
+        from recce.report.excel import build_workbook
         confirmed = Host(ip="10.0.0.5", subnet="10.0.0.0/24", state="up",
                          up_reason="syn-ack", ports=[Port(portid=445, state="open")])
         phantom = Host(ip="10.0.0.6", subnet="10.0.0.0/24", state="up",
@@ -1313,7 +1316,7 @@ class HostUpCertaintyTest(unittest.TestCase):
         self.assertNotIn("10.0.0.6", ips)         # unconfirmed phantom hidden
 
     def test_checklist_carries_legend_above_header_and_round_trips(self):
-        from recce.report_excel import (build_workbook, read_workbook_tracking,
+        from recce.report.excel import (build_workbook, read_workbook_tracking,
                                          CHECKLIST_TITLE)
         h = Host(ip="10.0.0.5", subnet="10.0.0.0/24", state="up", enumerated=True,
                  ports=[Port(portid=445, service="smb", state="open", vuln_scanned=True)])
@@ -1332,7 +1335,7 @@ class HostUpCertaintyTest(unittest.TestCase):
             self.assertTrue(back[tr.step_key("vuln", "10.0.0.5")][0])
 
     def test_overview_tallies_unconfirmed_hosts(self):
-        from recce.report_excel import build_workbook
+        from recce.report.excel import build_workbook
         confirmed = Host(ip="10.0.0.5", subnet="10.0.0.0/24",
                          ports=[Port(portid=445, state="open")])
         phantom = Host(ip="10.0.0.6", subnet="10.0.0.0/24", up_reason="user-set")
@@ -1346,7 +1349,8 @@ class HostUpCertaintyTest(unittest.TestCase):
 
     def test_udp_fallback_flips_silent_pn_host_to_up(self):
         # A -Pn host silent on TCP gets a UDP liveness ping; a reply confirms it up.
-        from recce import cli, scanner
+        from recce import cli
+        from recce.core import scanner
         saved = (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
                  scanner.verify_port_scan, scanner.udp_liveness_probe,
                  scanner.enum_scan, cli.np.parse_nmap_xml)
@@ -1385,7 +1389,8 @@ class HostUpCertaintyTest(unittest.TestCase):
     def test_discovery_reply_reason_propagates_and_skips_udp(self):
         # A host discovered live carries its real reply reason into the stored host,
         # and the UDP fallback is NOT wasted on a host we already proved is up.
-        from recce import cli, scanner
+        from recce import cli
+        from recce.core import scanner
         saved = (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
                  scanner.verify_port_scan, scanner.udp_liveness_probe,
                  scanner.enum_scan, cli.np.parse_nmap_xml)
@@ -1414,7 +1419,7 @@ class HostUpCertaintyTest(unittest.TestCase):
 
     def test_merge_never_downgrades_proof_of_life(self):
         # A real reply must survive a later -Pn re-scan that only knows "user-set".
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             store = Store(os.path.join(d, "s.sqlite"))
             store.upsert_host(Host(ip="10.0.0.5", up_reason="echo-reply"))
@@ -1427,7 +1432,7 @@ class HostUpCertaintyTest(unittest.TestCase):
 
 class VulnDbTest(unittest.TestCase):
     def test_version_comparator(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         self.assertLess(vulndb._cmp("2.4.41", "2.4.53"), 0)
         self.assertGreater(vulndb._cmp("2.4.50", "2.4.49"), 0)
         self.assertLess(vulndb._cmp("8.2p1", "8.5"), 0)
@@ -1438,7 +1443,7 @@ class VulnDbTest(unittest.TestCase):
         """Regression: MariaDB 10.x announces '5.5.5-10.x.y-MariaDB'. The
         leading 5.5.5 must not be read as the version, or a patched MariaDB gets
         a bogus EOL medium + high CVE-2012-2122."""
-        from recce import vulndb
+        from recce.vuln import vulndb
         self.assertEqual(vulndb._clean_version("5.5.5-10.11.6-MariaDB-0+deb12u1"),
                          "10.11.6-MariaDB-0+deb12u1")
         h = Host(ip="10.0.0.5", ports=[Port(portid=3306, service="mysql",
@@ -1455,8 +1460,8 @@ class VulnDbTest(unittest.TestCase):
     def test_product_advisory_reported_on_every_matching_port(self):
         """Regression: a product-only advisory exposed on two ports must yield a
         finding per port (was deduped by title, dropping all but the first)."""
-        from recce import vulndb
-        from recce.report_docx import group_findings
+        from recce.vuln import vulndb
+        from recce.report.docx import group_findings
         h = Host(ip="10.0.0.5", ports=[
             Port(portid=8090, service="http", product="Atlassian Confluence", version=""),
             Port(portid=8091, service="http", product="Atlassian Confluence", version="")])
@@ -1468,7 +1473,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertEqual(sorted({a[1] for a in f.affected}), [8090, 8091])
 
     def test_exact_and_range_matches(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         h = Host(ip="10.0.0.9", os_name="Linux", ports=[
             Port(portid=21, service="ftp", product="vsftpd", version="2.3.4"),
             Port(portid=80, service="http", product="Apache httpd", version="2.4.41"),
@@ -1482,7 +1487,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertFalse(any("End-of-life MySQL" in t for t in titles))
 
     def test_findings_carry_remediation_and_source(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         h = Host(ip="10.0.0.9", ports=[Port(portid=21, service="ftp",
                  product="vsftpd", version="2.3.4")])
         vulndb.assess_host_inplace(h)
@@ -1493,7 +1498,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertTrue(v.remediation)
 
     def test_multiple_findings_per_port_have_distinct_keys(self):
-        from recce.models import Vuln
+        from recce.core.models import Vuln
         a = Vuln(ip="1.1.1.1", port=80, protocol="tcp", script_id="version-db",
                  title="Finding A")
         b = Vuln(ip="1.1.1.1", port=80, protocol="tcp", script_id="version-db",
@@ -1501,7 +1506,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertNotEqual(a.key, b.key)
 
     def test_no_version_no_false_positive(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         # product matches but no version -> a version-gated sig must not fire.
         h = Host(ip="10.0.0.9", ports=[Port(portid=80, service="http",
                  product="Apache httpd", version="")])
@@ -1509,11 +1514,11 @@ class VulnDbTest(unittest.TestCase):
         self.assertEqual(n, 0)
 
     def test_signature_database_is_large(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         self.assertGreaterEqual(vulndb.signature_count(), 80)
 
     def test_new_signature_categories_match(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         cases = {
             "ActiveMQ OpenWire transport": "ActiveMQ",
             "Oracle WebLogic admin httpd": "WebLogic",
@@ -1536,7 +1541,7 @@ class VulnDbTest(unittest.TestCase):
                             f"{product} -> expected a '{expect}' finding")
 
     def test_windows_advisories_are_os_gated(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         # A non-DC Windows host gets the Windows SMB advisories, but NOT ZeroLogon
         # (which attacks a domain controller's Netlogon only).
         win = Host(ip="1.1.1.1", os_family="Windows", os_name="Windows Server 2019",
@@ -1556,7 +1561,7 @@ class VulnDbTest(unittest.TestCase):
                              for w in ("SMBGhost", "PrintNightmare", "ZeroLogon")))
 
     def test_iis_mssql_seimpersonate_potato_advisories(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         h = Host(ip="10.0.10.50", os_family="Windows", os_name="Windows 11",
                  ports=[Port(portid=80, service="http",
                              product="Microsoft IIS httpd", version="10.0"),
@@ -1573,7 +1578,7 @@ class VulnDbTest(unittest.TestCase):
             self.assertIn("GodPotato", v.output + v.remediation or "")
 
     def test_zerologon_is_dc_only(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         # A real DC (Kerberos 88 + LDAP 389 + SMB 445) DOES get ZeroLogon.
         dc = Host(ip="10.0.10.10", os_family="Windows", os_name="Windows Server 2019",
                   ports=[Port(portid=88, service="kerberos-sec", state="open"),
@@ -1590,7 +1595,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertIn("ZeroLogon", " ".join(v.title for v in dc2.vulns))
 
     def test_jetty_version_gate(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         for ver, should in [("9.4.30.v20200611", True), ("9.4.50", False)]:
             h = Host(ip="1.1.1.1", ports=[Port(portid=8080, service="http",
                      product="Jetty", version=ver, state="open")])
@@ -1599,7 +1604,7 @@ class VulnDbTest(unittest.TestCase):
             self.assertEqual(hit, should, f"Jetty {ver}")
 
     def test_findings_carry_cwes(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         h = Host(ip="10.0.0.9", ports=[Port(portid=21, service="ftp",
                  product="vsftpd", version="2.3.4")])
         vulndb.assess_host_inplace(h)
@@ -1608,7 +1613,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertTrue(all(c.startswith("CWE-") for c in v.cwes))
 
     def test_advisory_signature_is_product_only_and_potential(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         # A product-only advisory (no version) should still fire, tagged potential.
         h = Host(ip="10.0.0.9", ports=[Port(portid=8080, service="http",
                  product="Apache Tomcat", version="")])
@@ -1619,7 +1624,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertTrue(adv[0].cwes)
 
     def test_every_signature_has_cwe_field(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         for sig in vulndb.SIGNATURES:
             self.assertIn("cwe", sig, f"{sig['title']} missing cwe")
             self.assertTrue(sig["cwe"], f"{sig['title']} empty cwe")
@@ -1670,7 +1675,7 @@ class PhaseModelTest(unittest.TestCase):
 
     def test_merge_vuln_results(self):
         from recce import cli
-        from recce.models import Vuln
+        from recce.core.models import Vuln
         h = self._host()
         parsed = Host(ip="10.0.0.5", ports=[Port(portid=80, service="http",
                       scripts=[Script(id="http-git", output="x")])],
@@ -1683,7 +1688,7 @@ class PhaseModelTest(unittest.TestCase):
 
 class TargetingTest(unittest.TestCase):
     def test_ip_matcher(self):
-        from recce.targets import ip_matcher
+        from recce.core.targets import ip_matcher
         m = ip_matcher(["10.0.0.5", "10.0.1.0/24", "192.168.1.10-12"])
         self.assertTrue(m("10.0.0.5"))       # exact ip
         self.assertTrue(m("10.0.1.99"))      # in cidr
@@ -1692,7 +1697,7 @@ class TargetingTest(unittest.TestCase):
         self.assertFalse(m("172.16.0.1"))
 
     def test_empty_matches_all(self):
-        from recce.targets import ip_matcher
+        from recce.core.targets import ip_matcher
         m = ip_matcher([])
         self.assertTrue(m("1.2.3.4"))
 
@@ -1706,21 +1711,21 @@ class PrivescModuleTest(unittest.TestCase):
     def test_windows_playbook(self):
         # The generic OS checklist now lives on the separate reference sheet
         # (playbook_rows), scoped to the OSes present in the engagement.
-        from recce import privesc
+        from recce.act import privesc
         h = Host(ip="10.0.0.5", os_family="Windows",
                  ports=[Port(portid=445, service="microsoft-ds")])
         oses = {r["os"] for r in privesc.playbook_rows([h])}
         self.assertEqual(oses, {"windows"})
 
     def test_linux_playbook(self):
-        from recce import privesc
+        from recce.act import privesc
         h = Host(ip="10.0.0.6", os_family="Linux",
                  ports=[Port(portid=22, service="ssh")])
         oses = {r["os"] for r in privesc.playbook_rows([h])}
         self.assertEqual(oses, {"linux"})
 
     def test_playbook_shows_both_oses_for_mixed_or_unknown_scope(self):
-        from recce import privesc
+        from recce.act import privesc
         mixed = [Host(ip="10.0.0.5", os_family="Windows"),
                  Host(ip="10.0.0.6", os_family="Linux")]
         self.assertEqual({r["os"] for r in privesc.playbook_rows(mixed)},
@@ -1730,8 +1735,8 @@ class PrivescModuleTest(unittest.TestCase):
                          {"windows", "linux"})
 
     def test_remote_finding_from_vuln(self):
-        from recce import privesc
-        from recce.models import Vuln
+        from recce.act import privesc
+        from recce.core.models import Vuln
         h = Host(ip="10.0.0.5", os_family="Windows")
         h.vulns = [Vuln(ip="10.0.0.5", port=445, protocol="tcp",
                         script_id="smb-vuln-ms17-010", title="ms17-010",
@@ -1740,7 +1745,7 @@ class PrivescModuleTest(unittest.TestCase):
         self.assertTrue(any("MS17-010" in r["vector"] for r in findings))
 
     def test_current_potato_playbook_and_service_hints(self):
-        from recce import privesc
+        from recce.act import privesc
         h = Host(ip="10.0.10.50", os_family="Windows", os_name="Windows 11",
                  ports=[Port(portid=80, service="http",
                              product="Microsoft IIS httpd", version="10.0"),
@@ -1913,7 +1918,7 @@ class ExploitPlanTest(unittest.TestCase):
             return fh.read()
 
     def _hosts(self):
-        from recce.models import Vuln, Account
+        from recce.core.models import Vuln, Account
         dc = Host(ip="10.0.10.5", hostnames=["dc01"], os_family="Windows",
                   roles=["Domain Controller"], smb_signing="not required",
                   accounts=[Account(ip="10.0.10.5", source="nse", kind="domain",
@@ -1937,7 +1942,7 @@ class ExploitPlanTest(unittest.TestCase):
         return [dc, ftp]
 
     def test_msf_mapping(self):
-        from recce import exploitplan as ep
+        from recce.act import exploitplan as ep
         self.assertEqual(ep._msf_for("smb-vuln-ms17-010 CVE-2017-0143")["module"],
                          "exploit/windows/smb/ms17_010_eternalblue")
         self.assertEqual(ep._msf_for("vsftpd 2.3.4 backdoor")["module"],
@@ -1951,7 +1956,7 @@ class ExploitPlanTest(unittest.TestCase):
         # of them - a confirmed finding of one of these (the demo engagement's own
         # flagship critical findings) silently got NO .rc from `recce exploitplan`,
         # despite the write-up step correctly naming a module that exists.
-        from recce import exploitplan as ep
+        from recce.act import exploitplan as ep
         self.assertEqual(ep._msf_for("Zerologon CVE-2020-1472")["module"],
                          "auxiliary/admin/dcerpc/cve_2020_1472_zerologon")
         self.assertEqual(ep._msf_for("Log4Shell CVE-2021-44228")["module"],
@@ -1972,8 +1977,8 @@ class ExploitPlanTest(unittest.TestCase):
         # privilege escalation", a real em-dash) - which would raise
         # UnicodeEncodeError on a platform whose default text encoding isn't UTF-8
         # (e.g. cp1252 on Windows, which recce explicitly ships an airgap build for).
-        from recce import exploitplan as ep
-        from recce.models import Vuln
+        from recce.act import exploitplan as ep
+        from recce.core.models import Vuln
         h = Host(ip="10.0.10.5", os_family="Windows",
                  ports=[Port(portid=445, service="microsoft-ds")],
                  vulns=[Vuln(ip="10.0.10.5", port=445, protocol="tcp",
@@ -1989,7 +1994,7 @@ class ExploitPlanTest(unittest.TestCase):
                 self.assertIn("10.0.10.5.sh", fh.read())
 
     def test_build_plan_safe_default(self):
-        from recce import exploitplan as ep
+        from recce.act import exploitplan as ep
         with tempfile.TemporaryDirectory() as d:
             s = ep.build_plan(self._hosts(), d, lhost="10.9.9.9")
             self.assertEqual(sorted(s["plans"]), ["10.0.10.30", "10.0.10.5"])
@@ -2008,7 +2013,7 @@ class ExploitPlanTest(unittest.TestCase):
             self.assertIn("ntlmrelayx", dc_sh)
 
     def test_run_arms_launch(self):
-        from recce import exploitplan as ep
+        from recce.act import exploitplan as ep
         with tempfile.TemporaryDirectory() as d:
             s = ep.build_plan(self._hosts(), d, lhost="10.9.9.9", run=True)
             eb = next(f for f in os.listdir(s["dir"]) if "eternalblue" in f)
@@ -2016,8 +2021,8 @@ class ExploitPlanTest(unittest.TestCase):
             self.assertRegex(rc, r"(?m)^exploit -j$")   # active, not commented
 
     def test_potential_findings_get_no_plan(self):
-        from recce import exploitplan as ep
-        from recce.models import Vuln
+        from recce.act import exploitplan as ep
+        from recce.core.models import Vuln
         h = Host(ip="10.0.0.9", os_family="Linux",
                  ports=[Port(portid=23, service="telnet")],
                  vulns=[Vuln(ip="10.0.0.9", port=23, protocol="tcp",
@@ -2029,7 +2034,7 @@ class ExploitPlanTest(unittest.TestCase):
             self.assertEqual(s["plans"], [])            # nothing confirmed -> no plan
 
     def test_actions_for_host_structured(self):
-        from recce import exploitplan as ep
+        from recce.act import exploitplan as ep
         dc = self._hosts()[0]                            # DC with ms17-010 + signing off
         acts = ep.actions_for_host(dc, lhost="10.9.9.9")
         kinds = {a["kind"] for a in acts}
@@ -2040,13 +2045,13 @@ class ExploitPlanTest(unittest.TestCase):
         self.assertIn("10.9.9.9", msf["cmd"])           # LHOST filled in
 
     def test_exploitation_sheet_unifies_actions(self):
-        from recce.report_excel import _spec_exploitation
+        from recce.report.excel import _spec_exploitation
         spec = _spec_exploitation(self._hosts())
         types = {r["data"]["Type"] for r in spec.rows}
         self.assertIn("remote (msf)", types)
 
     def test_services_sheet_has_enum_command(self):
-        from recce.report_excel import _spec_services
+        from recce.report.excel import _spec_services
         spec = _spec_services(self._hosts())
         self.assertIn("Enum command", [c[0] for c in spec.cols])
         cmds = [r["data"].get("Enum command", "") for r in spec.rows]
@@ -2063,7 +2068,7 @@ class IngestServiceTest(unittest.TestCase):
            "[!] SNMP community string works: 'public' (v2c)\n")
 
     def test_parse_service_output(self):
-        from recce import ingest
+        from recce.intake import ingest
         p = ingest.parse_service_output(self.OUT)
         self.assertTrue(p["is_service"])
         self.assertEqual(len(p["findings"]), 4)
@@ -2072,7 +2077,7 @@ class IngestServiceTest(unittest.TestCase):
         self.assertTrue(all(f["port"] == 445 for f in smb))
 
     def test_service_vulns_confidence_and_source(self):
-        from recce import ingest
+        from recce.intake import ingest
         vulns = ingest.service_findings_to_vulns(ingest.parse_service_output(self.OUT))
         adv = next(v for v in vulns if v.title.startswith("Test BlueKeep"))
         self.assertEqual(adv.confidence, "potential")   # advisory -> off writeups
@@ -2086,7 +2091,7 @@ class IngestServiceTest(unittest.TestCase):
         # Literal find_ strings copied verbatim from the real per-service scripts
         # (not hand-approximated), so this catches severity drift against what
         # recce-service.sh actually prints, not just an idealized fixture.
-        from recce import ingest
+        from recce.intake import ingest
         cases = [
             # elasticsearch.sh: RCE named mid-sentence, not right after "->" - the
             # old "-> rce" pattern missed it and fell through to medium.
@@ -2118,7 +2123,7 @@ class IngestServiceTest(unittest.TestCase):
         # updating the Python side (or a fixture) to match.
         import shutil
         import subprocess
-        from recce import ingest
+        from recce.intake import ingest
         bash = shutil.which("bash")
         if not bash:
             self.skipTest("bash not available")
@@ -2148,7 +2153,7 @@ class IngestServiceTest(unittest.TestCase):
 
     def test_ingest_service_output_into_store(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             db = os.path.join(d, "results.sqlite")
             st = Store(db)
@@ -2171,7 +2176,7 @@ class VersionTupleTest(unittest.TestCase):
     def test_openssh_patch_level_preserved(self):
         """Regression: greedy [a-z]* used to swallow the 'p', collapsing 9.3p1 and
         9.3p2 to the same tuple and losing the OpenSSH < 9.3p2 finding."""
-        from recce.vulndb import _ver_tuple, _cmp
+        from recce.vuln.vulndb import _ver_tuple, _cmp
         self.assertEqual(_ver_tuple("8.2p1"), (8, 2, 1))      # docstring example
         self.assertEqual(_ver_tuple("9.3p1"), (9, 3, 1))
         self.assertEqual(_ver_tuple("9.3p2"), (9, 3, 2))
@@ -2180,7 +2185,7 @@ class VersionTupleTest(unittest.TestCase):
         self.assertEqual(_cmp("2.3.4", "2.3.4a"), -1)          # ...still < a-suffix
 
     def test_openssh_9_3p1_flags_double_free(self):
-        from recce import vulndb
+        from recce.vuln import vulndb
         h = Host(ip="10.0.0.9", os_family="Linux",
                  ports=[Port(portid=22, service="ssh", product="OpenSSH",
                              version="9.3p1")])
@@ -2194,7 +2199,7 @@ class VersionTupleTest(unittest.TestCase):
         self.assertFalse(any("double-free" in v.title for v in h2.vulns))
 class PrivEscVerdictTest(unittest.TestCase):
     def test_verdict_orders_and_classifies(self):
-        from recce import privesc as pe
+        from recce.act import privesc as pe
         h = Host(ip="10.0.0.5", os_family="Linux", local_findings=[
             {"category": "sudo",
              "vector": "NOPASSWD sudo: /usr/bin/find -> GTFOBins 'find'",
@@ -2217,7 +2222,7 @@ class PrivEscVerdictTest(unittest.TestCase):
         self.assertEqual(idx, sorted(idx))
 
     def test_unswept_host_with_ports_gets_a_deploy_todo_not_a_checklist(self):
-        from recce import privesc as pe
+        from recce.act import privesc as pe
         rows = pe.plan(Host(ip="10.0.0.6", os_family="Windows",
                             ports=[Port(portid=445, service="microsoft-ds")]))
         self.assertEqual([r["type"] for r in rows], ["action"])
@@ -2226,7 +2231,7 @@ class PrivEscVerdictTest(unittest.TestCase):
     def test_dead_ip_produces_no_privesc_rows(self):
         # A host with no open ports and nothing observed (e.g. a network/broadcast
         # address that slipped into scope) must not fabricate privesc entries.
-        from recce import privesc as pe
+        from recce.act import privesc as pe
         self.assertEqual(pe.plan(Host(ip="10.200.37.0")), [])
         self.assertEqual(pe.all_rows([Host(ip="10.200.37.0")]), [])
 
@@ -2236,7 +2241,7 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
     scripts must flow through parsing, categorization, promotion and the playbook."""
 
     def test_new_sections_categorize(self):
-        from recce import ingest
+        from recce.intake import ingest
         loot = (
             "recce-enum  host=WEB01  user=svc  now\n"
             "==== Lateral movement & pivoting ====\n"
@@ -2254,7 +2259,7 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
         self.assertEqual(cats["Writable log"], "persistence")
 
     def test_high_value_lateral_findings_promote(self):
-        from recce import ingest
+        from recce.intake import ingest
         findings = [
             {"vector": "Unconstrained-delegation hosts: SRV01 -> coerce auth + capture a TGT"},
             {"vector": "Kerberoastable accounts (SPN set): svc_sql"},
@@ -2266,7 +2271,7 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
         self.assertTrue(any("Kubernetes" in t for t in titles))
 
     def test_playbook_maps_new_vectors(self):
-        from recce import playbook as pb
+        from recce.act import playbook as pb
         self.assertEqual(pb.for_text("Kerberoastable accounts (SPN set): svc",
                                      "windows")["id"], "win-kerberoast")
         self.assertEqual(pb.for_text("Unconstrained-delegation hosts: SRV01",
@@ -2312,7 +2317,8 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
         self.assertIn("UNKNOWN:[]", r.stdout)                   # no false technique
 
     def test_suid_static_analysis_and_secret_phrasings_map(self):
-        from recce import ingest, playbook as pb
+        from recce.act import playbook as pb
+        from recce.intake import ingest
         # The static-analysis SUID findings promote and map to a play.
         promoted = ingest.promote_to_vulns("10.0.0.5", [
             {"vector": "SUID PATH-hijack candidate: /usr/bin/foo invokes bare "
@@ -2331,7 +2337,8 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
         self.assertEqual(parsed["findings"][0]["category"], "creds")
 
     def test_windows_exact_exploit_findings_map_and_promote(self):
-        from recce import ingest, playbook as pb
+        from recce.act import playbook as pb
+        from recce.intake import ingest
         unq = ("Unquoted service path EXPLOITABLE: service 'Foo' runs as LocalSystem "
                "-> plant your payload at  C:\\Program Files\\Sub.exe  (dir 'C:\\Program "
                "Files' is writable), then: sc stop Foo & sc start Foo")
@@ -2349,7 +2356,7 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
         self.assertTrue(any("Writable service binary/registry" in t for t in titles))
 class PocRecipeTest(unittest.TestCase):
     def test_finding_text_selects_the_right_recipe(self):
-        from recce import poc
+        from recce.act import poc
         cases = {
             "SUID env-injection candidate: /usr/bin/foo reads LD_PRELOAD": "ld_preload",
             "/etc/passwd is WRITABLE -> add a UID 0 user": "linux_passwd",
@@ -2362,7 +2369,7 @@ class PocRecipeTest(unittest.TestCase):
             self.assertEqual(poc.recipe_key_for(text), key, text)
 
     def test_select_for_host_covers_confirmed_findings(self):
-        from recce import poc
+        from recce.act import poc
         h = Host(ip="10.0.0.5", local_findings=[
             {"category": "suid", "vector": "SUID env-injection candidate: /x reads LD_PRELOAD"},
             {"category": "writable", "vector": "/etc/passwd is WRITABLE -> add a UID 0 user"}])
@@ -2370,7 +2377,7 @@ class PocRecipeTest(unittest.TestCase):
         self.assertEqual(keys, {"ld_preload", "linux_passwd"})
 
     def test_write_files_and_plan_lines(self):
-        from recce import poc
+        from recce.act import poc
         with tempfile.TemporaryDirectory() as d:
             recipes = {k: poc.RECIPES[k] for k in ("ld_preload", "win_dll")}
             written = poc.write_files(d, recipes)
@@ -2382,8 +2389,8 @@ class PocRecipeTest(unittest.TestCase):
             self.assertIn("msfvenom", block)
 
     def test_web_pocs_per_finding(self):
-        from recce import poc
-        from recce.models import Host, Vuln
+        from recce.act import poc
+        from recce.core.models import Host, Vuln
 
         def v(sid, out):
             return Vuln(ip="10.0.0.5", port=443, protocol="tcp", script_id=sid,
@@ -2425,8 +2432,8 @@ class PocRecipeTest(unittest.TestCase):
                     self.assertEqual(r.returncode, 0, f"{f}: {r.stderr}")
 
     def test_exploitplan_writes_web_pocs(self):
-        from recce import exploitplan
-        from recce.models import Host, Vuln
+        from recce.act import exploitplan
+        from recce.core.models import Host, Vuln
         h = Host(ip="10.0.0.5", os_family="Linux", vulns=[
             Vuln(ip="10.0.0.5", port=80, protocol="tcp", script_id="web-git",
                  title="Exposed Git repository (.git)", output="GET http://10.0.0.5/.git/HEAD",
@@ -2445,7 +2452,7 @@ class PocRecipeTest(unittest.TestCase):
         gcc = shutil.which("gcc")
         if not gcc:
             self.skipTest("gcc not available")
-        from recce import poc
+        from recce.act import poc
         with tempfile.TemporaryDirectory() as d:
             poc.write_files(d, {"ld_preload": poc.RECIPES["ld_preload"]})
             src = os.path.join(d, "recce_poc_preload.c")
@@ -2456,8 +2463,8 @@ class PocRecipeTest(unittest.TestCase):
             self.assertTrue(os.path.exists(so))
 
     def test_exploitplan_writes_poc_files(self):
-        from recce import exploitplan
-        from recce.models import Vuln
+        from recce.act import exploitplan
+        from recce.core.models import Vuln
         h = Host(ip="10.0.0.5", os_family="Linux",
                  local_findings=[{"category": "writable",
                                   "vector": "/etc/passwd is WRITABLE -> add a UID 0 user"}])
@@ -2481,7 +2488,7 @@ class ProofEngineTest(unittest.TestCase):
         return Vuln(**base)
 
     def test_activemq_patched_is_false_positive(self):
-        from recce import proofs
+        from recce.vuln import proofs
         h = Host(ip="10.0.0.5", ports=[Port(portid=61616, service="activemq",
                                             product="Apache ActiveMQ", version="5.18.3",
                                             state="open")])
@@ -2491,7 +2498,7 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(r["verdict"], proofs.FALSE_POSITIVE)
 
     def test_activemq_old_with_openwire_is_likely(self):
-        from recce import proofs
+        from recce.vuln import proofs
         h = Host(ip="10.0.0.5", ports=[Port(portid=61616, service="activemq",
                                             product="Apache ActiveMQ", version="5.17.1",
                                             state="open")])
@@ -2510,7 +2517,7 @@ class ProofEngineTest(unittest.TestCase):
 
     def test_version_cve_findings_now_get_a_verdict(self):
         # Gap-1: version->CVE matches that previously had NO prove path.
-        from recce import proofs
+        from recce.vuln import proofs
         # regreSSHion: patched build -> FALSE POSITIVE (catches the over-flag).
         h = self._ver_host(22, "OpenSSH", "9.8p1", "OpenSSH regreSSHion pre-auth RCE",
                            ["CVE-2024-6387"])
@@ -2533,7 +2540,7 @@ class ProofEngineTest(unittest.TestCase):
             self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.CONFIRMED, title)
 
     def test_smb_signing_confirmed_vs_false_positive(self):
-        from recce import proofs
+        from recce.vuln import proofs
         h = Host(ip="10.0.0.5", smb_signing="not required",
                  ports=[Port(portid=445, service="microsoft-ds", state="open")])
         h.vulns = [self._vuln(port=445, title="SMB signing not required",
@@ -2543,7 +2550,7 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.FALSE_POSITIVE)
 
     def test_ms17_010_nse_state_drives_verdict(self):
-        from recce import proofs
+        from recce.vuln import proofs
         h = Host(ip="10.0.0.5", ports=[Port(portid=445, service="microsoft-ds", state="open")])
         h.vulns = [self._vuln(port=445, script_id="smb-vuln-ms17-010",
                               title="ms17-010", state="VULNERABLE", source="nse")]
@@ -2553,7 +2560,7 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.FALSE_POSITIVE)
 
     def test_seimpersonate_enabled_confirms_but_remote_only_inconclusive(self):
-        from recce import proofs
+        from recce.vuln import proofs
         # On-target enum says Enabled -> CONFIRMED.
         h = Host(ip="10.0.0.5", os_family="Windows",
                  local_findings=[{"category": "token",
@@ -2568,7 +2575,7 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(proofs.verify_host(h2)[0]["verdict"], proofs.INCONCLUSIVE)
 
     def test_confirmed_sorts_before_false_positive(self):
-        from recce import proofs
+        from recce.vuln import proofs
         h = Host(ip="10.0.0.5", smb_signing="not required",
                  ports=[Port(portid=445, state="open"),
                         Port(portid=61616, product="Apache ActiveMQ", version="5.18.5",
@@ -2581,7 +2588,7 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(verdicts[-1], proofs.FALSE_POSITIVE)
 
     def test_printnightmare_verdicts(self):
-        from recce import proofs
+        from recce.vuln import proofs
         # On-target LPE precondition present -> LIKELY.
         h = Host(ip="10.0.0.5", os_family="Windows", local_findings=[{"category": "hardening",
                  "vector": "PrintNightmare surface: Spooler running + PointAndPrint "
@@ -2594,7 +2601,7 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(proofs.verify_host(h2)[0]["verdict"], proofs.FALSE_POSITIVE)
 
     def test_bluekeep_os_gating(self):
-        from recce import proofs
+        from recce.vuln import proofs
         old = Host(ip="10.0.0.5", os_name="Windows 7 Professional",
                    ports=[Port(portid=3389, service="ms-wbt-server", state="open")])
         old.vulns = [self._vuln(port=3389, title="BlueKeep", ids=["CVE-2019-0708"])]
@@ -2606,7 +2613,7 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(proofs.verify_host(new)[0]["verdict"], proofs.FALSE_POSITIVE)
 
     def test_zerologon_only_on_dcs(self):
-        from recce import proofs
+        from recce.vuln import proofs
         dc = Host(ip="10.0.0.5", os_family="Windows",
                   ports=[Port(portid=88, service="kerberos", state="open"),
                          Port(portid=389, service="ldap", state="open")])
@@ -2618,7 +2625,7 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(proofs.verify_host(member)[0]["verdict"], proofs.FALSE_POSITIVE)
 
     def test_heartbleed_and_kerberoast(self):
-        from recce import proofs
+        from recce.vuln import proofs
         h = Host(ip="10.0.0.5", ports=[Port(portid=443, service="https", state="open")])
         h.vulns = [self._vuln(port=443, script_id="ssl-heartbleed", title="heartbleed",
                               state="VULNERABLE", source="nse")]
@@ -2630,7 +2637,7 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(proofs.verify_host(k)[0]["verdict"], proofs.CONFIRMED)
 
     def test_verification_sheet_builds(self):
-        from recce.report_excel import _spec_verification
+        from recce.report.excel import _spec_verification
         h = Host(ip="10.0.0.5", smb_signing="not required",
                  ports=[Port(portid=445, state="open")])
         h.vulns = [self._vuln(port=445, title="SMB signing not required",
@@ -2651,7 +2658,8 @@ class CredentialsTest(unittest.TestCase):
                      ports=[Port(portid=22, service="ssh")])]
 
     def test_parse_and_stack_dedupe(self):
-        from recce import cli, credentials as cr
+        from recce import cli
+        from recce.creds import credentials as cr
         a = cli._parse_cred_spec("CORP\\alice:Passw0rd!")
         self.assertEqual((a.domain, a.username, a.kind), ("CORP", "alice", "password"))
         b = cli._parse_cred_spec("administrator:aad3b435b51404eeaad3b435b51404ee")
@@ -2662,8 +2670,8 @@ class CredentialsTest(unittest.TestCase):
         self.assertEqual(len(stacked), 2)
 
     def test_spray_plan_files_and_commands(self):
-        from recce import credentials as cr
-        from recce.models import Credential
+        from recce.creds import credentials as cr
+        from recce.core.models import Credential
         creds = [Credential(username="alice", secret="Pw!", kind="password", domain="CORP"),
                  Credential(username="administrator",
                             secret="aad3b435b51404eeaad3b435b51404ee", kind="nthash")]
@@ -2685,8 +2693,8 @@ class CredentialsTest(unittest.TestCase):
         # international display names) would raise UnicodeEncodeError on a
         # platform whose default text encoding isn't UTF-8 (e.g. cp1252 on
         # Windows, which recce explicitly ships an airgap build for).
-        from recce import credentials as cr
-        from recce.models import Credential
+        from recce.creds import credentials as cr
+        from recce.core.models import Credential
         creds = [Credential(username="josé", secret="contraseña—uno!",
                             kind="password", domain="CORP")]
         with tempfile.TemporaryDirectory() as d:
@@ -2697,8 +2705,8 @@ class CredentialsTest(unittest.TestCase):
                 self.assertIn("contraseña—uno!", fh.read())
 
     def test_harvest_from_accounts(self):
-        from recce import credentials as cr
-        from recce.models import Account
+        from recce.creds import credentials as cr
+        from recce.core.models import Account
         h = Host(ip="10.0.0.5", accounts=[
             Account(ip="10.0.0.5", source="secretsdump", kind="user", name="svc",
                     domain="CORP", attrs={"password": "S3cret"})])
@@ -2708,7 +2716,7 @@ class CredentialsTest(unittest.TestCase):
 
     def test_creds_add_list_plan_via_cli(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             db = os.path.join(d, "results.sqlite")
             st = Store(db)
@@ -2735,8 +2743,8 @@ class KubernetesTest(unittest.TestCase):
                            Port(portid=6443, state="open")])
 
     def test_findings_all_surfaces(self):
-        from recce import kubernetes as k8s
-        from recce.report_docx import _vuln_type
+        from recce.services import kubernetes as k8s
+        from recce.report.docx import _vuln_type
         pr = {("10.0.0.90", 10250): {"role": "kubelet", "anon_pods": True, "pod_count": 7},
               ("10.0.0.90", 2379): {"role": "etcd", "v2_readable": True,
                                     "etcd_version": "3.5.9"},
@@ -2754,7 +2762,8 @@ class KubernetesTest(unittest.TestCase):
             self.assertTrue(vt, v.cwes)
 
     def test_prove_engine_confirms_and_downgrades(self):
-        from recce import kubernetes as k8s, proofs
+        from recce.services import kubernetes as k8s
+        from recce.vuln import proofs
         pr = {("10.0.0.90", 10250): {"role": "kubelet", "anon_pods": True, "pod_count": 3},
               ("10.0.0.90", 6443): {"role": "apiserver", "version": "v1.28",
                                     "anon_list": False, "anon_status": 403}}
@@ -2767,7 +2776,7 @@ class KubernetesTest(unittest.TestCase):
 
     def test_v3_etcd_is_flagged(self):
         # Modern etcd disables the v2 keys API; a readable v3 gateway must still fire.
-        from recce import kubernetes as k8s
+        from recce.services import kubernetes as k8s
         pr = {("10.0.0.90", 2379): {"role": "etcd", "v2_readable": False,
                                     "v3_readable": True, "etcd_version": "3.5.9"}}
         h = Host(ip="10.0.0.90", ports=[Port(portid=2379, state="open")])
@@ -2776,7 +2785,7 @@ class KubernetesTest(unittest.TestCase):
         self.assertIn("v3", " ".join(f["detail"] for f in fs))
 
     def test_8080_is_not_auto_selected_as_apiserver(self):
-        from recce import kubernetes as k8s
+        from recce.services import kubernetes as k8s
         self.assertEqual(k8s.role(8080), "unknown")
         self.assertFalse(k8s.is_k8s(Port(portid=8080, state="open", service="http")))
         # but a service explicitly named kube-apiserver is still caught
@@ -2784,7 +2793,7 @@ class KubernetesTest(unittest.TestCase):
                                         service="kube-apiserver")))
 
     def test_probe_parsers(self):
-        from recce import kubernetes as k8s
+        from recce.services import kubernetes as k8s
         self.assertTrue(k8s._is_podlist({"kind": "PodList", "items": [1, 2]}))
         self.assertEqual(k8s._pod_count({"items": [1, 2, 3]}), 3)
         self.assertTrue(k8s._is_list({"kind": "NamespaceList", "items": []}))
@@ -2793,8 +2802,10 @@ class KubernetesTest(unittest.TestCase):
         self.assertEqual(k8s.role(2379), "etcd")
 
     def test_cmd_kubernetes_end_to_end(self):
-        from recce import cli, xlsx, kubernetes as k8s
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services import kubernetes as k8s
+        from recce.core.store import Store
         import http.server
         import threading
         import json as _json
@@ -2846,7 +2857,7 @@ class KubernetesTest(unittest.TestCase):
 
     def test_no_endpoints_is_graceful(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -2861,8 +2872,9 @@ class CapabilityAutoCheckTest(unittest.TestCase):
     ports it assessed (no manual ticking)."""
 
     def test_mark_capability_scanned_flags_ports_and_db(self):
-        from recce import cli, tracking as tr
-        from recce.store import Store
+        from recce import cli
+        from recce.core import tracking as tr
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             st = Store(os.path.join(d, "s.sqlite"))
             st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24", enumerated=True,
@@ -2920,8 +2932,8 @@ class DockerTest(unittest.TestCase):
         cls.httpd.shutdown()
 
     def test_probe_and_findings(self):
-        from recce import docker
-        from recce.report_docx import _vuln_type
+        from recce.services import docker
+        from recce.report.docx import _vuln_type
         pr = docker.probe("127.0.0.1", self.port)
         self.assertTrue(pr and pr["exposed"])
         self.assertEqual(pr["server_version"], "24.0.5")
@@ -2937,7 +2949,8 @@ class DockerTest(unittest.TestCase):
             self.assertTrue(vt, v.cwes)
 
     def test_prove_engine_confirms_exposure(self):
-        from recce import docker, proofs
+        from recce.services import docker
+        from recce.vuln import proofs
         pr = docker.probe("127.0.0.1", self.port)
         h = Host(ip="127.0.0.1", ports=[Port(portid=2375, state="open")])
         h.vulns = docker.findings_to_vulns(
@@ -2948,7 +2961,7 @@ class DockerTest(unittest.TestCase):
     def test_probed_but_not_exposed_marks_false(self):
         # A Docker port that answers TCP but whose API read fails (TLS-locked/auth) must
         # come back exposed=False + probed=True, not an unset 'not probed'.
-        from recce import docker
+        from recce.services import docker
         h = Host(ip="127.0.0.1", ports=[Port(portid=2375, state="open")])
         an = docker.analyze([h], active=True)   # nothing is listening on 2375 here
         t = an["targets"][0]
@@ -2956,8 +2969,10 @@ class DockerTest(unittest.TestCase):
         self.assertTrue(t.get("probed"))
 
     def test_cmd_docker_end_to_end(self):
-        from recce import cli, xlsx, docker
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services import docker
+        from recce.core.store import Store
         orig = docker.is_docker
         docker.is_docker = lambda p: (p.state == "open"
                                       and (p.portid == self.port or orig(p)))
@@ -2986,7 +3001,7 @@ class DockerTest(unittest.TestCase):
 
     def test_no_endpoints_is_graceful(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -3005,7 +3020,7 @@ class ListenerBackfillTest(unittest.TestCase):
         "    LISTEN proto=udp addr=[::] port=53 pid=800 proc=named bin=/usr/sbin/named\n")
 
     def test_parse_listeners_linux_and_windows_lines(self):
-        from recce import ingest
+        from recce.intake import ingest
         ls = {(x["proto"], x["port"]): x for x in ingest.parse_listeners(self.LOOT)}
         self.assertEqual(ls[("tcp", 80)]["bin"], "/usr/sbin/nginx")
         self.assertFalse(ls[("tcp", 80)]["loopback"])
@@ -3016,7 +3031,7 @@ class ListenerBackfillTest(unittest.TestCase):
         self.assertEqual(ingest.parse_listeners("recce-enum host=x\n[!] a finding"), [])
 
     def test_backfill_enriches_and_adds_ports(self):
-        from recce import ingest
+        from recce.intake import ingest
         h = Host(ip="10.0.0.9", ports=[
             Port(portid=80, protocol="tcp", service="http", product="nginx",
                  detect_source="nmap", state="open")])
@@ -3046,8 +3061,8 @@ class ListenerBackfillTest(unittest.TestCase):
         self.assertIn(("tcp", 6379), idx)               # loopback service added
 
     def test_backfill_survives_store_round_trip(self):
-        from recce import ingest
-        from recce.store import Store
+        from recce.intake import ingest
+        from recce.core.store import Store
         h = Host(ip="10.0.0.9", subnet="10.0.0.0/24", ports=[])
         ingest.backfill_ports(h, ingest.parse_listeners(self.LOOT))
         with tempfile.TemporaryDirectory() as d:
@@ -3120,7 +3135,7 @@ class AVAwarenessTest(unittest.TestCase):
             "    AppLocker policy present (review allowed paths)\n")
 
     def test_extract_defenses(self):
-        from recce import ingest
+        from recce.intake import ingest
         j = " | ".join(ingest.extract_defenses(self.LOOT))
         for expect in ("AV: Windows Defender", "CSFalcon (process)",
                        "CSAgent (service)", "Defender RTP=True",
@@ -3130,7 +3145,7 @@ class AVAwarenessTest(unittest.TestCase):
 
     def test_ingest_populates_defenses(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as dd:
             db = os.path.join(dd, "results.sqlite")
             st = Store(db)
@@ -3149,8 +3164,8 @@ class AVAwarenessTest(unittest.TestCase):
             self.assertTrue(any("CSFalcon" in x for x in h.defenses))
 
     def test_checklist_and_exploitation_columns(self):
-        from recce.report_excel import _spec_checklist, _spec_exploitation
-        from recce.models import Vuln
+        from recce.report.excel import _spec_checklist, _spec_exploitation
+        from recce.core.models import Vuln
         h = Host(ip="10.0.0.5", os_family="Windows",
                  defenses=["EDR/AV: CSFalcon (process)"],
                  ports=[Port(portid=445, service="microsoft-ds")],
@@ -3168,8 +3183,8 @@ class AVAwarenessTest(unittest.TestCase):
                             for r in ex.rows))
 
     def test_exploitplan_defenses_banner(self):
-        from recce import exploitplan as ep
-        from recce.models import Vuln
+        from recce.act import exploitplan as ep
+        from recce.core.models import Vuln
         h = Host(ip="10.0.0.5", os_family="Windows",
                  defenses=["EDR/AV: CSFalcon (process)"],
                  ports=[Port(portid=445, service="microsoft-ds")],
@@ -3188,7 +3203,7 @@ class AVAwarenessTest(unittest.TestCase):
 
 class ServiceEnumTest(unittest.TestCase):
     def test_script_mapping(self):
-        from recce import serviceenum as se
+        from recce.services import serviceenum as se
         self.assertEqual(se.script_for("microsoft-ds", 445), "smb")
         self.assertEqual(se.script_for("netbios-ssn", 139), "smb")
         self.assertEqual(se.script_for("ssl/http", 8443), "http")
@@ -3198,7 +3213,7 @@ class ServiceEnumTest(unittest.TestCase):
         self.assertEqual(se.script_for("unknown-thing", 12345), "")
 
     def test_commands_and_unmapped(self):
-        from recce import serviceenum as se
+        from recce.services import serviceenum as se
         h = Host(ip="10.0.0.5", hostnames=["dc"],
                  ports=[Port(portid=445, service="microsoft-ds"),
                         Port(portid=6379, service="redis"),
@@ -3211,7 +3226,7 @@ class ServiceEnumTest(unittest.TestCase):
 
     def test_cmd_services_smoke(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             db = os.path.join(d, "results.sqlite")
             st = Store(db)
@@ -3226,14 +3241,14 @@ class ServiceEnumTest(unittest.TestCase):
 
 class SvcDetectTest(unittest.TestCase):
     def test_servicefp_mining_names_unknown_port(self):
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
         p = Port(portid=5900, service="unknown", servicefp="RFB 003.008\n")
         self.assertTrue(sd.enrich_port("1.1.1.1", p, active=False))
         self.assertEqual(p.service, "vnc")
         self.assertEqual(p.detect_source, "inferred")
 
     def test_curated_port_map_labels_windows_services(self):
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
         p = Port(portid=5040, service="unknown")
         sd.enrich_port("1.1.1.1", p, active=False)
         self.assertEqual(p.service, "cdpsvc")
@@ -3245,13 +3260,13 @@ class SvcDetectTest(unittest.TestCase):
         self.assertEqual(p2.service, "msrpc")
 
     def test_nmap_named_port_is_never_overwritten(self):
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
         p = Port(portid=80, service="http", detect_source="nmap")
         self.assertFalse(sd.enrich_port("1.1.1.1", p, active=False))
         self.assertEqual(p.service, "http")
 
     def test_banner_signature_matching(self):
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
         self.assertEqual(sd._match_signature("SSH-2.0-OpenSSH_8.9")[0], "ssh")
         self.assertEqual(sd._match_signature("HTTP/1.1 200 OK")[0], "http")
         self.assertEqual(sd._match_signature("+PONG\r\n")[0], "redis")
@@ -3265,7 +3280,7 @@ class SvcDetectTest(unittest.TestCase):
         lab shakeout where 8099 came back 'unknown' and all API surface was missed."""
         import socket as _socket
         import threading
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
 
         srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
         srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
@@ -3301,7 +3316,8 @@ class SvcDetectTest(unittest.TestCase):
         'https' - which makes both _is_tls and _is_web fire. Uses a monkeypatched
         probe so the test needs no cert; the live handshake path is covered by the
         real-socket negative test below."""
-        from recce import svcdetect as sd, web, probes
+        from recce.services import svcdetect as sd, probes
+        from recce.services import web
 
         orig = sd.tls_http_probe
         sd.tls_http_probe = lambda ip, port, timeout=4.0: (
@@ -3324,7 +3340,7 @@ class SvcDetectTest(unittest.TestCase):
         handshake fails, so we never mislabel a cleartext port as https."""
         import socket as _socket
         import threading
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
 
         srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
         srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
@@ -3351,7 +3367,7 @@ class SvcDetectTest(unittest.TestCase):
             t.join(timeout=2)
 
     def test_suggest_command_only_for_still_unknown(self):
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
         unknown = Port(portid=1234, service="unknown")
         self.assertIn("nmap -sV --version-all",
                       sd.suggest_id_command("1.1.1.1", unknown))
@@ -3359,7 +3375,7 @@ class SvcDetectTest(unittest.TestCase):
         self.assertEqual(sd.suggest_id_command("1.1.1.1", named), "")
 
     def test_reprobe_upgrades_still_unknown_ports(self):
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
         host = Host(ip="10.0.0.7", ports=[
             Port(portid=8888, service="unknown", state="open"),
             Port(portid=5040, service="cdpsvc", detect_source="inferred", state="open"),
@@ -3378,7 +3394,7 @@ class SvcDetectTest(unittest.TestCase):
         self.assertEqual(sd.still_unknown_ports(host), [])
 
     def test_reprobe_scanner_command_targets_only_leftover_ports(self):
-        from recce import scanner
+        from recce.core import scanner
         seen = {}
         orig = scanner._run
 
@@ -3404,7 +3420,7 @@ class SvcDetectTest(unittest.TestCase):
         self.assertNotIn("cmd", seen)
 
     def test_parse_product_version_from_banners(self):
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
         cases = {
             "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3": ("OpenSSH", "8.9p1"),
             "220 (vsFTPd 3.0.3)": ("vsFTPd", "3.0.3"),
@@ -3422,7 +3438,7 @@ class SvcDetectTest(unittest.TestCase):
         self.assertIsNone(sd.parse_product_version("just some noise"))
 
     def test_enrich_versions_fills_product_for_cve_mapping(self):
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
         # nmap named the service but left product blank; we hold its banner.
         host = Host(ip="10.0.0.8", ports=[
             Port(portid=22, service="ssh", detect_source="nmap", state="open",
@@ -3438,7 +3454,7 @@ class SvcDetectTest(unittest.TestCase):
         self.assertEqual(p25.product, "Postfix")
 
     def test_enrich_versions_never_overwrites_nmap_product(self):
-        from recce import svcdetect as sd
+        from recce.services import svcdetect as sd
         host = Host(ip="10.0.0.8", ports=[
             Port(portid=22, service="ssh", product="OpenSSH", version="9.6",
                  detect_source="nmap", state="open",
@@ -3498,7 +3514,7 @@ class StoreTrackingTest(unittest.TestCase):
 class PlaybookTest(unittest.TestCase):
     def test_host_level_finding_walkthrough_has_no_bogus_port(self):
         # A port-less (host-level) priv-esc finding must not render "nmap -p None".
-        from recce.report_docx import group_findings, _walkthrough_steps
+        from recce.report.docx import group_findings, _walkthrough_steps
         h = Host(ip="10.0.20.5", os_family="Linux", vulns=[
             Vuln(ip="10.0.20.5", port=None, protocol="tcp", script_id="local-enum",
                  title="SUID GTFOBins escalation candidate", severity="high",
@@ -3512,7 +3528,7 @@ class PlaybookTest(unittest.TestCase):
         # The whole rendered write-up (Affected systems / Evidence / walkthrough)
         # must never show "ip:None" for a host-level finding.
         import zipfile
-        from recce.report_docx import build_writeups
+        from recce.report.docx import build_writeups
         h = Host(ip="10.0.20.5", os_family="Linux", vulns=[
             Vuln(ip="10.0.20.5", port=None, protocol="tcp", script_id="local-enum",
                  title="Sudo misconfiguration -> root", severity="high",
@@ -3529,7 +3545,7 @@ class PlaybookTest(unittest.TestCase):
                 self.assertNotIn("-p None", t)
 
     def test_windows_seimpersonate_maps_to_potato(self):
-        from recce import playbook
+        from recce.act import playbook
         e = playbook.for_text("Token holds SeImpersonate -> SYSTEM", "Windows")
         self.assertIsNotNone(e)
         self.assertIn("GodPotato", e["tool"])
@@ -3537,7 +3553,7 @@ class PlaybookTest(unittest.TestCase):
         self.assertIn("SYSTEM", e["validate"])
 
     def test_finding_values_are_substituted_into_command(self):
-        from recce import playbook
+        from recce.act import playbook
         # the SUID binary path from the finding is filled into the command
         e = playbook.for_text("SUID /usr/bin/find - GTFOBins escalation candidate",
                               "Linux")
@@ -3549,14 +3565,14 @@ class PlaybookTest(unittest.TestCase):
         self.assertIn(r"C:\Program Files\X\s.exe", e2["cmd"])
 
     def test_no_match_returns_none(self):
-        from recce import playbook
+        from recce.act import playbook
         self.assertIsNone(playbook.for_text("some benign http banner", "Linux"))
         self.assertIsNone(playbook.for_text("", ""))
 
     def test_confirmed_only_advisories_excluded(self):
         # A 'potential' advisory vuln must NOT get an exploitation entry, even if
         # its text would otherwise match.
-        from recce import playbook
+        from recce.act import playbook
         h = Host(ip="10.0.0.5", os_family="Windows", vulns=[
             Vuln(ip="10.0.0.5", port=445, protocol="tcp", script_id="adv",
                  title="SeImpersonate advisory", severity="high",
@@ -3568,7 +3584,7 @@ class PlaybookTest(unittest.TestCase):
     def test_linux_writable_service_unit_does_not_get_windows_command(self):
         # OS-distinct matching: a Linux systemd 'writable service unit' finding
         # must not resolve to the Windows sc-config play.
-        from recce import playbook
+        from recce.act import playbook
         e = playbook.for_text("Writable service unit: /etc/systemd/system/x.service",
                               "Linux")
         if e is not None:
@@ -3577,39 +3593,39 @@ class PlaybookTest(unittest.TestCase):
 
 class ExploitRefTest(unittest.TestCase):
     def test_cve_exact_match(self):
-        from recce.exploitref import proven_exploit_ref
+        from recce.vuln.exploitref import proven_exploit_ref
         ref = proven_exploit_ref(["CVE-2017-0144"])
         self.assertIsNotNone(ref)
         self.assertIn("eternalblue", ref.lower())
 
     def test_no_match_returns_none(self):
-        from recce.exploitref import proven_exploit_ref
+        from recce.vuln.exploitref import proven_exploit_ref
         self.assertIsNone(proven_exploit_ref(["CVE-1999-0001"]))
         self.assertIsNone(proven_exploit_ref(None))
         self.assertIsNone(proven_exploit_ref([], ""))
 
     def test_cve_embedded_in_nse_id_text(self):
         # A raw NSE finding carrying the CVE only in its id must resolve the same.
-        from recce.exploitref import proven_exploit_ref
+        from recce.vuln.exploitref import proven_exploit_ref
         ref = proven_exploit_ref([], "http-vuln-cve2021-41773")
         self.assertIsNotNone(ref)
         self.assertIn("apache", ref.lower())
 
     def test_keyword_fallback_when_no_cve(self):
-        from recce.exploitref import proven_exploit_ref
+        from recce.vuln.exploitref import proven_exploit_ref
         self.assertIn("ms17_010",
                       (proven_exploit_ref([], "SMB ms17-010 vulnerable") or "").lower())
         self.assertIn("vsftpd",
                       (proven_exploit_ref([], "vsftpd 2.3.4 backdoor") or "").lower())
 
     def test_explicit_cve_beats_text(self):
-        from recce.exploitref import proven_exploit_ref
+        from recce.vuln.exploitref import proven_exploit_ref
         # A known CVE in the list wins even if the text mentions nothing.
         self.assertEqual(proven_exploit_ref(["CVE-2014-0160"]),
                          proven_exploit_ref([], "heartbleed"))
 
     def test_windows_references_resolve(self):
-        from recce.exploitref import proven_exploit_ref
+        from recce.vuln.exploitref import proven_exploit_ref
         cases = [
             (["CVE-2008-4250"], "ms08_067"),      # MS08-067
             (["CVE-2017-0147"], "eternalblue"),   # EternalBlue variant CVE
@@ -3623,7 +3639,7 @@ class ExploitRefTest(unittest.TestCase):
     def test_token_privilege_maps_to_potato_tools(self):
         # A confirmed SeImpersonate finding (no CVE) points at the existing Potato
         # tools - a reference, not generated code.
-        from recce.exploitref import proven_exploit_ref
+        from recce.vuln.exploitref import proven_exploit_ref
         ref = proven_exploit_ref([], "Token holds SeImpersonate -> Potato -> SYSTEM")
         self.assertIsNotNone(ref)
         self.assertIn("godpotato", ref.lower())
@@ -3633,7 +3649,7 @@ class ExploitRefTest(unittest.TestCase):
         # Integrity: every keyword ref must be a real curated reference - either a
         # concrete CVE entry, or the (CVE-less) token-privilege Potato reference.
         # Catches a typo'd/dangling keyword value.
-        from recce.exploitref import PROVEN_EXPLOIT, PROVEN_KW, _POTATO
+        from recce.vuln.exploitref import PROVEN_EXPLOIT, PROVEN_KW, _POTATO
         allowed = set(PROVEN_EXPLOIT.values()) | {_POTATO}
         self.assertTrue(set(PROVEN_KW.values()) <= allowed)
         self.assertTrue(all(v.strip() for v in PROVEN_KW.values()))
@@ -3645,7 +3661,7 @@ class DeployTest(unittest.TestCase):
                     ports=[Port(portid=p, state="open") for p in ports])
 
     def test_transport_selection(self):
-        from recce import deploy
+        from recce.creds import deploy
         ssh = {"username": "u", "password": "p"}
         win = {"username": "a", "password": "b"}
         self.assertEqual(deploy.transport_for(self._host("1", "Linux", [22, 80]), ssh, win), "ssh")
@@ -3657,7 +3673,7 @@ class DeployTest(unittest.TestCase):
         self.assertIsNone(deploy.transport_for(self._host("6", "Linux", [22]), None, None))  # no creds
 
     def test_skip_reason_explains_why_a_host_is_unable(self):
-        from recce import deploy
+        from recce.creds import deploy
         ssh = {"username": "u", "password": "p"}
         win = {"username": "a", "password": "b"}
         # No remote-exec port at all.
@@ -3702,12 +3718,12 @@ class DeployTest(unittest.TestCase):
 
     def test_ps_payload_is_utf16le_base64(self):
         import base64
-        from recce import deploy
+        from recce.creds import deploy
         b = deploy._b64_ps("Write-Host hi")
         self.assertEqual(base64.b64decode(b).decode("utf-16-le"), "Write-Host hi")
 
     def test_ssh_key_auth_pipes_script_no_disk_artifact(self):
-        from recce import deploy
+        from recce.creds import deploy
         calls = {}
 
         def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
@@ -3726,7 +3742,7 @@ class DeployTest(unittest.TestCase):
         self.assertIn("/k", calls["argv"])
 
     def test_winrm_and_smb_run_encoded_powershell(self):
-        from recce import deploy
+        from recce.creds import deploy
         seen = {}
 
         def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
@@ -3746,7 +3762,8 @@ class DeployTest(unittest.TestCase):
         self.assertIn("--put-file", " ".join(seen["argvs"][1]))   # smb pushes the script
 
     def test_deploy_dry_run_executes_nothing(self):
-        from recce import cli, deploy
+        from recce import cli
+        from recce.creds import deploy
         called = {"n": 0}
         orig = deploy.deploy_one
         deploy.deploy_one = lambda *a, **k: (called.__setitem__("n", called["n"] + 1)
@@ -3771,7 +3788,7 @@ class DeployTest(unittest.TestCase):
     def test_stager_serves_script_under_token_only(self):
         import urllib.request
         import urllib.error
-        from recce.stager import Stager
+        from recce.creds.stager import Stager
         data = b"# recce-enum.ps1"
         with Stager("127.0.0.1", {"recce-enum.ps1": data}) as st:
             got = urllib.request.urlopen(st.url("recce-enum.ps1"), timeout=5).read()
@@ -3783,7 +3800,7 @@ class DeployTest(unittest.TestCase):
             self.assertEqual(cm.exception.code, 404)
 
     def test_nxc_auth_parse_and_authmap_selection(self):
-        from recce import deploy
+        from recce.creds import deploy
         rows = deploy._parse_nxc_auth(
             "SMB   10.0.0.1  445  DC  [+] d\\a:p (Pwn3d!)\n"
             "SMB   10.0.0.2  445  WS  [-] d\\a:p STATUS_LOGON_FAILURE")
@@ -3801,7 +3818,7 @@ class DeployTest(unittest.TestCase):
         """A rejected nxc WinRM login is a bare '[-]' banner with no STATUS keyword
         and no script output - it must be reported as a failure, never folded as a
         successful run with garbage loot."""
-        from recce import deploy
+        from recce.creds import deploy
         o_run, o_smb = deploy._run, deploy.smb_tool
         deploy.smb_tool = lambda: "nxc"
         deploy._run = lambda argv, timeout, stdin=None: (
@@ -3815,8 +3832,8 @@ class DeployTest(unittest.TestCase):
         self.assertIn("auth", err.lower())
 
     def test_exploit_cell_needs_cve_match_not_just_port(self):
-        from recce.report_excel import _exploit_cell, _curated_exploit
-        from recce.models import Exploit
+        from recce.report.excel import _exploit_cell, _curated_exploit
+        from recce.core.models import Exploit
         host = Host(ip="1.1.1.1", exploits=[
             Exploit(ip="1.1.1.1", port=80, edb_id="99999", cves=["CVE-2099-9999"])])
         # unrelated port-80 finding, no shared CVE -> NO exploit attached (was the bug)
@@ -3839,7 +3856,7 @@ class DeployTest(unittest.TestCase):
         """With netexec absent but impacket present, the Windows path uses
         impacket wmiexec (which pairs cleanly with --stager: runs the cradle, no
         file push)."""
-        from recce import deploy
+        from recce.creds import deploy
         seen = []
 
         def fake_run(argv, timeout, stdin=None, env=None, new_session=False):
@@ -3866,7 +3883,7 @@ class DeployTest(unittest.TestCase):
             deploy._run, deploy.smb_tool, deploy.impacket_tool = o_run, o_smb, o_imp
 
     def test_stager_unreachable_falls_back_to_push(self):
-        from recce import deploy
+        from recce.creds import deploy
         win = {"username": "a", "password": "b"}
         seen = []
 
@@ -3896,7 +3913,8 @@ class DeployTest(unittest.TestCase):
         self.assertTrue(out and "recce-enum" in out)  # and got output
 
     def test_deploy_worker_folds_recce_enum_output(self):
-        from recce import cli, deploy
+        from recce import cli
+        from recce.creds import deploy
         sample = ("recce-enum host=web01 os=linux\n"
                   "[!] sudo: NOPASSWD entry - run a root command via sudo\n")
         orig = deploy.deploy_one
@@ -3924,7 +3942,7 @@ class SnmpTest(unittest.TestCase):
     def setUpClass(cls):
         import socket
         import threading
-        from recce import snmp as S
+        from recce.services import snmp as S
 
         # MIB: exact-match GETs + a couple of walkable subtrees. Values are the
         # already-BER-encoded value bytes (what sits after the OID in a varbind).
@@ -4010,7 +4028,7 @@ class SnmpTest(unittest.TestCase):
         cls.sock.close()
 
     def test_ber_and_oid_roundtrip(self):
-        from recce import snmp as S
+        from recce.services import snmp as S
         for oid in ("1.3.6.1.2.1.1.1.0", "1.3.6.1.4.1.77.1.2.25.3",
                     "1.3.6.1.2.1.25.4.2.1.2.1"):
             _tag, body, _ = S._parse_tlv(S.encode_oid(oid), 0)
@@ -4021,7 +4039,7 @@ class SnmpTest(unittest.TestCase):
         self.assertEqual(vbs, [("1.3.6.1.2.1.1.1.0", "x")])
 
     def test_probe_brutes_community_and_walks(self):
-        from recce import snmp as S
+        from recce.services import snmp as S
         pr = S.probe("127.0.0.1", self.port, timeout=1.0, known_open=True)
         self.assertIsNotNone(pr)
         self.assertEqual(pr["community"], "public")
@@ -4031,7 +4049,8 @@ class SnmpTest(unittest.TestCase):
         self.assertEqual(pr["processes"], ["services.exe"])
 
     def test_findings_accounts_and_prove(self):
-        from recce import snmp as S, proofs
+        from recce.services import snmp as S
+        from recce.vuln import proofs
         pr = S.probe("127.0.0.1", self.port, timeout=1.0, known_open=True)
         h = Host(ip="127.0.0.1", ports=[Port(portid=161, service="snmp", state="open")])
         fs = S.findings([h], {("127.0.0.1", 161): pr})
@@ -4050,8 +4069,10 @@ class SnmpTest(unittest.TestCase):
         self.assertIn(proofs.CONFIRMED, verdicts)
 
     def test_cmd_snmp_end_to_end(self):
-        from recce import cli, xlsx, snmp as S
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services import snmp as S
+        from recce.core.store import Store
         orig_targets, orig_is = S.snmp_targets, S.is_snmp
         # Point the single target at the mock agent's ephemeral port, and teach is_snmp
         # to recognise that port so findings() matches the probe.
@@ -4082,7 +4103,7 @@ class SnmpTest(unittest.TestCase):
 
     def test_no_answer_is_graceful(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "eng")
             os.makedirs(out)
@@ -4094,7 +4115,7 @@ class SnmpTest(unittest.TestCase):
 
 def _self_response():
     """Tiny well-formed GetResponse so a bare parse_response smoke-check has input."""
-    from recce import snmp as S
+    from recce.services import snmp as S
     varbind = S._tlv(0x30, S.encode_oid("1.3.6.1.2.1.1.1.0") + S._octet("x"))
     pdu = S._tlv(0xA2, S._int(1) + S._int(0) + S._int(0) + S._tlv(0x30, varbind))
     return S._tlv(0x30, S._int(1) + S._octet("public") + pdu)
@@ -4144,7 +4165,7 @@ class RsyncTest(unittest.TestCase):
         cls.srv.shutdown()
 
     def test_list_and_access(self):
-        from recce import rsync as R
+        from recce.services import rsync as R
         pr = R.list_modules("127.0.0.1", self.port, timeout=3.0)
         self.assertTrue(pr["reachable"])
         self.assertEqual([m["name"] for m in pr["modules"]],
@@ -4153,7 +4174,8 @@ class RsyncTest(unittest.TestCase):
         self.assertEqual(R.probe_module("127.0.0.1", self.port, "secret", 3.0), "auth")
 
     def test_findings_and_prove(self):
-        from recce import rsync as R, proofs
+        from recce.services import rsync as R
+        from recce.vuln import proofs
         analysis = R.analyze([Host(ip="127.0.0.1",
                                    ports=[Port(portid=self.port, state="open",
                                                service="rsync")])], active=True)
@@ -4170,8 +4192,10 @@ class RsyncTest(unittest.TestCase):
         self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
 
     def test_cmd_rsync_end_to_end(self):
-        from recce import cli, xlsx, rsync as R
-        from recce.store import Store
+        from recce import cli
+        from recce.report.formats import xlsx
+        from recce.services import rsync as R
+        from recce.core.store import Store
         orig = R.is_rsync
         R.is_rsync = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
         try:
@@ -4201,7 +4225,7 @@ class NfsTest(unittest.TestCase):
         import socketserver
         import struct
         import threading
-        from recce import nfs as N
+        from recce.services import nfs as N
 
         def xstr(s):
             b = s.encode()
@@ -4251,7 +4275,7 @@ class NfsTest(unittest.TestCase):
         cls.srv.shutdown()
 
     def test_probe_lists_exports(self):
-        from recce import nfs as N
+        from recce.services import nfs as N
         pr = N.probe("127.0.0.1", timeout=3.0, pmport=self.port)
         self.assertTrue(pr["reachable"])
         self.assertTrue(pr["nfs"])
@@ -4262,7 +4286,7 @@ class NfsTest(unittest.TestCase):
 
     def test_is_world_scoped_wildcard_not_world(self):
         # Regression (audit): a scoped wildcard is a domain restriction, NOT everyone.
-        from recce import nfs as N
+        from recce.services import nfs as N
         self.assertTrue(N._is_world([]))                             # no restriction
         self.assertTrue(N._is_world(["*"]))                          # bare wildcard
         self.assertTrue(N._is_world(["(everyone)"]))
@@ -4271,7 +4295,7 @@ class NfsTest(unittest.TestCase):
 
     def test_recv_record_bounds_hostile_fragments(self):
         # Regression (audit): a never-last fragment stream must terminate, not hang.
-        from recce import nfs as N
+        from recce.services import nfs as N
         import io
         class _FakeSock:
             def __init__(self):
@@ -4285,7 +4309,8 @@ class NfsTest(unittest.TestCase):
         self.assertIsNone(N._recv_record(_FakeSock(), 1.0))          # bounded -> None
 
     def test_findings_and_prove(self):
-        from recce import nfs as N, proofs
+        from recce.services import nfs as N
+        from recce.vuln import proofs
         pr = {"10.0.8.9": N.probe("127.0.0.1", timeout=3.0, pmport=self.port)}
         h = Host(ip="10.0.8.9", ports=[Port(portid=2049, service="nfs", state="open"),
                                        Port(portid=111, service="rpcbind", state="open")])
@@ -4297,7 +4322,7 @@ class NfsTest(unittest.TestCase):
         self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
 
     def test_rpc_reply_framing(self):
-        from recce import nfs as N
+        from recce.services import nfs as N
         import struct
         body = struct.pack(">III", 0x1003, 1, 0) + struct.pack(">II", 0, 0) \
             + struct.pack(">I", 0) + b"payload!!"
@@ -4309,7 +4334,7 @@ class SvcProbeTest(unittest.TestCase):
 
     def test_budget_stops_early_with_partial(self):
         import time
-        from recce import svcprobe as S
+        from recce.services import svcprobe as S
         targets = [{"ip": f"10.0.0.{i}"} for i in range(20)]
         st = {}
         got = [r for _, r in S.iter_probe(
@@ -4320,7 +4345,7 @@ class SvcProbeTest(unittest.TestCase):
         self.assertEqual(st["done"], len(got))           # bookkeeping matches
 
     def test_keyboardinterrupt_yields_partial(self):
-        from recce import svcprobe as S
+        from recce.services import svcprobe as S
         targets = [{"ip": f"10.0.0.{i}"} for i in range(10)]
 
         def probe(t):
@@ -4333,7 +4358,7 @@ class SvcProbeTest(unittest.TestCase):
         self.assertEqual(got, [f"10.0.0.{i}" for i in range(4)])   # 4 completed
 
     def test_progress_fires_and_completes(self):
-        from recce import svcprobe as S
+        from recce.services import svcprobe as S
         targets = [{"ip": f"10.0.0.{i}"} for i in range(5)]
         seen = []
         st = {}
@@ -4345,7 +4370,7 @@ class SvcProbeTest(unittest.TestCase):
         self.assertIsNone(st["stopped"])                 # ran to completion
 
     def test_progress_exception_never_breaks_the_loop(self):
-        from recce import svcprobe as S
+        from recce.services import svcprobe as S
         def boom(i, n, t):
             raise ValueError("progress must never break a scan")
         out = [r for _, r in S.iter_probe(
@@ -4358,7 +4383,7 @@ class DiscoveryReconfirmTest(unittest.TestCase):
     that recovers firewalled hosts which block ping but answer a port scan."""
 
     def test_discovery_command_probes_ad_ports_and_retries(self):
-        from recce import scanner
+        from recce.core import scanner
         seen = {}
         orig = scanner._run
         scanner._run = lambda cmd, timeout=None: (seen.__setitem__("cmd", cmd),
@@ -4380,7 +4405,7 @@ class DiscoveryReconfirmTest(unittest.TestCase):
         self.assertEqual(seen["cmd"][seen["cmd"].index("--max-retries") + 1], "2")
 
     def test_udp_basic_scan_command(self):
-        from recce import scanner
+        from recce.core import scanner
         seen = {}
         orig_run, orig_root = scanner._run, scanner._is_root
         scanner._is_root = lambda: True          # pretend root so it builds the command
@@ -4401,7 +4426,7 @@ class DiscoveryReconfirmTest(unittest.TestCase):
         self.assertTrue(scanner.PROFILES["standard"].udp_basic)
 
     def test_reconfirm_command_is_bounded_pn_topports(self):
-        from recce import scanner
+        from recce.core import scanner
         seen = {}
         orig = scanner._run
         scanner._run = lambda cmd, timeout=None: (seen.__setitem__("cmd", cmd),
@@ -4422,7 +4447,8 @@ class DiscoveryReconfirmTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--top-ports") + 1], "100")
 
     def test_reconfirm_promotes_firewalled_host(self):
-        from recce import cli, scanner
+        from recce import cli
+        from recce.core import scanner
         orig_rc, orig_parse = scanner.reconfirm_hosts, cli.np.parse_nmap_xml
         # 10.0.0.50 blocked ping but answers on 445; 10.0.0.51 is genuinely dead.
         cli.np.parse_nmap_xml = lambda path: [
@@ -4440,7 +4466,8 @@ class DiscoveryReconfirmTest(unittest.TestCase):
         self.assertNotIn("10.0.0.51", recovered)        # stays down (no open port)
 
     def test_reconfirm_respects_cap_and_optout(self):
-        from recce import cli, scanner
+        from recce import cli
+        from recce.core import scanner
         calls = {"n": 0}
         orig = scanner.reconfirm_hosts
         scanner.reconfirm_hosts = lambda tf, out, profile: (
@@ -4462,7 +4489,7 @@ class DiscoveryReconfirmTest(unittest.TestCase):
         # An authoritative list pre-registers every target BEFORE scanning, so a
         # timeout/failure can't drop it. Each is present, named, and shown up.
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             st = Store(os.path.join(d, "r.sqlite"))
             n = cli._seed_targets(st, ["10.0.0.5", "10.0.0.6"],
@@ -4481,7 +4508,7 @@ class DiscoveryReconfirmTest(unittest.TestCase):
     def test_seed_targets_never_clobbers_a_scanned_host(self):
         # Re-seeding merges - it must not wipe ports/findings already collected.
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             st = Store(os.path.join(d, "r.sqlite"))
             st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24",
@@ -4495,7 +4522,8 @@ class DiscoveryReconfirmTest(unittest.TestCase):
         self.assertEqual(h.up_reason, "syn-ack")         # real reply reason kept
 
     def test_port_scope_label_and_all_ports_override(self):
-        from recce import cli, scanner
+        from recce import cli
+        from recce.core import scanner
         # standard + thorough = full sweep; quick = partial (top-N).
         self.assertEqual(scanner.port_scope_label(scanner.PROFILES["standard"]),
                          ("all 65535 TCP ports", True))
@@ -4515,7 +4543,8 @@ class DiscoveryReconfirmTest(unittest.TestCase):
 
     def test_targets_up_implies_pn(self):
         # --targets-up forces -Pn semantics so discovery can never drop a provided host.
-        from recce import cli, scanner
+        from recce import cli
+        from recce.core import scanner
         prof = scanner.ScanProfile()
         args = SimpleNamespace(targets_up=True, no_discovery=False)
         cli._apply_profile_overrides(prof, args)
@@ -4537,8 +4566,8 @@ class AuditRegressionE2ETest(unittest.TestCase):
     def test_plain_http_product_not_flipped_to_tls(self):
         # BUG: _is_tls substring-matched the PRODUCT, so "SimpleHTTPServer" (contains
         # "https") got scanned as HTTPS and every web finding was missed on 8080.
-        from recce import probes
-        from recce.models import Port
+        from recce.services import probes
+        from recce.core.models import Port
         self.assertFalse(probes._is_tls(
             Port(portid=8080, service="http", product="SimpleHTTPServer")))
         self.assertFalse(probes._is_tls(Port(portid=80, service="http", product="nginx")))
@@ -4547,7 +4576,7 @@ class AuditRegressionE2ETest(unittest.TestCase):
         self.assertTrue(probes._is_tls(Port(portid=9999, service="ssl/http")))
 
     def test_targets_dashed_hostname_and_huge_cidr(self):
-        from recce.targets import _expand_token
+        from recce.core.targets import _expand_token
         # A hyphenated FQDN / typo must not crash the scope (was ValueError).
         self.assertEqual(_expand_token("mail-1.corp.example"), ["mail-1.corp.example"])
         self.assertEqual(_expand_token("10.0.0.10-"), ["10.0.0.10-"])
@@ -4559,7 +4588,7 @@ class AuditRegressionE2ETest(unittest.TestCase):
             _expand_token("10.0.0.0/8")
 
     def test_parser_tolerates_bad_numeric_attr(self):
-        from recce import parser
+        from recce.core import parser
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "x.xml")
             with open(f, "w") as fh:
@@ -4571,7 +4600,7 @@ class AuditRegressionE2ETest(unittest.TestCase):
         self.assertEqual(len(hosts), 1)
 
     def test_bson_parse_negative_length_terminates(self):
-        from recce import mongodb
+        from recce.services.db import mongodb
         import struct
         body = b"\x02\x00" + struct.pack("<i", -6)    # string, empty name, negative len
         doc = struct.pack("<i", len(body) + 5) + body + b"\x00"
@@ -4579,7 +4608,7 @@ class AuditRegressionE2ETest(unittest.TestCase):
         self.assertEqual(out, {})
 
     def test_from_json_ignores_unknown_keys(self):
-        from recce.models import Host
+        from recce.core.models import Host
         data = {"ip": "1.2.3.4", "subnet": "1.2.3.0/24",
                 "some_removed_field": "legacy",       # schema drift on a carried DB
                 "ports": [{"portid": 80, "state": "open", "gone_field": 1}]}
@@ -4588,7 +4617,7 @@ class AuditRegressionE2ETest(unittest.TestCase):
         self.assertEqual([p.portid for p in h.ports], [80])
 
     def test_coverage_excludes_unconfirmed_phantom_hosts(self):
-        from recce import tracking as tr
+        from recce.core import tracking as tr
         confirmed = Host(ip="10.0.0.5", subnet="10.0.0.0/24",
                          ports=[Port(portid=445, state="open")])
         phantom = Host(ip="10.0.0.250", subnet="10.0.0.0/24", up_reason="user-set")
@@ -4602,7 +4631,7 @@ class AuditRegressionE2ETest(unittest.TestCase):
 
     def test_incomplete_scan_survives_merge_over_seed(self):
         # A --targets-up seed (never enumerated) must not mark a truncated enum complete.
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             st = Store(os.path.join(d, "r.sqlite"))
             st.upsert_host(Host(ip="10.0.0.9", subnet="10.0.0.0/24",

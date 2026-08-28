@@ -7,8 +7,8 @@ pipeline reads instead of re-deriving "is this real?" from strings.
 
 import unittest
 
-from recce import qod
-from recce.models import Host, Port, Vuln
+from recce.core import qod
+from recce.core.models import Host, Port, Vuln
 
 
 def _v(**kw):
@@ -107,7 +107,7 @@ class QodScoreTest(unittest.TestCase):
 
 class QodReportColumnTest(unittest.TestCase):
     def test_vulns_sheet_shows_qod_tier(self):
-        from recce.report_excel import _spec_vulns
+        from recce.report.excel import _spec_vulns
         h = Host(ip="10.0.0.5", ports=[Port(portid=22, protocol="tcp", service="ssh")])
         h.vulns = [_v(ip="10.0.0.5", port=22, source="version-db", confidence="likely",
                       title="OpenSSH < 7.7 user enum"),

@@ -4,8 +4,8 @@ import json
 import tempfile
 import unittest
 
-from recce import vulndb
-from recce.models import Host, Port
+from recce.vuln import vulndb
+from recce.core.models import Host, Port
 
 
 def _host(product="AcmeApp", version="1.0.0", extrainfo=""):

@@ -22,8 +22,8 @@ import re
 import socket
 import struct
 
-from ...models import Host, Port
-from ...svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
+from ...core.models import Host, Port
+from ..svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
 
 _PORTS = (1521, 1522, 1526, 1748, 1754)
 _DEFAULT_PORT = 1521
@@ -254,7 +254,7 @@ findings_to_vulns = make_findings_to_vulns_wrapper("oracle", _DEFAULT_PORT)
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     """Full Oracle TNS analysis. Returns {targets, findings, runbooks, probes, stats}."""
-    from ... import svcprobe
+    from .. import svcprobe
     targets = oracle_targets(hosts)
     probes: dict = {}
     state: dict = {}

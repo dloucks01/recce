@@ -18,12 +18,12 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from recce import smb
-from recce import ftp
-from recce import docker
-from recce import kubernetes
-from recce import web
-from recce.models import Port
+from recce.services import smb
+from recce.services import ftp
+from recce.services import docker
+from recce.services import kubernetes
+from recce.services import web
+from recce.core.models import Port
 from tests import wire_vectors as W
 
 

@@ -18,15 +18,15 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from .. import ad
-from .. import exploits
-from .. import parser as np
-from .. import scanner
-from .. import tracking as tr
-from ..models import Host
-from ..report_excel import read_workbook_edits, update_workbook
-from ..report_markdown import build_csv, build_markdown
-from ..store import Store, StoreError
-from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from ..vuln import exploits
+from ..core import parser as np
+from ..core import scanner
+from ..core import tracking as tr
+from ..core.models import Host
+from ..report.excel import read_workbook_edits, update_workbook
+from ..report.markdown import build_csv, build_markdown
+from ..core.store import Store, StoreError
+from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
@@ -71,7 +71,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name, required, desc in tools:
         present = shutil.which(name) is not None
         if name == "searchsploit":
-            from .. import exploits
+            from ..vuln import exploits
             present = exploits.available()               # mirror the runtime gate
         if name == "ldap":
             from .. import ad
@@ -80,29 +80,29 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 backend = "ldapsearch" if shutil.which("ldapsearch") else "ldap3 package"
                 desc = f"credentialed AD LDAP enum (using {backend})"
         if name == "netexec":
-            from .. import credenum
+            from ..creds import credenum
             present = credenum.smb_tool() is not None   # nxc / crackmapexec too
         if name == "browser":
-            from .. import screenshot
+            from ..report import screenshot
             present = screenshot.available()             # firefox / chrome variants
             found = screenshot.browser_tool()
             if found:
                 desc = f"auto web screenshots in write-ups (using {found})"
         if name == "proxychains4":
-            from .. import proxy
+            from ..core import proxy
             present = bool(proxy.proxychains_bin())       # proxychains4 OR proxychains
         if name == "nmap":
             nmap_ok = present
         presence[name] = present
         mark = "OK  " if present else ("MISSING (required)" if required else "-   (optional)")
         print(f"  {name:<15} {mark:<20} {desc}")
-    from .. import credenum as _ce
+    from ..creds import credenum as _ce
     if _ce.impacket_tool("GetUserSPNs"):
         print(f"  {'impacket':<15} {'OK  ':<20} Kerberoast / AS-REP / secretsdump")
     # The MSSQL deep enum (linked servers, data-mine, xp_cmdshell) needs the
     # impacket-mssqlclient CLI specifically - it silently no-ops without it, so surface
     # it explicitly (GetUserSPNs being present does not imply mssqlclient is).
-    from .. import mssql as _mssql
+    from ..services.db import mssql as _mssql
     _msc = "OK  " if _mssql.mssqlclient_tool() else "-   (deep MSSQL enum disabled)"
     print(f"  {'mssqlclient':<15} {_msc:<20} MSSQL deep enum (impacket-mssqlclient)")
     import importlib.util as _ilu
@@ -203,7 +203,7 @@ def cmd_encdec(args: argparse.Namespace) -> int:
       recce encdec --chain url-decode json-pretty
       recce encdec --list
     """
-    from .. import encdec
+    from ..core import encdec
 
     if args.list:
         ops = encdec.list_ops()
@@ -267,7 +267,7 @@ def cmd_loot_scan(args: argparse.Namespace) -> int:
     existing loot findings on the same host by (script_id, title).
     """
     from ..intake.loot import scan_evidence
-    from ..store import Store
+    from ..core.store import Store
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
@@ -359,7 +359,7 @@ def cmd_sqli(args: argparse.Namespace) -> int:
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
-    sample = os.path.join(os.path.dirname(__file__), "sample_scan.xml")
+    sample = os.path.join(os.path.dirname(np.__file__), "sample_scan.xml")
     if not os.path.exists(sample):
         print("[x] Sample XML missing.")
         return 1
@@ -371,8 +371,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
     store.set_scope("10.0.10.0/24", 254)   # demo scope: three /24s
     store.set_scope("10.0.20.0/24", 254)
     store.set_scope("10.0.30.0/24", 254)   # in scope but no live hosts found
-    from ..models import Exploit
-    from ..targets import _subnet_of
+    from ..core.models import Exploit
+    from ..core.targets import _subnet_of
     # Stand-in for searchsploit output (unavailable offline in the demo).
     demo_exploits = {
         "10.0.20.6": [Exploit(ip="10.0.20.6", port=21, product="vsftpd", version="2.3.4",
@@ -389,7 +389,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
         ad.identify_roles(h)
         ad.parse_signing_and_ntlm(h)
         h.exploits = demo_exploits.get(h.ip, [])
-        from .. import vulndb
+        from ..vuln import vulndb
         vulndb.assess_host_inplace(h)   # offline version->CVE findings
         h.enumerated = True
         # Confirmed footholds, so the map's access overlay has something to show.

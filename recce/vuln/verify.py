@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 
-from ..models import Evidence, Host
+from ..core.models import Evidence, Host
 from .verify_rules import rule_for_cve, script_cves
 
 _CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)

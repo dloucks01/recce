@@ -8,8 +8,8 @@ gated on a real DC.
 """
 import unittest
 
-from recce import kerberos as K
-from recce.ntlm import nt_hash
+from recce.ad import kerberos as K
+from recce.ad.ntlm import nt_hash
 
 try:
     from impacket.krb5.crypto import _HMACMD5, _RC4, Enctype, Key

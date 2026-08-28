@@ -14,31 +14,31 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
         the report already does (intake.dedup) so the WebUI and the docx
         report see the same canonical row count, not a doubled list from
         (say) an nmap NSE + a version-db match for the same CVE."""
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             hosts = st.all_hosts()
         _apply_dedup(hosts)
         return hosts, (_meta_name() or "recce engagement")
 
     def _meta_name():
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             return st.get_meta("engagement")
 
     def _tracking() -> dict:
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             return st.get_tracking()
 
     def _statuses() -> dict:
         """Lifecycle status per finding key (new/triaged/confirmed/in-report/
         excluded/retested-*). Empty dict when no rows carry a status yet."""
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             return st.get_statuses()
 
     def _scope() -> dict:
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             return st.get_scope()
 
@@ -49,8 +49,8 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
         finding has no mapped published module: not every KEV has a public msf
         module, and recce ships no exploit code — it only names existing ones.
         """
-        from ... import tracking
-        from ...store import Store
+        from ...core import tracking
+        from ...core.store import Store
         from ...act.exploitplan import _msf_for
         if not key.strip():
             raise HTTPException(400, "key=<finding_key> required")
@@ -160,8 +160,8 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
     def host_detail(ip: str):
         """Everything about one host — services, full findings (with output +
         remediation + QoD), AD accounts, posture — for the drill-down drawer."""
-        from ... import qod, tracking
-        from ...store import Store
+        from ...core import qod, tracking
+        from ...core.store import Store
         with Store(db_path) as st:
             h = st.get_host(ip)
             trk = st.get_tracking()
@@ -206,7 +206,7 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
     @app.get("/api/findings")
     def findings(limit: int = Query(default=0, ge=0),
                  offset: int = Query(default=0, ge=0)):
-        from ... import tracking
+        from ...core import tracking
         hs, _ = _hosts()
         tr = _tracking()
         statuses = _statuses()
@@ -233,7 +233,7 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
         Counts exclude tier=lead so the Dashboard numbers match the Findings
         tab default view (which also hides leads). `leads_hidden` carries the
         excluded count for the sub-line."""
-        from ... import tracking
+        from ...core import tracking
         from .._common import _tier
         hs, name = _hosts()
         tr = _tracking()

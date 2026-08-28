@@ -17,8 +17,9 @@ import ssl
 import time
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
-from ...models import Host, Port, Vuln
-from ... import probes, proxy
+from ...core.models import Host, Port, Vuln
+from .. import probes
+from ...core import proxy
 
 
 # Shared primitives — every probe fetches through _fetch / _mk / etc.

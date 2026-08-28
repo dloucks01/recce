@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import tempfile
 
-from ..models import Account, Domain, Host
+from ..core.models import Account, Domain, Host
 
 # --- User-Account-Control flags -------------------------------------------------
 UAC = {

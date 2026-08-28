@@ -25,14 +25,16 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recce import ad, parser, xlsx
-from recce import tracking as tr
-from recce.models import Host, Port, Vuln
-from recce.report_excel import (build_workbook, read_key_order,
+from recce import ad
+from recce.core import parser
+from recce.report.formats import xlsx
+from recce.core import tracking as tr
+from recce.core.models import Host, Port, Vuln
+from recce.report.excel import (build_workbook, read_key_order,
                                  read_workbook_edits, read_workbook_tracking,
                                  update_workbook, STATUS_WIP, STATUS_TODO)
-from recce.store import Store
-from recce.targets import _subnet_of
+from recce.core.store import Store
+from recce.core.targets import _subnet_of
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 

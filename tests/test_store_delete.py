@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from recce.models import Credential, Host, Port, Vuln
-from recce.store import Store
+from recce.core.models import Credential, Host, Port, Vuln
+from recce.core.store import Store
 
 
 @pytest.fixture()

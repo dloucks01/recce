@@ -271,14 +271,14 @@ def _tier(v) -> str:
     # happens in-memory at report time and isn't written back), so v.qod is often 0 in
     # the store. qod_of fail-open-computes the score from the detection method, so a
     # real confirmed service finding isn't mis-tiered as a hidden "lead".
-    from .. import qod
+    from ..core import qod
     q = qod.qod_of(v)
     return "confirmed" if q >= 95 else "likely" if q >= 70 else "lead"
 
 
 def _finding_dict(v, reviewed: bool = False, notes: str = "",
                   status: str = "") -> dict:
-    from .. import tracking
+    from ..core import tracking
     # `sources` = distinct detector names that corroborated this finding after
     # dedup. Populated by _apply_dedup below; a singleton just carries [v.source].
     sources = getattr(v, "_sources", None) or ([v.source] if v.source else [])
@@ -405,7 +405,7 @@ _IMPORT_TOOLS = ("nmap", "nxc", "kerberoast", "asrep", "secretsdump", "loot")
 def _import_signatures(content: str, filename: str = "") -> list[str]:
     """Every import format whose signature is present in `content`, most-specific first.
     Returns a list so the endpoint can spot a concatenated multi-tool paste (>1 kind)."""
-    from ..importers import detect_scanner
+    from ..intake.importers import detect_scanner
     content = content.lstrip("﻿")
     low = content.lower()
     fn = filename.lower()
@@ -502,7 +502,7 @@ def _detect_import_kind(content: str, filename: str = "") -> str:
 def _import_preview(kind: str, content: str, raw_bytes: bytes) -> dict:
     """Dry-run: parse `content` WITHOUT committing, so the user sees what an import would
     fold into the shared engagement (and a 0-row warning if the format looks wrong)."""
-    from .. import importers
+    from ..intake import importers
     n = 0
     detail = ""
     sample: list[str] = []
@@ -521,14 +521,14 @@ def _import_preview(kind: str, content: str, raw_bytes: bytes) -> dict:
             n = sum(1 for ln in lines if re.search(r"\[\+\]", ln))
             detail = f"~{n} validated login line(s)"
         elif kind == "secretsdump":
-            from .. import credenum as ce
+            from ..creds import credenum as ce
             rows = ce.parse_secretsdump(content)
             live = [r for r in rows if not r.get("history")]
             n = len(live)
             detail = f"{len(live)} credential(s), {len(rows) - len(live)} history skipped"
             sample = [f"{r['name']} ({r.get('kind')})" for r in live[:6]]
         elif kind in ("kerberoast", "asrep"):
-            from .. import credenum as ce
+            from ..creds import credenum as ce
             fn = ce.parse_getuserspns if kind == "kerberoast" else ce.parse_getnpusers
             rows = [r for r in fn(content) if r.get("hash")]
             n = len(rows)
@@ -540,7 +540,7 @@ def _import_preview(kind: str, content: str, raw_bytes: bytes) -> dict:
             detail = f"~{n} credential line(s)"
         elif kind == "nmap":
             import tempfile
-            from ..parser import parse_nmap_file
+            from ..core.parser import parse_nmap_file
             suffix = ".xml" if ("<nmaprun" in content[:4000]
                                 or content.lstrip().startswith("<?xml")) else ".gnmap.txt"
             fd, tmp = tempfile.mkstemp(suffix=suffix)

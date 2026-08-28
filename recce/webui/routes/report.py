@@ -26,7 +26,7 @@ def register_report_routes(app: FastAPI, ctx) -> None:
         keys. Empty = every finding, matching the CLI's default behavior."""
         if kind not in _REPORTS:
             raise HTTPException(404, f"unknown report kind {kind!r}")
-        from ...store import Store
+        from ...core.store import Store
         from ...cli import _generate_reports, _open_paths
         include_keys = None
         if include.strip():
@@ -52,7 +52,7 @@ def register_report_routes(app: FastAPI, ctx) -> None:
         include: a single finding key (from Finding.key). Multiple keys
         aren't supported here — use the combined report."""
         from fastapi.responses import FileResponse
-        from ...store import Store
+        from ...core.store import Store
         from ...report import docx as _docx
         if not include.strip():
             raise HTTPException(400, "include=<finding_key> required")
@@ -89,7 +89,7 @@ def register_report_routes(app: FastAPI, ctx) -> None:
         shape and [TESTER: …] placeholders directly in the Report Studio
         preview pane. Returns 404 if the selector matches != 1 finding."""
         from fastapi.responses import Response
-        from ...store import Store
+        from ...core.store import Store
         import html as _html
         if not include.strip():
             raise HTTPException(400, "include=<finding_key> required")
@@ -197,7 +197,7 @@ def register_report_routes(app: FastAPI, ctx) -> None:
         the Report Studio uses this to reshape the report live as the tester
         selects/deselects rows."""
         from fastapi.responses import Response
-        from ...store import Store
+        from ...core.store import Store
         from ...cli import _generate_reports, _open_paths
         include_keys = None
         if include.strip():

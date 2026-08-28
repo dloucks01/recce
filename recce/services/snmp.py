@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import socket
 
-from ..models import Account, Host, Port
-from ..svccommon import finding_builder
+from ..core.models import Account, Host, Port
+from .svccommon import finding_builder
 
 _DEFAULT_PORT = 161
 _TIMEOUT = 1.5
@@ -436,12 +436,12 @@ def runbook(ip: str, community: str) -> list[dict]:
 # --- proof + analyze ------------------------------------------------------------
 
 def proof_html(command, output, banner: str = "") -> str:
-    from .. import mssql
+    from ..services.db import mssql
     return mssql.proof_html(command, output, prompt="$ ", banner=banner)
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from ..svccommon import findings_to_vulns as _f2v
+    from .svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "snmp", _DEFAULT_PORT)
 
 
@@ -450,7 +450,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     """Full SNMP analysis. Attaches enumerated Account objects onto their host in place
     (Users & Accounts / spray list). Returns {targets, findings, runbooks, stats}.
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
-    from .. import svcprobe
+    from . import svcprobe
     host_by_ip = {h.ip: h for h in hosts}
     targets = snmp_targets(hosts)
     probes: dict = {}

@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
-from ..models import Vuln
+from ..core.models import Vuln
 
 
 # Well-known patterns. Ordered by specificity — more specific first so an

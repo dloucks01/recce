@@ -10,7 +10,7 @@ import os
 import tempfile
 import unittest
 
-from recce.store import Store
+from recce.core.store import Store
 from recce.webui.services import credentials as credentials_svc
 from recce.webui.services import findings as findings_svc
 
@@ -98,7 +98,7 @@ class CredentialsServiceTest(_TmpDbMixin, unittest.TestCase):
 
     def test_list_credentials_pagination(self):
         # seed a few creds directly through the store
-        from recce.models import Credential
+        from recce.core.models import Credential
         with Store(self.db_path) as st:
             for i in range(5):
                 st.add_credential(Credential(

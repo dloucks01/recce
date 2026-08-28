@@ -21,8 +21,9 @@ import unittest
 
 import openpyxl
 
-from recce import qod, report_docx, report_excel, report_html, report_markdown
-from recce.models import Account, Host, Port, Vuln
+from recce.core import qod
+from recce.report import docx as report_docx, excel as report_excel, html as report_html, markdown as report_markdown
+from recce.core.models import Account, Host, Port, Vuln
 
 
 def _engagement():
@@ -153,9 +154,9 @@ def test_report_surfaces_kev_known_exploited():
     import os
     import tempfile
 
-    from recce.models import Host, Port, Vuln
-    from recce.report_docx import group_findings
-    from recce.report_html import build_html
+    from recce.core.models import Host, Port, Vuln
+    from recce.report.docx import group_findings
+    from recce.report.html import build_html
 
     h = Host(ip="10.0.0.5", up_reason="syn-ack",
              ports=[Port(portid=445, service="microsoft-ds", state="open")],

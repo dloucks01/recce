@@ -9,8 +9,9 @@ import unittest
 from contextlib import redirect_stdout
 from types import SimpleNamespace
 
-from recce import proxy, scanner
-from recce.scanner import ScanProfile
+from recce.core import scanner
+from recce.core import proxy
+from recce.core.scanner import ScanProfile
 
 
 class ProxyBase(unittest.TestCase):
@@ -162,7 +163,7 @@ class TimeoutScalingTest(ProxyBase):
     def test_probe_modules_use_scaled_timeout(self):
         # svcdetect/web/probes resolve their connect timeout through proxy.scaled at call
         # time, so a proxied run gets a longer ceiling than a direct one.
-        from recce import proxy as p
+        from recce.core import proxy as p
         base_direct = p.scaled(4.0)
         p.configure("socks5h://127.0.0.1:1080")
         self.assertGreater(p.scaled(4.0), base_direct)
@@ -177,8 +178,8 @@ class TimeoutScalingTest(ProxyBase):
 class ReportBannerTest(ProxyBase):
     def test_html_report_carries_proxy_banner(self):
         import tempfile
-        from recce.report_html import build_html
-        from recce.models import Host
+        from recce.report.html import build_html
+        from recce.core.models import Host
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "r.html")
             build_html([Host(ip="10.0.0.1")], out, title="T",
@@ -189,15 +190,15 @@ class ReportBannerTest(ProxyBase):
 
     def test_html_report_no_banner_when_direct(self):
         import tempfile
-        from recce.report_html import build_html
-        from recce.models import Host
+        from recce.report.html import build_html
+        from recce.core.models import Host
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "r.html")
             build_html([Host(ip="10.0.0.1")], out, title="T")   # no proxy_note
             self.assertNotIn("Scanned via", open(out).read())
 
     def test_xlsx_guide_carries_proxy_banner(self):
-        from recce import report_excel
+        from recce.report import excel as report_excel
         rows = []
 
         class FakeSheet:
@@ -231,15 +232,15 @@ class HonestyTest(ProxyBase):
         self.assertIn("skipped", out)
 
     def test_mssql_sql_browser_skips_when_proxied(self):
-        from recce import mssql
+        from recce.services.db import mssql
         proxy.configure("socks5h://127.0.0.1:1080")
         # No socket is created; returns [] immediately (TCP 1433 enum still works).
         self.assertEqual(mssql.sql_browser("10.0.0.1"), [])
 
     def test_markdown_carries_proxy_note(self):
         import tempfile
-        from recce.report_markdown import build_markdown
-        from recce.models import Host
+        from recce.report.markdown import build_markdown
+        from recce.core.models import Host
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "r.md")
             build_markdown([Host(ip="10.0.0.1")], out, title="T",

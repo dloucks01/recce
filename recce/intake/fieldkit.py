@@ -30,7 +30,7 @@ import ipaddress
 import re
 from typing import Any
 
-from ..models import Host, Port, Vuln
+from ..core.models import Host, Port, Vuln
 
 BRIDGE_VERSION = 1
 

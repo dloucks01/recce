@@ -18,15 +18,15 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from .. import ad
-from .. import exploits
-from .. import parser as np
-from .. import scanner
-from .. import tracking as tr
-from ..models import Host
-from ..report_excel import read_workbook_edits, update_workbook
-from ..report_markdown import build_csv, build_markdown
-from ..store import Store, StoreError
-from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from ..vuln import exploits
+from ..core import parser as np
+from ..core import scanner
+from ..core import tracking as tr
+from ..core.models import Host
+from ..report.excel import read_workbook_edits, update_workbook
+from ..report.markdown import build_csv, build_markdown
+from ..core.store import Store, StoreError
+from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
@@ -47,8 +47,8 @@ def cmd_writeups(args: argparse.Namespace) -> int:
     _import_excel_tracking(store, paths)   # honour any Excel edits first
     hosts = _selected_hosts(store.all_hosts(), args)
     out_dir = os.path.join(args.output_dir, "writeups")
-    from ..report_docx import build_writeups
-    from .. import screenshot
+    from ..report.docx import build_writeups
+    from ..report import screenshot
 
     shots: dict = {}
     if not args.no_screenshots and not screenshot.available():
@@ -71,7 +71,7 @@ def cmd_writeups(args: argparse.Namespace) -> int:
     title = store.get_meta("engagement") or args.title
     combined_path = None
     if not args.no_combined:
-        from ..report_docx import build_combined
+        from ..report.docx import build_combined
         combined_path = os.path.join(out_dir, "findings_report.docx")
         build_combined(hosts, combined_path, title=f"{title} - Findings Report",
                        min_severity=args.min_severity,
@@ -106,7 +106,7 @@ def cmd_writeup(args: argparse.Namespace) -> int:
         return 1
     _import_excel_tracking(store, paths)
     hosts = store.all_hosts()
-    from ..report_docx import list_findings, build_one_writeup
+    from ..report.docx import list_findings, build_one_writeup
 
     if not args.selector:
         findings = list_findings(hosts, min_severity="info")
@@ -128,7 +128,7 @@ def cmd_writeup(args: argparse.Namespace) -> int:
     out_dir = os.path.join(args.output_dir, "writeups")
     shots: dict = {}
     if not args.no_screenshots:
-        from .. import screenshot
+        from ..report import screenshot
         if screenshot.available():
             res = _match_one_host(hosts, args.selector)
             for h in res:
@@ -208,8 +208,8 @@ def cmd_retest(args: argparse.Namespace) -> int:
     includes: cover with counts (fixed / still-open / regressed / new),
     per-verdict finding lists (still-open first — those are the ones the
     client still owes you)."""
-    from ..store import Store
-    from .. import retest as _retest
+    from ..core.store import Store
+    from ..report import retest as _retest
     from ..report.retest_docx import build_retest_report
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):

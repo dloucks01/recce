@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .. import db as _db
-from .. import web as _web
+from ..services import db as _db
+from ..services import web as _web
 
 _SMB_WINRM = {139, 445, 5985, 5986}
 

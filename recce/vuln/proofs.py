@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 
-from ..models import Host, Port, Vuln
+from ..core.models import Host, Port, Vuln
 from .vulndb import _cmp                      # reuse the version comparator
 
 CONFIRMED = "CONFIRMED"

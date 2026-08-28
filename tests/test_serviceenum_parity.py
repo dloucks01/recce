@@ -8,7 +8,7 @@ import pathlib
 import re
 import unittest
 
-from recce import serviceenum
+from recce.services import serviceenum
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _SH = _ROOT / "recce" / "scripts" / "recce-service.sh"

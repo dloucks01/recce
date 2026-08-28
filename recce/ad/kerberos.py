@@ -28,8 +28,8 @@ import socket
 import struct
 import time
 
-from ..models import Host, Port
-from ..svccommon import finding_builder, recvn as _recvn
+from ..core.models import Host, Port
+from ..services.svccommon import finding_builder, recvn as _recvn
 from .ntlm import normalize_nt_hash, nt_hash, rc4k
 
 _PORT = 88
@@ -698,12 +698,12 @@ def runbook(dc_ip: str, realm: str) -> list[dict]:
 
 
 def proof_html(command, output, banner: str = "") -> str:
-    from .. import mssql
+    from ..services.db import mssql
     return mssql.proof_html(command, output, prompt="$ ", banner=banner)
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from ..svccommon import findings_to_vulns as _f2v
+    from ..services.svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "kerberos", _PORT)
 
 
@@ -715,7 +715,8 @@ def analyze(hosts: list[Host], users: list[str] | None = None,
     `realm`/`dc_ip` fall back to derived domains / a host with 88 open. `budget` caps
     wall-clock seconds; `progress(i, n, user)` fires per AS-REQ. Returns
     {dc_ip, realm, results, findings, runbooks, stats}."""
-    from .. import ad, svcprobe
+    from .. import ad
+    from ..services import svcprobe
     dc_ip = dc_ip or dc_ip_for(hosts)
     if not realm:
         doms = ad.derive_domains([h for h in hosts if h.is_up])

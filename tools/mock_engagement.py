@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from recce.models import Account, Credential, Evidence, Host, Port, Vuln  # noqa: E402
+from recce.core.models import Account, Credential, Evidence, Host, Port, Vuln  # noqa: E402
 
 
 def _v(ip, port, script_id, title, severity, *, output, remediation, source,
@@ -453,8 +453,8 @@ def build(eng_dir: str, hosts: int = 48, seed: int = 1337,
     """Seed a realistic engagement into eng_dir. Returns summary counts."""
     random.seed(seed)
     from recce.cli import _open_paths
-    from recce.store import Store
-    from recce.targets import _subnet_of
+    from recce.core.store import Store
+    from recce.core.targets import _subnet_of
 
     st = Store(_open_paths(eng_dir)["db"])
     try:

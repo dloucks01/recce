@@ -16,14 +16,16 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recce import ad, exploits, parser, scanner
-from recce import tracking as tr
-from recce import xlsx
-from recce.models import Account, Host, Port, Script, Vuln
-from recce.report_excel import (build_workbook, read_workbook_tracking,
+from recce import ad
+from recce.core import parser, scanner
+from recce.vuln import exploits
+from recce.core import tracking as tr
+from recce.report.formats import xlsx
+from recce.core.models import Account, Host, Port, Script, Vuln
+from recce.report.excel import (build_workbook, read_workbook_tracking,
                                        update_workbook)
-from recce.store import Store
-from recce.targets import apply_exclusions, load_targets
+from recce.core.store import Store
+from recce.core.targets import apply_exclusions, load_targets
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
@@ -78,7 +80,8 @@ class WebPutProofTest(unittest.TestCase):
         cls.httpd.shutdown()
 
     def test_put_write_is_proven_and_reverted(self):
-        from recce import web, proofs
+        from recce.services import web
+        from recce.vuln import proofs
         _profile, vulns = web.scan_endpoint("127.0.0.1",
                                             Port(portid=self.port, service="http",
                                                  state="open"), active=True)
@@ -151,7 +154,8 @@ class WebJwtNoneProofTest(unittest.TestCase):
         cls.httpd.shutdown()
 
     def test_alg_none_is_proven_by_replay(self):
-        from recce import web, proofs
+        from recce.services import web
+        from recce.vuln import proofs
         _profile, vulns = web.scan_endpoint("127.0.0.1",
                                             Port(portid=self.port, service="http",
                                                  state="open"), active=True)
@@ -168,7 +172,7 @@ class WebJwtNoneProofTest(unittest.TestCase):
     def test_alg_none_rejected_is_not_a_finding(self):
         # A server that ignores the forged token (rejects unsigned) must NOT be flagged
         # as exploitable - the forge-and-replay downgrades it.
-        from recce import web
+        from recce.services import web
         import http.server
         import threading
         import base64 as _b64
@@ -302,7 +306,7 @@ class WebModuleTest(unittest.TestCase):
         return Port(portid=self.port, service="http", state="open")
 
     def test_fingerprint_from_headers_and_body(self):
-        from recce import web
+        from recce.services import web
         fp = web.fingerprint({"server": "nginx", "set-cookie": "JSESSIONID=1"},
                              "<title>Home</title> wp-content")
         self.assertIn("server=nginx", fp["tech"])
@@ -311,7 +315,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertEqual(fp["title"], "Home")
 
     def test_deep_scan_finds_git_env_listing_methods_cookie(self):
-        from recce import web
+        from recce.services import web
         profile, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
         sids = {v.script_id for v in findings}
         self.assertIn("web-git", sids)          # exposed .git
@@ -326,7 +330,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertIn("/.git/HEAD", git.output)
 
     def test_high_value_exposures(self):
-        from recce import web
+        from recce.services import web
         _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
         sids = {v.script_id for v in findings}
         self.assertIn("web-metrics", sids)        # Prometheus /metrics
@@ -334,7 +338,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertIn("web-graphql", sids)        # GraphQL introspection (POST)
 
     def test_deep_actuator_backup_gitconfig_and_secret_extraction(self):
-        from recce import web
+        from recce.services import web
         _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
         by = {v.script_id: v for v in findings}
         self.assertIn("web-actuator", by)               # actuator index
@@ -347,7 +351,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertNotIn("S3cr3tPass", by["web-actuator-env"].output)
 
     def test_default_creds_probe_opt_in(self):
-        from recce import web
+        from recce.services import web
         # Without creds=True, the Basic-auth endpoint isn't brute-tried.
         _, f0 = web.scan_endpoint("127.0.0.1", self._port(), active=True, creds=False)
         self.assertNotIn("web-default-creds", {v.script_id for v in f0})
@@ -358,7 +362,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertTrue(any(v.script_id == "web-default-creds" for v in found))
 
     def test_product_version_fingerprint(self):
-        from recce import web
+        from recce.services import web
         self.assertEqual(web.product_version({"x-jenkins": "2.401.1"}, ""), ("Jenkins", "2.401.1"))
         prod, ver = web.product_version({}, '<meta name="generator" content="WordPress 6.4.2">')
         self.assertEqual(prod, "WordPress")
@@ -366,7 +370,7 @@ class WebModuleTest(unittest.TestCase):
 
 
     def test_ssti_js_secret_and_wordpress_enum(self):
-        from recce import web
+        from recce.services import web
         _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
         sids = {v.script_id for v in findings}
         self.assertIn("web-ssti", sids)          # {{7*7}} -> 49 in the reflected page
@@ -377,7 +381,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertIn("Google API key", js.title)
 
     def test_authenticated_crawl_discovers_pages_forms_and_params(self):
-        from recce import web
+        from recce.services import web
         cres = web.crawl("127.0.0.1", self._port(), auth={"Cookie": "PHPSESSID=abc"})
         paths = {p["path"] for p in cres["pages"]}
         self.assertIn("/page2?q=1", paths)                     # followed the link
@@ -385,7 +389,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertTrue(any(f["password"] for f in cres["forms"]))   # parsed the login form
 
     def test_crawl_flags_cleartext_login_and_reflected_param(self):
-        from recce import web
+        from recce.services import web
         cres = web.crawl("127.0.0.1", self._port())
         fs = web._crawl_findings("127.0.0.1", self._port(), cres)
         self.assertIn("web-cleartext-login", {v.script_id for v in fs})   # pw form over HTTP
@@ -394,7 +398,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertEqual(ref[0].script_id, "web-ssti")
 
     def test_jwt_alg_none_detected(self):
-        from recce import web
+        from recce.services import web
         # A header.payload.sig where header = {"alg":"none"}.
         findings = web._scan_jwts("1.1.1.1", Port(portid=443, service="https"),
                                   {"set-cookie": "t=eyJhbGciOiJub25lIn0.eyJ1IjoiYSJ9."}, "")
@@ -402,17 +406,17 @@ class WebModuleTest(unittest.TestCase):
         self.assertEqual(findings[0].severity, "high")
         self.assertIn("alg:none", findings[0].title.lower())
         # Proof engine renders a verdict + jwt_tool step.
-        from recce import proofs
+        from recce.vuln import proofs
         r = proofs.recipe_for(findings[0])
         self.assertEqual(r["id"], "web-jwt")
 
     def test_passive_mode_skips_path_probes(self):
-        from recce import web
+        from recce.services import web
         _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=False)
         self.assertNotIn("web-git", {v.script_id for v in findings})
 
     def test_web_endpoints_categorization_and_bridge(self):
-        from recce import web
+        from recce.services import web
         h = Host(ip="127.0.0.1", ports=[self._port(),
                                         Port(portid=445, service="microsoft-ds", state="open")])
         h.vulns = web_git = []
@@ -422,7 +426,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertIn("nikto", eps[0]["commands"])
 
     def test_auth_headers_are_sent(self):
-        from recce import web
+        from recce.services import web
         r = web._fetch("127.0.0.1", self._port(), "/reflect", auth={"X-Test": "hello"})
         self.assertIsNotNone(r)
         self.assertEqual(r[2], "hello")            # server echoed our auth header
@@ -430,7 +434,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertEqual(r2[2], "none")            # no header without auth
 
     def test_non_http_port_skips_active_probes(self):
-        from recce import web
+        from recce.services import web
         # A closed/non-HTTP port: root fetch fails -> no path probes, no crash.
         dead = Port(portid=1, service="https", state="open")     # nothing listening
         profile, findings = web.scan_endpoint("127.0.0.1", dead, active=True)
@@ -438,7 +442,8 @@ class WebModuleTest(unittest.TestCase):
         self.assertNotIn("web-git", {v.script_id for v in findings})
 
     def test_web_proof_and_poc_wiring(self):
-        from recce import proofs, poc
+        from recce.act import poc
+        from recce.vuln import proofs
         v = Vuln(ip="1.1.1.1", port=80, protocol="tcp", script_id="web-git",
                  title="Exposed Git repository (.git) - source/secret disclosure",
                  output="GET http://1.1.1.1/.git/HEAD -> HTTP 200", source="web")
@@ -536,7 +541,7 @@ class WebTier1Test(unittest.TestCase):
         return Port(portid=self.port, service="http", state="open")
 
     def test_fingerprints(self):
-        from recce import web
+        from recce.services import web
         fp = web.fingerprint({}, "grafana MinIO Console")
         self.assertIn("Grafana", fp["tech"])
         self.assertIn("MinIO", fp["tech"])
@@ -546,7 +551,7 @@ class WebTier1Test(unittest.TestCase):
         self.assertEqual((prod, ver), ("Elasticsearch", "7.10.2"))
 
     def test_unauth_exposure_paths(self):
-        from recce import web
+        from recce.services import web
         _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
         sids = {v.script_id for v in findings}
         self.assertIn("web-jenkins-script", sids)     # critical - unauth Groovy RCE
@@ -559,7 +564,7 @@ class WebTier1Test(unittest.TestCase):
         self.assertEqual(jenk.severity, "critical")
 
     def test_form_and_basic_default_creds(self):
-        from recce import web
+        from recce.services import web
         base = web.url_for("127.0.0.1", self._port())
         # Form/JSON logins (opt-in): Grafana admin/admin + MinIO minioadmin.
         forms = web._form_login_defaults("127.0.0.1", self._port(), base, ["Grafana", "MinIO"])
@@ -572,7 +577,7 @@ class WebTier1Test(unittest.TestCase):
         self.assertTrue(any("guest:guest" in v.output for v in basic))
 
     def test_creds_flag_gates_form_login(self):
-        from recce import web
+        from recce.services import web
         # Without creds=True the form-login probe never runs.
         _, f0 = web.scan_endpoint("127.0.0.1", self._port(), active=True, creds=False)
         self.assertNotIn("web-default-creds", {v.script_id for v in f0})
@@ -580,7 +585,8 @@ class WebTier1Test(unittest.TestCase):
         self.assertIn("web-default-creds", {v.script_id for v in f1})
 
     def test_prove_confirms_tier1(self):
-        from recce import web, proofs
+        from recce.services import web
+        from recce.vuln import proofs
         _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
         h = Host(ip="127.0.0.1", ports=[self._port()])
         h.vulns = findings
@@ -679,7 +685,7 @@ class WebSqliTest(unittest.TestCase):
         return Port(portid=self.port, service="http", state="open")
 
     def test_error_based_get(self):
-        from recce import web
+        from recce.services import web
         send = web._make_sender("127.0.0.1", self._port(), "get", "/prod", "id", None)
         fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /prod", send)
         self.assertTrue(fs and fs[0].script_id == "web-sqli")
@@ -687,20 +693,20 @@ class WebSqliTest(unittest.TestCase):
         self.assertIn("MySQL", fs[0].title)
 
     def test_boolean_based_get(self):
-        from recce import web
+        from recce.services import web
         send = web._make_sender("127.0.0.1", self._port(), "get", "/boolsqli", "id", None)
         fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /boolsqli", send)
         self.assertTrue(fs and fs[0].script_id == "web-sqli")
         self.assertIn("boolean-based", fs[0].title)
 
     def test_dynamic_page_no_false_positive(self):
-        from recce import web
+        from recce.services import web
         send = web._make_sender("127.0.0.1", self._port(), "get", "/dyn", "id", None)
         fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /dyn", send)
         self.assertEqual(fs, [])            # a page that changes every request must not FP
 
     def test_form_risk_classifier_skips_side_effecting_forms(self):
-        from recce import web
+        from recce.services import web
 
         def form(action, fields):
             return {"action": action, "method": "post", "inputs": [f[0] for f in fields],
@@ -721,7 +727,7 @@ class WebSqliTest(unittest.TestCase):
         self.assertFalse(web._form_risk(form("/search", [("q", "text")])))
 
     def test_risky_form_is_recorded_not_submitted(self):
-        from recce import web
+        from recce.services import web
         # scan_crawl over the mock root, whose forms include /account/delete.
         h = Host(ip="127.0.0.1", ports=[self._port()])
         web.scan_crawl(h)
@@ -732,7 +738,7 @@ class WebSqliTest(unittest.TestCase):
         self.assertFalse(WebSqliTest.hit_delete)         # and never actually submitted
 
     def test_form_field_fuzzing_via_scan_crawl(self):
-        from recce import web
+        from recce.services import web
         h = Host(ip="127.0.0.1", ports=[self._port()])
         pages, added = web.scan_crawl(h)
         sids = {v.script_id for v in h.vulns}
@@ -745,7 +751,8 @@ class WebSqliTest(unittest.TestCase):
         self.assertFalse(WebSqliTest.hit_delete)
 
     def test_prove_confirms_sqli(self):
-        from recce import web, proofs
+        from recce.services import web
+        from recce.vuln import proofs
         send = web._make_sender("127.0.0.1", self._port(), "get", "/prod", "id", None)
         fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /prod", send)
         h = Host(ip="127.0.0.1", ports=[self._port()])
@@ -817,7 +824,7 @@ class WebCookieRedirectLfiTest(unittest.TestCase):
 
     # --- cookies (unit) ---------------------------------------------------------
     def test_cookie_hardening_checks(self):
-        from recce import web
+        from recce.services import web
         tls = Port(portid=443, service="https", state="open")
         titles = {v.title.split(":")[0] for v in
                   web._cookie_findings("1.1.1.1", tls, "sessionid=x; Path=/")}
@@ -838,19 +845,19 @@ class WebCookieRedirectLfiTest(unittest.TestCase):
         self.assertTrue(any("broad parent Domain" in v.title for v in dom))
 
     def test_cookie_findings_surface_in_scan_endpoint(self):
-        from recce import web
+        from recce.services import web
         _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
         self.assertIn("web-cookie", {v.script_id for v in findings})
 
     # --- open redirect ----------------------------------------------------------
     def test_open_redirect_detected(self):
-        from recce import web
+        from recce.services import web
         send = web._make_sender("127.0.0.1", self._port(), "get", "/go", "next", None)
         fs = web._open_redirect_via("127.0.0.1", self._port(), "param 'next' on /go", send)
         self.assertTrue(fs and fs[0].script_id == "web-openredirect")
 
     def test_open_redirect_no_fp_on_fixed_target(self):
-        from recce import web
+        from recce.services import web
         # /safe always redirects to /dashboard regardless of input -> not open.
         send = web._make_sender("127.0.0.1", self._port(), "get", "/safe", "next", None)
         self.assertEqual(web._open_redirect_via("127.0.0.1", self._port(),
@@ -858,7 +865,7 @@ class WebCookieRedirectLfiTest(unittest.TestCase):
 
     # --- path traversal ---------------------------------------------------------
     def test_traversal_detected_on_fileish_param(self):
-        from recce import web
+        from recce.services import web
         send = web._make_sender("127.0.0.1", self._port(), "get", "/download", "file", None)
         fs = web._traversal_via("127.0.0.1", self._port(), "param 'file' on /download",
                                 "file", send)
@@ -866,7 +873,7 @@ class WebCookieRedirectLfiTest(unittest.TestCase):
         self.assertEqual(fs[0].severity, "high")
 
     def test_traversal_skips_non_fileish_param(self):
-        from recce import web
+        from recce.services import web
         # A param that doesn't look like a file/path is not traversal-tested (budget/FP).
         send = web._make_sender("127.0.0.1", self._port(), "get", "/download", "q", None)
         self.assertEqual(web._traversal_via("127.0.0.1", self._port(),
@@ -874,7 +881,8 @@ class WebCookieRedirectLfiTest(unittest.TestCase):
 
     # --- integration + prove ----------------------------------------------------
     def test_scan_crawl_finds_redirect_and_lfi(self):
-        from recce import web, proofs
+        from recce.services import web
+        from recce.vuln import proofs
         h = Host(ip="127.0.0.1", ports=[self._port()])
         web.scan_crawl(h)
         sids = {v.script_id for v in h.vulns}

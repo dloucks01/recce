@@ -38,8 +38,8 @@ import ssl
 import time
 from html.parser import HTMLParser
 
-from ..models import Port, Vuln
-from .. import proxy
+from ..core.models import Port, Vuln
+from ..core import proxy
 
 
 # ---- request helpers --------------------------------------------------------
@@ -313,7 +313,7 @@ def _resolve_extra_paths(extra_paths: list[str] | None) -> list[tuple]:
     catch-all "the user thinks this is worth probing" — leaving the
     curated bundled list to keep its specific severities/CWEs."""
     from os import environ as _env
-    from .. import wordlists as _wl
+    from . import wordlists as _wl
     merged: list[str] = list(extra_paths or [])
     env_path = _env.get("RECCE_HTTP_WORDLIST", "").strip()
     if env_path:
@@ -1042,41 +1042,6 @@ def api_spec_probe(ip: str, port: int, use_tls: bool) -> dict | None:
 # ---- vhost enumeration (Tier A) --------------------------------------------
 
 # Small list of hostname patterns that commonly bind to the same IP as a
-# public site. Each is tried as Host: header; a materially different response
-# (different size + different title) indicates a virtual host bound to that
-# name. The tester now knows there's a second app hiding on the same box.
-_VHOST_CANDIDATES = [
-    "admin", "dev", "staging", "test", "internal", "intranet", "portal",
-    "api", "vpn", "mail", "webmail", "monitor", "grafana", "jenkins",
-]
-
-
-def vhost_probe(ip: str, port: int, use_tls: bool, root_domain: str = "") -> list[dict]:
-    """Try each candidate hostname as `Host:` header vs. the ip-only baseline.
-    Return list of {hostname, status, length, title} that were materially
-    different from the baseline. `root_domain` seeds fully-qualified guesses
-    (e.g. 'corp.local' -> admin.corp.local); an empty string uses bare names."""
-    r0 = _get(ip, port, use_tls, "/", read_body=True)
-    if r0 is None:
-        return []
-    baseline_len = len(r0.get("body") or b"")
-    baseline_status = r0["status"]
-
-    hits: list[dict] = []
-    for name in _VHOST_CANDIDATES:
-        host_val = f"{name}.{root_domain}" if root_domain else name
-        r = _get(ip, port, use_tls, "/", read_body=True,
-                 extra_headers={"Host": host_val})
-        if r is None:
-            continue
-        length = len(r.get("body") or b"")
-        # Materially different: status differs OR size differs by >=32 bytes.
-        # Small differences (dynamic tokens, request IDs) are noise.
-        if r["status"] != baseline_status or abs(length - baseline_len) >= 32:
-            hits.append({"hostname": host_val, "status": r["status"], "length": length})
-    return hits
-
-
 # ---- Deep probes (Actuator / nginx alias / cache poisoning / headers / CSP) --
 
 # Spring Boot Actuator endpoints. `/actuator/env` and `/actuator/heapdump` are
@@ -1370,7 +1335,7 @@ def enum_findings(host_ip: str, port: Port,
     Called from `probes.http_findings` alongside the existing header checks.
     `extra_paths` augments the bundled `_PATHS` list — sourced from either
     a `--wordlist` CLI flag or `RECCE_HTTP_WORDLIST` env var."""
-    from .. import probes
+    from . import probes
     use_tls = probes._is_tls(port)
 
     out: list[Vuln] = []

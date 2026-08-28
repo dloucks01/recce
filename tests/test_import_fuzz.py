@@ -11,9 +11,9 @@ import random
 import tempfile
 import unittest
 
-from recce import credenum as ce
-from recce import importers as im
-from recce.store import Store
+from recce.creds import credenum as ce
+from recce.intake import importers as im
+from recce.core.store import Store
 
 # Realistic-ish seeds for each parser (kept short; the point is the mutations).
 SEEDS = {
@@ -81,7 +81,7 @@ class ScannerParsersNeverCrash(unittest.TestCase):
                     self.fail(f"{name} parser raised on a mutation: {e!r}")
 
     def test_masscan_and_decode_helpers(self):
-        from recce.parser import parse_masscan_json, parse_masscan_list
+        from recce.core.parser import parse_masscan_json, parse_masscan_list
         rng = random.Random(99)
         seeds = ["open tcp 80 1.2.3.4 1\n", '[{"ip":"1.2.3.4","ports":[{"port":80,"status":"open"}]}]']
         for seed in seeds:

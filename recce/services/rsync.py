@@ -21,8 +21,8 @@ from __future__ import annotations
 import shlex
 import socket
 
-from ..models import Host, Port
-from ..svccommon import finding_builder
+from ..core.models import Host, Port
+from .svccommon import finding_builder
 
 _PORTS = (873,)
 _DEFAULT_PORT = 873
@@ -269,12 +269,12 @@ def runbook(ip: str, port: int) -> list[dict]:
 
 
 def proof_html(command, output, banner: str = "") -> str:
-    from .. import mssql
+    from ..services.db import mssql
     return mssql.proof_html(command, output, prompt="$ ", banner=banner)
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from ..svccommon import findings_to_vulns as _f2v
+    from .svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "rsync", _DEFAULT_PORT)
 
 
@@ -291,7 +291,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     """Full rsync analysis. Returns {targets, findings, runbooks, probes, stats}.
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
-    from .. import svcprobe
+    from . import svcprobe
     targets = rsync_targets(hosts)
     probes: dict = {}
     state: dict = {}

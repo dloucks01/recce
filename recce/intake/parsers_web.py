@@ -18,7 +18,7 @@ import json
 import re
 import xml.etree.ElementTree as ET
 
-from ..models import Vuln
+from ..core.models import Vuln
 
 
 # ---- shared ------------------------------------------------------------------

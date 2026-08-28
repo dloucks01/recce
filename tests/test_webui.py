@@ -90,8 +90,8 @@ def test_unannotated_service_finding_is_not_hidden_as_a_lead(tmp_path):
     from fastapi.testclient import TestClient
 
     from recce.cli import _open_paths
-    from recce.models import Host, Port, Vuln
-    from recce.store import Store
+    from recce.core.models import Host, Port, Vuln
+    from recce.core.store import Store
     from recce.webui.app import create_app
 
     eng = tmp_path / "eng_qod"

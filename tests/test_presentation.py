@@ -2,9 +2,9 @@
 
 import unittest
 
-from recce import qod
-from recce.models import Host, Port, Vuln
-from recce.report_excel import _spec_vulns
+from recce.core import qod
+from recce.core.models import Host, Port, Vuln
+from recce.report.excel import _spec_vulns
 
 
 def _host():
@@ -64,14 +64,14 @@ class ExploitCandidateLabelTest(unittest.TestCase):
         return h
 
     def test_actions_carry_verified_flag(self):
-        from recce import exploitplan
+        from recce.act import exploitplan
         acts = exploitplan.actions_for_host(self._host())
         vmap = {a["finding"]: a.get("verified") for a in acts}
         self.assertTrue(vmap.get("ms17-010"))                              # confirmed
         self.assertIn(False, [v for k, v in vmap.items() if "vsftpd" in k])  # candidate
 
     def test_exploitation_sheet_confidence_column(self):
-        from recce.report_excel import _spec_exploitation
+        from recce.report.excel import _spec_exploitation
         spec = _spec_exploitation([self._host()])
         self.assertIn("Confidence", [c[0] for c in spec.cols])
         confs = {r["data"]["Finding"]: r["data"]["Confidence"] for r in spec.rows}

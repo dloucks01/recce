@@ -20,19 +20,39 @@ import re
 import sys
 import tempfile
 import time
-from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .. import ad
-from .. import exploits
-from .. import parser as np
-from .. import scanner
-from .. import tracking as tr
-from ..models import Host
-from ..report_excel import read_workbook_edits, update_workbook
-from ..report_markdown import build_csv, build_markdown
-from ..store import Store, StoreError
-from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from ..vuln import exploits
+from ..core import parser as np
+from ..core import scanner
+from ..core import tracking as tr
+from ..core.models import Host
+from ..report.excel import read_workbook_edits, update_workbook
+from ..report.markdown import build_csv, build_markdown
+from ..core.store import Store, StoreError
+from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
+_MODULE_PATH = {
+    "snmp": "recce.services.snmp", "smtp": "recce.services.smtp",
+    "dns": "recce.services.dns", "rsync": "recce.services.rsync",
+    "nfs": "recce.services.nfs", "ftp": "recce.services.ftp",
+    "docker": "recce.services.docker", "kubernetes": "recce.services.kubernetes",
+    "ldap": "recce.services.ldap", "smb": "recce.services.smb",
+    "mongodb": "recce.services.db.mongodb", "redis": "recce.services.db.redis",
+    "elasticsearch": "recce.services.db.elasticsearch", "mssql": "recce.services.db.mssql",
+    "mysql": "recce.services.db.mysql", "postgres": "recce.services.db.postgres",
+    "cassandra": "recce.services.db.cassandra", "couchdb": "recce.services.db.couchdb",
+    "influxdb": "recce.services.db.influxdb", "memcached": "recce.services.db.memcached",
+    "oracle": "recce.services.db.oracle", "db2": "recce.services.db.db2",
+    "zookeeper": "recce.services.zookeeper", "kafka": "recce.services.kafka",
+    "etcd": "recce.services.etcd", "consul": "recce.services.consul",
+    "nomad": "recce.services.nomad", "modbus": "recce.services.modbus",
+    "ipmi": "recce.services.ipmi", "prometheus": "recce.services.prometheus",
+    "rdp": "recce.services.rdp", "vnc": "recce.services.vnc",
+    "docker_registry": "recce.services.docker_registry",
+    "api": "recce.services.api", "web": "recce.services.web",
+}
 
 __all__ = ['BANNER', '_Refresher', '_SEV_ORDER', '_fmt_dur', '_progress', '_summarize_failures', '_ports_for_host', '_swept_ports_for_host', '_RETRY_HOST_TIMEOUT_CAP_MIN', '_union_swept', '_fold_swept_ports', '_disproved_ports_in_xml', '_open_store', '_sudo_owner', '_reown', '_relax_perms', '_open_paths', '_now', '_record_issues', '_persist_host', '_resolve_domains', '_reconcile_steps', '_import_excel_tracking', '_safe_refresh', '_DEFER_REPORTS', '_generate_reports', '_apply_profile_overrides', '_split_userdomain', '_creds_of', '_db_login_creds', '_web_login_creds', '_admin_creds_of', '_final_report', '_mkissue', '_enum_worker', '_reconfirm_missed', '_seed_targets', '_discover', '_phase_enum', '_merge_vuln_results', '_vuln_worker', '_selected_hosts', '_vuln_targets', '_phase_vulns', '_db_worker', '_phase_db', '_privesc_worker', '_phase_privesc', '_ssh_creds_of', '_credenum_worker', '_auth_cell', '_print_auth_table', '_phase_credenum', '_setup_scan', '_print_next', '_recovery_hint', '_sweep_defaults', '_UNAUTH_SWEEP', '_AUTH_SWEEP', '_run_sweep', '_match_one_host', '_web_screenshots', '_cves_from_findings', '_prove_run_safe_checks', '_parse_cred_spec', '_spray_cred_set', '_self_scan', '_run_ldap_enum', '_ip_key', '_fold_host', '_resolve_ingest_host', '_tag_host_os', '_ingest_service_output', '_fold_loot', '_deploy_worker', '_collect_scan_files', '_proof_shot', '_ad_shot', '_ad_live_kerberos', '_mssql_shot', '_smb_shot', '_ftp_shot', '_docker_shot', '_ldap_shot', '_run_service_scan', '_fmt_snmp', '_snmp_persist_accounts', '_fmt_mongodb', '_fmt_redis', '_fmt_elasticsearch', '_fmt_rsync', '_fmt_nfs', '_fmt_mysql', '_fmt_postgres', '_fmt_smtp', '_fmt_dns', '_fmt_memcached', '_fmt_couchdb', '_fmt_influxdb', '_fmt_cassandra', '_fmt_oracle', '_fmt_db2', '_probe_progress', '_probe_kwargs', '_report_partial', '_fold_service_findings', '_mark_capability_scanned', '_service_module_coverage', '_demo_credentials', '_demo_bloodhound']
 
@@ -167,7 +187,7 @@ def _disproved_ports_in_xml(xml_path: str, ip: str) -> set:
     couldn't reach ('filtered'/no-response = packet loss, NOT counted here) is kept -
     masscan's positive evidence stands over nmap loss. Never raises."""
     import xml.etree.ElementTree as ET
-    from ..parser import _declares_entities
+    from ..core.parser import _declares_entities
     if _declares_entities(xml_path):
         return set()
     try:
@@ -447,14 +467,16 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     if _DEFER_REPORTS:
         return
     hosts = store.all_hosts()
-    from .. import qod, verify, dedup, kev, epss
+    from ..core import qod
+    from ..intake import dedup
+    from ..vuln import verify, kev, epss
     # Apply the tester's include filter first so downstream annotation and
     # dedup passes only touch what will actually appear in the report.
     # include_keys uses the same canonical vuln_row_key the frontend and
     # tracking table use ("vuln:ip:port:script_id:title[:60]"), so the two
     # views stay in sync.
     if include_keys is not None:
-        from ..tracking import vuln_row_key
+        from ..core.tracking import vuln_row_key
         for h in hosts:
             h.vulns = [v for v in h.vulns if vuln_row_key(v) in include_keys]
     for h in hosts:                    # ensure every finding is QoD-scored before report/gates
@@ -485,7 +507,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     # If this (or the originating scan) ran through a proxy, stamp the datastore so the
     # note survives a later plain `recce report`, and surface it in the deliverables -
     # a reader must know the data came from a connect-scan-only, no-UDP proxied run.
-    from .. import proxy as _proxy
+    from ..core import proxy as _proxy
     if _proxy.is_active():
         store.set_meta("proxy", _proxy.describe())
     proxy_note = store.get_meta("proxy") or ""
@@ -517,7 +539,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     # never has to request them one by one; leads/version-guesses and info are excluded
     # by default (build_combined's _is_real filter). `recce writeup <id>` still targets one.
     try:
-        from ..report_docx import build_combined
+        from ..report.docx import build_combined
         # Client branding + engagement context so the cover page reflects the
         # actual engagement, not just "recce". Fields are optional; the builder
         # skips the cover cleanly when nothing is set.
@@ -530,7 +552,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     except Exception as e:  # noqa: BLE001 - a writeup failure never blocks the other reports
         if not quiet:
             print(f"    [!] findings write-up doc skipped: {e}")
-    from ..report_html import build_html, build_assets_html
+    from ..report.html import build_html, build_assets_html
     gen = _now()
     build_html(hosts, paths["html"], title=title, domains=domains,
                credentials=credentials, generated=gen, tracking=tracking,
@@ -542,7 +564,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     # Standalone, directly-viewable diagrams (open the .svg in any browser — no tools).
     # Best-effort - never block a report on these.
     try:
-        from .. import netmap
+        from ..report import netmap
         eng_dir = os.path.dirname(paths["html"])
         ad_blob = meta.get("ad_bloodhound")
 
@@ -570,7 +592,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             _write("network-reachability.svg",
                    _standalone_svg(netmap.reachability_svg(hosts, ad_blob)))
         # Attack path as a standalone SVG too (only when there's a confirmed path).
-        from .. import attackpath as _ap
+        from ..act import attackpath as _ap
         _ap_steps = _ap.build(hosts)
         if _ap_steps:
             _write("attack-path.svg", _standalone_svg(_ap.svg(hosts, _ap_steps)))
@@ -946,7 +968,7 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     # (nmap saw it closed). This recovers ports enum lost to packet loss - the same "0
     # open ports" failure as the nmap path - while still pruning masscan's false opens.
     if masscan_candidates:
-        from ..models import Port
+        from ..core.models import Port
         disproved = _disproved_ports_in_xml(enum_xml, ip)
         have = {(p.protocol, p.portid) for p in host.ports}
         for pid in masscan_candidates:
@@ -982,7 +1004,7 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     # Recover the services nmap left as unknown/blank: mine its kept fingerprint,
     # fall back to the curated port map, then a stdlib banner grab (active) - so a
     # port like 5040 becomes 'Windows CDPSvc', not a dead 'unknown'.
-    from .. import svcdetect
+    from ..services import svcdetect
     svcdetect.enrich_host(host, active=active_probe)
     # Second opinion: for the handful of ports STILL unnamed, re-run nmap at max
     # version effort (--version-all) aimed at just those - cheap because it's a few
@@ -997,9 +1019,9 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
             svcdetect.apply_reprobe(host, np.parse_nmap_xml(rp_xml))
     ad.identify_roles(host)
     ad.parse_signing_and_ntlm(host)
-    from .. import vulndb
+    from ..vuln import vulndb
     vulndb.assess_host_inplace(host)   # offline version->CVE findings, immediately
-    from .. import qod
+    from ..core import qod
     qod.annotate(host)                 # stamp Quality-of-Detection once, from the method
     return host, issues
 
@@ -1042,7 +1064,7 @@ def _seed_targets(store, live_ips, subnet_map, hostname_map):
     failed scan can never make a real target vanish from the report ('false no hosts').
     Each is stored up-front with its provided hostname and up_reason 'target-list'; the
     enum phase then enriches it in place. Returns the count seeded."""
-    from ..models import Host
+    from ..core.models import Host
     n = 0
     for ip in live_ips:
         h = Host(ip=ip, subnet=subnet_map.get(ip, ""), up_reason="target-list")
@@ -1404,9 +1426,9 @@ def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss,
     # Deep web enum runs BEFORE the CVE mapping so a product/version recovered from
     # a web fingerprint (Jenkins/Confluence/…) gets version->CVE matched too.
     if use_probes:
-        from .. import web
+        from ..services import web
         web.scan_host(host, active=True)   # headers/TLS + exposures + fingerprint
-    from .. import vulndb
+    from ..vuln import vulndb
     vulndb.assess_host_inplace(host)   # offline version->CVE findings
     if use_ss:
         exploits.enrich_hosts([host])
@@ -1521,7 +1543,7 @@ def _phase_vulns(store, paths, args, profile) -> None:
 
 def _db_worker(host, portids, profile, paths, creds, aggressive, use_ss):
     """Returns (host, issues)."""
-    from .. import db as dbmod
+    from ..services import db as dbmod
     issues: list[dict] = []
     vx = os.path.join(paths["raw"], f"{host.ip}_db.xml")
     _, iss = scanner.nse_scan(host.ip, portids, vx, profile,
@@ -1542,7 +1564,7 @@ def _db_worker(host, portids, profile, paths, creds, aggressive, use_ss):
 
 
 def _phase_db(store, paths, args, profile) -> None:
-    from .. import db as dbmod
+    from ..services import db as dbmod
     creds = _creds_of(args)
     aggressive = getattr(args, "aggressive", False)
     use_ss = not getattr(args, "no_searchsploit", False) and exploits.available()
@@ -1582,7 +1604,7 @@ def _phase_db(store, paths, args, profile) -> None:
 
 def _privesc_worker(host, profile, paths, creds, aggressive):
     """Returns (host, issues)."""
-    from .. import privesc as pe
+    from ..act import privesc as pe
     issues: list[dict] = []
     ports = [p.portid for p in host.open_ports
              if p.portid in (139, 445, 3389, 135) or "http" in (p.service or "")]
@@ -1649,7 +1671,7 @@ def _ssh_creds_of(args) -> dict | None:
 
 def _credenum_worker(host, creds, ssh_creds, aggressive, admin_creds=None):
     """Returns (host, issues, auth)."""
-    from .. import credenum
+    from ..creds import credenum
     issues, auth = credenum.enrich_host(host, creds, ssh_creds, aggressive=aggressive,
                                         admin_creds=admin_creds)
     return host, issues, auth
@@ -1705,7 +1727,7 @@ def _print_auth_table(auth_rows: list) -> None:
 
 
 def _phase_credenum(store, paths, args) -> None:
-    from .. import credenum
+    from ..creds import credenum
     creds = _creds_of(args)
     admin_creds = _admin_creds_of(args)
     ssh_creds = _ssh_creds_of(args)
@@ -1743,8 +1765,8 @@ def _phase_credenum(store, paths, args) -> None:
     # safe) to find the working cred PER HOST, then enum each host with its own cred.
     per_host_creds: dict[str, dict] = {}
     if want_set:
-        from .. import credentials as cr
-        from ..models import Credential
+        from ..creds import credentials as cr
+        from ..core.models import Credential
         stacked = cr.stack(targets, store.all_credentials()) if getattr(args, "all_creds", False) else []
         cred_set = _spray_cred_set(args, stacked)
         if cred_set:
@@ -1827,7 +1849,7 @@ def _setup_scan(args):
     _apply_profile_overrides(profile, args)
     rules = getattr(args, "rules", None)
     if rules:
-        from .. import vulndb
+        from ..vuln import vulndb
         n = vulndb.load_rules(rules)
         print(f"[+] Loaded {n} extra detection rule(s) from {rules}."
               if n else f"[!] No usable detection rules found in {rules}.")
@@ -1857,7 +1879,7 @@ def _print_next(paths: dict, output_dir: str, n: int = 1) -> None:
     """Echo the top next-best-action(s) for this engagement (ambient guidance). Opens a
     short-lived read of the datastore, so it works after the main scan store is closed.
     Silent on any error - guidance must never break a command."""
-    from .. import workflow
+    from ..act import workflow
     try:
         s = Store(paths["db"])
     except Exception:  # noqa: BLE001
@@ -2041,7 +2063,8 @@ def _match_one_host(hosts, selector):
 
 def _web_screenshots(targets, output_dir) -> None:
     """Headless-browser screenshot per web endpoint -> engagement/screenshots/."""
-    from .. import screenshot, web
+    from ..report import screenshot
+    from ..services import web
     if not screenshot.available():
         print("    [!] --screenshots: no headless browser found (chromium/firefox); "
               "skipping. `recce doctor` shows what's missing.")
@@ -2088,7 +2111,7 @@ def _prove_run_safe_checks(store, paths, hosts, args) -> None:
     """--run: re-run the NON-INTRUSIVE detection NSE for SMB findings so a verdict
     can move from LIKELY to CONFIRMED / FALSE POSITIVE on real evidence. These are
     detection scripts (smb-security-mode, smb-vuln-ms17-010), not exploits."""
-    from .. import proofs
+    from ..vuln import proofs
     profile = scanner.PROFILES.get(getattr(args, "profile", "standard"),
                                    scanner.PROFILES["standard"])
     smb_scripts = ["smb-security-mode", "smb2-security-mode",
@@ -2120,7 +2143,7 @@ def _prove_run_safe_checks(store, paths, hosts, args) -> None:
 
 def _parse_cred_spec(spec: str):
     """Parse 'user:secret', 'DOMAIN\\user:secret', or 'domain/user:secret'."""
-    from ..models import Credential
+    from ..core.models import Credential
     idpart, secret = (spec.split(":", 1) + [""])[:2] if ":" in spec else (spec, "")
     domain = ""
     if "\\" in idpart:
@@ -2141,7 +2164,7 @@ def _spray_cred_set(args, stacked):
     """The credential set to spray: the stacked/looted creds (default) plus any
     --user-list usernames and --pass-list passwords. Returns Credential objects; a
     spray combines all usernames x all passwords (paired when lockout-safe)."""
-    from ..models import Credential
+    from ..core.models import Credential
     creds = list(stacked)
     for path, make in ((getattr(args, "user_list", None), lambda v: Credential(username=v)),
                        (getattr(args, "pass_list", None),
@@ -2161,7 +2184,7 @@ def _spray_cred_set(args, stacked):
 def _self_scan() -> bool:
     import tempfile
     try:
-        from .. import scanner
+        from ..core import scanner
         profile = scanner.PROFILES["quick"]
         with tempfile.TemporaryDirectory() as d:
             fp = os.path.join(d, "p.xml")
@@ -2171,7 +2194,7 @@ def _self_scan() -> bool:
             scanner.enum_scan("127.0.0.1", ports or [80], deep, profile)  # (xml, issue)
             host = _fold_host("127.0.0.1", np.parse_nmap_xml(deep), {"127.0.0.1": "local"})
             host.enumerated = True
-            from ..report_excel import build_workbook, read_workbook_tracking
+            from ..report.excel import build_workbook, read_workbook_tracking
             out = os.path.join(d, "wb.xlsx")
             build_workbook([host], out)
             read_workbook_tracking(out)  # prove read-back parses too
@@ -2323,8 +2346,8 @@ def _tag_host_os(host, parsed) -> None:
 def _ingest_service_output(svc: dict, paths: dict, args) -> int:
     """Fold recce-service.sh per-service findings into the datastore as confirmed
     service-enum Vulns on the matching host:port (creating a host entry if needed)."""
-    from .. import ingest
-    from ..models import Host, Port
+    from ..intake import ingest
+    from ..core.models import Host, Port
     store = _open_store(paths["db"])
     if store is None:
         return 1
@@ -2373,7 +2396,7 @@ def _fold_loot(host, text: str, source: str) -> tuple[int, int, int]:
     category/vector), AV/EDR defenses, and high-signal findings promoted to Vulns.
     Sets privesc_checked. Returns (added, total_rows, promoted). Shared by the
     `ingest` command and the `deploy` orchestrator so both fold identically."""
-    from .. import ingest
+    from ..intake import ingest
     parsed = ingest.parse_loot(text)
     new_rows = ingest.to_local_findings(parsed, source)
     have = {(f.get("category"), f.get("vector")) for f in host.local_findings}
@@ -2410,7 +2433,7 @@ def _deploy_worker(host, ssh_creds, win_creds, timeout, loot_dir,
                    stager=None, authmap=None):
     """Run the on-target enum script on one host remotely, save the raw loot, fold
     it into the host. Returns (host, transport, added, promoted, error)."""
-    from .. import deploy
+    from ..creds import deploy
     transport, out, err = deploy.deploy_one(host, ssh_creds, win_creds, timeout,
                                             stager=stager, authmap=authmap)
     if not out:
@@ -2467,10 +2490,10 @@ def _proof_shot(args, module: str, filename: str, command: str, output: str,
     if not getattr(args, "screenshots", False):
         return None
     from importlib import import_module
-    from .. import screenshot
+    from ..report import screenshot
     if not screenshot.available():
         return None
-    mod = import_module(f"recce.{module}")
+    mod = import_module(_MODULE_PATH.get(module, f"recce.{module}"))
     png = screenshot.capture_html(mod.proof_html(command, output, **proof_kwargs))
     if not png:
         return None
@@ -2604,7 +2627,7 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
     them. `fmt(t, active)` returns the display text for one target; optional
     `extra(store, hosts, tgts, by_ip)` runs a per-service post-fold step."""
     from importlib import import_module
-    from .. import proxy
+    from ..core import proxy
     if udp and proxy.is_active():
         # A UDP-only service can't be reached through a TCP proxy, and a datagram would
         # leak from the operator's real IP. Say so loudly instead of returning a clean,
@@ -2612,7 +2635,7 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
         print(f"[!] {label} is UDP-only and can't traverse the proxy ({proxy.describe()}) "
               f"- skipped. Run it from the pivot host directly, or without --proxy.")
         return 0
-    mod = import_module(f"recce.{module}")
+    mod = import_module(_MODULE_PATH.get(module, f"recce.{module}"))
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
@@ -2974,10 +2997,10 @@ def _service_module_coverage(store, hosts) -> list[dict]:
     an applicable open port have actually had the module run. 'Run' = the host appears
     in the module's stored analysis targets, or it carries a finding from that source.
     Ordered highest-impact first so `status` surfaces the critical exposures."""
-    from .. import (mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap,
-                   snmp as _snmp, mongodb as _mongo, redis as _redis,
-                   elasticsearch as _es, rsync as _rsync, nfs as _nfs,
-                   kerberos as _krb)
+    from ..ad import kerberos as _krb
+    from ..services import (smb, ftp, docker, kubernetes as k8s, ldap as _ldap,
+                            snmp as _snmp, rsync as _rsync, nfs as _nfs)
+    from ..services.db import mssql, mongodb as _mongo, redis as _redis, elasticsearch as _es
     mods = [
         ("MongoDB", "mongodb", _mongo.is_mongodb, "recce mongodb"),
         ("Redis", "redis", _redis.is_redis, "recce redis"),
@@ -3020,7 +3043,7 @@ def _demo_credentials(store: Store) -> None:
     """Seed a few captured credentials so the demo report's Credentials section
     renders. Secrets are masked in the shareable HTML; the workbook keeps the full
     values. Offline and deterministic."""
-    from ..models import Credential
+    from ..core.models import Credential
     for c in (
         Credential(username="jsmith", secret="Summer2024!", kind="password",
                    domain="corp.local", source="cracked",
@@ -3046,7 +3069,7 @@ def _demo_bloodhound(store: Store) -> None:
     """Seed a small synthetic SharpHound collection so the demo report showcases the
     AD findings, attack paths and the tier-0 **AD architecture diagram**. Offline and
     deterministic — analysed exactly like a real collection."""
-    from .. import bloodhound as bh
+    from ..ad import bloodhound as bh
     B = "S-1-5-21-4242-4242-4242"
     users = {"meta": {"type": "users"}, "data": [
         {"ObjectIdentifier": f"{B}-1104",

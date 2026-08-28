@@ -1,8 +1,9 @@
 """CWE naming, inference, coverage, and the report/Act integration."""
 from __future__ import annotations
 
-from recce import act, cwe
-from recce.models import Host, Port, Vuln
+from recce import act
+from recce.core import cwe
+from recce.core.models import Host, Port, Vuln
 
 
 def _v(sid, title, cwes=None):
@@ -52,7 +53,7 @@ def test_coverage_groups_and_counts():
 
 
 def test_report_docx_cwe_label_falls_back_to_fuller_table():
-    from recce.report_docx import cwe_label
+    from recce.report.docx import cwe_label
     # CWE-1392 isn't in report_docx's own table but is in recce.cwe -> resolves to a name
     assert cwe_label("CWE-1392") == "CWE-1392 (Use of Default Credentials)"
 
@@ -63,7 +64,7 @@ def test_names_table_covers_every_report_docx_cwe():
     # fallback, so any CWE missing here renders with a blank "-" weakness name in
     # those reports' CWE coverage table. Regression: CWE-917 and 26 others were
     # missing, so a real finding's CWE row would render nameless.
-    from recce.report_docx import _CWE_NAME
+    from recce.report.docx import _CWE_NAME
     missing = sorted(set(_CWE_NAME) - set(cwe.NAMES))
     assert missing == [], f"CWE(s) missing from cwe.NAMES: {missing}"
 

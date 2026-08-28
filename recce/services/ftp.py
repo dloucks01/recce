@@ -20,8 +20,8 @@ from __future__ import annotations
 import re
 import socket
 
-from ..models import Host, Port
-from ..svccommon import finding_builder
+from ..core.models import Host, Port
+from .svccommon import finding_builder
 
 _DEFAULT_PORT = 21
 _TIMEOUT = 6.0
@@ -349,7 +349,7 @@ def write_proof_finding(ip: str, port: int, proof: dict,
 # --- proof screenshot -----------------------------------------------------------
 
 def proof_html(command, output, banner: str = "") -> str:
-    from .. import mssql
+    from ..services.db import mssql
     return mssql.proof_html(command, output, prompt="ftp> ", banner=banner)
 
 
@@ -357,7 +357,7 @@ def proof_html(command, output, banner: str = "") -> str:
 
 def findings_to_vulns(fs: list[dict]) -> dict:
     """FTP findings -> {ip: [Vuln]} (source='ftp')."""
-    from ..svccommon import findings_to_vulns as _f2v
+    from .svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "ftp", _DEFAULT_PORT)
 
 
@@ -365,7 +365,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     """Full FTP analysis. Returns {targets, findings, runbooks, stats}.
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
-    from .. import svcprobe
+    from . import svcprobe
     targets = ftp_targets(hosts)
     probes: dict = {}
     state: dict = {}

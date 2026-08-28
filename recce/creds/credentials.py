@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import re
 
-from ..models import Credential, Host
+from ..core.models import Credential, Host
 
 
 # --- auto-harvest from what recce already knows -------------------------------

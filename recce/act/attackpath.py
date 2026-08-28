@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import re
 
-from ..models import Host
-from .. import exploitplan as xp
+from ..core.models import Host
+from ..act import exploitplan as xp
 
 STAGE_ORDER = ["Initial Access", "Privilege Escalation", "Credential Access",
                "Lateral Movement", "Domain Dominance"]
@@ -152,7 +152,7 @@ def svg(hosts: list[Host], steps: list[dict] | None = None) -> str:
     cards (a device icon by role + host + finding), stage-to-stage arrows, and dashed
     same-host connectors showing one box being walked through the stages."""
     from html import escape as _e
-    from .. import netmap as _nm
+    from ..report import netmap as _nm
     steps = steps if steps is not None else build(hosts)
     used = [st for st in STAGE_ORDER if any(s["stage"] == st for s in steps)]
     if not steps:

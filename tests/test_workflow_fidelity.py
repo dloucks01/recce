@@ -23,14 +23,16 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recce import ad, parser, xlsx
-from recce import tracking as tr
-from recce.models import Host, Port, Vuln
-from recce.report_excel import (build_workbook, read_key_order,
+from recce import ad
+from recce.core import parser
+from recce.report.formats import xlsx
+from recce.core import tracking as tr
+from recce.core.models import Host, Port, Vuln
+from recce.report.excel import (build_workbook, read_key_order,
                                  read_workbook_edits, read_workbook_tracking,
                                  update_workbook, STATUS_WIP, STATUS_TODO)
-from recce.store import Store
-from recce.targets import _subnet_of
+from recce.core.store import Store
+from recce.core.targets import _subnet_of
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
@@ -184,17 +186,17 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
         _hdr, by_ip = rows_by_ip(self.sheets, "Vulnerabilities")
         # ms17-010 is on the DC only.
         dc_finds = " ".join(r["Finding"] for r in by_ip.get("10.0.10.10", []))
-        self.assertIn("ms17-010", dc_finds)
+        self.assertIn("ms17-010", dc_finds.lower())
         # ...and NOT attributed to any other host.
         for ip in ("10.0.20.5", "10.0.20.6", "10.0.10.25"):
             self.assertNotIn("ms17-010",
-                             " ".join(r["Finding"] for r in by_ip.get(ip, [])))
+                             " ".join(r["Finding"] for r in by_ip.get(ip, [])).lower())
         # ftp-anon is web02 only.
         self.assertIn("FTP", " ".join(r["Finding"] for r in by_ip.get("10.0.20.6", [])))
 
     def test_grouped_by_host_no_hostname_col_and_full_details(self):
-        from recce.report_excel import build_workbook
-        from recce.models import Host, Port, Vuln
+        from recce.report.excel import build_workbook
+        from recce.core.models import Host, Port, Vuln
         rows = self.sheets["Vulnerabilities"]
         hdr = rows[0]
         self.assertNotIn("Hostname", hdr)                 # Hostname moved to the band
@@ -225,7 +227,7 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
         self.assertNotIn("Proven exploit", _hdr)
         # The DC's ms17-010 finding carries the proven EternalBlue exploit (curated).
         dc = by_ip["10.0.10.10"]
-        ms17 = next(r for r in dc if "ms17-010" in r["Finding"])
+        ms17 = next(r for r in dc if "ms17-010" in r["Finding"].lower())
         self.assertIn("eternalblue", ms17["Exploit"].lower())
         # A potential/advisory finding (now shown by its low QoD tier) never claims
         # an exploit.
@@ -391,7 +393,7 @@ class CoverageMathFidelityTest(unittest.TestCase):
             import openpyxl
         except ImportError:
             self.skipTest("openpyxl not installed (test-only dependency)")
-        from recce.report_excel import build_workbook
+        from recce.report.excel import build_workbook
 
         def enum_cell(path):
             ov = openpyxl.load_workbook(path)["Overview"]
@@ -413,7 +415,7 @@ class CoverageMathFidelityTest(unittest.TestCase):
     def test_accounts_differing_only_by_rid_dont_collide(self):
         """Regression: the store keeps accounts distinct by rid, so acct_key must
         include rid or two such accounts collapse to one row + undercount."""
-        from recce.models import Account
+        from recce.core.models import Account
         a = Account(ip="10.0.0.5", source="ldap", kind="user", name="svc", domain="corp", rid="1103")
         b = Account(ip="10.0.0.5", source="ldap", kind="user", name="svc", domain="corp", rid="1104")
         ka = tr.acct_key(a.source, a.kind, a.domain, a.name, a.rid)
@@ -430,7 +432,7 @@ class CoverageMathFidelityTest(unittest.TestCase):
 
 class WriteupPerIpFidelityTest(unittest.TestCase):
     def test_grouped_finding_lists_only_the_affected_ip(self):
-        from recce.report_docx import group_findings
+        from recce.report.docx import group_findings
         findings = group_findings(sample_hosts())
         ms17 = next(f for f in findings if "ms17-010" in f.title.lower())
         self.assertEqual(sorted({a[0] for a in ms17.affected}), ["10.0.10.10"])
@@ -439,7 +441,7 @@ class WriteupPerIpFidelityTest(unittest.TestCase):
 
     def test_shared_finding_across_hosts_lists_all_affected(self):
         # Two hosts with the same finding title -> one write-up, both IPs.
-        from recce.report_docx import group_findings
+        from recce.report.docx import group_findings
         hosts = [
             Host(ip="10.0.0.1", ports=[Port(portid=443, service="https")],
                  vulns=[Vuln(ip="10.0.0.1", port=443, protocol="tcp",
@@ -453,7 +455,7 @@ class WriteupPerIpFidelityTest(unittest.TestCase):
                          ["10.0.0.1", "10.0.0.2"])
 
     def test_generated_docx_contains_correct_ip_only(self):
-        from recce.report_docx import build_writeups
+        from recce.report.docx import build_writeups
         import zipfile
         import xml.etree.ElementTree as ET
         W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -473,7 +475,7 @@ class WriteupPerIpFidelityTest(unittest.TestCase):
 
 class MarkdownCsvFidelityTest(unittest.TestCase):
     def test_markdown_attributes_findings_to_correct_host(self):
-        from recce.report_markdown import build_markdown
+        from recce.report.markdown import build_markdown
         with tempfile.TemporaryDirectory() as d:
             md = os.path.join(d, "r.md")
             build_markdown(sample_hosts(), md, title="Eng", domains=[])
@@ -483,12 +485,12 @@ class MarkdownCsvFidelityTest(unittest.TestCase):
         self.assertIn("10.0.10.10", text)
         # The DC's finding is present and tied to the DC's IP line.
         dc_line = next(ln for ln in text.splitlines()
-                       if "ms17-010" in ln)
+                       if "ms17-010" in ln.lower())
         self.assertIn("10.0.10.10", dc_line)
 
     def test_csv_one_row_per_open_port_with_correct_ip(self):
         import csv as csvmod
-        from recce.report_markdown import build_csv
+        from recce.report.markdown import build_csv
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "s.csv")
             build_csv(sample_hosts(), p)

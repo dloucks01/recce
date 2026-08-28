@@ -14,8 +14,8 @@ import time
 import unittest
 
 from recce import cli
-from recce.models import Host, Port, Vuln
-from recce.store import Store
+from recce.core.models import Host, Port, Vuln
+from recce.core.store import Store
 
 _SUBNETS = 20
 _PER = 25                      # 500 hosts total

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from recce import cli
 from recce.cli import _open_paths
-from recce.store import Store
+from recce.core.store import Store
 
 
 def _nmap_xml(ip: str, ports: list[tuple[int, str, str]]) -> str:
@@ -106,7 +106,7 @@ class ConcurrentUpsert(unittest.TestCase):
 
     def test_concurrent_same_host_upserts_lose_nothing(self):
         import threading
-        from recce.models import Host, Port
+        from recce.core.models import Host, Port
         eng = tempfile.mkdtemp()
         db = _open_paths(eng)["db"]
         Store(db).close()

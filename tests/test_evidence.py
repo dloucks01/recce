@@ -7,8 +7,9 @@ it survives the datastore round-trip. (The proofs rewrite that consumes it lands
 
 import unittest
 
-from recce import parser, vulndb
-from recce.models import Evidence, Host, Port, Script, Vuln
+from recce.core import parser
+from recce.vuln import vulndb
+from recce.core.models import Evidence, Host, Port, Script, Vuln
 
 
 class EvidenceProducersTest(unittest.TestCase):

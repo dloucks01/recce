@@ -16,7 +16,7 @@ import re
 import socket
 import struct
 
-from ...models import Host, Port
+from ...core.models import Host, Port
 from .base import recvn as _recvn, cred_list as _base_cred_list, finding as _base_finding
 
 # Column/field names whose data is worth sampling (PII / secrets / credentials).
@@ -111,7 +111,7 @@ def _do_auth(sock: socket.socket, user: str, password: str | None) -> bool:
         mechs = [m.decode("ascii", "replace") for m in body[4:].split(b"\x00") if m]
         if "SCRAM-SHA-256" not in mechs:
             return False
-        from ... import scram
+        from ...ad import scram
         client = scram.ScramClient(user, password, "SCRAM-SHA-256")
         first = client.first_message().encode()
         _send(sock, b"p", b"SCRAM-SHA-256\x00" + struct.pack("!I", len(first)) + first)
@@ -854,7 +854,7 @@ def runbook(ip: str, port: int) -> list[dict]:
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from ...svccommon import findings_to_vulns as _f2v
+    from ..svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "postgres", _DEFAULT_PORT)
 
 
@@ -867,15 +867,15 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     embedded credentials. `wordlist` = optional path to a user-supplied
     credential list (each line `user:password` or password paired with
     `postgres`); augments the bundled default-cred sweep."""
-    from ...wordlists import load_cred_wordlist
+    from ..wordlists import load_cred_wordlist
     extra_creds = load_cred_wordlist(wordlist, default_user="postgres")
-    from ... import svcprobe
+    from .. import svcprobe
     targets = postgres_targets(hosts)
     probes: dict = {}
     state: dict = {}
     looted: list = []
     if active:
-        from ...models import Credential
+        from ...core.models import Credential
         for t, pr in svcprobe.iter_probe(
                 targets, lambda t: probe(t["ip"], t["port"]),
                 budget=budget, progress=progress, state=state):

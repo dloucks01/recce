@@ -24,8 +24,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from recce import cli
-from recce import mongodb as M
-from recce.store import Store
+from recce.services.db import mongodb as M
+from recce.core.store import Store
 
 
 # --- live servers ---------------------------------------------------------------
@@ -282,7 +282,7 @@ class SweepWiringTest(unittest.TestCase):
             os.environ.get("TMPDIR", "/tmp"), f"recce_sweepwire_{os.getpid()}")
         shutil.rmtree(self.dir, ignore_errors=True)
         os.makedirs(self.dir)
-        sample = os.path.join(os.path.dirname(recce.__file__), "sample_scan.xml")
+        sample = os.path.join(os.path.dirname(recce.__file__), "core", "sample_scan.xml")
         self.assertTrue(os.path.exists(sample), "bundled sample_scan.xml missing")
         self.assertEqual(cli.main(["import", sample, "-o", self.dir]), 0)
 

@@ -22,7 +22,7 @@ import subprocess
 import time
 from urllib.parse import urlparse
 
-from ..models import Vuln
+from ..core.models import Vuln
 from ..intake import importers
 
 

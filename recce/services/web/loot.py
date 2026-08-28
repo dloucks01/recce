@@ -43,7 +43,7 @@ _ENV_PASS_RE = re.compile(r"(?im)^\s*(?:export\s+)?(?:DB_PASS(?:WORD)?|DATABASE_
 def _web_credentials(sid: str, body: str, ip: str, port: int):
     """Extract cleartext, sprayable credentials from an exposed secret-bearing file.
     Returns a list of Credential objects (empty when nothing usable leaked)."""
-    from ...models import Credential
+    from ...core.models import Credential
     out: list = []
     seen: set = set()
 
@@ -152,7 +152,7 @@ def _scan_git_dump(ip: str, port: Port, auth: dict | None, findings: list) -> li
     recovered files for secrets/credentials, and emit a web-git-dump finding. Returns the
     captured Credential objects (folded into the profile's credential loot)."""
     from .. import gitdump
-    from ...models import Credential
+    from ...core.models import Credential
 
     def _gf(rel: str):
         if rel.endswith("/"):
@@ -345,7 +345,7 @@ def _scan_sourcemaps(ip: str, port: Port, base: str, body: str, auth) -> tuple[l
     the original source inline in `sourcesContent`) and mine it for secrets/credentials.
     Returns (findings, [Credential]). Read-only GETs."""
     from .. import gitdump
-    from ...models import Credential
+    from ...core.models import Credential
     findings: list = []
     creds: list = []
     srcs = [s for s in _SCRIPT_SRC.findall(body)

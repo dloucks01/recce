@@ -18,8 +18,8 @@ import re
 import socket
 import struct
 
-from ...models import Host, Port
-from ...svccommon import finding_builder, recvn as _recvn
+from ...core.models import Host, Port
+from ..svccommon import finding_builder, recvn as _recvn
 
 _PORTS = (27017, 27018, 27019)
 _DEFAULT_PORT = 27017
@@ -207,7 +207,7 @@ def _mongo_scram(sock, user: str, password: str, mechanism: str, rid: int,
                  timeout: float) -> bool:
     """One SCRAM conversation (saslStart -> saslContinue*) on `sock`. Returns True on a
     completed, mutually-verified authentication. Never raises."""
-    from ... import scram
+    from ...ad import scram
     try:
         pw = scram.mongo_sha1_secret(user, password) if "SHA-1" in mechanism else password
         client = scram.ScramClient(user, pw, mechanism)
@@ -809,7 +809,7 @@ def proof_html(command, output, banner: str = "") -> str:
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from ...svccommon import findings_to_vulns as _f2v
+    from ..svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "mongodb", _DEFAULT_PORT)
 
 
@@ -820,10 +820,10 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe.
     `wordlist` = optional path to a user-supplied credential list; augments
     the bundled weak-SCRAM sweep."""
-    from ... import svcprobe
-    from ...models import Credential
+    from .. import svcprobe
+    from ...core.models import Credential
     from .base import cred_list as _cred_list
-    from ...wordlists import load_cred_wordlist
+    from ..wordlists import load_cred_wordlist
     extra_creds = load_cred_wordlist(wordlist, default_user="admin")
     targets = mongodb_targets(hosts)
     probes: dict = {}

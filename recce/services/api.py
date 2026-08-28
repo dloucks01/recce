@@ -17,7 +17,7 @@ import re
 import urllib.parse
 
 from . import web
-from .. import probes
+from . import probes
 
 _MAX_ENDPOINT_PROBES = 40                # bounded, read-only GETs against enumerated paths
 _ID_PARAM = re.compile(r"\{[^}]*(id|uuid|guid|key|no|num)[^}]*\}", re.I)
@@ -188,7 +188,7 @@ def _spec_findings(ip: str, port, base: str, tgt: str, spec: dict) -> list[dict]
                                    "server-side; never trust the client-supplied id.",
                     "cwes": ["CWE-639", "CWE-284"]})
     if spec.get("secrets"):
-        from ..models import Credential
+        from ..core.models import Credential
         creds = [Credential(username=u, secret=pw, kind="password", source="api-spec-loot",
                             origin_ip=ip, notes=f"embedded in OpenAPI spec on {tgt} (sprayable)")
                  for u, pw in spec["secrets"][:8]]
@@ -326,7 +326,7 @@ def analyze(hosts, active: bool = True, budget: float | None = None,
     """Probe every web port for API surface. Returns the deep-service analysis shape
     ({findings, targets, stats}) so it folds through _fold_service_findings unchanged.
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
-    from .. import svcprobe
+    from . import svcprobe
     findings: list[dict] = []
     targets: list[dict] = []
     port_by: dict = {}                    # (ip, portid) -> Port, so the probe keeps the
@@ -351,5 +351,5 @@ def analyze(hosts, active: bool = True, budget: float | None = None,
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from .. import svccommon
+    from . import svccommon
     return svccommon.findings_to_vulns(fs, source="api", default_port=80, prefix="api")

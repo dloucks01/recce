@@ -30,16 +30,16 @@ import struct
 import tempfile
 import unittest
 
-from recce import snmp
-from recce import mongodb
-from recce import ldap
-from recce import ntlm
-from recce import smb
-from recce import web
-from recce import parser
-from recce import mssql
-from recce import credenum
-from recce import bloodhound
+from recce.services import snmp
+from recce.services.db import mongodb
+from recce.services import ldap
+from recce.ad import ntlm
+from recce.services import smb
+from recce.services import web
+from recce.core import parser
+from recce.services.db import mssql
+from recce.creds import credenum
+from recce.ad import bloodhound
 from tests import wire_vectors as W
 
 

@@ -6,8 +6,8 @@ import socketserver
 import struct
 import threading
 
-from recce import dns
-from recce.models import Host, Port
+from recce.services import dns
+from recce.core.models import Host, Port
 
 
 def _serve(ancount: int, rcode: int):

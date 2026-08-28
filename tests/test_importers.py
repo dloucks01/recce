@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from recce import importers as I   # noqa: E402
+from recce.intake import importers as I   # noqa: E402
 
 NESSUS = '''<?xml version="1.0"?><NessusClientData_v2><Report name="s">
 <ReportHost name="10.0.0.5"><HostProperties><tag name="host-ip">10.0.0.5</tag></HostProperties>

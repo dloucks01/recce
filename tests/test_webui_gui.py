@@ -214,7 +214,7 @@ class ApiShape(unittest.TestCase):
         not clobber each other — the load-modify-save is serialised by a process lock."""
         import tempfile, threading
         from recce.cli import _open_paths
-        from recce.store import Store
+        from recce.core.store import Store
         from recce.webui import collab
         eng = tempfile.mkdtemp()
         db = _open_paths(eng)["db"]
@@ -249,7 +249,7 @@ class ApiShape(unittest.TestCase):
     def test_spray_endpoint_is_graceful_without_netexec(self):
         # the Loot "Spray" button POSTs here; with no netexec it must report cleanly,
         # not 500 (and not hang - no tool means no network attempts).
-        from recce import credenum
+        from recce.creds import credenum
         orig = credenum.smb_tool
         credenum.smb_tool = lambda: None
         try:
@@ -265,7 +265,7 @@ class ApiShape(unittest.TestCase):
         # the "Run read-only loot" button POSTs here; on an empty engagement it must be a
         # fast, clean no-op (the real loot chain is covered by the act unit tests).
         empty = tempfile.mkdtemp()
-        from recce.store import Store
+        from recce.core.store import Store
         Store(_open_paths(empty)["db"]).close()
         try:
             with _client(empty) as c:

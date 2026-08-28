@@ -6,8 +6,8 @@ attached a bogus live-probe corroboration).
 """
 from __future__ import annotations
 
-from recce import qod
-from recce.svccommon import finding_builder, findings_to_vulns
+from recce.core import qod
+from recce.services.svccommon import finding_builder, findings_to_vulns
 
 
 def test_per_finding_confidence_and_evidence():
@@ -49,7 +49,7 @@ def test_finding_builder_shapes_the_dict_and_folds_narrative():
 
 def test_recvn_two_modes():
     import socket as _s
-    from recce.svccommon import recvn
+    from recce.services.svccommon import recvn
     a, b = _s.socketpair()
     try:
         b.sendall(b"hello world")

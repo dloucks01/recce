@@ -26,8 +26,8 @@ import http.client
 import json
 import ssl
 
-from ...models import Host, Port
-from ...svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
+from ...core.models import Host, Port
+from ..svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
 
 _PORTS = (5984, 6984)
 _TLS_PORTS = (6984,)
@@ -236,7 +236,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
 
 
 def _old_version(ver: str) -> bool:
-    from ... import vulndb
+    from ...vuln import vulndb
     try:
         return bool(ver) and vulndb._cmp(ver, "2.1.1") < 0
     except Exception:      # noqa: BLE001 - a weird banner must never crash the scan
@@ -274,7 +274,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     """Full CouchDB analysis. Returns {targets, findings, runbooks, probes, stats}.
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
-    from ... import svcprobe
+    from .. import svcprobe
     targets = couchdb_targets(hosts)
     probes: dict = {}
     state: dict = {}

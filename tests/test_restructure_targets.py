@@ -7,7 +7,7 @@ import each target and exercise its public API with a valid input plus a
 malformed input, so any regression during a subpackage move (report/, ad/,
 services/, services/db/, vuln/, act/, creds/, intake/, core/) surfaces here.
 
-Each test intentionally uses the CURRENT import path (`from recce.web import …`)
+Each test intentionally uses the CURRENT import path (`from recce.services.web import …`)
 so that a move to `from recce.services.web import …` breaks the import and
 forces the restructure PR to also update this file. That's the point.
 
@@ -17,30 +17,30 @@ from __future__ import annotations
 
 import pytest
 
-from recce.models import Host, Port
+from recce.core.models import Host, Port
 
 
 # --- web.py -------------------------------------------------------------------
 
 class TestWebModule:
     def test_imports(self):
-        from recce import web  # noqa: F401
+        from recce.services import web  # noqa: F401
 
     def test_is_web_positive_and_negative(self):
-        from recce.web import is_web
+        from recce.services.web import is_web
         assert is_web(Port(portid=80, service="http")) is True
         assert is_web(Port(portid=443, service="https")) is True
         assert is_web(Port(portid=22, service="ssh")) is False
 
     def test_wordlist_returns_list(self):
-        from recce.web import wordlist_for_gobuster, wordlist_for_domain_enum
+        from recce.services.web import wordlist_for_gobuster, wordlist_for_domain_enum
         gob = wordlist_for_gobuster()
         assert isinstance(gob, list) and len(gob) > 0
         dom = wordlist_for_domain_enum()
         assert isinstance(dom, list)
 
     def test_is_web_malformed(self):
-        from recce.web import is_web
+        from recce.services.web import is_web
         # empty service string + non-standard port: must not crash
         assert isinstance(is_web(Port(portid=0, service="")), bool)
 
@@ -49,10 +49,10 @@ class TestWebModule:
 
 class TestBloodhoundModule:
     def test_imports(self):
-        from recce import bloodhound  # noqa: F401
+        from recce.ad import bloodhound  # noqa: F401
 
     def test_public_fns_exist(self):
-        from recce.bloodhound import (
+        from recce.ad.bloodhound import (
             is_sharphound, load_graph, high_value_targets,
             attack_paths, findings, is_dc,
         )
@@ -60,7 +60,7 @@ class TestBloodhoundModule:
         assert is_sharphound("/nonexistent/path/that/does/not/exist") is False
 
     def test_high_value_targets_empty_graph(self):
-        from recce.bloodhound import high_value_targets, findings
+        from recce.ad.bloodhound import high_value_targets, findings
         # bloodhound expects the parsed BloodHound JSON shape: {nodes, edges}.
         # An empty-but-well-formed graph must yield empty results, not crash.
         # bloodhound.load_graph returns {nodes, edges, adj, domains}.
@@ -69,7 +69,7 @@ class TestBloodhoundModule:
         assert isinstance(findings(empty), list)
 
     def test_attack_paths_empty_graph(self):
-        from recce.bloodhound import attack_paths
+        from recce.ad.bloodhound import attack_paths
         # bloodhound.load_graph returns {nodes, edges, adj, domains}.
         empty = {"nodes": {}, "edges": [], "adj": {}, "domains": {}}
         result = attack_paths(empty, owned=set())
@@ -108,10 +108,10 @@ class TestAdModule:
 
 class TestKerberosModule:
     def test_imports(self):
-        from recce import kerberos  # noqa: F401
+        from recce.ad import kerberos  # noqa: F401
 
     def test_is_kerberos(self):
-        from recce.kerberos import is_kerberos
+        from recce.ad.kerberos import is_kerberos
         # Recognises the main KDC port (88), plus service/product string hints.
         # 464 (kpasswd) is intentionally NOT recognised — see kerberos.is_kerberos.
         assert is_kerberos(Port(portid=88)) is True
@@ -119,13 +119,13 @@ class TestKerberosModule:
         assert is_kerberos(Port(portid=22)) is False
 
     def test_client_key_derives_bytes(self):
-        from recce.kerberos import client_key
+        from recce.ad.kerberos import client_key
         # password-based derivation must return bytes of a plausible key length
         key = client_key(password="Passw0rd!")
         assert isinstance(key, bytes) and len(key) in (16, 32)  # RC4 or AES
 
     def test_parse_response_malformed(self):
-        from recce.kerberos import parse_response
+        from recce.ad.kerberos import parse_response
         # short/garbage KRB response must not crash — should return dict or raise
         # a specific caught exception, not propagate an unexpected one
         try:
@@ -138,23 +138,23 @@ class TestKerberosModule:
 
 class TestScannerModule:
     def test_imports(self):
-        from recce import scanner  # noqa: F401
+        from recce.core import scanner  # noqa: F401
 
     def test_scan_profile_defaults(self):
-        from recce.scanner import ScanProfile
+        from recce.core.scanner import ScanProfile
         p = ScanProfile()
         assert p.name == "standard"
         assert p.top_ports > 0
 
     def test_harden_for_proxy_returns_profile(self):
-        from recce.scanner import ScanProfile, harden_for_proxy
+        from recce.core.scanner import ScanProfile, harden_for_proxy
         p = harden_for_proxy(ScanProfile())
         # returns a (potentially adjusted) ScanProfile — must not be None
         assert p is not None
         assert hasattr(p, "top_ports")
 
     def test_check_environment_returns_list(self):
-        from recce.scanner import ScanProfile, check_environment
+        from recce.core.scanner import ScanProfile, check_environment
         issues = check_environment(ScanProfile())
         assert isinstance(issues, list)
 
@@ -182,24 +182,24 @@ class TestTunnelModule:
 
 class TestScramModule:
     def test_imports(self):
-        from recce import scram  # noqa: F401
+        from recce.ad import scram  # noqa: F401
 
     def test_mongo_sha1_secret_shape(self):
-        from recce.scram import mongo_sha1_secret
+        from recce.ad.scram import mongo_sha1_secret
         # MongoDB SCRAM-SHA-1 secret is md5(user + ":mongo:" + password), hex string
         h = mongo_sha1_secret("alice", "hunter2")
         assert isinstance(h, str)
         assert len(h) == 32 and all(c in "0123456789abcdef" for c in h)
 
     def test_mongo_sha1_secret_deterministic(self):
-        from recce.scram import mongo_sha1_secret
+        from recce.ad.scram import mongo_sha1_secret
         # same input → same output (it's a hash)
         a = mongo_sha1_secret("bob", "swordfish")
         b = mongo_sha1_secret("bob", "swordfish")
         assert a == b
 
     def test_mongo_sha1_secret_empty(self):
-        from recce.scram import mongo_sha1_secret
+        from recce.ad.scram import mongo_sha1_secret
         # empty inputs should still produce a valid hex digest, not crash
         assert len(mongo_sha1_secret("", "")) == 32
 

@@ -22,8 +22,8 @@ import re
 import socket
 import struct
 
-from ...models import Host, Port
-from ...svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
+from ...core.models import Host, Port
+from ..svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
 
 _PORTS = (50000, 50001, 60000, 523, 25000)
 _DEFAULT_PORT = 50000
@@ -293,7 +293,7 @@ findings_to_vulns = make_findings_to_vulns_wrapper("db2", _DEFAULT_PORT)
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     """Full Db2 (DRDA) analysis. Returns {targets, findings, runbooks, probes, stats}."""
-    from ... import svcprobe
+    from .. import svcprobe
     targets = db2_targets(hosts)
     probes: dict = {}
     state: dict = {}

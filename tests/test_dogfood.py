@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from recce import cli                       # noqa: E402
 from recce.cli import _open_paths           # noqa: E402
-from recce.store import Store               # noqa: E402
+from recce.core.store import Store               # noqa: E402
 from tools.mock_engagement import build     # noqa: E402
 
 

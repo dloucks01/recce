@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from recce.models import Host, Port, Vuln
-from recce.proofs import (
+from recce.core.models import Host, Port, Vuln
+from recce.vuln.proofs import (
     CONFIRMED, FALSE_POSITIVE, INCONCLUSIVE, LIKELY,
     _is_dc, _local, _nse_vulnerable, _os_blob, _port_of, _port_open, _pv,
     _v_activemq, _v_eol, _v_kerberoast, _v_log4shell, _v_ms17,

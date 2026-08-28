@@ -27,8 +27,8 @@ import shlex
 import socket
 import struct
 
-from ..models import Host, Port
-from ..svccommon import finding_builder, recvn as _recvn
+from ..core.models import Host, Port
+from .svccommon import finding_builder, recvn as _recvn
 
 _DEFAULT_PORT = 389
 _LDAPS = 636
@@ -462,7 +462,7 @@ _DOMAIN_ATTRS = ["ms-DS-MachineAccountQuota", "minPwdLength", "lockoutThreshold"
 _PW_HINT = ("pass", "pwd", "pw=", "pw:", "secret", "cred", "kennwort", "mot de passe")
 # Word-boundary match so a description doesn't fire on bypass/compass/passport (pass),
 # accredited/incredible (cred), or passenger/passive - only on an actual credential hint.
-from ..util import PW_DESC_RE as _PW_DESC_RE   # shared with bloodhound (was duplicated)
+from ..core.util import PW_DESC_RE as _PW_DESC_RE   # shared with bloodhound (was duplicated)
 
 
 def _open(ip: str, port: int, timeout: float):
@@ -558,7 +558,7 @@ def _ntlm_bind(sock, user: str, domain: str, nthash: bytes, timeout: float,
     When `seal`, negotiates sign+seal and returns (resultCode, SecurityContext) so the
     caller can wrap the post-bind traffic (satisfies a signing-required DC on 389).
     Returns (resultCode, ctx_or_None)."""
-    from .. import ntlm
+    from ..ad import ntlm
     flags = ntlm._SEAL_FLAGS if seal else ntlm._TYPE1_FLAGS
     sock.sendall(build_sasl_bind(1, "GSS-SPNEGO", ntlm.type1(flags)))
     resp = _read_message(sock, timeout)
@@ -579,7 +579,7 @@ def _authenticate(sock, creds: dict, timeout: float, seal: bool) -> tuple[bool, 
     """Bind with the supplied credential. Pass-the-hash (creds['hash']) uses an NTLM
     SASL bind (sign+seal on plaintext 389); otherwise a simple bind with the password.
     Returns (ok, method, security_context_or_None)."""
-    from .. import ntlm
+    from ..ad import ntlm
     if creds.get("hash"):
         rc, ctx = _ntlm_bind(sock, creds.get("user", ""), creds.get("domain", ""),
                              ntlm.normalize_nt_hash(creds["hash"]), timeout, seal)
@@ -714,7 +714,7 @@ def _dn_cn(dn: str) -> str:
 
 
 def _user_account(attrs: dict, domain: str, dc_ip: str) -> "object | None":
-    from ..models import Account
+    from ..core.models import Account
     name = _first(attrs, "sAMAccountName")
     if not name:
         return None
@@ -748,7 +748,7 @@ def _user_account(attrs: dict, domain: str, dc_ip: str) -> "object | None":
 def _computer_account(attrs: dict, domain: str, dc_ip: str) -> "object | None":
     """Only computers with delegation are worth an Account row (they are attack-path
     pivots); the rest would just flood Users & Accounts."""
-    from ..models import Account
+    from ..core.models import Account
     name = _first(attrs, "sAMAccountName")
     uac = _uac(attrs)
     deleg = attrs.get("msDS-AllowedToDelegateTo") or []
@@ -1067,7 +1067,7 @@ def cred_runbook(ip: str, port: int, base: str, creds: dict | None) -> list[dict
 # --- proof screenshot -----------------------------------------------------------
 
 def proof_html(command, output, banner: str = "") -> str:
-    from .. import mssql
+    from ..services.db import mssql
     return mssql.proof_html(command, output, prompt="ldap> ", banner=banner)
 
 
@@ -1075,7 +1075,7 @@ def proof_html(command, output, banner: str = "") -> str:
 
 def findings_to_vulns(fs: list[dict]) -> dict:
     """LDAP findings -> {ip: [Vuln]} (source='ldap')."""
-    from ..svccommon import findings_to_vulns as _f2v
+    from .svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "ldap", _DEFAULT_PORT)
 
 
@@ -1090,7 +1090,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per DC. The whole
     per-DC unit (probe + paged auth enum) runs under the budget/Ctrl-C guard, so a slow
     authenticated enum can't overrun unbounded and a Ctrl-C keeps partial results."""
-    from .. import svcprobe
+    from . import svcprobe
     targets = ldap_targets(hosts)
     host_by_ip = {h.ip: h for h in hosts}
     probes: dict = {}

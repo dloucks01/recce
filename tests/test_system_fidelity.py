@@ -20,8 +20,10 @@ import tempfile
 import threading
 import unittest
 
-from recce import ad, ldap as L, mongodb as M, mssql, nfs as N, redis, rsync as R, smb, snmp as S
-from recce.models import Host, Port
+from recce import ad
+from recce.services import ldap as L, nfs as N, rsync as R, smb, snmp as S
+from recce.services.db import mongodb as M, mssql, redis
+from recce.core.models import Host, Port
 
 
 # --- faithful mock domain controller --------------------------------------------
@@ -178,7 +180,7 @@ class WindowsADSystemFidelityTest(unittest.TestCase):
 
     def test_mock_dc_findings_reach_the_report(self):
         # End-to-end: the enumerated DC + BOTH protocols' findings render into reports.
-        from recce import report_markdown, report_excel, report_html
+        from recce.report import markdown as report_markdown, excel as report_excel, html as report_html
         ip = "127.0.0.1"
         with _MockServer(_ldap_dc_handler) as ldap_srv, \
                 _MockServer(_smb_dc_handler) as smb_srv:
@@ -347,7 +349,7 @@ class NetworkApplianceSystemFidelityTest(unittest.TestCase):
     through recce's real probes/findings on one host."""
 
     def test_snmp_appliance_is_enumerated(self):
-        from recce import probes
+        from recce.services import probes
         ip = "127.0.0.1"
         with _SnmpAgent(_appliance_mib()) as agent, _HttpMgmt() as web:
             host = _appliance_host(ip)
@@ -371,7 +373,7 @@ class NetworkApplianceSystemFidelityTest(unittest.TestCase):
         self.assertIn("content-security-policy", web_titles)
 
     def test_appliance_findings_reach_the_report(self):
-        from recce import report_html
+        from recce.report import html as report_html
         ip = "127.0.0.1"
         with _SnmpAgent(_appliance_mib()) as agent:
             host = _appliance_host(ip)
@@ -550,7 +552,7 @@ class DatabaseServerSystemFidelityTest(unittest.TestCase):
         self.assertIn("without authentication", mongo_titles)
 
     def test_database_findings_reach_the_report(self):
-        from recce import report_html
+        from recce.report import html as report_html
         ip = "127.0.0.1"
         with _MockServer(_mongo_handler) as mongo_srv, \
                 _MockServer(_redis_handler) as redis_srv:
@@ -674,7 +676,7 @@ class LinuxFileServerSystemFidelityTest(unittest.TestCase):
                       " ".join(f["title"].lower() for f in smb_fs))
 
     def test_file_server_findings_reach_the_report(self):
-        from recce import report_html
+        from recce.report import html as report_html
         ip = "127.0.0.1"
         with _MockServer(_nfs_handler) as nfs_srv, \
                 _MockServer(_rsync_handler) as rsync_srv:

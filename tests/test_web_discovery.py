@@ -12,8 +12,8 @@ import socketserver
 import threading
 import unittest
 
-from recce import web
-from recce.models import Port
+from recce.services import web
+from recce.core.models import Port
 
 
 def _serve(handler):

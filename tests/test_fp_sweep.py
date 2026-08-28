@@ -11,8 +11,12 @@ Each group corresponds to a class of over-eager detection found in the audit:
 
 import unittest
 
-from recce import ad, bloodhound, credenum, ldap, proofs, vulndb, web
-from recce.models import Account, Host, Port, Script, Vuln
+from recce import ad
+from recce.ad import bloodhound
+from recce.creds import credenum
+from recce.services import ldap, web
+from recce.vuln import proofs, vulndb
+from recce.core.models import Account, Host, Port, Script, Vuln
 
 
 def _vdb_titles(host):
@@ -228,7 +232,7 @@ class AdSubstringTest(unittest.TestCase):
 # --- Group F: parser negation ----------------------------------------------------
 class ParserNegationTest(unittest.TestCase):
     def _classify(self, output):
-        from recce.parser import _classify_vuln
+        from recce.core.parser import _classify_vuln
         return _classify_vuln("10.0.0.10", None, Script(id="http-vuln-check", output=output))
 
     def test_not_affected_with_cve_is_not_a_finding(self):

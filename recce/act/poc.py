@@ -523,7 +523,7 @@ def select_for_host(host) -> dict[str, dict]:
     """The applicable PoC recipes for a host's CONFIRMED findings, keyed by id."""
     keys: list[str] = []
     texts: list[str] = []
-    from .. import qod
+    from ..core import qod
     for v in getattr(host, "vulns", []) or []:
         if qod.is_visible(v):          # single QoD authority (was: confidence != potential)
             texts.append(f"{v.title} {v.output}")

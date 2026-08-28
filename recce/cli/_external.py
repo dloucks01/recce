@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from ..store import Store
+from ..core.store import Store
 from ..services import external as _ext
 
 
@@ -68,7 +68,7 @@ def cmd_nuclei(args: argparse.Namespace) -> int:
                 for ip, vs in by_ip.items():
                     host = st.get_host(ip)
                     if host is None:
-                        from ..models import Host
+                        from ..core.models import Host
                         host = Host(ip=ip)
                     for v in vs:
                         host.vulns.append(v)

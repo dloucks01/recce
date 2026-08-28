@@ -21,7 +21,7 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
     def act_plan():
         """The Act phase: findings -> ranked, guided action plan. 'What do I do now?'."""
         from ... import act
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             hosts, creds = st.all_hosts(), st.all_credentials()
         cards = act.action_plan(hosts, creds, eng_dir)
@@ -40,7 +40,7 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
         happened, not just "0 new" (which reads as "broken" when the store
         already holds the harvest from a previous pass)."""
         from ... import act
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             existing_before = len(st.all_credentials())
             summary = act.execute_auto(st, eng_dir)
@@ -87,10 +87,10 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
     def spray(body: dict = Body(default=None)):
         """Run a lockout-safe spray of the looted/stacked creds across a target scope
         (one IP / range / all), fold the validated logins. safe=false = full user x pass."""
-        from ... import credentials as cr
+        from ...creds import credentials as cr
         from ...cli import ip_matcher
-        from ...models import Credential
-        from ...store import Store
+        from ...core.models import Credential
+        from ...core.store import Store
         body = body or {}
         with Store(db_path) as st:
             hosts = st.all_hosts()

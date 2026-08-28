@@ -25,8 +25,8 @@ import socket
 import ssl
 import time
 
-from .models import Host, Port, Vuln
-from . import proxy
+from ..core.models import Host, Port, Vuln
+from ..core import proxy
 
 # Ports we treat as HTTP/HTTPS even if nmap's service name is fuzzy.
 _TLS_HINTS = ("https", "ssl", "tls")
@@ -167,7 +167,7 @@ def http_findings(host_ip: str, port: Port) -> list[Vuln]:
     # Import lazily so probes.py doesn't take the extra load unless the port
     # is actually HTTP.
     try:
-        from .services import http as _svc_http
+        from . import http as _svc_http
         findings.extend(_svc_http.enum_findings(host_ip, port))
     except Exception:                             # never let deep-scan break header checks
         pass

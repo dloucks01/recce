@@ -2,8 +2,8 @@
 
 import unittest
 
-from recce import api, web
-from recce.models import Host, Port
+from recce.services import api, web
+from recce.core.models import Host, Port
 
 
 def _mock_fetch(responses):

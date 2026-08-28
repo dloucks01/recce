@@ -21,9 +21,10 @@ import threading
 import time
 import unittest
 
-from recce import (elasticsearch as es, ftp, ldap as L, mongodb as M, mssql,
-                   probes, redis, smb, snmp as S)
-from recce.models import Port
+from recce.services import probes
+from recce.services import ftp, ldap as L, smb, snmp as S
+from recce.services.db import elasticsearch as es, mongodb as M, mssql, redis
+from recce.core.models import Port
 
 
 # --- hostile server scaffolding -------------------------------------------------

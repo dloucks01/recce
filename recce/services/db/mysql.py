@@ -15,7 +15,7 @@ import re
 import socket
 import struct
 
-from ...models import Host, Port
+from ...core.models import Host, Port
 from .base import recvn as _recvn, cred_list as _base_cred_list, finding as _base_finding
 
 _PORTS = (3306, 3307, 33060)
@@ -527,19 +527,19 @@ def runbook(ip: str, port: int) -> list[dict]:
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from ...svccommon import findings_to_vulns as _f2v
+    from ..svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "mysql", _DEFAULT_PORT)
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
-    from ... import svcprobe
+    from .. import svcprobe
     targets = mysql_targets(hosts)
     probes: dict = {}
     state: dict = {}
     looted: list = []
     if active:
-        from ...models import Credential
+        from ...core.models import Credential
         from .base import cred_list as _cred_list
         for t, pr in svcprobe.iter_probe(
                 targets, lambda t: probe(t["ip"], t["port"]),

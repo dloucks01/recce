@@ -17,8 +17,9 @@ import ssl
 import time
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
-from ...models import Host, Port, Vuln
-from ... import probes, proxy
+from ...core.models import Host, Port, Vuln
+from .. import probes
+from ...core import proxy
 
 
 __all__ = ['_TIMEOUT', '_UA', 'is_web', 'scheme_for', 'url_for', '_mk', '_fetch', '_fetch_raw', '_post_multipart', '_TITLE', '_GENERATOR', '_TECH_BODY', '_COOKIE_TECH', 'fingerprint', 'product_version', '_SECRET_RE', '_looks_like_html', '_leaked_secrets', '_resp_same']

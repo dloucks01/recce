@@ -8,11 +8,11 @@ Covers three concrete fixes:
 """
 from __future__ import annotations
 
-from recce.models import Account, Host, Port
+from recce.core.models import Account, Host, Port
 
 
 def test_anonymous_bind_is_info_and_cleartext_is_decoupled():
-    from recce import ldap as L
+    from recce.services import ldap as L
     h = Host(ip="10.0.0.5", ports=[Port(portid=389, service="ldap", state="open")])
     # a DC that accepts an anonymous bind but denies anonymous reads (the default)
     pr = {"anon_bind": True, "anon_read": False, "rootdse_ok": False, "tls": False}
@@ -44,7 +44,7 @@ def test_disabled_accounts_are_not_roast_targets():
 
 
 def test_tgs_hash_formats_rc4_and_aes_crackably():
-    from recce import kerberos as K
+    from recce.ad import kerberos as K
     cipher = bytes(range(40))
     rc4 = K.tgs_hash("svc", "CORP.LOCAL", "MSSQLSvc/a", 23, cipher)
     assert rc4.startswith("$krb5tgs$23$*svc$CORP.LOCAL$MSSQLSvc/a*$")
@@ -56,7 +56,7 @@ def test_tgs_hash_formats_rc4_and_aes_crackably():
 
 
 def test_tgs_request_advertises_aes_fallback():
-    from recce import kerberos as K
+    from recce.ad import kerberos as K
     # the TGS-REQ body must offer AES (17,18), not RC4 (23) only, so AES-only service
     # accounts are roasted instead of silently dropped on KDC_ERR_ETYPE_NOSUPP.
     rc4_only = K._req_body("CORP.LOCAL", K._principal(2, ["MSSQLSvc", "a"]), None,

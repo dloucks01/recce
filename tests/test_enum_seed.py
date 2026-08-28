@@ -13,7 +13,8 @@ import os
 import tempfile
 import unittest
 
-from recce import cli, scanner
+from recce import cli
+from recce.core import scanner
 
 
 def _host_xml(ip, ports, closed=()):

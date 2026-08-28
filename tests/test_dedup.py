@@ -2,8 +2,8 @@
 
 import unittest
 
-from recce import dedup
-from recce.models import Vuln
+from recce.intake import dedup
+from recce.core.models import Vuln
 
 
 def _v(cve=None, port=443, title="t", sid="s", source="version-db", sev="medium",

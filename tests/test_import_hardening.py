@@ -12,7 +12,7 @@ import os
 import tempfile
 import unittest
 
-from recce import importers as im
+from recce.intake import importers as im
 
 
 class Helpers(unittest.TestCase):
@@ -42,7 +42,7 @@ class Helpers(unittest.TestCase):
 
 class Secretsdump(unittest.TestCase):
     def test_cleartext_history_and_hash(self):
-        from recce.credenum import parse_secretsdump
+        from recce.creds.credenum import parse_secretsdump
         rows = {r["name"]: r for r in parse_secretsdump(
             "CORP\\svc:CLEARTEXT:PlainPw1\n"
             "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::\n"
@@ -54,7 +54,7 @@ class Secretsdump(unittest.TestCase):
         self.assertTrue(rows["Administrator_history0"]["history"])
 
     def test_asrep_jtr_form_kept(self):
-        from recce.credenum import parse_getnpusers
+        from recce.creds.credenum import parse_getnpusers
         got = parse_getnpusers("$krb5asrep$roastme@CORP.LOCAL:a1b2c3d4deadbeef")
         self.assertEqual(got[0]["name"], "roastme")
         self.assertTrue(got[0]["hash"].endswith("deadbeef"))          # full hash, not truncated
@@ -63,7 +63,7 @@ class Secretsdump(unittest.TestCase):
 class ImportEndpoint(unittest.TestCase):
     def _client(self):
         from fastapi.testclient import TestClient
-        from recce.store import Store
+        from recce.core.store import Store
         from recce.webui.app import create_app
         d = tempfile.mkdtemp()
         Store(os.path.join(d, "results.sqlite")).close()
@@ -75,7 +75,7 @@ class ImportEndpoint(unittest.TestCase):
 
     def test_utf16_nxc_lmnt_login(self):
         c, d = self._client()
-        from recce.store import Store
+        from recce.core.store import Store
         nxc = ("SMB 10.0.0.5 445 DC01 [+] corp\\admin:"
                "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0 (Pwn3d!)\n")
         r = self._imp(c, nxc.encode("utf-16"), "nxc")      # UTF-16, LM:NT
@@ -87,7 +87,7 @@ class ImportEndpoint(unittest.TestCase):
 
     def test_creds_list_keeps_pth_and_hashcat(self):
         c, d = self._client()
-        from recce.store import Store
+        from recce.core.store import Store
         body = ("corp\\bob:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0\n"
                 "31d6cfe0d16ae931b73c59d7e0c089c0:CrackedPw\n"
                 "alice:Summer2024!\n")
@@ -100,7 +100,7 @@ class ImportEndpoint(unittest.TestCase):
 class Feedback(unittest.TestCase):
     def _client(self):
         from fastapi.testclient import TestClient
-        from recce.store import Store
+        from recce.core.store import Store
         from recce.webui.app import create_app
         d = tempfile.mkdtemp()
         Store(os.path.join(d, "results.sqlite")).close()
@@ -186,7 +186,7 @@ class ParserVariants(unittest.TestCase):
         self.assertEqual((v[0].ip, v[0].severity, v[0].ids), ("1.2.3.4", "critical", ["CVE-2021-1"]))
 
     def test_masscan_list_and_json(self):
-        from recce import parser
+        from recce.core import parser
         import tempfile
         d = tempfile.mkdtemp()
         lp = os.path.join(d, "m.list")

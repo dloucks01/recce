@@ -25,8 +25,9 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     def verify_plan():
         """Dry-run: which version-inference leads can be settled with a safe
         NSE re-check, and which checks already ran."""
-        from ... import qod, verify
-        from ...store import Store
+        from ...core import qod
+        from ...vuln import verify
+        from ...core.store import Store
         with Store(db_path) as st:
             hosts = st.all_hosts()
         for h in hosts:
@@ -68,7 +69,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     @app.delete("/api/host/{ip}")
     def delete_host(ip: str, x_tester: str = Header(default="someone")):
         """Remove a host and all its findings/tracking from the engagement."""
-        from ...store import Store
+        from ...core.store import Store
         from .. import collab
         with Store(db_path) as st:
             if not st.delete_host(ip):
@@ -83,8 +84,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     def delete_credential(body: dict = Body(...),
                           x_tester: str = Header(default="someone")):
         """Remove a credential from the store by its dedupe key."""
-        from ...models import Credential
-        from ...store import Store
+        from ...core.models import Credential
+        from ...core.store import Store
         username = str(body.get("username", ""))
         secret = str(body.get("secret", ""))
         kind = str(body.get("kind", "password"))
@@ -101,7 +102,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     def delete_finding(body: dict = Body(...),
                        x_tester: str = Header(default="someone")):
         """Remove a specific finding from a host."""
-        from ...store import Store
+        from ...core.store import Store
         from .. import collab
         ip = str(body.get("ip", "")).strip()
         vuln_key = str(body.get("key", "")).strip()
@@ -130,7 +131,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     @app.get("/api/meta")
     def get_meta():
         """Return all engagement metadata fields."""
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             data = {k: (st.get_meta(k) or "") for k in _META_KEYS}
         return data
@@ -139,7 +140,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     def set_meta(body: dict = Body(...),
                  x_tester: str = Header(default="someone")):
         """Set one or more engagement metadata fields."""
-        from ...store import Store
+        from ...core.store import Store
         from .. import collab
         updated = []
         with Store(db_path) as st:
@@ -168,7 +169,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         raster; SVG isn't supported by our docx pipeline). Size capped at 4 MB
         so a runaway upload can't clog the sqlite meta blob."""
         import base64
-        from ...store import Store
+        from ...core.store import Store
         b64 = str(body.get("data", "")).strip()
         if not b64:
             raise HTTPException(400, "data (base64 image bytes) required")
@@ -202,7 +203,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     @app.get("/api/issues")
     def list_issues():
         """Return all scan issues/warnings, newest first."""
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             issues = st.get_issues()
             counts = st.count_issues()
@@ -213,7 +214,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     @app.get("/api/scope")
     def get_scope():
         """Return all scope subnets."""
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             scope = st.get_scope()
         return [{"subnet": s, "size": n} for s, n in sorted(scope.items())]
@@ -222,7 +223,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     def add_scope(body: dict = Body(...),
                   x_tester: str = Header(default="someone")):
         """Add a subnet to the engagement scope."""
-        from ...store import Store
+        from ...core.store import Store
         from .. import collab
         subnet = str(body.get("subnet", "")).strip()
         if not subnet:
@@ -243,7 +244,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     @app.delete("/api/scope/{subnet:path}")
     def remove_scope(subnet: str, x_tester: str = Header(default="someone")):
         """Remove a subnet from the engagement scope."""
-        from ...store import Store
+        from ...core.store import Store
         from .. import collab
         with Store(db_path) as st:
             if not st.delete_scope(subnet):
@@ -259,8 +260,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     @app.get("/api/writeups")
     def list_writeup_findings():
         """List all findings available for write-up (id, severity, title, affected)."""
-        from ...report_docx import list_findings
-        from ...store import Store
+        from ...report.docx import list_findings
+        from ...core.store import Store
         with Store(db_path) as st:
             hosts = st.all_hosts()
         return {"findings": list_findings(hosts, min_severity="info")}
@@ -270,8 +271,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         """Generate a single-finding Word write-up. Returns the file as a download."""
         import os
         from fastapi.responses import FileResponse
-        from ...report_docx import build_one_writeup
-        from ...store import Store
+        from ...report.docx import build_one_writeup
+        from ...core.store import Store
         selector = str(body.get("selector", "")).strip()
         if not selector:
             raise HTTPException(400, "selector required (finding id, CVE, IP, or title substring)")
@@ -297,8 +298,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
     def netmap_svg():
         """Network/architecture map as a self-contained SVG."""
         from fastapi.responses import Response
-        from ... import netmap
-        from ...store import Store
+        from ...report import netmap
+        from ...core.store import Store
         with Store(db_path) as st:
             hosts = st.all_hosts()
             domains = st.all_domains()
@@ -337,7 +338,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
                     x_tester: str = Header(default="someone")):
         """Mark multiple items as reviewed (or unreviewed) in one call.
         Body: {keys: ["key1", "key2", ...], reviewed: true}"""
-        from ...store import Store
+        from ...core.store import Store
         from .. import collab
         keys = body.get("keys", [])
         if not isinstance(keys, list) or not keys:
@@ -371,8 +372,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         import time
         import zipfile
         from fastapi.responses import Response
-        from ... import fieldkit
-        from ...store import Store
+        from ...intake import fieldkit
+        from ...core.store import Store
         with Store(db_path) as st:
             hosts = [h for h in st.all_hosts() if h.is_up]
             if not hosts:
@@ -442,8 +443,8 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
         """Return the current proxy configuration (if any). The proxy is
         process-global — set via `recce serve --proxy URL` or by running
         under proxychains. Individual scans inherit it automatically."""
-        from ... import proxy as _proxy
-        from ...store import Store
+        from ...core import proxy as _proxy
+        from ...core.store import Store
         active = _proxy.is_active()
         desc = _proxy.describe() if active else ""
         with Store(db_path) as st:

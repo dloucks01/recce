@@ -3,8 +3,8 @@ when they've already run on the host (their output is present), so no finding is
 
 import unittest
 
-from recce import scanner
-from recce.models import Host, Port, Script
+from recce.core import scanner
+from recce.core.models import Host, Port, Script
 
 
 class EnumPresentTest(unittest.TestCase):

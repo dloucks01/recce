@@ -24,8 +24,9 @@ import ssl
 import time
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
-from ...models import Host, Port, Vuln
-from ... import probes, proxy
+from ...core.models import Host, Port, Vuln
+from .. import probes
+from ...core import proxy
 
 # Re-export split submodules so `from recce.services.web import X` keeps working.
 from .http import *  # noqa: F401,F403

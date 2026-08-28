@@ -30,7 +30,7 @@ import tempfile
 import time
 import unittest
 
-from recce import mysql, postgres
+from recce.services.db import mysql, postgres
 
 
 def _free_port() -> int:

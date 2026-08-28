@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from recce.store import Store
+from recce.core.store import Store
 from recce.webui.collab import (
     Presence,
     add_activity,
@@ -142,7 +142,7 @@ def test_add_activity_returns_entry(st):
     entry = add_activity(st, "alice", "assign", "alice claimed 10.0.0.1")
     assert entry["tester"] == "alice"
     assert entry["kind"] == "assign"
-    assert entry["text"] == "alice claimed 10.0.0.1"
+    assert entry["text"] == "claimed 10.0.0.1"
     assert "ts" in entry
 
 

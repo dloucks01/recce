@@ -11,12 +11,12 @@ import math
 import os
 from html import escape
 
-from ..models import Host
+from ..core.models import Host
 from .. import ad
-from .. import attackpath as ap
-from .. import credentials as cr
-from .. import tracking as tr
-from .. import netmap as nm
+from ..act import attackpath as ap
+from ..creds import credentials as cr
+from ..core import tracking as tr
+from . import netmap as nm
 from .docx import (list_findings, group_findings, cwe_label, _vuln_type,
                    _tools_line)
 
@@ -542,7 +542,7 @@ def _ad_architecture(ad_arch, hosts=None, credentials=None):
 
 def _attack_coverage(hosts):
     """MITRE ATT&CK technique coverage, grouped by tactic along the kill chain."""
-    from .. import attack
+    from ..act import attack
     cov = attack.coverage(hosts)
     if not cov["by_tactic"]:
         return ""

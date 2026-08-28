@@ -55,7 +55,7 @@ import os
 import re
 from fnmatch import fnmatch
 
-from ..models import Vuln
+from ..core.models import Vuln
 
 
 _log = logging.getLogger("recce.intake.parsers_user")

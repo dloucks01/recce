@@ -11,8 +11,8 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from recce.models import Credential, Host, Port, Vuln
-from recce.store import Store
+from recce.core.models import Credential, Host, Port, Vuln
+from recce.core.store import Store
 from recce.webui.app import create_app
 
 

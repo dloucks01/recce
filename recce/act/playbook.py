@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from ..models import Host
+from ..core.models import Host
 
 # Each play:
 #   match   - regex over "title + evidence" (lowercased) that selects the finding
@@ -285,7 +285,7 @@ def host_entries(host: Host) -> list[dict]:
 
     # Findings above the QoD visibility floor (skip advisories / low-confidence version
     # matches). Single QoD authority; was a bespoke `confidence == "potential"` skip.
-    from .. import qod
+    from ..core import qod
     for v in host.vulns:
         if not qod.is_visible(v):
             continue

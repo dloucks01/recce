@@ -65,7 +65,7 @@ class CredentialedAdIntegrationTest(unittest.TestCase):
     def test_authenticated_smb_enumeration(self):
         # nxc smb with valid domain creds establishes a session and enumerates the DC.
         self._require("nxc")
-        from recce import credenum
+        from recce.creds import credenum
         data, err = credenum.run_nxc_smb(_HOST, self.creds)
         self.assertIsNone(err, f"nxc smb errored: {err}")
         self.assertIsNotNone(data, "nxc returned no data")
@@ -77,7 +77,7 @@ class CredentialedAdIntegrationTest(unittest.TestCase):
     def test_kerberoast_captures_a_service_ticket(self):
         # GetUserSPNs -request must recover a TGS-REP hash for the provisioned SPN user.
         self._require("impacket-GetUserSPNs")
-        from recce import credenum
+        from recce.creds import credenum
         spns, err = credenum.run_kerberoast(_HOST, self.creds)
         self.assertIsNone(err, f"kerberoast errored: {err}")
         names = {a.get("name", "").lower() for a in spns}
@@ -91,8 +91,8 @@ class CredentialedAdIntegrationTest(unittest.TestCase):
         # $krb5tgs$23$ ticket decrypts with the service account's real key - proving the
         # hash is genuine AND that the native path is accepted by the KDC where
         # impacket-GetUserSPNs -request is rejected (KRB_AP_ERR_INAPP_CKSUM).
-        from recce import kerberos
-        from recce.ntlm import nt_hash
+        from recce.ad import kerberos
+        from recce.ad.ntlm import nt_hash
         spn = os.environ.get("RECCE_AD_SPN", "MSSQLSvc/db.recce.local:1433")
         spn_pass = os.environ.get("RECCE_AD_SPN_PASS", "Sql!Passw0rd")
         r = kerberos.kerberoast_spn(_HOST, _DOMAIN, _ADMIN,
@@ -117,7 +117,7 @@ class CredentialedAdIntegrationTest(unittest.TestCase):
         # against a real Windows DC (where DRSUAPI works), flagging that it now succeeds.
         # As a domain admin, secretsdump -just-dc / SAM+NTDS must return NTLM hashes.
         self._require("impacket-secretsdump")
-        from recce import credenum
+        from recce.creds import credenum
         dumped, err = credenum.run_secretsdump(_HOST, self.creds)
         self.assertIsNone(err, f"secretsdump errored: {err}")
         self.assertTrue(dumped, "no NTLM hashes dumped")
@@ -126,7 +126,7 @@ class CredentialedAdIntegrationTest(unittest.TestCase):
     def test_bloodhound_live_kerberoast(self):
         # The bloodhound live-roast path (different creds shape) against the same DC.
         self._require("impacket-GetUserSPNs")
-        from recce import bloodhound
+        from recce.ad import bloodhound
         res = bloodhound.live_kerberoast(
             {"domain": _DOMAIN, "user": _ADMIN, "secret": _PASS,
              "dc_ip": _HOST, "is_hash": False})
@@ -136,7 +136,7 @@ class CredentialedAdIntegrationTest(unittest.TestCase):
 
     def test_ldap_rootdse_identifies_the_domain(self):
         # The unauth LDAP probe reads the DC's RootDSE and identifies the real domain.
-        from recce import ldap as L
+        from recce.services import ldap as L
         pr = L.probe(_HOST, 389, timeout=8.0)
         self.assertIsNotNone(pr, "LDAP probe returned nothing")
         self.assertTrue(pr.get("rootdse_ok"), "RootDSE not read from the live DC")

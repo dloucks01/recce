@@ -1,8 +1,8 @@
 """The spray engine: parse netexec hits + run a lockout-safe spray (nxc mocked)."""
 from __future__ import annotations
 
-from recce import credentials as cr, credenum
-from recce.models import Credential, Host, Port
+from recce.creds import credentials as cr, credenum
+from recce.core.models import Credential, Host, Port
 
 
 def _h(ip, port, svc):
@@ -66,10 +66,11 @@ def test_credenum_all_creds_sprays_then_enums_with_the_working_cred(monkeypatch,
     # host with ITS discovered cred (nxc + enrich_host mocked - no network).
     import contextlib
     import io
-    from recce import cli, credenum
+    from recce import cli
+    from recce.creds import credenum
     from recce.cli import _open_paths
-    from recce.models import Host, Port
-    from recce.store import Store
+    from recce.core.models import Host, Port
+    from recce.core.store import Store
     eng = str(tmp_path / "e")
     st = Store(_open_paths(eng)["db"])
     st.upsert_host(Host(ip="10.0.0.5", ports=[Port(portid=445, service="smb", state="open")]))

@@ -20,7 +20,7 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
     def _mutate(fn, event: dict, activity: tuple | None = None,
                 x_tester: str = "someone"):
         """Open the store, run fn(st), persist an activity line, broadcast, close."""
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             result = fn(st)
             if activity:
@@ -34,7 +34,7 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
     def collab_state():
         """Everything the UI overlays on hosts/findings: who owns what, triage labels,
         per-port status, dismissed findings, the activity feed, and who's online."""
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             return {"assignments": collab.get_assignments(st),
                     "labels": collab.get_labels(st),
@@ -96,8 +96,8 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
 
     @app.post("/api/add/credential")
     def add_credential(body: dict = Body(...), x_tester: str = Header(default="someone")):
-        from ...models import Credential
-        from ...store import Store
+        from ...core.models import Credential
+        from ...core.store import Store
         user = str(body.get("username", "")).strip()
         secret = str(body.get("secret", "")).strip()
         if not user and not secret:
@@ -123,9 +123,9 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
 
     @app.post("/api/add/host")
     def add_host(body: dict = Body(...), x_tester: str = Header(default="someone")):
-        from ...models import Host
-        from ...store import Store
-        from ...targets import load_targets
+        from ...core.models import Host
+        from ...core.store import Store
+        from ...core.targets import load_targets
         tokens = str(body.get("targets", "")).split()
         if not tokens:
             raise HTTPException(400, "give one or more IPs / ranges / CIDRs")
@@ -146,8 +146,8 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
 
     @app.post("/api/add/access")
     def add_access(body: dict = Body(...), x_tester: str = Header(default="someone")):
-        from ...models import Host
-        from ...store import Store
+        from ...core.models import Host
+        from ...core.store import Store
         ip = str(body.get("ip", "")).strip()
         if not ip:
             raise HTTPException(400, "a host IP is required")
@@ -177,7 +177,7 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
 
     @app.get("/api/chat")
     def chat_history(limit: int = 200):
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             return collab.get_chat(st, limit)
 
@@ -187,7 +187,7 @@ def register_collab_routes(app: FastAPI, ctx) -> None:
         as `image` (base64) and rendered inline; any other file (or an oversize image)
         is kept as `file` ({data: base64, name}) and offered as a forced download -
         never rendered inline, so an uploaded .html/.svg/etc. can't execute in-origin."""
-        from ...store import Store
+        from ...core.store import Store
         import base64
         text = str(body.get("text", "")).strip()
         image_b64 = body.get("image") or ""

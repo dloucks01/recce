@@ -13,8 +13,9 @@ confidence interaction and the protocol boundary.
 """
 import unittest
 
-from recce import dedup, qod
-from recce.models import Host, Port, Vuln
+from recce.core import qod
+from recce.intake import dedup
+from recce.core.models import Host, Port, Vuln
 
 
 def _v(port, cves, source, confidence="", severity="high", proto="tcp", state="",

@@ -23,8 +23,8 @@ import json
 import re
 import ssl
 
-from ..models import Host, Port
-from ..svccommon import finding_builder
+from ..core.models import Host, Port
+from .svccommon import finding_builder
 
 _TIMEOUT = 6.0
 _KUBELET = 10250
@@ -543,7 +543,7 @@ def runbook(ip: str, port: int) -> list[dict]:
 # --- proof screenshot -----------------------------------------------------------
 
 def proof_html(command, output, banner: str = "") -> str:
-    from .. import mssql
+    from ..services.db import mssql
     return mssql.proof_html(command, output, prompt="$ ", banner=banner)
 
 
@@ -551,7 +551,7 @@ def proof_html(command, output, banner: str = "") -> str:
 
 def findings_to_vulns(fs: list[dict]) -> dict:
     """Kubernetes findings -> {ip: [Vuln]} (source='kubernetes', script_id 'k8s:')."""
-    from ..svccommon import findings_to_vulns as _f2v
+    from .svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "kubernetes", _KUBELET, prefix="k8s")
 
 
@@ -559,7 +559,7 @@ def analyze(hosts: list[Host], active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     """Full Kubernetes analysis. Returns {targets, findings, runbooks, stats}.
     `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
-    from .. import svcprobe
+    from . import svcprobe
     targets = k8s_targets(hosts)
     probes: dict = {}
     state: dict = {}

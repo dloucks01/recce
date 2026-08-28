@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from . import tracking
-from .intake import dedup as _dedup
+from ..core import tracking
+from ..intake import dedup as _dedup
 
 
 class Verdict(TypedDict, total=False):

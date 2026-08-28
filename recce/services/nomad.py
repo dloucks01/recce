@@ -26,7 +26,7 @@ import http.client
 import json
 import ssl
 
-from ..models import Host, Port
+from ..core.models import Host, Port
 
 
 _DEFAULT_PORT = 4646
@@ -194,13 +194,13 @@ def runbook(ip: str, port: int) -> list[dict]:
 
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from ..svccommon import findings_to_vulns as _f2v
+    from .svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "nomad", _DEFAULT_PORT)
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
-    from .. import svcprobe
+    from . import svcprobe
     targets = nomad_targets(hosts)
     probes: dict = {}
     state: dict = {}

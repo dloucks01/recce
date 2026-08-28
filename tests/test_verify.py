@@ -7,8 +7,8 @@ deleted.
 
 import unittest
 
-from recce import verify
-from recce.models import Evidence, Host, Port, Script, Vuln
+from recce.vuln import verify
+from recce.core.models import Evidence, Host, Port, Script, Vuln
 
 
 def _lead(cve, port=445, source="version-db"):
@@ -79,7 +79,7 @@ class RefutationTest(unittest.TestCase):
 
 class ConfirmPlanTest(unittest.TestCase):
     def test_registry_lookup(self):
-        from recce import verify_rules
+        from recce.vuln import verify_rules
         r = verify_rules.rule_for_cve("CVE-2017-0143")
         self.assertEqual(r["nse"], "smb-vuln-ms17-010")
         self.assertIn("B", r["tier"])

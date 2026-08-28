@@ -18,7 +18,7 @@ import tempfile
 import threading
 import unittest
 
-from recce import parser, scanner
+from recce.core import parser, scanner
 
 _HAS_NMAP = shutil.which("nmap") is not None
 

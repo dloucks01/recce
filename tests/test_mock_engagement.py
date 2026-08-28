@@ -21,7 +21,7 @@ from tools.mock_engagement import build
 class MockEngagementDataQualityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from recce.store import Store
+        from recce.core.store import Store
         cls.dir = tempfile.mkdtemp(prefix="recce-mock-eng-")
         cls.stats = build(cls.dir, hosts=15, seed=1337)
         cls.hosts = Store(f"{cls.dir}/results.sqlite").all_hosts()
@@ -62,7 +62,7 @@ class MockEngagementDataQualityTest(unittest.TestCase):
         # when domains resolve non-empty - assert it actually appears in the page,
         # not just that derive_domains() returns something in isolation.
         import tempfile as _tf
-        from recce import report_html
+        from recce.report import html as report_html
         out = f"{_tf.mkdtemp()}/assets.html"
         report_html.build_assets_html(self.hosts, out, title="t")
         html = open(out, encoding="utf-8").read()

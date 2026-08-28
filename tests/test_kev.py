@@ -2,9 +2,10 @@
 
 import unittest
 
-from recce import kev, qod
-from recce.models import Host, Port, Vuln
-from recce.report_excel import _spec_vulns
+from recce.core import qod
+from recce.vuln import kev
+from recce.core.models import Host, Port, Vuln
+from recce.report.excel import _spec_vulns
 
 
 class KevTest(unittest.TestCase):

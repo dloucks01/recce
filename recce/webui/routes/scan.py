@@ -30,7 +30,7 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
         dropdown next to the free-text `--wordlist FILE` input. `kind`
         query param filters to a single family (paths / creds / users) so
         the postgres card's dropdown doesn't show HTTP path lists."""
-        from ...wordlists import list_bundled
+        from ...services.wordlists import list_bundled
         return {"wordlists": list_bundled(kind)}
 
     @app.post("/api/scan")
@@ -106,7 +106,7 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
                 if val.startswith("-"):
                     continue
                 if val.startswith("bundled:"):
-                    from ...wordlists import BUNDLED_WORDLISTS
+                    from ...services.wordlists import BUNDLED_WORDLISTS
                     name = val[len("bundled:"):].strip()
                     known = {e["name"] for e in BUNDLED_WORDLISTS}
                     if name not in known:

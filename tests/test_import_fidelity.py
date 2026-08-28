@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
 
-from recce.store import Store
+from recce.core.store import Store
 from recce.webui.app import create_app
 
 HAVE_NMAP = shutil.which("nmap") is not None

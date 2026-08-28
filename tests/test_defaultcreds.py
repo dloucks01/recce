@@ -1,8 +1,9 @@
 """Default-credential knowledge base + the Act default-cred cards."""
 from __future__ import annotations
 
-from recce import act, defaultcreds
-from recce.models import Host, Port
+from recce import act
+from recce.creds import defaultcreds
+from recce.core.models import Host, Port
 
 
 def _p(portid, service=""):

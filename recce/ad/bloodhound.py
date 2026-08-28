@@ -34,7 +34,7 @@ from collections import deque
 _HIGHVALUE_RID = {"512", "516", "518", "519", "521"}   # DA, DCs, Schema, EA, RODC-ish
 # Credential-hint match for account descriptions, word-boundary so it doesn't fire on
 # bypass/compass/passport (pass) or accredited/incredible (cred).
-from ..util import PW_DESC_RE as _PW_DESC_RE   # shared with ldap (was duplicated)
+from ..core.util import PW_DESC_RE as _PW_DESC_RE   # shared with ldap (was duplicated)
 _HIGHVALUE_SID = {
     "S-1-5-32-544": "Administrators",
     "S-1-5-32-548": "Account Operators",
@@ -742,7 +742,7 @@ def _kerb_tool(*names):
 
 
 def _run(cmd, timeout: int = 240, **kw) -> tuple[str, str | None]:
-    from ..util import run_tool
+    from ..core.util import run_tool
     return run_tool(cmd, timeout, **kw)
 
 
@@ -848,7 +848,7 @@ def live_kerberoast(creds: dict, privileged: set | None = None) -> dict:
     privileged = {p.upper() for p in (privileged or set())}
     dc = creds.get("dc_ip") or ""
     # Native path: reuse credenum's discover(native LDAP / impacket LDAP) + native roast.
-    from .. import credenum
+    from ..creds import credenum
     key = "hash" if creds.get("is_hash") else "password"
     ce = {"domain": creds.get("domain", ""), "username": creds.get("user", ""),
           "dc_ip": dc, key: creds.get("secret", "")}
@@ -1062,7 +1062,7 @@ def findings_to_vulns(analysis: dict, ip: str, hostname: str = "") -> list:
     domain host) so they feed the main severity totals, the Vulnerabilities sheet,
     and the per-finding writeups - not just the AD-only sheets. Each keeps its
     exact prove/abuse command as evidence."""
-    from ..models import Vuln
+    from ..core.models import Vuln
     out = []
     for f in analysis.get("findings", []):
         cat = f["category"]

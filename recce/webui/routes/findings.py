@@ -56,7 +56,7 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
 
     @app.post("/api/finding/status")
     def set_status(body: dict = Body(...), x_tester: str = Header(default="someone")):
-        from ...store import Store
+        from ...core.store import Store
         import time
         key = str(body.get("key", "")).strip()
         status = str(body.get("status", "")).strip().lower()
@@ -115,7 +115,7 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
         findings persist to the datastore so they show up in the Findings
         tab and roll into the report."""
         from ...intake.loot import scan_evidence
-        from ...store import Store
+        from ...core.store import Store
         new_vulns = scan_evidence(ctx.eng_dir)
         if not new_vulns:
             return {"scanned": True, "added": 0}
@@ -153,7 +153,7 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
         note = str(body.get("note", "")).strip() or f"pasted by {x_tester}"
         result = loot_svc.extract_and_persist(db_path, text, origin_ip=origin_ip, note=note)
         if result["added"] > 0:
-            from ...store import Store
+            from ...core.store import Store
             with Store(db_path) as st:
                 collab.add_activity(st, x_tester, "add",
                     f"{x_tester} auto-looted {result['added']} credential(s) from pasted text")
@@ -197,8 +197,8 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
         import os
         import re as _re
         import time
-        from ...store import Store
-        from ...models import Host, Vuln
+        from ...core.store import Store
+        from ...core.models import Host, Vuln
 
         ip = str(body.get("ip", "")).strip()
         filename = str(body.get("filename", "")).strip()

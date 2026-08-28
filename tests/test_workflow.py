@@ -23,17 +23,19 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recce import ad, parser, xlsx
-from recce import tracking as tr
-from recce.models import Host, Port, Vuln
-from recce.report_excel import (build_workbook, read_key_order,
+from recce import ad
+from recce.core import parser
+from recce.report.formats import xlsx
+from recce.core import tracking as tr
+from recce.core.models import Host, Port, Vuln
+from recce.report.excel import (build_workbook, read_key_order,
                                  read_workbook_edits, read_workbook_tracking,
                                  update_workbook, STATUS_WIP, STATUS_TODO)
-from recce.store import Store
+from recce.core.store import Store
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _workflow_helpers import _LOOT_LINUX, _LOOT_WIN, _GNMAP
-from recce.targets import _subnet_of
+from recce.core.targets import _subnet_of
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
@@ -201,7 +203,7 @@ class WorkbookStructureTest(unittest.TestCase):
         self.assertTrue(crit.font.bold)
 
     def test_raw_nse_sheet_scopes_host_and_port_scripts_per_host(self):
-        from recce.models import Host, Port, Script
+        from recce.core.models import Host, Port, Script
         hosts = [
             Host(ip="10.0.0.5", hostnames=["a"], ports=[Port(portid=445,
                  service="microsoft-ds", scripts=[Script(id="smb2-security-mode",
@@ -278,7 +280,7 @@ class WorkbookStructureTest(unittest.TestCase):
             self.assertTrue(loc.split("!")[0] in present, f"dangling link: {loc}")
 
     def test_credentialed_access_matrix(self):
-        from recce.models import Host, Port, Vuln
+        from recce.core.models import Host, Port, Vuln
 
         def cv(t):
             return Vuln(ip="x", port=445, protocol="tcp", script_id="c",
@@ -311,7 +313,7 @@ class WorkbookStructureTest(unittest.TestCase):
             from openpyxl import load_workbook
         except ImportError:
             self.skipTest("openpyxl not installed")
-        from recce.report_excel import read_key_order
+        from recce.report.excel import read_key_order
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "wb.xlsx")
             build_workbook(sample_hosts(), out)
@@ -348,8 +350,8 @@ class WorkbookStructureTest(unittest.TestCase):
             # And after a NEW host is added to an already-seen subnet (it appends at
             # the saved-order tail but the writer re-groups it under its subnet). The
             # linear precompute mis-counted band rows here; the bucketed one must not.
-            from recce.report_excel import update_workbook
-            from recce.models import Host, Port
+            from recce.report.excel import update_workbook
+            from recce.core.models import Host, Port
             extra = Host(ip="10.0.10.99", subnet="10.0.10.0/24", state="up",
                          hostnames=["late01"], os_name="Linux",
                          ports=[Port(portid=22, service="ssh", state="open")])
@@ -361,7 +363,7 @@ class WorkbookStructureTest(unittest.TestCase):
             from openpyxl import load_workbook
         except ImportError:
             self.skipTest("openpyxl not installed")
-        from recce import tracking as tr
+        from recce.core import tracking as tr
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "wb.xlsx")
             build_workbook(sample_hosts(), out)
@@ -407,7 +409,7 @@ class ScannerCommandTest(unittest.TestCase):
     """Verify the actual nmap command assembled for each phase (mock _run)."""
 
     def _capture(self, fn, *a, **k):
-        import recce.scanner as s
+        import recce.core.scanner as s
         calls = []
         orig = s._run
         s._run = lambda cmd, timeout=None: (calls.append((cmd, timeout))
@@ -419,7 +421,7 @@ class ScannerCommandTest(unittest.TestCase):
         return calls
 
     def test_full_port_scan_flags(self):
-        import recce.scanner as s
+        import recce.core.scanner as s
         with tempfile.TemporaryDirectory() as d:
             calls = self._capture(s.full_port_scan, "1.2.3.4",
                                   os.path.join(d, "p.xml"), s.PROFILES["standard"])
@@ -436,7 +438,7 @@ class ScannerCommandTest(unittest.TestCase):
         # is throttled and ports vanish; PROVEN), and retries at nmap's own -T4 default
         # (6, never the old too-low 3). Dead IPs stay bounded by --host-timeout.
         import copy
-        import recce.scanner as s
+        import recce.core.scanner as s
         prof = copy.copy(s.PROFILES["standard"])
         prof.assume_up = True
         with tempfile.TemporaryDirectory() as d:
@@ -451,7 +453,7 @@ class ScannerCommandTest(unittest.TestCase):
         """A rate-limiting network (nmap drops probes) must trigger an automatic
         congestion-adaptive re-scan - no --min-rate floor, more retries, -T3 -
         which is what actually finds the ports (the fast pass under-reports)."""
-        import recce.scanner as s
+        import recce.core.scanner as s
         calls = []
         outs = iter([
             s.RunOutcome(returncode=0, stderr="Increasing send delay for 1.2.3.4 "
@@ -477,7 +479,7 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertTrue(issue and issue.level == "warning")   # rate-limit surfaced
 
     def test_reliable_flag_drops_min_rate_from_first_pass(self):
-        import recce.scanner as s
+        import recce.core.scanner as s
         calls = []
         orig = s._run
         s._run = lambda cmd, timeout=None: (calls.append(cmd)
@@ -493,7 +495,7 @@ class ScannerCommandTest(unittest.TestCase):
 
     def test_clean_fast_pass_does_not_rescan(self):
         """No dropped probes -> a single scan, no wasteful reliable re-run."""
-        import recce.scanner as s
+        import recce.core.scanner as s
         calls = []
         orig = s._run
         s._run = lambda cmd, timeout=None: (calls.append(cmd)
@@ -505,7 +507,7 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_enum_scan_flags(self):
-        import recce.scanner as s
+        import recce.core.scanner as s
         with tempfile.TemporaryDirectory() as d:
             calls = self._capture(s.enum_scan, "1.2.3.4", [80, 445],
                                   os.path.join(d, "e.xml"), s.PROFILES["standard"])
@@ -518,7 +520,7 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIn("80,445", j)                    # exactly the ports given
 
     def test_udp_liveness_probe_is_a_udp_ping_without_pn(self):
-        import recce.scanner as s
+        import recce.core.scanner as s
         orig_root = s._is_root
         s._is_root = lambda: True                     # pretend we have raw-socket caps
         try:
@@ -537,7 +539,7 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIn("1.2.3.4", cmd)
 
     def test_udp_liveness_probe_needs_root(self):
-        import recce.scanner as s
+        import recce.core.scanner as s
         orig_root = s._is_root
         s._is_root = lambda: False
         try:
@@ -549,7 +551,7 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertEqual(calls, [])                    # no nmap run without root
 
     def test_vuln_scan_safe_vs_aggressive(self):
-        import recce.scanner as s
+        import recce.core.scanner as s
         with tempfile.TemporaryDirectory() as d:
             safe = self._capture(s.vuln_scan, "1.2.3.4", [80],
                                  os.path.join(d, "v.xml"), s.PROFILES["standard"])
@@ -568,7 +570,7 @@ class ScannerCommandTest(unittest.TestCase):
             self.assertIn(script, agg_j)
 
     def test_vuln_scan_fast_tier(self):
-        import recce.scanner as s
+        import recce.core.scanner as s
         with tempfile.TemporaryDirectory() as d:
             fast = self._capture(s.vuln_scan, "1.2.3.4", [80, 445],
                                  os.path.join(d, "v.xml"), s.PROFILES["standard"],
@@ -582,7 +584,7 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIn("90s", fast_j)                   # lighter script-timeout
 
     def test_enum_deep_scripts_on_standard_not_quick(self):
-        import recce.scanner as s
+        import recce.core.scanner as s
         with tempfile.TemporaryDirectory() as d:
             std = self._capture(s.enum_scan, "1.2.3.4", [80],
                                 os.path.join(d, "e.xml"), s.PROFILES["standard"])
@@ -593,14 +595,14 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertNotIn("http-enum", " ".join(quick[0][0]))
 
     def test_version_all_profile_uses_version_all(self):
-        import recce.scanner as s
+        import recce.core.scanner as s
         with tempfile.TemporaryDirectory() as d:
             calls = self._capture(s.enum_scan, "1.2.3.4", [80],
                                   os.path.join(d, "e.xml"), s.PROFILES["thorough"])
         self.assertIn("--version-all", calls[0][0])
 
     def test_no_ports_writes_empty_xml_and_no_scan(self):
-        import recce.scanner as s
+        import recce.core.scanner as s
         with tempfile.TemporaryDirectory() as d:
             xmlp = os.path.join(d, "e.xml")
             calls = self._capture(s.enum_scan, "1.2.3.4", [], xmlp,
@@ -642,7 +644,7 @@ class ModelSerializationTest(unittest.TestCase):
     """Host/Domain survive the exact JSON round-trip the store uses (no field loss)."""
 
     def _rich_host(self):
-        from recce.models import Account, Exploit, Script
+        from recce.core.models import Account, Exploit, Script
         return Host(
             ip="10.0.0.5", subnet="10.0.0.0/24", hostnames=["h1", "h1.corp"],
             os_name="Linux 5.4", os_family="Linux", os_accuracy=95,
@@ -682,7 +684,7 @@ class ModelSerializationTest(unittest.TestCase):
         self.assertEqual(h2.host_scripts[0].id, "hs")
 
     def test_domain_json_roundtrip(self):
-        from recce.models import Domain
+        from recce.core.models import Domain
         import json
         d = Domain(name="corp.local", netbios="CORP", dc_ips=["10.0.10.10"],
                    anonymous_bind=True, password_policy={"min": 7},
@@ -703,7 +705,7 @@ class PhaseWorkerTest(unittest.TestCase):
 
     def test_enum_worker_folds_ports_flags_and_runs_vulndb(self):
         from recce import cli
-        import recce.scanner as s
+        import recce.core.scanner as s
         orig = s.enum_scan
         s.enum_scan = lambda ip, ports, out, profile, creds=None: _fake_scan(
             out, ip, [{"port": 21, "service": "ftp", "product": "vsftpd",
@@ -725,7 +727,7 @@ class PhaseWorkerTest(unittest.TestCase):
 
     def test_vuln_worker_merges_findings_and_marks_ports(self):
         from recce import cli
-        import recce.scanner as s
+        import recce.core.scanner as s
         orig = s.vuln_scan
         s.vuln_scan = lambda ip, ports, out, profile, creds=None, aggressive=False, \
             fast=False, skip_enum_scripts=False: \
@@ -747,7 +749,7 @@ class PhaseWorkerTest(unittest.TestCase):
 
     def test_db_worker_sets_db_scanned(self):
         from recce import cli
-        import recce.scanner as s
+        import recce.core.scanner as s
         orig = s.nse_scan
         s.nse_scan = lambda ip, ports, out, profile, scripts, creds=None: _fake_scan(
             out, ip, [{"port": 3306, "service": "mysql"}])
@@ -767,7 +769,7 @@ class PhaseWorkerTest(unittest.TestCase):
 
     def test_privesc_worker_returns_host_and_issues(self):
         from recce import cli
-        import recce.scanner as s
+        import recce.core.scanner as s
         orig = s.nse_scan
         s.nse_scan = lambda ip, ports, out, profile, scripts, creds=None: _fake_scan(
             out, ip, [{"port": 445, "service": "microsoft-ds"}])
@@ -787,8 +789,8 @@ class PhaseWorkerTest(unittest.TestCase):
 
 class EnvironmentAndTargetsTest(unittest.TestCase):
     def test_check_environment_requires_nmap_and_warns(self):
-        import recce.scanner as s
-        from recce.scanner import ScanProfile, ScannerError
+        import recce.core.scanner as s
+        from recce.core.scanner import ScanProfile, ScannerError
         oh, orr = s._have, s._is_root
         try:
             s._have = lambda t: False        # nothing installed
@@ -807,7 +809,7 @@ class EnvironmentAndTargetsTest(unittest.TestCase):
             s._have, s._is_root = oh, orr
 
     def test_load_targets_from_file_with_comments_and_cidr(self):
-        from recce.targets import load_targets
+        from recce.core.targets import load_targets
         with tempfile.TemporaryDirectory() as d:
             f = os.path.join(d, "scope.txt")
             with open(f, "w") as fh:
@@ -820,7 +822,7 @@ class EnvironmentAndTargetsTest(unittest.TestCase):
         self.assertEqual(sm["10.0.1.1"], "10.0.1.0/30")  # CIDR line -> subnet label
 
     def test_missing_target_file_raises(self):
-        from recce.targets import load_targets
+        from recce.core.targets import load_targets
         with self.assertRaises(FileNotFoundError):
             load_targets(["@/no/such/file.txt"])
 
@@ -844,7 +846,7 @@ class TargetingFormE2ETest(unittest.TestCase):
         """Run `vulns <targets>` against a freshly seeded store; return the set of
         IPs that actually got vuln-scanned (i.e. the hosts the phase selected)."""
         from recce import cli
-        import recce.scanner as s
+        import recce.core.scanner as s
 
         d = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
@@ -944,8 +946,8 @@ class UsabilityAndDiscoveryTest(unittest.TestCase):
         # The killer field bug: hosts that block ping got dropped -> zero ports.
         # Now 0 discovery responses must auto-fall-back to scanning all as up.
         from recce import cli
-        import recce.scanner as s
-        from recce.store import Store
+        import recce.core.scanner as s
+        from recce.core.store import Store
 
         def empty_disc(tf, out):
             with open(out, "w") as fh:
@@ -1014,7 +1016,7 @@ class PhaseIdempotencyTest(unittest.TestCase):
 
     def test_rerunning_vulns_does_not_duplicate(self):
         from recce import cli
-        import recce.scanner as s
+        import recce.core.scanner as s
 
         d = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
@@ -1051,7 +1053,7 @@ class PhaseIdempotencyTest(unittest.TestCase):
 
     def test_store_merge_is_idempotent_for_all_collections(self):
         # Upserting the identical rich host twice must not grow any collection.
-        from recce.models import Account, Exploit, Script
+        from recce.core.models import Account, Exploit, Script
         d = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
         s = Store(os.path.join(d, "r.sqlite"))
@@ -1125,7 +1127,7 @@ class ProgressAndAuthTest(unittest.TestCase):
 
 class StoreFixesTest(unittest.TestCase):
     def test_corrupt_db_raises_storeerror(self):
-        from recce.store import Store, StoreError
+        from recce.core.store import Store, StoreError
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "results.sqlite")
             with open(p, "w") as fh:
@@ -1151,7 +1153,7 @@ class StoreFixesTest(unittest.TestCase):
                 self.assertNotIn("Traceback", out)
 
     def test_distance_preserved_through_merge(self):
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             s = Store(os.path.join(d, "r.sqlite"))
             s.upsert_host(Host(ip="10.0.0.5", distance=3))
@@ -1161,7 +1163,7 @@ class StoreFixesTest(unittest.TestCase):
 
     def test_rerun_does_not_duplicate_issues(self):
         from recce import cli
-        from recce.store import Store
+        from recce.core.store import Store
         with tempfile.TemporaryDirectory() as d:
             paths = cli._open_paths(d)
             s = Store(paths["db"])
@@ -1218,7 +1220,9 @@ class EnumRobustnessTest(unittest.TestCase):
         return a
 
     def test_one_bad_host_does_not_abort_run_or_corrupt_workbook(self):
-        from recce import cli, scanner, xlsx
+        from recce import cli
+        from recce.core import scanner
+        from recce.report.formats import xlsx
         import zipfile
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
@@ -1266,7 +1270,8 @@ class EnumRobustnessTest(unittest.TestCase):
         store.close()
 
     def test_persist_failure_on_one_host_does_not_abort_the_phase(self):
-        from recce import cli, scanner
+        from recce import cli
+        from recce.core import scanner
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         paths = cli._open_paths(d)
@@ -1308,8 +1313,9 @@ class EnumRobustnessTest(unittest.TestCase):
         """A host the fast pass found 0 ports on is re-verified with an adaptive
         re-scan (discovered-live always; -Pn only with --verify-all), so a missed
         sweep isn't silently trusted as 'no ports'."""
-        from recce import cli, scanner
-        from recce.models import Host
+        from recce import cli
+        from recce.core import scanner
+        from recce.core.models import Host
         calls = {"verify": 0}
         saved = (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
                  scanner.verify_port_scan, scanner.enum_scan, cli.np.parse_nmap_xml)
@@ -1359,8 +1365,8 @@ class EnumRobustnessTest(unittest.TestCase):
     def test_truncated_sweep_incomplete_flag_round_trips_and_clears_on_recompletion(self):
         """A truncated sweep flags the host incomplete_scan (persisted); a later
         complete sweep clears it, and ports union across the two scans."""
-        from recce.store import Store
-        from recce.models import Host, Port
+        from recce.core.store import Store
+        from recce.core.models import Host, Port
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         st = Store(os.path.join(d, "s.sqlite"))
@@ -1376,8 +1382,8 @@ class EnumRobustnessTest(unittest.TestCase):
         st.close()
 
     def test_corrupt_existing_workbook_is_regenerated_not_fatal(self):
-        from recce.report_excel import update_workbook
-        from recce import xlsx
+        from recce.report.excel import update_workbook
+        from recce.report.formats import xlsx
         import zipfile
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

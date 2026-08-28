@@ -18,15 +18,15 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from .. import ad
-from .. import exploits
-from .. import parser as np
-from .. import scanner
-from .. import tracking as tr
-from ..models import Host
-from ..report_excel import read_workbook_edits, update_workbook
-from ..report_markdown import build_csv, build_markdown
-from ..store import Store, StoreError
-from ..targets import expand_excludes, explicit_targets, ip_matcher, load_targets
+from ..vuln import exploits
+from ..core import parser as np
+from ..core import scanner
+from ..core import tracking as tr
+from ..core.models import Host
+from ..report.excel import read_workbook_edits, update_workbook
+from ..report.markdown import build_csv, build_markdown
+from ..core.store import Store, StoreError
+from ..core.targets import expand_excludes, explicit_targets, ip_matcher, load_targets
 
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
@@ -45,7 +45,7 @@ def cmd_next(args: argparse.Namespace) -> int:
     store = _open_store(paths["db"])
     if store is None:
         return 1
-    from .. import workflow
+    from ..act import workflow
     acts = workflow.next_actions(store.all_hosts(), store.all_credentials(), args.output_dir)
     store.close()
     if not acts:
@@ -127,7 +127,7 @@ def cmd_attack(args: argparse.Namespace) -> int:
     """Engagement-wide MITRE ATT&CK coverage: the techniques recce's findings map to,
     grouped by tactic along the kill chain. For client reports that want ATT&CK, not
     just CVEs/CWEs."""
-    from .. import attack
+    from ..act import attack
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No engagement at {args.output_dir}. Run `recce run <targets>` first.")
@@ -163,7 +163,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
     (NSE VULNERABLE -> CONFIRMED) or refutes a disproved one (NOT VULNERABLE, hidden by
     default). Only Tier-A/B (read-only / non-intrusive detection) - never a weaponizing PoC.
     See docs/design/ACTIVE-VERIFICATION.md."""
-    from .. import verify, qod
+    from ..core import qod
+    from ..vuln import verify
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No engagement at {args.output_dir}. Run `recce run <targets> -o "
@@ -227,7 +228,7 @@ def cmd_poc(args: argparse.Namespace) -> int:
     it uses the CVEs from the engagement's findings (`--confirmed` to gate to confirmed
     ones only). recce references published exploits and scaffolds a harness; it does not
     author weaponized exploit code."""
-    from .. import pocgen
+    from ..act import pocgen
     paths = _open_paths(args.output_dir)
     store = _open_store(paths["db"])
     if store is None:
@@ -293,7 +294,7 @@ def cmd_exploitplan(args: argparse.Namespace) -> int:
     _import_excel_tracking(store, paths)
     hosts = _selected_hosts(store.all_hosts(), args)
     store.close()
-    from .. import exploitplan
+    from ..act import exploitplan
 
     summary = exploitplan.build_plan(hosts, args.output_dir, lhost=args.lhost,
                                      lport=args.lport, run=args.run)
@@ -327,7 +328,7 @@ def cmd_prove(args: argparse.Namespace) -> int:
     SeImpersonate / …) render a verdict - CONFIRMED, LIKELY, FALSE POSITIVE or
     INCONCLUSIVE - from the evidence recce already holds, plus the exact safe step
     to finish proving. Nothing here exploits anything."""
-    from .. import proofs
+    from ..vuln import proofs
     print(BANNER)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -408,7 +409,7 @@ def cmd_attackpath(args: argparse.Namespace) -> int:
     _import_excel_tracking(store, paths)
     hosts = _selected_hosts(store.all_hosts(), args)
     store.close()
-    from .. import attackpath as ap
+    from ..act import attackpath as ap
 
     steps = ap.build(hosts)
     for line in ap.narrative(hosts, steps):

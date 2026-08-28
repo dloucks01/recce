@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 
-from ..models import Port, Vuln
+from ..core.models import Port, Vuln
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _SEC = re.compile(r"^=+\s*(.*?)\s*=+$")

@@ -12,11 +12,11 @@ golden failure and a fuzz failure refer to byte-for-byte the same "real" message
 import struct
 import unittest
 
-from recce import snmp
-from recce import mongodb
-from recce import ldap
-from recce import ntlm
-from recce import smb
+from recce.services import snmp
+from recce.services.db import mongodb
+from recce.services import ldap
+from recce.ad import ntlm
+from recce.services import smb
 from tests import wire_vectors as W
 
 

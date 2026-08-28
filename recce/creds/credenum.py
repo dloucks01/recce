@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import shutil
 
-from ..models import Account, Host, Script, Vuln
+from ..core.models import Account, Host, Script, Vuln
 
 _TIMEOUT = 180   # per external-tool invocation (seconds)
 
@@ -67,7 +67,7 @@ def available_tools() -> dict[str, str | None]:
 def _run(cmd: list[str], timeout: int = _TIMEOUT, **kw) -> tuple[str, str | None]:
     """Run a tool; return (combined output, error-or-None). Never raises. kw forwards
     env_extra / stdin_data / new_session so credentials stay off the process argv."""
-    from ..util import run_tool
+    from ..core.util import run_tool
     return run_tool(cmd, timeout, **kw)
 
 
@@ -81,7 +81,7 @@ def parse_nxc_smb(output: str) -> dict:
 
     Tolerant of version differences: keys off the message text, not columns.
     """
-    from ..importers import strip_ansi
+    from ..intake.importers import strip_ansi
     result: dict = {"admin": False, "auth": False, "host_info": "", "shares": [],
                     "users": [], "sessions": [], "loggedon": [], "passpol": {}}
     section = None
@@ -158,7 +158,7 @@ _ASREP_HASH = re.compile(r"\$krb5asrep\$(?:\d+\$)?([^@$\s]+)@\S+")
 
 def parse_getuserspns(output: str) -> list[dict]:
     """Kerberoast results: SPN table rows + any `$krb5tgs$` hashes (with -request)."""
-    from ..importers import strip_ansi
+    from ..intake.importers import strip_ansi
     accounts: list[dict] = []
     by_name: dict[str, dict] = {}
     for raw in strip_ansi(output).splitlines():
@@ -184,7 +184,7 @@ def parse_getuserspns(output: str) -> list[dict]:
 
 def parse_getnpusers(output: str) -> list[dict]:
     """AS-REP roast results: `$krb5asrep$` lines -> accounts with hashes."""
-    from ..importers import strip_ansi
+    from ..intake.importers import strip_ansi
     out: list[dict] = []
     seen: set[str] = set()
     for raw in strip_ansi(output).splitlines():
@@ -210,7 +210,7 @@ def parse_secretsdump(output: str) -> list[dict]:
     (so a cleartext isn't mislabeled as a hash), and a password-`_historyN` row is flagged
     (a rotated/stale hash must not be sprayed as the current one). Keeps name/rid/nt for
     backward compatibility."""
-    from ..importers import strip_ansi
+    from ..intake.importers import strip_ansi
     out: list[dict] = []
     for raw in strip_ansi(output).splitlines():
         line = raw.strip()
@@ -477,7 +477,7 @@ def _spn_targets_native(dc_ip: str, creds: dict) -> list[dict] | None:
     """SPN accounts via recce's own authenticated LDAP. Returns a list (possibly empty)
     on a successful bind, or None if every bind was refused (the caller then tries
     impacket's LDAP)."""
-    from .. import ldap
+    from ..services import ldap
     realm = (creds.get("domain") or "").strip()
     if not realm:
         return None
@@ -524,7 +524,7 @@ def run_kerberoast(dc_ip: str, creds: dict) -> tuple[list[dict], str | None]:
     listing as a fallback; the ROAST itself is always the stdlib Kerberos client, which
     works against a Samba KDC where impacket-GetUserSPNs -request trips on the
     authenticator checksum (KRB_AP_ERR_INAPP_CKSUM)."""
-    from .. import kerberos
+    from ..ad import kerberos
     realm = (creds.get("domain") or "").strip()
     targets = _spn_targets_native(dc_ip, creds)
     if targets is None:                                 # native bind refused

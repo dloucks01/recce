@@ -1,7 +1,7 @@
 """Credential store service."""
 from __future__ import annotations
 
-from ...store import Store
+from ...core.store import Store
 
 
 def list_credentials(db_path: str, limit: int = 0, offset: int = 0) -> dict:

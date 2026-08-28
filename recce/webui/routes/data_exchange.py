@@ -23,7 +23,7 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
     broker = ctx.broker
 
     def _hosts():
-        from ...store import Store
+        from ...core.store import Store
         with Store(db_path) as st:
             return st.all_hosts(), (st.get_meta("engagement") or "recce engagement")
 
@@ -31,7 +31,7 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
     def encdec_ops():
         """List every encoder/decoder operation the /api/encdec endpoint
         supports. Returns [{name, description, requires_key}]."""
-        from ... import encdec
+        from ...core import encdec
         return {"ops": encdec.list_ops()}
 
 
@@ -40,7 +40,7 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         """Apply one op to `input`. body: {op, input, key?}. On failure returns
         {ok:false, error} instead of HTTPException — the WebUI can render the
         message inline without the browser turning it into a modal."""
-        from ... import encdec
+        from ...core import encdec
         op = str(body.get("op", "")).strip()
         input_text = str(body.get("input", ""))
         key = str(body.get("key", ""))
@@ -62,7 +62,7 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         Returns {ok, output, step_outputs:[str]} on success — step_outputs
         lets the UI show the intermediate value at each stage of the recipe.
         On any failure returns {ok:false, error, failed_step_index}."""
-        from ... import encdec
+        from ...core import encdec
         input_text = str(body.get("input", ""))
         steps = body.get("steps") or []
         if not isinstance(steps, list):
@@ -164,7 +164,7 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         netexec / GetUserSPNs / GetNPUsers / secretsdump -> credenum's parsers."""
         import base64
         import tempfile
-        from ... import importers
+        from ...intake import importers
         content_in = str(body.get("content", ""))
         filename = str(body.get("filename", ""))
         kind = str(body.get("kind", "auto")).lower()
@@ -276,9 +276,9 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
             return {"mode": "job", "id": job.id, "kind": kind}
 
         # Credential-tool output: no CLI import exists, so parse + fold directly.
-        from ... import credenum as ce
-        from ...models import Credential, Host
-        from ...store import Store
+        from ...creds import credenum as ce
+        from ...core.models import Credential, Host
+        from ...core.store import Store
         added = 0
         summary = ""
         with Store(db_path) as st:
@@ -394,8 +394,8 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
                 # Any registered parser — built-in OR user-defined (Phase 2).
                 # A user parser under ~/.recce/parsers/ shows up in
                 # SCANNER_PARSERS and folds via the same path.
-                from ... import epss, kev
-                from ...importers import SCANNER_PARSERS
+                from ...vuln import epss, kev
+                from ...intake.importers import SCANNER_PARSERS
                 if kind not in SCANNER_PARSERS:
                     raise HTTPException(422, f"unsupported import kind {kind!r}")
                 vulns = SCANNER_PARSERS[kind](content)
@@ -431,8 +431,8 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         branches (what's next, from the next-action engine), and the attack-path narrative
         (the chain we're building). All derived from the datastore, so it's the same for
         every tester and updates the instant anyone folds in a result."""
-        from ... import attackpath, workflow
-        from ...store import Store
+        from ...act import attackpath, workflow
+        from ...core.store import Store
         with Store(db_path) as st:
             hosts = st.all_hosts()
             creds = st.all_credentials()
@@ -496,7 +496,7 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         """Structured attack-path steps grouped by kill-chain stage, plus the
         narrative summary. Frontend renders this as clickable steps on the
         Exploit tab (each step's ip jumps to the host drawer)."""
-        from ... import attackpath
+        from ...act import attackpath
         hs, _ = _hosts()
         up = [h for h in hs if h.is_up]
         steps = attackpath.build(up)
@@ -516,7 +516,7 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         in the window. The primary use is a Dashboard card that answers
         "what's happened since I stepped away?"."""
         import time
-        from ...store import Store
+        from ...core.store import Store
         from .. import collab as _collab
         now = time.time()
         if since <= 0:
@@ -600,7 +600,7 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         import os
         import re
         from fastapi.responses import Response
-        from ... import screenshot as shot
+        from ...report import screenshot as shot
         if not shot.available():
             raise HTTPException(503, "no headless browser installed (chromium/firefox)")
         if not (1 <= port <= 65535):
@@ -647,7 +647,7 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
     def attackpath_svg():
         """The projected attack-path graph as a standalone SVG, for inline display."""
         from fastapi.responses import Response
-        from ... import attackpath
+        from ...act import attackpath
         hs, _ = _hosts()
         steps = attackpath.build(hs)
         if not steps:
@@ -660,7 +660,7 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
     @app.get("/api/attack")
     def attack_coverage():
         """MITRE ATT&CK coverage: techniques the findings map to, by tactic."""
-        from ... import attack
+        from ...act import attack
         hs, _ = _hosts()
         cov = attack.coverage(hs)
         return {"technique_count": cov["technique_count"],

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import socket
 
-from .models import Evidence, Vuln
+from ..core.models import Evidence, Vuln
 
 
 def recvn(sock, n: int, timeout: float | None = None):
@@ -86,7 +86,7 @@ def findings_to_vulns(fs: list[dict], source: str, default_port: int,
 def make_proof_html_wrapper(prompt: str):
     """Factory for proof_html wrappers with a custom prompt."""
     def proof_html(command, output, banner: str = "") -> str:
-        from . import mssql
+        from .db import mssql
         return mssql.proof_html(command, output, prompt=prompt, banner=banner)
     return proof_html
 

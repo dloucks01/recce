@@ -22,12 +22,12 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .. import ad
-from .. import db as dbmod
-from .. import privesc as pe
-from .. import tracking as tr
+from ..services import db as dbmod
+from ..act import privesc as pe
+from ..core import tracking as tr
 from .formats import xlsx
-from ..exploitref import proven_exploit_ref
-from ..models import Domain, Host
+from ..vuln.exploitref import proven_exploit_ref
+from ..core.models import Domain, Host
 
 CHECKBOX_HEADERS = {"Reviewed", "Checked", "Triaged", "Done", "Worked"}
 CHECKLIST_TITLE = "Checklist"
@@ -287,8 +287,8 @@ def _spec_services(hosts: list[Host]) -> SheetSpec:
     """One row per open port, grouped by IP. Each port has its own tri-state work
     Status (not started / in progress / done) and a Notes cell, so a tester can
     track exactly which ports they've looked at, are working, or haven't touched."""
-    from .. import serviceenum as se
-    from .. import svcdetect
+    from ..services import serviceenum as se
+    from ..services import svcdetect
     # Hostname isn't a column - it rides in the collapsible per-IP band, so it isn't
     # repeated on every port row.
     cols = [
@@ -335,7 +335,7 @@ def _spec_web(hosts: list[Host]) -> SheetSpec:
     """Every web-facing endpoint (HTTP/HTTPS on ANY port), categorized in one place,
     with its tech stack, how many web findings it carries, and the exact Kali
     deep-scan commands to run against it. Populated deeper by `recce web`."""
-    from .. import web
+    from ..services import web
     cols = [
         ("Status", "status", 15), ("IP", "data", 16), ("Hostname", "data", 20),
         ("URL", "data", 30), ("Scheme", "data", 7), ("Tech / server", "data", 34),
@@ -459,7 +459,7 @@ def _qod_cell(v) -> str:
     """The finding's Quality of Detection as 'NN tier' (e.g. '99 active_vuln',
     '80 remote_banner'). Falls back to computing it if the finding wasn't annotated
     (a direct spec call in a test), so the column is always meaningful."""
-    from .. import qod as _qod
+    from ..core import qod as _qod
     score = v.qod or _qod.qod_of(v)
     kind = v.qod_type or _qod.score(v)[1]
     verified = " ✓" if score >= _qod.MIN_QOD_VERIFIED else ""
@@ -469,7 +469,7 @@ def _qod_cell(v) -> str:
 def _tier(v) -> str:
     """The honest confidence bucket from QoD: confirmed (actively verified),
     likely (a version/inference lead worth checking), or lead (low-confidence)."""
-    from .. import qod as _qod
+    from ..core import qod as _qod
     score = v.qod or _qod.qod_of(v)
     if score >= _qod.MIN_QOD_VERIFIED:
         return "confirmed"
@@ -495,8 +495,8 @@ def _priority_cell(v) -> str:
 def _to_confirm_cell(h, v) -> str:
     """For a not-yet-confirmed lead, the exact SAFE command that would settle it (the
     honesty loop's `to_confirm`); blank for an actively-verified finding."""
-    from .. import qod as _qod
-    from ..verify_rules import rule_for_cve
+    from ..core import qod as _qod
+    from ..vuln.verify_rules import rule_for_cve
     if (v.qod or _qod.qod_of(v)) >= _qod.MIN_QOD_VERIFIED:
         return ""
     for cve in (i.upper() for i in (v.ids or [])):
@@ -684,7 +684,7 @@ def _spec_verification(hosts: list[Host]) -> SheetSpec:
     """Per-finding proof verdict: CONFIRMED / LIKELY / FALSE POSITIVE / INCONCLUSIVE,
     with the evidence used, the preconditions, the exact safe command to finish
     proving, and what a false positive looks like. Answers 'is this real?'."""
-    from .. import proofs
+    from ..vuln import proofs
     cols = [
         ("Verdict", "data", 15), ("IP", "data", 16), ("Port", "data", 7),
         ("Vulnerability", "data", 34), ("Evidence (why this verdict)", "data", 64),
@@ -743,7 +743,7 @@ def _spec_exploitation(hosts: list[Host]) -> SheetSpec:
     to validate. References vetted tools - it does not generate exploit code. Empty
     (sheet skipped) until there are confirmed findings. `exploitplan` writes the
     same actions out as runnable .rc / .sh artifacts."""
-    from .. import exploitplan as xp
+    from ..act import exploitplan as xp
     _KIND = {"remote-msf": "remote (msf)", "remote-tool": "remote (tool)",
              "post-shell": "post-shell"}
     defenses = {h.ip: "; ".join(h.defenses) for h in hosts if h.defenses}
@@ -773,7 +773,7 @@ def _spec_attackpath(hosts: list[Host]) -> SheetSpec:
     """The confirmed findings chained into a prioritised attack path (foothold ->
     priv-esc -> creds -> lateral -> domain), grounded in what recce found. Empty
     (sheet skipped) until there are confirmed, chainable findings."""
-    from .. import attackpath as ap
+    from ..act import attackpath as ap
     cols = [
         ("Done", "checkbox", 9), ("Stage", "data", 20), ("IP", "data", 22),
         ("Hostname", "data", 16), ("Step", "data", 34), ("Existing tool", "data", 26),
@@ -1591,7 +1591,7 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     sh.write([("Totals", "header"), ("", "header")])
     nav_set = set(nav)
     proven = sum(1 for h in hosts for v in h.vulns if _curated_exploit(v))
-    from .. import proofs
+    from ..vuln import proofs
     confirmed = sum(1 for r in proofs.verify_hosts(hosts)
                     if r["verdict"] == proofs.CONFIRMED)
     _links = {
@@ -1898,7 +1898,7 @@ def _build_mssql(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import mssql as _mssql
+    from ..services.db import mssql as _mssql
     sh = wb.add_sheet("MSSQL")
     sh.write([("Microsoft SQL Server - offensive enumeration & attack chain", "title")])
     sh.write([("Pre-auth probes are recce's own (SQL Browser + TDS pre-login); "
@@ -2001,7 +2001,7 @@ def _build_mssql(wb, analysis: dict) -> None:
 
 
 def _mssql_vname(ver: str) -> str:
-    from .. import mssql
+    from ..services.db import mssql
     return mssql.version_name(ver) if ver else ""
 
 
@@ -2015,7 +2015,7 @@ def _build_smb(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import smb as _smb
+    from ..services import smb as _smb
     sh = wb.add_sheet("SMB")
     sh.write([("SMB / file sharing - offensive enumeration & attack surface", "title")])
     sh.write([("Pre-auth posture (dialect, signing, SMBv1) is recce's own stdlib "
@@ -2081,7 +2081,7 @@ def _build_ftp(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import ftp as _ftp
+    from ..services import ftp as _ftp
     sh = wb.add_sheet("FTP")
     sh.write([("FTP - offensive enumeration & attack surface", "title")])
     sh.write([("Banner, anonymous-login and AUTH-TLS posture are recce's own stdlib "
@@ -2129,7 +2129,7 @@ def _build_docker(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import docker as _docker
+    from ..services import docker as _docker
     sh = wb.add_sheet("Docker")
     sh.write([("Docker Engine API - offensive enumeration & attack surface", "title")])
     sh.write([("An unauthenticated Docker API is remote root RCE on the host. recce "
@@ -2167,7 +2167,7 @@ def _build_kubernetes(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import kubernetes as _k8s
+    from ..services import kubernetes as _k8s
     sh = wb.add_sheet("Kubernetes")
     sh.write([("Kubernetes - offensive attack-surface enumeration", "title")])
     sh.write([("Unauthenticated reads of the kubelet, kube-apiserver and etcd (recce's "
@@ -2221,7 +2221,7 @@ def _build_ldap(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import ldap as _ldap
+    from ..services import ldap as _ldap
     sh = wb.add_sheet("LDAP")
     sh.write([("LDAP / Active Directory - offensive directory enumeration", "title")])
     sh.write([("recce speaks LDAP directly (stdlib BER/ASN.1): an anonymous bind, a "
@@ -2271,7 +2271,7 @@ def _build_snmp(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import snmp as _snmp
+    from ..services import snmp as _snmp
     sh = wb.add_sheet("SNMP")
     sh.write([("SNMP - offensive UDP enumeration", "title")])
     sh.write([("recce speaks SNMP v2c directly (stdlib BER over UDP): it guesses "
@@ -2311,7 +2311,7 @@ def _build_mongodb(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import mongodb as _mongo
+    from ..services.db import mongodb as _mongo
     sh = wb.add_sheet("MongoDB")
     sh.write([("MongoDB - offensive enumeration", "title")])
     sh.write([("recce speaks the MongoDB wire protocol directly (stdlib OP_MSG/BSON): "
@@ -2351,7 +2351,7 @@ def _build_redis(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import redis as _redis
+    from ..services.db import redis as _redis
     sh = wb.add_sheet("Redis")
     sh.write([("Redis - offensive enumeration", "title")])
     sh.write([("recce speaks the Redis wire protocol directly (stdlib RESP): PING + "
@@ -2391,7 +2391,7 @@ def _build_elasticsearch(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import elasticsearch as _es
+    from ..services.db import elasticsearch as _es
     sh = wb.add_sheet("Elasticsearch")
     sh.write([("Elasticsearch - offensive enumeration", "title")])
     sh.write([("recce GETs the Elasticsearch HTTP API directly (stdlib http.client): / "
@@ -2430,7 +2430,7 @@ def _build_rsync(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import rsync as _rsync
+    from ..services import rsync as _rsync
     sh = wb.add_sheet("rsync")
     sh.write([("rsync daemon - offensive enumeration", "title")])
     sh.write([("recce speaks the rsync daemon protocol directly (stdlib): it lists the "
@@ -2471,7 +2471,7 @@ def _build_nfs(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
-    from .. import nfs as _nfs
+    from ..services import nfs as _nfs
     sh = wb.add_sheet("NFS")
     sh.write([("NFS / mountd - offensive enumeration", "title")])
     sh.write([("recce speaks ONC RPC directly (stdlib): the portmapper DUMP on 111 "
@@ -2512,7 +2512,7 @@ def _build_kerberos(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not results and not fs:
         return
-    from .. import kerberos as _krb
+    from ..ad import kerberos as _krb
     sh = wb.add_sheet("Kerberos")
     sh.write([("Kerberos - credential-less AD roasting", "title")])
     sh.write([("recce speaks Kerberos directly (stdlib ASN.1 DER, no impacket): for "
@@ -2550,7 +2550,7 @@ def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> Sh
     """The stacked credential set (auto-harvested + manually captured), ready to
     spray. Empty (sheet skipped) until there are credentials. `recce creds --plan`
     writes the users/passwords/hashes files + the netexec/impacket spray commands."""
-    from .. import credentials as cr
+    from ..creds import credentials as cr
     stacked = cr.stack(hosts, creds_stored or [])
     cols = [
         ("Worked", "checkbox", 9), ("User", "data", 22), ("Domain", "data", 14),

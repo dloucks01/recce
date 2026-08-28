@@ -1,8 +1,9 @@
 """MITRE ATT&CK technique mapping: findings -> techniques, coverage, Act tagging."""
 from __future__ import annotations
 
-from recce import act, attack
-from recce.models import Host, Port, Vuln
+from recce import act
+from recce.act import attack
+from recce.core.models import Host, Port, Vuln
 
 
 def _v(sid, title, sev="high", **kw):
@@ -44,7 +45,7 @@ def test_technique_id_and_tactic_id():
 
 
 def test_coverage_carries_no_external_url():
-    from recce.models import Host, Vuln
+    from recce.core.models import Host, Vuln
     h = Host(ip="1.2.3.4", state="up")
     h.vulns.append(Vuln(ip="1.2.3.4", port=445, protocol="tcp",
                         script_id="smb-vuln-ms17-010", state="VULNERABLE",
@@ -75,7 +76,7 @@ def test_act_cards_are_tagged_with_attack_techniques():
     assert loot.attack_id                              # tagged
     # a spray card (archetype default) picks up the spraying technique
     h2 = Host(ip="10.0.0.6", ports=[Port(portid=445, state="open")])
-    from recce.models import Credential
+    from recce.core.models import Credential
     cards2 = act.action_plan([h2], [Credential(username="u", secret="p", kind="password")])
     spray = next(c for c in cards2 if c.archetype == "spray")
     assert spray.attack_id == "T1110.003"

@@ -16,7 +16,7 @@ be run by the `privesc` command; the playbook needs no scanning.
 
 from __future__ import annotations
 
-from .models import Host
+from ..core.models import Host
 from . import playbook as pb
 
 # OS-specific local checklists. (vector, command / how-to, note)

@@ -10,11 +10,11 @@ import os
 import shutil
 import unittest
 
-from recce import tracking as tr
-from recce import credenum
+from recce.core import tracking as tr
+from recce.creds import credenum
 from recce import cli
-from recce.models import Host, Port, Vuln
-from recce.store import Store
+from recce.core.models import Host, Port, Vuln
+from recce.core.store import Store
 
 
 def _host(ip="10.0.0.5", *script_ids, port=445, svc="microsoft-ds"):
@@ -117,7 +117,7 @@ class AccessCommandTest(unittest.TestCase):
                                 f"recce_acccmd_{os.getpid()}")
         shutil.rmtree(self.dir, ignore_errors=True)
         os.makedirs(self.dir)
-        sample = os.path.join(os.path.dirname(recce.__file__), "sample_scan.xml")
+        sample = os.path.join(os.path.dirname(recce.__file__), "core", "sample_scan.xml")
         self.assertEqual(cli.main(["import", sample, "-o", self.dir]), 0)
 
     def tearDown(self):

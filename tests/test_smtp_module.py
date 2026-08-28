@@ -5,8 +5,8 @@ from __future__ import annotations
 import socketserver
 import threading
 
-from recce import smtp
-from recce.models import Host, Port
+from recce.services import smtp
+from recce.core.models import Host, Port
 
 
 def _serve(responder):

@@ -2,8 +2,8 @@
 
 import unittest
 
-from recce.models import Host, Port, Vuln
-from recce.workflow import next_actions
+from recce.core.models import Host, Port, Vuln
+from recce.act.workflow import next_actions
 
 
 def _h(ip="10.0.0.1", ports=(), **flags):

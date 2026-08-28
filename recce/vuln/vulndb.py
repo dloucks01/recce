@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from ..models import Evidence, Host, Port, Vuln
+from ..core.models import Evidence, Host, Port, Vuln
 
 
 def _ver_tuple(v: str) -> tuple[int, ...]:

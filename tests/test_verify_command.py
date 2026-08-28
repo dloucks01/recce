@@ -7,10 +7,10 @@ import tempfile
 import unittest
 
 from recce import cli
-from recce import parser as np
-from recce import scanner
-from recce.models import Host, Port, Script, Vuln
-from recce.store import Store
+from recce.core import parser as np
+from recce.core import scanner
+from recce.core.models import Host, Port, Script, Vuln
+from recce.core.store import Store
 
 
 def _lead_host():

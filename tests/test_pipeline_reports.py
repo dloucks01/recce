@@ -16,14 +16,16 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from recce import ad, exploits, parser, scanner
-from recce import tracking as tr
-from recce import xlsx
-from recce.models import Account, Host, Port, Script, Vuln
-from recce.report_excel import (build_workbook, read_workbook_tracking,
+from recce import ad
+from recce.core import parser, scanner
+from recce.vuln import exploits
+from recce.core import tracking as tr
+from recce.report.formats import xlsx
+from recce.core.models import Account, Host, Port, Script, Vuln
+from recce.report.excel import (build_workbook, read_workbook_tracking,
                                        update_workbook)
-from recce.store import Store
-from recce.targets import apply_exclusions, load_targets
+from recce.core.store import Store
+from recce.core.targets import apply_exclusions, load_targets
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
@@ -36,7 +38,7 @@ from _pipeline_helpers import header_index, _docx_text, _self_response, SAMPLE  
 
 class CoverageTest(unittest.TestCase):
     def setUp(self):
-        from recce.targets import _subnet_of
+        from recce.core.targets import _subnet_of
         self.hosts = parser.parse_nmap_xml(SAMPLE)
         for h in self.hosts:
             h.subnet = _subnet_of(h.ip)
@@ -69,8 +71,8 @@ class WorkbookFlowTest(unittest.TestCase):
     grouped and the AD cluster kept contiguous."""
 
     def _build(self):
-        from recce.models import Domain, Vuln
-        from recce import xlsx
+        from recce.core.models import Domain, Vuln
+        from recce.report.formats import xlsx
 
         def V(ip, port, sid, title, sev, src):
             return Vuln(ip=ip, port=port, protocol="tcp", script_id=sid, title=title,
@@ -148,7 +150,7 @@ class PortStatusTest(unittest.TestCase):
                            Port(portid=443, service="https", state="open")])
 
     def test_services_sheet_has_status_column_and_dropdown(self):
-        from recce.report_excel import (build_workbook, STATUS_VALUES,
+        from recce.report.excel import (build_workbook, STATUS_VALUES,
                                          STATUS_TODO)
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "wb.xlsx")
@@ -177,7 +179,7 @@ class PortStatusTest(unittest.TestCase):
                             "Services Status dropdown not found")
 
     def test_status_roundtrip_and_reviewed_mapping(self):
-        from recce.report_excel import (build_workbook, read_workbook_edits,
+        from recce.report.excel import (build_workbook, read_workbook_edits,
                                          STATUS_WIP, STATUS_DONE)
         with tempfile.TemporaryDirectory() as d:
             store = Store(os.path.join(d, "t.sqlite"))
@@ -207,7 +209,7 @@ class PortStatusTest(unittest.TestCase):
     def test_status_column_not_misread_as_checkbox(self):
         # The Status column sits at index 0 (where a checkbox used to be); a
         # "Not started" cell must not be read as reviewed=True.
-        from recce.report_excel import build_workbook, read_workbook_edits
+        from recce.report.excel import build_workbook, read_workbook_edits
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "wb.xlsx")
             build_workbook([self._host()], out)
@@ -296,7 +298,7 @@ class WeakConfigFindingTest(unittest.TestCase):
 
 class DocxWriterTest(unittest.TestCase):
     def test_writer_parts_and_text(self):
-        from recce.docx import Document
+        from recce.report.formats.docx import Document
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "t.docx")
             doc = Document()
@@ -315,7 +317,7 @@ class DocxWriterTest(unittest.TestCase):
     def test_design_language_styling(self):
         """Teal accent, coloured/mono field values, teal-tinted evidence block."""
         import zipfile
-        from recce.docx import Document
+        from recce.report.formats.docx import Document
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "s.docx")
             doc = Document()
@@ -336,7 +338,7 @@ class DocxWriterTest(unittest.TestCase):
         """A doc with a TOC emits the field + updateFields (Word rebuilds on open);
         a plain doc emits settings.xml WITHOUT updateFields, so it never prompts."""
         import zipfile
-        from recce.docx import Document
+        from recce.report.formats.docx import Document
         with tempfile.TemporaryDirectory() as d:
             # with TOC
             p1 = os.path.join(d, "toc.docx")
@@ -358,7 +360,7 @@ class DocxWriterTest(unittest.TestCase):
     def test_table_body_cell_colour(self):
         """body_colors tints an individual body cell (severity ramp on counts)."""
         import zipfile
-        from recce.docx import Document
+        from recce.report.formats.docx import Document
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "tc.docx")
             doc = Document()
@@ -375,7 +377,7 @@ class DocxWriterTest(unittest.TestCase):
         import struct
         import binascii
         import zlib
-        from recce.docx import Document, _png_size
+        from recce.report.formats.docx import Document, _png_size
         sig = b"\x89PNG\r\n\x1a\n"
 
         def chunk(t, dat):
@@ -404,7 +406,7 @@ class DocxWriterTest(unittest.TestCase):
 
 class WriteupTest(unittest.TestCase):
     def _hosts(self):
-        from recce.models import Vuln
+        from recce.core.models import Vuln
         h1 = Host(ip="10.0.20.5", hostnames=["web01"],
                   ports=[Port(portid=443, service="https")],
                   vulns=[Vuln(ip="10.0.20.5", port=443, protocol="tcp",
@@ -428,7 +430,7 @@ class WriteupTest(unittest.TestCase):
         return [h1, h2]
 
     def test_grouping_across_hosts(self):
-        from recce.report_docx import group_findings
+        from recce.report.docx import group_findings
         findings = group_findings(self._hosts())
         # 2 distinct findings; critical sorts first.
         self.assertEqual([f.severity for f in findings], ["critical", "medium"])
@@ -437,7 +439,7 @@ class WriteupTest(unittest.TestCase):
                          ["10.0.20.5", "10.0.20.9"])   # spans both hosts
 
     def test_build_writeups_and_no_overwrite(self):
-        from recce.report_docx import build_writeups
+        from recce.report.docx import build_writeups
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "writeups")
             summary = build_writeups(self._hosts(), out)
@@ -455,14 +457,14 @@ class WriteupTest(unittest.TestCase):
             self.assertEqual(len(again["skipped"]), 2)
 
     def test_min_severity_filter(self):
-        from recce.report_docx import build_writeups
+        from recce.report.docx import build_writeups
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "w")
             summary = build_writeups(self._hosts(), out, min_severity="high")
             self.assertEqual(summary["total"], 1)   # only the critical
 
     def _hosts_potential_and_loot(self):
-        from recce.models import Vuln
+        from recce.core.models import Vuln
         return [Host(ip="10.0.30.5", hostnames=["box"],
                      ports=[Port(portid=23, service="telnet"),
                             Port(portid=445, service="microsoft-ds")],
@@ -482,7 +484,7 @@ class WriteupTest(unittest.TestCase):
                      ])]
 
     def test_potential_excluded_by_default_included_on_flag(self):
-        from recce.report_docx import build_writeups
+        from recce.report.docx import build_writeups
         hosts = self._hosts_potential_and_loot()
         with tempfile.TemporaryDirectory() as d:
             real = build_writeups(hosts, os.path.join(d, "r"))
@@ -492,7 +494,7 @@ class WriteupTest(unittest.TestCase):
             self.assertEqual(allf["total"], 2)                 # both
 
     def test_list_findings_flags_real(self):
-        from recce.report_docx import list_findings
+        from recce.report.docx import list_findings
         rows = list_findings(self._hosts_potential_and_loot())
         by_title = {r["title"]: r for r in rows}
         self.assertFalse(by_title["Telnet cleartext"]["real"])
@@ -506,8 +508,8 @@ class WriteupTest(unittest.TestCase):
         # card and the exec "Confirmed" tile both treat as "Reported" - an honesty
         # inconsistency. A blank confidence (the NSE-VULNERABLE ms17-010 here) must
         # read the same in all three places.
-        from recce.report_docx import list_findings, group_findings
-        from recce import report_html as rh
+        from recce.report.docx import list_findings, group_findings
+        from recce.report import html as rh
         hosts = self._hosts_potential_and_loot()
         row = {r["title"]: r for r in list_findings(hosts)}["smb-vuln-ms17-010"]
         self.assertEqual(row["confidence"], "")        # not coerced to "confirmed"
@@ -524,7 +526,7 @@ class WriteupTest(unittest.TestCase):
         self.assertEqual(confirmed, 0)
 
     def test_single_writeup_prefills_looted(self):
-        from recce.report_docx import build_one_writeup
+        from recce.report.docx import build_one_writeup
         hosts = self._hosts_potential_and_loot()
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "writeups")
@@ -536,7 +538,7 @@ class WriteupTest(unittest.TestCase):
             self.assertIn("NOPASSWD sudo: /usr/bin/find", text)
 
     def test_single_writeup_selectors(self):
-        from recce.report_docx import build_one_writeup
+        from recce.report.docx import build_one_writeup
         hosts = self._hosts_potential_and_loot()
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "w")
@@ -556,7 +558,7 @@ class WriteupTest(unittest.TestCase):
             self.assertEqual(none["reason"], "none")
 
     def test_auto_walkthrough_steps(self):
-        from recce.report_docx import group_findings, _walkthrough_steps
+        from recce.report.docx import group_findings, _walkthrough_steps
         findings = group_findings(self._hosts())
         tls = next(f for f in findings if "SSL" in f.title)
         steps = _walkthrough_steps(tls)
@@ -566,8 +568,8 @@ class WriteupTest(unittest.TestCase):
         self.assertIn("ssl-enum-ciphers", joined)  # tailored confirmation step
 
     def test_narrative_is_multi_paragraph_and_context_aware(self):
-        from recce.models import Vuln
-        from recce.report_docx import group_findings, _narrative
+        from recce.core.models import Vuln
+        from recce.report.docx import group_findings, _narrative
         # A likely (version-matched) web finding.
         web = Host(ip="10.0.20.5", hostnames=["web01"],
                    ports=[Port(portid=80, service="http", product="Apache httpd",
@@ -606,14 +608,12 @@ class WriteupTest(unittest.TestCase):
         type has a plain-language impact - so no finding drops to a blank type."""
         import glob
         import re
-        from recce.report_docx import _CWE_TYPE, _CWE_NAME, _TYPE_IMPACT
+        from recce.report.docx import _CWE_TYPE, _CWE_NAME, _TYPE_IMPACT
         used = set()
-        for fn in glob.glob(os.path.join(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__))), "recce", "*.py")):
-            # report_docx.py and cwe.py are the CWE naming/typing tables themselves - they
-            # LIST CWEs for reference, they don't EMIT them as findings, so they aren't
-            # bound by the "every emitted CWE must be typed here" guarantee.
-            if fn.endswith(("report_docx.py", "cwe.py")):
+        pkg_root = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "recce")
+        for fn in glob.glob(os.path.join(pkg_root, "**", "*.py"), recursive=True):
+            if fn.endswith(("docx.py", "cwe.py")):
                 continue
             with open(fn) as fh:
                 used |= set(re.findall(r"CWE-\d+", fh.read()))
@@ -626,14 +626,14 @@ class WriteupTest(unittest.TestCase):
         for _keys, label, _cia in _CWE_TYPE:
             self.assertIn(label, _TYPE_IMPACT, f"type '{label}' has no impact wording")
         # CWEs the NSE-script mapper can assign must also be named + typed.
-        from recce.report_docx import _NSE_CWE
+        from recce.report.docx import _NSE_CWE
         nse_cwes = {c for cs in _NSE_CWE.values() for c in cs}
         self.assertEqual(nse_cwes - typed, set(), "NSE-mapped CWEs with no type")
         self.assertEqual(nse_cwes - set(_CWE_NAME), set(), "NSE-mapped CWEs with no name")
 
     def test_nse_scripts_auto_map_to_cwe_and_cve(self):
-        from recce.models import Vuln
-        from recce.report_docx import group_findings
+        from recce.core.models import Vuln
+        from recce.report.docx import group_findings
 
         def finding_for(script_id, title=None):
             h = Host(ip="10.0.0.9", ports=[Port(portid=445, service="microsoft-ds")],
@@ -664,8 +664,8 @@ class WriteupTest(unittest.TestCase):
         self.assertEqual(f.cwes, ["CWE-22"])
 
     def test_marquee_vulns_get_specific_impact(self):
-        from recce.models import Vuln
-        from recce.report_docx import group_findings, _narrative
+        from recce.core.models import Vuln
+        from recce.report.docx import group_findings, _narrative
         cases = [
             (["CVE-2020-1472"], "verify zerologon", "ZeroLogon"),
             (["CVE-2021-34527"], "printnightmare", "Print Spooler"),
@@ -682,8 +682,8 @@ class WriteupTest(unittest.TestCase):
             self.assertIn(needle, blob, f"{title} missing marquee wording")
 
     def test_reports_exclude_informational_by_default(self):
-        from recce.models import Vuln
-        from recce.report_docx import build_writeups
+        from recce.core.models import Vuln
+        from recce.report.docx import build_writeups
         h = Host(ip="10.0.0.9", ports=[Port(portid=25, service="smtp")],
                  vulns=[
                      Vuln(ip="10.0.0.9", port=25, protocol="tcp", script_id="a",
@@ -702,8 +702,8 @@ class WriteupTest(unittest.TestCase):
             self.assertEqual(summary2["total"], 2)
 
     def test_walkthrough_uses_searchsploit_exploit(self):
-        from recce.models import Vuln, Exploit
-        from recce.report_docx import group_findings, _walkthrough_steps
+        from recce.core.models import Vuln, Exploit
+        from recce.report.docx import group_findings, _walkthrough_steps
         h = Host(ip="10.0.20.6", ports=[Port(portid=21, service="ftp",
                  product="vsftpd", version="2.3.4")],
                  vulns=[Vuln(ip="10.0.20.6", port=21, protocol="tcp",
@@ -716,8 +716,8 @@ class WriteupTest(unittest.TestCase):
         self.assertIn("17491", " ".join(_walkthrough_steps(f)))
 
     def test_walkthrough_only_cites_proven_exploits(self):
-        from recce.models import Vuln
-        from recce.report_docx import group_findings, _walkthrough_steps
+        from recce.core.models import Vuln
+        from recce.report.docx import group_findings, _walkthrough_steps
 
         def steps(title, conf, cves, source="version-db", svc="http", port=80):
             h = Host(ip="1.1.1.1", ports=[Port(portid=port, service=svc)],
@@ -745,7 +745,7 @@ class WriteupTest(unittest.TestCase):
         self.assertNotIn("Research a working exploit", s)
 
     def test_combined_report(self):
-        from recce.report_docx import build_combined
+        from recce.report.docx import build_combined
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "combined.docx")
             res = build_combined(self._hosts(), out, title="Test Engagement")
@@ -772,7 +772,7 @@ class WriteupTest(unittest.TestCase):
             self.assertIn('w:color w:val="C00000"', body)
 
     def test_screenshot_url_classification(self):
-        from recce import screenshot
+        from recce.report import screenshot
         self.assertTrue(screenshot._web_url(Port(portid=443, service="https")))
         self.assertTrue(screenshot._web_url(Port(portid=8080, service="http-proxy")))
         self.assertIsNone(screenshot._web_url(Port(portid=22, service="ssh")))
@@ -795,7 +795,7 @@ class WriteupTest(unittest.TestCase):
         """Regression: a browser installed but not on PATH (sudo secure_path,
         snap, /opt) must still be found via the absolute-path fallback scan."""
         import shutil as _sh
-        from recce import screenshot as s
+        from recce.report import screenshot as s
         d = tempfile.mkdtemp()
         self.addCleanup(lambda: _sh.rmtree(d, ignore_errors=True))
         # a browser in a bin dir + one nested under an /opt-style dir
@@ -825,7 +825,7 @@ class WriteupTest(unittest.TestCase):
             os.environ["PATH"] = orig_path
 
     def test_firefox_detection_and_command(self):
-        from recce import screenshot
+        from recce.report import screenshot
         ff = self._fake_browser("firefox")
         os.environ["RECCE_BROWSER"] = ff
         self.addCleanup(lambda: os.environ.pop("RECCE_BROWSER", None))
@@ -865,7 +865,7 @@ class WriteupTest(unittest.TestCase):
             os.environ.pop("RECCE_BROWSER", None)
 
     def test_chrome_detection_and_command(self):
-        from recce import screenshot
+        from recce.report import screenshot
         ch = self._fake_browser("chromium")
         os.environ["RECCE_BROWSER"] = ch
         self.addCleanup(lambda: os.environ.pop("RECCE_BROWSER", None))
@@ -1070,13 +1070,13 @@ class CheckboxPersistenceTest(unittest.TestCase):
     def test_every_checkbox_header_round_trips(self):
         """Every column with the checkbox role must be recognised by the read-back
         (CHECKBOX_HEADERS), or the operator's ticks are silently lost on regen."""
-        from recce import report_excel as rx
-        from recce.models import Vuln, Credential
+        from recce.report import excel as rx
+        from recce.core.models import Vuln, Credential
         hosts = [Host(ip="10.0.0.5", os_family="Windows", roles=["Domain Controller"],
                       local_findings=[{"category": "sudo",
                                        "vector": "NOPASSWD sudo: /usr/bin/find",
                                        "section": "Sudo", "source": "recce-enum"}],
-                      accounts=[__import__("recce.models", fromlist=["Account"]).Account(
+                      accounts=[__import__("recce.core.models", fromlist=["Account"]).Account(
                           ip="10.0.0.5", source="nse", kind="domain", domain="CORP")],
                       ports=[Port(portid=445, service="microsoft-ds")],
                       vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
@@ -1097,7 +1097,7 @@ class CheckboxPersistenceTest(unittest.TestCase):
 
 class HtmlReportTest(unittest.TestCase):
     def _hosts(self):
-        from recce.models import Vuln
+        from recce.core.models import Vuln
         return [Host(ip="10.0.0.5", hostnames=["dc01"], os_family="Windows",
                      roles=["Domain Controller"], defenses=["EDR/AV: CSFalcon (process)"],
                      ports=[Port(portid=445, service="microsoft-ds")],
@@ -1108,7 +1108,7 @@ class HtmlReportTest(unittest.TestCase):
                                  output="VULNERABLE")])]
 
     def test_self_contained_and_escaped(self):
-        from recce import report_html
+        from recce.report import html as report_html
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "report.html")
             report_html.build_html(self._hosts(), p, title="Client X",
@@ -1138,7 +1138,7 @@ class HtmlReportTest(unittest.TestCase):
         across a page break, and evidence must print in full (not clip at the on-screen
         max-height). Locks the print-quality contract against a CSS refactor."""
         import re
-        from recce import report_html
+        from recce.report import html as report_html
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "r.html")
             report_html.build_html(self._hosts(), p, title="Print")
@@ -1154,8 +1154,8 @@ class HtmlReportTest(unittest.TestCase):
         self.assertIn(".netmap svg{max-width:100%", block)  # wide map fits the page
 
     def test_detailed_findings_section(self):
-        from recce import report_html
-        from recce.models import Vuln
+        from recce.report import html as report_html
+        from recce.core.models import Vuln
         h = Host(ip="10.0.0.6", os_family="Linux",
                  ports=[Port(portid=21, service="ftp")],
                  vulns=[Vuln(ip="10.0.0.6", port=21, protocol="tcp",
@@ -1178,7 +1178,7 @@ class HtmlReportTest(unittest.TestCase):
     def test_visual_dashboard(self):
         """The 'At a glance' dashboard renders inline-SVG visuals for a non-technical
         reader, and stays self-contained (no xmlns/external refs in the SVG)."""
-        from recce import report_html
+        from recce.report import html as report_html
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "report.html")
             report_html.build_html(self._hosts(), p, title="Viz")
@@ -1198,8 +1198,8 @@ class HtmlReportTest(unittest.TestCase):
         unverified finding as fact: a scoring legend (severity bands + confidence
         meanings), a per-finding confidence badge + 'why this rating' basis line, and
         a grounded exec assessment."""
-        from recce import report_html
-        from recce.models import Vuln
+        from recce.report import html as report_html
+        from recce.core.models import Vuln
         h = Host(ip="10.0.0.7", os_family="Linux",
                  ports=[Port(portid=80, service="http")],
                  vulns=[Vuln(ip="10.0.0.7", port=80, protocol="tcp",
@@ -1229,7 +1229,8 @@ class HtmlReportTest(unittest.TestCase):
         """A read-only 'Assessment coverage' checklist reflects both the tool's auto
         state (enumerated host -> Enumerated done) and an operator tick passed via
         tracking (a reviewed host shows checked)."""
-        from recce import report_html, tracking as tr
+        from recce.core import tracking as tr
+        from recce.report import html as report_html
         h = Host(ip="10.0.0.10", subnet="10.0.0.0/24", state="up",
                  up_reason="syn-ack", enumerated=True,
                  ports=[Port(portid=445, state="open", service="microsoft-ds")])
@@ -1252,8 +1253,8 @@ class HtmlReportTest(unittest.TestCase):
         """All users and captured credentials are surfaced on the companion assets
         page; the credential secret is masked in the shareable HTML (full values stay
         in the workbook)."""
-        from recce import report_html
-        from recce.models import Account, Credential
+        from recce.report import html as report_html
+        from recce.core.models import Account, Credential
         h = Host(ip="10.0.10.10", state="up", up_reason="syn-ack",
                  ports=[Port(portid=445, state="open", service="microsoft-ds")],
                  accounts=[
@@ -1292,7 +1293,7 @@ class HtmlReportTest(unittest.TestCase):
         self.assertIn("Architecture &amp; assets", report)   # link to companion page
 
     def test_empty_hosts_ok(self):
-        from recce import report_html
+        from recce.report import html as report_html
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "r.html")
             report_html.build_html([], p, title="Empty")

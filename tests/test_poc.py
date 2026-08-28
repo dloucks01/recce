@@ -16,8 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from recce import exploits, pocgen                    # noqa: E402
-from recce.models import Host, Port, Vuln             # noqa: E402
+from recce.vuln import exploits                        # noqa: E402
+from recce.act import pocgen                           # noqa: E402
+from recce.core.models import Host, Port, Vuln         # noqa: E402
 
 
 def _host_with_cve(ip="10.0.20.6", cve="CVE-2011-2523"):

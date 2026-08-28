@@ -25,8 +25,8 @@ import json
 import ssl
 import urllib.parse
 
-from ...models import Host, Port
-from ...svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
+from ...core.models import Host, Port
+from ..svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
 
 _PORTS = (8086, 8087)
 _TLS_PORTS = (8087,)
@@ -216,7 +216,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
 
 
 def _jwt_bypass(ver: str) -> bool:
-    from ... import vulndb
+    from ...vuln import vulndb
     try:
         return bool(ver) and vulndb._cmp(ver, "1.7.6") < 0
     except Exception:      # noqa: BLE001
@@ -255,7 +255,7 @@ findings_to_vulns = make_findings_to_vulns_wrapper("influxdb", _DEFAULT_PORT)
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     """Full InfluxDB analysis. Returns {targets, findings, runbooks, probes, stats}."""
-    from ... import svcprobe
+    from .. import svcprobe
     targets = influxdb_targets(hosts)
     probes: dict = {}
     state: dict = {}
