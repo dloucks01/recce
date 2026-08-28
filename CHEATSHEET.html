@@ -83,8 +83,7 @@ footer{color:var(--mut);font-size:11.5px;margin-top:26px;text-align:center}
 <header>
   <div class="wrap">
     <h1>recce — Field Cheat-Sheet</h1>
-    <div class="sub">Airgapped enumeration → one workbook you check off as you go.
-      Keep <span class="k">-o eng</span> the same across every command — it's the one engagement folder.</div>
+    <div class="sub">Keep <span class="k">-o eng</span> the same across every command.</div>
   </div>
 </header>
 
@@ -92,20 +91,19 @@ footer{color:var(--mut);font-size:11.5px;margin-top:26px;text-align:center}
 
   <!-- WORKFLOW -->
   <div class="card span" style="margin-top:20px">
-    <h2><span class="num">0</span>The engagement at a glance</h2>
+    <h2><span class="num">0</span>Engagement flow</h2>
     <div class="flow">
-      <div class="st"><b>enum / scan</b><span>discover hosts &amp; ports</span></div>
-      <div class="ar">▶</div>
-      <div class="st"><b>vulns</b><span>NSE + offline CVE</span></div>
-      <div class="ar">▶</div>
-      <div class="st"><b>services</b><span>per-port enum cmds</span></div>
-      <div class="ar">▶</div>
+      <div class="st"><b>enum / scan</b><span>hosts &amp; ports</span></div>
+      <div class="ar">&#9654;</div>
+      <div class="st"><b>vulns</b><span>NSE + CVE</span></div>
+      <div class="ar">&#9654;</div>
+      <div class="st"><b>services</b><span>per-port enum</span></div>
+      <div class="ar">&#9654;</div>
       <div class="st"><b>ingest / creds</b><span>fold in loot</span></div>
-      <div class="ar">▶</div>
-      <div class="st"><b>writeups / report</b><span>deliverables</span></div>
+      <div class="ar">&#9654;</div>
+      <div class="st"><b>report</b><span>deliverables</span></div>
     </div>
-    <div class="note tip"><b>First run</b> &nbsp;<code>./bin/recce doctor</code> — self-tests the whole
-      pipeline and lists which optional tools (netexec, impacket, searchsploit…) are present. Only <code>nmap</code> is required.</div>
+    <div class="note tip"><b>First run</b> &nbsp;<code>./bin/recce doctor</code> — checks pipeline + optional tools. Only <code>nmap</code> is required.</div>
   </div>
 
   <div class="grid">
@@ -115,152 +113,143 @@ footer{color:var(--mut);font-size:11.5px;margin-top:26px;text-align:center}
       <h2><span class="num">1</span>Core commands</h2>
       <table>
         <tr><th>Phase</th><th>Command</th><th>Does</th></tr>
-        <tr><td>Enumerate</td><td class="cmd"><code>sudo ./bin/recce enum &lt;targets&gt; -o eng</code></td><td>discover hosts/ports/services → fills the sheet</td></tr>
-        <tr><td>Import</td><td class="cmd"><code>./bin/recce import scan.xml -o eng</code></td><td>build the sheet from an existing nmap scan</td></tr>
-        <tr><td>Vuln-scan</td><td class="cmd"><code>sudo ./bin/recce vulns -o eng</code></td><td>NSE + offline CVE/CWE + TLS/HTTP probes</td></tr>
-        <tr><td>Deep pass (unauth)</td><td class="cmd"><code>./bin/recce sweep -o eng</code></td><td><b>all</b> credential-free deep modules at once (web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql)</td></tr>
-        <tr><td>Deep pass (auth)</td><td class="cmd"><code>./bin/recce credsweep -u U -p P -d dom -o eng</code></td><td><b>all</b> authenticated modules at once (credenum + authed ldap/smb/mssql/ftp)</td></tr>
-        <tr><td>Per-service</td><td class="cmd"><code>./bin/recce services -o eng</code></td><td>prints the exact enum command per open port</td></tr>
-        <tr><td>Databases</td><td class="cmd"><code>sudo ./bin/recce db -o eng</code></td><td>focused database-service enum</td></tr>
+        <tr><td>Enumerate</td><td class="cmd"><code>sudo ./bin/recce enum &lt;targets&gt; -o eng</code></td><td>hosts/ports/services</td></tr>
+        <tr><td>Import</td><td class="cmd"><code>./bin/recce import scan.xml -o eng</code></td><td>build sheet from existing nmap XML</td></tr>
+        <tr><td>Vuln-scan</td><td class="cmd"><code>sudo ./bin/recce vulns -o eng</code></td><td>NSE + CVE/CWE + TLS/HTTP probes</td></tr>
+        <tr><td>Sweep (unauth)</td><td class="cmd"><code>./bin/recce sweep -o eng</code></td><td>all cred-free deep modules</td></tr>
+        <tr><td>Sweep (auth)</td><td class="cmd"><code>./bin/recce credsweep -u U -p P -d dom -o eng</code></td><td>all authed deep modules</td></tr>
+        <tr><td>Per-service</td><td class="cmd"><code>./bin/recce services -o eng</code></td><td>exact enum cmd per open port</td></tr>
+        <tr><td>Databases</td><td class="cmd"><code>sudo ./bin/recce db -o eng</code></td><td>database-service enum</td></tr>
         <tr><td>Priv-esc</td><td class="cmd"><code>./bin/recce privesc -o eng</code></td><td>per-host escalation playbook</td></tr>
-        <tr><td>Credentialed</td><td class="cmd"><code>./bin/recce credenum -u U -p P -d dom -o eng</code></td><td>authed SMB/AD/SSH enum</td></tr>
-        <tr><td>On-target loot</td><td class="cmd"><code>./bin/recce ingest loot.txt -o eng</code></td><td>fold <code>recce-enum.sh/.ps1</code> findings in</td></tr>
-        <tr><td>Mass local-enum</td><td class="cmd"><code>./bin/recce deploy -u U -p P -o eng</code></td><td>run local-enum + priv-esc on every host you have creds for (SSH/WinRM/SMB); <code>--dry-run</code> to preview</td></tr>
-        <tr><td>Exploit plan</td><td class="cmd"><code>./bin/recce exploitplan -o eng --lhost &lt;ip&gt;</code></td><td>runnable msf <code>.rc</code> + tool commands</td></tr>
-        <tr><td>Attack path</td><td class="cmd"><code>./bin/recce attackpath -o eng</code></td><td>chains findings → domain compromise</td></tr>
-        <tr><td>Credentials</td><td class="cmd"><code>./bin/recce creds --add 'dom\u:p' -o eng</code></td><td>stack creds → spray plan (<code>--plan</code>)</td></tr>
-        <tr><td>Write-ups</td><td class="cmd"><code>./bin/recce writeups -o eng</code></td><td>one Word doc per real finding</td></tr>
-        <tr><td>Report</td><td class="cmd"><code>./bin/recce report -o eng</code></td><td>refold Excel edits + rebuild HTML/MD</td></tr>
-        <tr><td>Access</td><td class="cmd"><code>./bin/recce access -o eng</code></td><td>footholds per host (auto from credentialed enum); record with <code>--host IP --note '...'</code></td></tr>
-        <tr><td>Status</td><td class="cmd"><code>./bin/recce status -o eng</code></td><td>what's left + the next command to run</td></tr>
+        <tr><td>Cred enum</td><td class="cmd"><code>./bin/recce credenum -u U -p P -d dom -o eng</code></td><td>authed SMB/AD/SSH enum</td></tr>
+        <tr><td>Ingest loot</td><td class="cmd"><code>./bin/recce ingest loot.txt -o eng</code></td><td>fold <code>recce-enum.sh/.ps1</code> output</td></tr>
+        <tr><td>Deploy</td><td class="cmd"><code>./bin/recce deploy -u U -p P -o eng</code></td><td>local-enum on every credentialed host; <code>--dry-run</code> to preview</td></tr>
+        <tr><td>Exploit plan</td><td class="cmd"><code>./bin/recce exploitplan -o eng --lhost &lt;ip&gt;</code></td><td>msf <code>.rc</code> + tool commands</td></tr>
+        <tr><td>Attack path</td><td class="cmd"><code>./bin/recce attackpath -o eng</code></td><td>chains findings to compromise</td></tr>
+        <tr><td>Credentials</td><td class="cmd"><code>./bin/recce creds --add 'dom\u:p' -o eng</code></td><td>stack creds; <code>--plan</code> = spray plan</td></tr>
+        <tr><td>Write-ups</td><td class="cmd"><code>./bin/recce writeups -o eng</code></td><td>Word doc per finding</td></tr>
+        <tr><td>Report</td><td class="cmd"><code>./bin/recce report -o eng</code></td><td>rebuild HTML/MD from Excel edits</td></tr>
+        <tr><td>Access</td><td class="cmd"><code>./bin/recce access -o eng</code></td><td>footholds per host; <code>--host IP --note '...'</code></td></tr>
+        <tr><td>Status</td><td class="cmd"><code>./bin/recce status -o eng</code></td><td>what's left + next command</td></tr>
       </table>
-      <div class="note tip"><b>Tip</b> &nbsp;<code>./bin/recce</code> is a shortcut for <code>python3 -m recce</code> —
-        use whichever runs. Run scans with <code>sudo</code> so nmap can do SYN/OS detection.</div>
+      <div class="note tip"><b>Tip</b> &nbsp;<code>./bin/recce</code> = <code>python3 -m recce</code>. Use <code>sudo</code> for SYN/OS detection.</div>
     </div>
 
     <!-- TARGETING -->
     <div class="card">
       <h2><span class="num">2</span>Targeting</h2>
       <table>
-        <tr><th>Scan…</th><th>Type</th></tr>
+        <tr><th>Scan...</th><th>Syntax</th></tr>
         <tr><td>one host</td><td><code>10.0.10.5</code></td></tr>
         <tr><td>several</td><td><code>10.0.10.5 10.0.10.9</code></td></tr>
-        <tr><td>a range</td><td><code>10.0.10.10-40</code></td></tr>
-        <tr><td>a subnet</td><td><code>10.0.10.0/24</code></td></tr>
-        <tr><td>a file list</td><td><code>@scope.txt</code></td></tr>
+        <tr><td>range</td><td><code>10.0.10.10-40</code></td></tr>
+        <tr><td>subnet</td><td><code>10.0.10.0/24</code></td></tr>
+        <tr><td>file</td><td><code>@scope.txt</code></td></tr>
       </table>
-      <div class="note warn"><b>Zero ports?</b> &nbsp;Hosts block ping (firewalled / Windows / AD).
-        Add <code>-Pn</code> to treat every target as up. recce also auto-falls-back to <code>-Pn</code>
-        when discovery gets no responses.</div>
-      <p style="font-size:12px;color:var(--mut);margin:2px 0 10px"><code>enum</code>/<code>scan</code> take the
-        <b>scope to scan</b>. <code>vulns</code>/<code>db</code>/<code>privesc</code> take targets to work
-        on <b>just that subset</b> of what's already enumerated.</p>
+      <div class="note warn"><b>Zero ports?</b> &nbsp;Add <code>-Pn</code> (auto-fallback when discovery gets no responses).</div>
     </div>
 
     <!-- SPEED / FILTERS -->
     <div class="card">
       <h2><span class="num">3</span>Speed &amp; filters</h2>
       <ul class="tight">
-        <li><code>--fast</code> — top-signal checks only, live % + ETA on big ranges</li>
-        <li><code>--aggressive</code> — brute / nikto / dir-busting (loud)</li>
+        <li><code>--fast</code> — top-signal checks only</li>
+        <li><code>--aggressive</code> — brute / nikto / dir-bust</li>
         <li><code>--only http smb</code> — restrict to named services</li>
-        <li><code>--unscanned</code> — only ports not yet vuln-scanned</li>
-        <li><code>--workers N</code> · <code>--profile quick</code> · <code>--host-timeout</code></li>
-        <li><code>--resume</code> — pick up an interrupted run</li>
-        <li><code>--no-probes</code> · <code>--no-searchsploit</code> — skip extras</li>
+        <li><code>--unscanned</code> — only ports not yet scanned</li>
+        <li><code>--workers N</code> / <code>--profile quick</code> / <code>--host-timeout</code></li>
+        <li><code>--resume</code> — pick up interrupted run</li>
+        <li><code>--no-probes</code> / <code>--no-searchsploit</code></li>
       </ul>
-      <div class="note tip"><b>Env</b> &nbsp;<code>RECCE_DEBUG=1</code> prints the full traceback on any crash.</div>
+      <div class="note tip"><b>Debug</b> &nbsp;<code>RECCE_DEBUG=1</code> for full tracebacks.</div>
     </div>
 
     <!-- POST-EXPLOIT -->
     <div class="card span">
       <h2><span class="num">4</span>Got a foothold?</h2>
       <table>
-        <tr><th>On the target</th><th>Then, back on Kali</th></tr>
+        <tr><th>On target</th><th>Back on Kali</th></tr>
         <tr>
-          <td class="cmd"><code>./recce-enum.sh -o loot.txt</code><br><span style="font-size:11px;color:var(--mut)">Linux read-only sweep (<code>-t</code> self-test)</span></td>
+          <td class="cmd"><code>./recce-enum.sh -o loot.txt</code></td>
           <td class="cmd"><code>./bin/recce ingest loot.txt -o eng</code></td>
         </tr>
         <tr>
-          <td class="cmd"><code>powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt</code><br><span style="font-size:11px;color:var(--mut)">Windows read-only sweep</span></td>
-          <td class="cmd"><code>./bin/recce exploitplan -o eng --lhost &lt;ip&gt;</code> → <code>attackpath</code> → <code>creds --plan</code></td>
+          <td class="cmd"><code>powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt</code></td>
+          <td class="cmd"><code>./bin/recce exploitplan -o eng --lhost &lt;ip&gt;</code></td>
         </tr>
       </table>
-      <div class="note crit"><b>Read-only</b> &nbsp;The on-target sweeps only <em>read</em> — they enumerate and
-        flag what's escalatable; they never change the box. <code>ingest</code> then determines what's
-        <em>actually</em> priv-escable from what the sweep found.</div>
+      <div class="note crit"><b>Read-only</b> &nbsp;On-target sweeps only read; they never change the box.</div>
     </div>
 
     <!-- WORKBOOK -->
     <div class="card">
       <h2><span class="num">5</span>The workbook</h2>
       <ul class="tight">
-        <li><b>Start Here</b> — explains every tab; <b>Runbook</b> — what to type per phase.</li>
+        <li><b>Start Here</b> — tab guide. <b>Runbook</b> — per-phase commands.</li>
         <li><b>Checklist</b> — one row per IP, grouped by subnet.</li>
-        <li><b>Services / Vulns / Priv-esc / Exploitation / Attack Path / Credentials</b> — the working tabs.</li>
-        <li><b>Overview</b> — every subnet with live-host + per-surface completion.</li>
+        <li><b>Services / Vulns / Priv-esc / Exploitation / Attack Path / Credentials</b></li>
+        <li><b>Overview</b> — subnet completion status.</li>
       </ul>
       <div class="legend">
-        <span><b>☐</b>to&nbsp;do</span>
-        <span><b>◐</b>in&nbsp;progress</span>
-        <span><b>☑</b>done</span>
-        <span><b>—</b>doesn't&nbsp;apply</span>
+        <span><b>&#9744;</b>to&nbsp;do</span>
+        <span><b>&#9680;</b>in&nbsp;progress</span>
+        <span><b>&#9745;</b>done</span>
+        <span><b>&#8212;</b>n/a</span>
       </div>
-      <div class="note tip"><b>Your ticks are safe</b> &nbsp;Re-scanning never wipes manual marks.
-        Edit in Excel, <b>save + close</b>, then <code>./bin/recce report -o eng</code> folds edits back in.</div>
+      <div class="note tip"><b>Safe re-scan</b> &nbsp;Re-scanning never wipes manual marks.
+        Edit in Excel, save + close, then <code>./bin/recce report -o eng</code>.</div>
     </div>
 
     <!-- DELIVERABLES -->
     <div class="card">
-      <h2><span class="num">6</span>Deliverables (in <code>eng/</code>)</h2>
+      <h2><span class="num">6</span>Deliverables (<code>eng/</code>)</h2>
       <table>
-        <tr><th>File</th><th>What it is</th></tr>
-        <tr><td class="cmd"><code>enumeration.xlsx</code></td><td>the tracking workbook you work out of</td></tr>
-        <tr><td class="cmd"><code>report.html</code></td><td>self-contained client-ready page</td></tr>
-        <tr><td class="cmd"><code>enumeration.md</code></td><td>notes-friendly markdown</td></tr>
+        <tr><th>File</th><th>What</th></tr>
+        <tr><td class="cmd"><code>enumeration.xlsx</code></td><td>tracking workbook</td></tr>
+        <tr><td class="cmd"><code>report.html</code></td><td>client-ready page</td></tr>
+        <tr><td class="cmd"><code>enumeration.md</code></td><td>markdown notes</td></tr>
         <tr><td class="cmd"><code>services.csv</code></td><td>flat pivot data</td></tr>
-        <tr><td class="cmd"><code>writeups/*.docx</code></td><td>per-finding Word docs + combined report</td></tr>
-        <tr><td class="cmd"><code>exploit-plan/*</code></td><td>runnable msf <code>.rc</code> + per-host plans</td></tr>
-        <tr><td class="cmd"><code>creds/*.txt</code></td><td>users / passwords / nthashes for spraying</td></tr>
+        <tr><td class="cmd"><code>writeups/*.docx</code></td><td>per-finding Word docs</td></tr>
+        <tr><td class="cmd"><code>exploit-plan/*</code></td><td>msf <code>.rc</code> + per-host plans</td></tr>
+        <tr><td class="cmd"><code>creds/*.txt</code></td><td>users / passwords / hashes</td></tr>
       </table>
     </div>
 
     <!-- TROUBLESHOOTING -->
     <div class="card span">
-      <h2><span class="num">7</span>Troubleshooting (quick hits)</h2>
+      <h2><span class="num">7</span>Troubleshooting</h2>
       <table>
         <tr><th>Symptom</th><th>Fix</th><th>Symptom</th><th>Fix</th></tr>
         <tr>
-          <td><code>nmap … not found</code></td><td>install nmap (only hard requirement)</td>
+          <td><code>nmap not found</code></td><td>install nmap</td>
           <td>too slow</td><td><code>--fast</code>, <code>--workers N</code>, <code>--profile quick</code></td>
         </tr>
         <tr>
-          <td>weak scan / "not root"</td><td>run with <code>sudo</code></td>
-          <td>crashed / interrupted</td><td><code>--resume</code>, or <code>report -o eng</code></td>
+          <td>weak scan / "not root"</td><td><code>sudo</code></td>
+          <td>crashed / interrupted</td><td><code>--resume</code></td>
         </tr>
         <tr>
-          <td>zero ports / few live</td><td>add <code>-Pn</code>; if manual nmap finds them, add <code>--reliable</code> (rate-limiting)</td>
+          <td>zero ports</td><td><code>-Pn</code>; <code>--reliable</code> if rate-limited</td>
           <td>"No open ports match"</td><td>run <code>enum</code> first</td>
         </tr>
         <tr>
-          <td>no findings (expected some)</td><td><code>--version-all</code> then <code>vulns --aggressive</code></td>
-          <td>workbook won't update</td><td>close it in Excel first (locked)</td>
+          <td>no findings</td><td><code>--version-all</code> then <code>vulns --aggressive</code></td>
+          <td>workbook won't update</td><td>close it in Excel first</td>
         </tr>
         <tr>
-          <td><code>credenum: No … tools</code></td><td>install netexec + impacket (or ssh)</td>
-          <td>auth <code>FAIL</code> / <code>ERR</code></td><td><code>FAIL</code>=creds rejected (check domain); <code>ERR</code>=unreachable</td>
+          <td><code>credenum: No tools</code></td><td>install netexec + impacket</td>
+          <td><code>FAIL</code> / <code>ERR</code></td><td><code>FAIL</code>=bad creds; <code>ERR</code>=unreachable</td>
         </tr>
       </table>
-      <div class="note tip"><b>Every phase is idempotent</b> &nbsp;Re-running never duplicates rows —
-        it's always safe to run a phase again. Full reference: <b>README.md</b> ·
-        deep help: <b>TROUBLESHOOTING.md</b> · walkthrough: <b>QUICKSTART.md</b>.</div>
+      <div class="note tip"><b>Idempotent</b> &nbsp;Every phase is safe to re-run (no duplicate rows).
+        See <b>README.md</b>, <b>TROUBLESHOOTING.md</b>, <b>QUICKSTART.md</b>.</div>
     </div>
 
   </div>
 
-  <footer>recce — stdlib-only pentest enumeration, triage &amp; reporting. Print this page for a one-sheet field reference.</footer>
+  <footer>recce — stdlib-only pentest enumeration, triage &amp; reporting.</footer>
 </div>
 
-<button class="printbtn" onclick="window.print()">⎙ Print</button>
+<button class="printbtn" onclick="window.print()">&#9112; Print</button>
 </body>
 </html>

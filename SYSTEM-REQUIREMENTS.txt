@@ -1,23 +1,16 @@
-# recce has NO third-party Python packages to install - it uses only the Python
-# standard library, so it runs on an airgapped box with a stock Python 3.9+.
-# (The .xlsx and .docx writers are hand-rolled; there is nothing to pip install.)
+# recce — stdlib-only Python (3.9+), no pip install needed.
 #
-# It orchestrates these SYSTEM tools when present (all standard on Kali). Only
-# nmap is required; every other tool is optional and its phase degrades cleanly
-# (with a logged note) when the tool is absent:
+# System tools (all standard on Kali). Only nmap is required; everything
+# else is optional and degrades cleanly. Run `recce doctor` to check.
 #
-#   nmap           (required) - scanning, service/version/OS detection, NSE vuln
-#   masscan        (optional) - fast --fast network-wide port sweep
-#   searchsploit   (optional) - offline exploit mapping (exploitdb package)
-#   ldapsearch     (optional) - credentialed AD LDAP enumeration (ldap-utils)
-#   netexec / nxc  (optional) - credentialed SMB/AD enum (credenum phase)
-#   impacket       (optional) - Kerberoast / AS-REP / secretsdump (credenum phase)
-#   ssh (+ sshpass)(optional) - credentialed Linux local checks (credenum phase)
-#   chromium       (optional) - auto web screenshots in finding write-ups
-#                               (or point RECCE_BROWSER at any Chrome/Chromium)
+#   nmap           (required) — scanning, service/version/OS, NSE vuln + AD
+#   masscan        (optional) — fast network-wide port sweep
+#   searchsploit   (optional) — offline exploit mapping
+#   netexec / nxc  (optional) — credentialed SMB/AD enum (credenum)
+#   impacket       (optional) — Kerberoast / AS-REP / secretsdump (credenum)
+#   ldapsearch     (optional) — credentialed AD LDAP enum
+#   ssh + sshpass  (optional) — credentialed Linux local checks (credenum)
+#   chromium       (optional) — web screenshots (or set RECCE_BROWSER)
 #
-# Run `recce doctor` on the laptop to confirm which capabilities are available.
-#
-# Fully self-contained option: `./tools/build_bundle.sh` freezes the Python runtime,
-# all deps (impacket/ldap3/openpyxl/fastapi/uvicorn) AND nmap+masscan+ldapsearch into
-# one ~45MB folder that runs on a box with NOTHING installed. See docs/reference/packaging.md.
+# Self-contained bundle: tools/build_bundle.sh freezes Python + all deps +
+# nmap/masscan/ldapsearch into one ~45MB folder. See docs/reference/packaging.md.
