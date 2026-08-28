@@ -237,8 +237,17 @@ def sha512(s: str) -> str: return _hash_hex("sha512", s)
 
 def nt_hash(s: str) -> str:
     """NT hash (MD4 of UTF-16-LE) — the Windows NTLM 'NT' half. Testers use
-    this to convert cleartext passwords into pass-the-hash-ready format."""
-    return hashlib.new("md4", s.encode("utf-16-le")).hexdigest()
+    this to convert cleartext passwords into pass-the-hash-ready format.
+
+    MD4 is NOT in hashlib.algorithms_guaranteed. OpenSSL 3 moved it to the
+    legacy provider, which is not loaded by default, so `hashlib.new("md4")`
+    raises ValueError on stock Ubuntu/Debian even though it happens to work on
+    Kali. ad.ntlm already ships a pure-Python MD4 for exactly this reason —
+    reuse it rather than carrying a second copy. Imported inside the function
+    so core/ does not take an import-time dependency on the ad/ package.
+    """
+    from ..ad.ntlm import md4
+    return md4(s.encode("utf-16-le")).hex()
 
 
 def hmac_sha256(s: str, key: str) -> str:

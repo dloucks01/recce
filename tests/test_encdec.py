@@ -69,6 +69,28 @@ class FixedOutputTest(unittest.TestCase):
         self.assertEqual(encdec.apply("nt-hash", "password"),
                          "8846f7eaee8fb117ad06bdd830b7586c")
 
+    def test_nt_hash_without_openssl_md4(self):
+        """MD4 is not in hashlib.algorithms_guaranteed. OpenSSL 3 moved it to
+        the legacy provider, so hashlib.new("md4") raises on stock Ubuntu even
+        though it works on Kali - which is exactly how this passed locally and
+        failed in CI. nt-hash must fall back to the pure-Python MD4."""
+        import hashlib
+        real_new = hashlib.new
+
+        def no_md4(name, *a, **kw):
+            if name.lower().replace("-", "") == "md4":
+                raise ValueError("unsupported hash type md4")
+            return real_new(name, *a, **kw)
+
+        hashlib.new = no_md4
+        try:
+            self.assertEqual(encdec.apply("nt-hash", "password"),
+                             "8846f7eaee8fb117ad06bdd830b7586c")
+            self.assertEqual(encdec.apply("nt-hash", ""),
+                             "31d6cfe0d16ae931b73c59d7e0c089c0")
+        finally:
+            hashlib.new = real_new
+
     def test_hmac_sha256_known(self):
         # RFC 4231 test vector 1: key of 20 bytes 0x0b, data "Hi There"
         # https://datatracker.ietf.org/doc/html/rfc4231#section-4.2
