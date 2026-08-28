@@ -67,9 +67,11 @@ echo "[*] Staging $NAME ..."
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
-# What ships in the bundle. Everything needed to run + verify offline; nothing
-# client- or scan-specific.
-INCLUDE="recce bin tests docs README.md QUICKSTART.md CHEATSHEET.html TROUBLESHOOTING.md \
+# What ships in the bundle: everything an operator needs to RUN recce offline.
+# The test suite and the docker lab (test_env/) are development artifacts - they
+# stay in the repo, where CI runs them, and are not carried into the field.
+# `--verify` still runs the suite from the source tree before staging.
+INCLUDE="recce bin docs README.md QUICKSTART.md CHEATSHEET.html TROUBLESHOOTING.md \
          INTEGRATION.md CHANGELOG.md LICENSE pyproject.toml SYSTEM-REQUIREMENTS.txt \
          make_package.sh tools"
 for item in $INCLUDE; do
