@@ -59,8 +59,21 @@ class CredentialedAdIntegrationTest(unittest.TestCase):
         cls.creds = {"username": _ADMIN, "password": _PASS, "domain": _DOMAIN}
 
     def _require(self, tool):
-        if not shutil.which(tool):
-            self.skipTest(f"{tool} not installed")
+        """Skip unless the tool is resolvable the same way recce resolves it.
+
+        Kali's impacket-scripts package installs `impacket-GetUserSPNs`, while
+        `pip install impacket` installs `GetUserSPNs.py`. recce already handles
+        both (credenum.impacket_tool), but this used to hardcode shutil.which()
+        on the Kali name only - so on CI, where impacket comes from pip, three
+        tests silently skipped even though recce would have driven them fine.
+        """
+        if tool.startswith("impacket-"):
+            from recce.creds import credenum
+            if credenum.impacket_tool(tool[len("impacket-"):]):
+                return
+        elif shutil.which(tool):
+            return
+        self.skipTest(f"{tool} not installed")
 
     def test_authenticated_smb_enumeration(self):
         # nxc smb with valid domain creds establishes a session and enumerates the DC.
