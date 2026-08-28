@@ -125,10 +125,15 @@ jobs:
     timeout-minutes: 30
     # 5 meaningful cases (LDAP, SMB, both kerberoast paths via recce's native RC4
     # roast) + 1 documented xfail (secretsdump/DRSUAPI, an impacket-vs-Samba issue).
-    # continue-on-error stays for two reasons: Samba DC provisioning ON A GITHUB
-    # RUNNER isn't confirmed reliable (timing/DNS), and until the netexec install
-    # below was fixed this job died at the install step and had never once reached
-    # a test - so there is no green history to justify making it blocking yet.
+    # Verified end-to-end against this compose file on a real Samba DC: exactly
+    # 5 passed + 1 xfailed.
+    #
+    # This job had never once executed a test. Two concrete faults hid that, both
+    # now fixed: `pip install netexec` (not on PyPI) killed it at the install
+    # step, and publishing port 53 collided with the runner's own resolver. The
+    # old comment blamed "provisioning reliability (timing/DNS)" - a guess, not a
+    # diagnosis. continue-on-error stays only until this tier has actually gone
+    # green on a runner a few times; flip it once it has.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7

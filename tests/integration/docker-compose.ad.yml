@@ -26,8 +26,13 @@ services:
       INSECURELDAP: "true"          # allow plain LDAP on 389 for the RootDSE probe
       NOCOMPLEXITY: "false"
     ports:
-      - "53:53"
-      - "53:53/udp"
+      # Port 53 is deliberately NOT published to the host. A GitHub runner
+      # already has a resolver bound there, so publishing it failed the whole
+      # job with "failed to bind host port for 0.0.0.0:53: address already in
+      # use" before the DC ever started. Nothing needs it: the DC still runs
+      # its own DNS inside the container (dns: 127.0.0.1 above, which Samba
+      # requires), provision-ad.sh drives the DC via `docker exec`, and the
+      # tests reach it by explicit IP on 445/389/88 with dc_ip pinned.
       - "88:88"
       - "88:88/udp"
       - "135:135"
