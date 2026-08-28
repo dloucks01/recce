@@ -24,6 +24,7 @@ import http.client
 import socket
 import ssl
 import time
+import warnings
 
 from ..core.models import Host, Port, Vuln
 from ..core import proxy
@@ -321,8 +322,17 @@ def _accepts_protocol(host_ip: str, portid: int, version) -> bool:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        ctx.minimum_version = version
-        ctx.maximum_version = version
+        # Pinning min==max to SSLv3/TLSv1/TLSv1.1 makes Python emit a
+        # DeprecationWarning. Negotiating an obsolete version is the POINT here -
+        # it is how we detect a server that still accepts one - so the warning is
+        # Python objecting to intentional behaviour. Suppress it at exactly this
+        # assignment; anything else deprecated still warns normally.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r"ssl\.TLSVersion\.\w+ is deprecated",
+                category=DeprecationWarning)
+            ctx.minimum_version = version
+            ctx.maximum_version = version
         # Modern OpenSSL disables legacy ciphers by default (SECLEVEL 2), which
         # would fail the handshake even against a server that DOES speak the old
         # version - a false negative. Lower the security level so those ciphers
