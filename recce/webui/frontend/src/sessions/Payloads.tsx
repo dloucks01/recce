@@ -681,7 +681,9 @@ const POSTENUM_WIN: CmdGroup[] = [
   },
 ];
 
-export function PostExploitRef({ hostIp }: { hostIp: string }) {
+// hostIp is accepted (Sessions.tsx passes session.host_ip) but not used yet -
+// the reference commands below are generic, not templated per host.
+export function PostExploitRef(_props: { hostIp: string }) {
   const [platform, setPlatform] = useState<"linux" | "windows">("linux");
   const groups = platform === "linux" ? POSTENUM_LINUX : POSTENUM_WIN;
 

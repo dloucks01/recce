@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { SessionInfo, getDiff, getSessions } from "../api";
+import { getDiff, getSessions } from "../api";
 import { Nav } from "./shared";
 
 // Every event that lands on the timeline is normalised to this shape so the

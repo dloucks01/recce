@@ -127,7 +127,9 @@ function groupBy(catalog: CmdCatalog): Record<string, { key: string; spec: CmdSp
 
 type QueueItem = { command: string; targets: string; flags: string[]; label: string };
 
-export function ScanTab({ tester, onRunning, onLog, prefillTarget }: ScanTabProps) {
+// `tester` stays in ScanTabProps (App passes it) but is unused here - the job
+// rows render each job's own j.tester, not the current operator.
+export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
   const [catalog, setCatalog] = useState<CmdCatalog>({});
   const [hosts, setHosts] = useState<Host[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);

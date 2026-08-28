@@ -86,6 +86,13 @@ jobs:
       - name: Install frontend deps
         working-directory: recce/webui/frontend
         run: npm ci
+      - name: Typecheck
+        # `vite build` uses esbuild, which STRIPS types without checking them -
+        # tsconfig's strict/noUnusedLocals/noUnusedParameters were never enforced
+        # and type errors shipped silently into the committed bundle. Runs before
+        # the build so a type error fails fast.
+        working-directory: recce/webui/frontend
+        run: npm run typecheck
       - name: Build
         working-directory: recce/webui/frontend
         run: npm run build

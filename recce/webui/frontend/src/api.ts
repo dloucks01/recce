@@ -62,7 +62,12 @@ export type VulnDetail = Finding & {
   output: string; remediation: string; cwes: string[];
   qod: number; qod_type: string; state: string;
 };
-export type HostDetail = Host & {
+// Omit<Host, "ports"> — NOT `Host &`. The /api/host/{ip} detail endpoint sends a
+// richer port shape than the host LIST does (state/version/banner separately,
+// where the list pre-merges version into product). Intersecting would AND the
+// two `ports` types rather than replace, so element access resolved to plain
+// Port and `p.version` / `p.banner` failed to typecheck.
+export type HostDetail = Omit<Host, "ports"> & {
   access_detail: string; smb_signing: string; defenses: string[];
   ports: (Port & { state?: string; version?: string; banner?: string })[];
   vulns: VulnDetail[]; accounts: Account[];

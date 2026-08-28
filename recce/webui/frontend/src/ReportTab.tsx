@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Finding, SEVS, AttackPath, getAttackPath, EngagementMeta,
   getEngagementMeta, setEngagementMeta, uploadClientLogo } from "./api";
 import { SevTag, Chips } from "./ui";
