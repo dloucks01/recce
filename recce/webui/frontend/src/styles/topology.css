@@ -1,0 +1,67 @@
+/* ---- Topology tab: live network / architecture maps ---------------------- */
+/* Every colour comes from tokens.css so the maps sit correctly in both themes.
+   The SVGs themselves are generated server-side with their own palette (they
+   have to stand alone as report artifacts), so the canvas gives them a neutral
+   surface rather than trying to restyle their internals. */
+
+.topo-view .panel { display: flex; flex-direction: column; gap: 10px; }
+
+.topo-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+
+.topo-views { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.topo-tab {
+  font: 600 12px/1 var(--sans);
+  padding: 7px 11px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: var(--surface2); color: var(--muted);
+  cursor: pointer; transition: background .12s, color .12s, border-color .12s;
+}
+.topo-tab:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.topo-tab.on {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+/* A view with no data yet is shown but inert - the operator learns the map
+   exists and what would populate it, instead of it silently missing. */
+.topo-tab:disabled { opacity: .45; cursor: not-allowed; }
+
+.topo-tools { display: flex; align-items: center; gap: 6px; }
+.topo-tools button, .topo-tools a {
+  font: 600 12px/1 var(--sans);
+  padding: 7px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: var(--surface); color: var(--muted);
+  cursor: pointer; text-decoration: none;
+}
+.topo-tools button:hover, .topo-tools a:hover { color: var(--text); border-color: var(--accent); }
+.topo-zoom {
+  font: 600 11px/1 var(--mono); color: var(--faint);
+  min-width: 44px; text-align: center; font-variant-numeric: tabular-nums;
+}
+
+.topo-blurb { margin: 0; font-size: 12px; }
+
+.topo-canvas {
+  position: relative; overflow: hidden;
+  min-height: 420px; height: 62vh;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background:
+    radial-gradient(circle at 1px 1px, var(--line) 1px, transparent 0) 0 0 / 22px 22px,
+    var(--surface2);
+  cursor: grab;
+}
+.topo-canvas:active { cursor: grabbing; }
+
+.topo-stage {
+  transform-origin: 0 0;
+  padding: 18px;
+  /* The generated SVGs carry their own width/height; let them size naturally
+     and pan around them rather than squashing to fit. */
+  width: max-content;
+}
+.topo-stage svg { display: block; max-width: none; height: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  .topo-tab, .topo-tools button, .topo-tools a { transition: none; }
+}

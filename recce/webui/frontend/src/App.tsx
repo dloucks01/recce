@@ -4,7 +4,7 @@ import { ImportModal, ShortcutHelp, CommandPalette, EncDecModal } from "./modals
 import { ToolsMenu } from "./ToolsMenu";
 import { getSessions, getCredentials, getListeners, startListener, SessionInfo, Credential } from "./api";
 import { useEngagement } from "./useEngagement";
-import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Timeline, Nav, FindingFilters } from "./views";
+import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Timeline, Topology, Nav, FindingFilters } from "./views";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
 import { TabBar, TabId } from "./TabBar";
@@ -90,7 +90,7 @@ function cycleDensity(cur: Density): Density {
 }
 
 // Main App
-const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "sessions", "timeline", "report", "exploit", "credentials", "playbook"];
+const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology", "sessions", "timeline", "report", "exploit", "credentials", "playbook"];
 const isTab = (t: string): t is TabId => (VALID_TABS as string[]).includes(t);
 
 // Read the initial UI state from the URL once, so a shared link opens in
@@ -298,6 +298,7 @@ export default function App() {
     findings: findings.filter((f) => f.tier !== "lead").length || undefined,
     hosts: hosts.length || undefined,
     services: ov?.services || undefined,
+    topology: undefined,
     sessions: undefined,
     timeline: undefined,
     report: undefined,
@@ -391,6 +392,7 @@ export default function App() {
             />
           ) : <DashboardSkeleton />)}
           {tab === "services" && <Services hosts={hosts} findings={findings} nav={nav} />}
+          {tab === "topology" && <Topology />}
           {tab === "timeline" && <Timeline nav={nav} />}
           {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus}
             exploitIntent={exploitIntent} onExploitConsumed={() => setExploitIntent(null)}

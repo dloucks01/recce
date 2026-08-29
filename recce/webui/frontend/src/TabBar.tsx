@@ -1,6 +1,6 @@
 import { Fragment, useState, useEffect, useRef } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "sessions" | "timeline" | "report" | "exploit" | "credentials" | "playbook";
+export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "exploit" | "credentials" | "playbook";
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
@@ -8,6 +8,7 @@ const TAB_LABELS: Record<TabId, string> = {
   findings: "Findings",
   hosts: "Hosts",
   services: "Services",
+  topology: "Topology",
   sessions: "Sessions",
   timeline: "Timeline",
   report: "Report",
@@ -28,11 +29,11 @@ const TAB_LABELS: Record<TabId, string> = {
 // localStorage remembers.
 //
 // Testers can still drag-and-drop within the visible set to reorder.
-const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services",
+const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
                            "exploit", "sessions", "credentials", "report",
                            "playbook", "timeline"];
 // The DEFAULT visible set. Everything after "report" is optional.
-const DEFAULT_VISIBLE: TabId[] = ["dashboard", "scan", "findings", "hosts", "services",
+const DEFAULT_VISIBLE: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
                                    "exploit", "sessions", "credentials", "report"];
 
 // Visual group boundaries — a divider is inserted BEFORE these tab ids

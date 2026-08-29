@@ -214,6 +214,48 @@ def test_netmap_returns_svg(client):
     assert "<svg" in r.text
 
 
+def test_netmap_views_lists_every_projection(client):
+    """The Topology tab builds its selector from this, so an id added to the
+    route without a generator behind it would surface as a dead button."""
+    r = client.get("/api/netmap/views")
+    assert r.status_code == 200
+    body = r.json()
+    ids = {v["id"] for v in body["views"]}
+    assert ids == {"architecture", "overview", "full", "tiered", "reachability", "ad"}
+    assert body["hosts"] > 0
+    for v in body["views"]:
+        assert v["blurb"] and isinstance(v["available"], bool)
+
+
+@pytest.mark.parametrize("view", ["architecture", "overview", "full",
+                                  "tiered", "reachability"])
+def test_netmap_each_view_draws(client, view):
+    """Each host-based view must return a real drawable SVG carrying its own
+    xmlns - the report embeds these in a page that declares the namespace, but a
+    standalone response has to bring it or the browser renders nothing."""
+    r = client.get(f"/api/netmap.svg?view={view}")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("image/svg+xml")
+    assert "<svg" in r.text and "xmlns=" in r.text
+    assert len(r.text) > 200, f"{view} returned a blank/placeholder SVG"
+
+
+def test_netmap_ad_view_is_blank_without_bloodhound(client):
+    """`ad` is the one view needing an import rather than just live hosts. With
+    no BloodHound blob it must return a valid empty SVG, not 500 - the UI reads
+    `available` to grey the button and the short body to show the hint."""
+    r = client.get("/api/netmap.svg?view=ad")
+    assert r.status_code == 200
+    assert "<svg" in r.text
+    avail = {v["id"]: v["available"] for v in client.get("/api/netmap/views").json()["views"]}
+    assert avail["ad"] is False
+
+
+def test_netmap_rejects_unknown_view(client):
+    r = client.get("/api/netmap.svg?view=../../etc/passwd")
+    assert r.status_code == 400
+
+
 # --- doctor ----------------------------------------------------------------
 
 def test_doctor_launches_job(client):

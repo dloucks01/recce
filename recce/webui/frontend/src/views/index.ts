@@ -8,3 +8,4 @@ export { Credentials } from "./Credentials";
 export { Playbook } from "./Playbook";
 export { Services } from "./Services";
 export { Timeline } from "./Timeline";
+export { Topology } from "./Topology";

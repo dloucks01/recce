@@ -14,6 +14,7 @@
      report.css   — Report finding selector
      sessions.css — Sessions tab split-pane + intent banner + polish
      msfvenom.css — msfvenom generator form
+     topology.css — Topology tab (live network / architecture maps)
 */
 @import "./base.css";
 @import "./layout.css";
@@ -25,3 +26,4 @@
 @import "./report.css";
 @import "./sessions.css";
 @import "./msfvenom.css";
+@import "./topology.css";

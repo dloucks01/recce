@@ -293,22 +293,87 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
 
     # --- network map ---------------------------------------------------------
 
+    # The views the Topology tab offers. Same generators the report uses
+    # (cli/_common.py writes these as .svg files) — served live here so the maps
+    # are a working view of the engagement, not only a report artifact.
+    _NETMAP_VIEWS = {
+        "architecture": "infrastructure and segments",
+        "overview":     "by role, aggregated",
+        "full":         "every host",
+        "tiered":       "DC → servers → workstations",
+        "reachability": "adjacency / who can reach whom",
+        "ad":           "Active Directory tier-0",
+    }
+
+    def _ad_blob(st) -> dict:
+        """store.get_meta returns the raw JSON *string* (see cli/_common.py, which
+        json.loads every one of these blobs before handing them to the report)."""
+        import json as _j
+        raw = st.get_meta("ad_bloodhound")
+        if not raw:
+            return {}
+        try:
+            return _j.loads(raw) or {}
+        except ValueError:
+            return {}
+
+    @app.get("/api/netmap/views")
+    def netmap_views():
+        """Which map views have data right now, so the UI can disable empty ones."""
+        from ...core.store import Store
+        with Store(db_path) as st:
+            up = [h for h in st.all_hosts() if h.is_up]
+            arch = (_ad_blob(st).get("architecture") or {})
+        return {"views": [
+            {"id": k, "label": k, "blurb": v,
+             # `ad` needs a BloodHound import; the rest only need live hosts.
+             "available": bool(arch.get("nodes")) if k == "ad" else bool(up)}
+            for k, v in _NETMAP_VIEWS.items()], "hosts": len(up)}
+
     @app.get("/api/netmap.svg")
-    def netmap_svg():
-        """Network/architecture map as a self-contained SVG."""
+    def netmap_svg(view: str = "architecture"):
+        """A network map as a self-contained SVG. `view` selects the projection.
+
+        Defaults to `architecture` (the segment/infra view) rather than the old
+        aggregate host map, because that is the one that reads as a diagram of the
+        environment rather than a list of boxes.
+        """
         from fastapi.responses import Response
         from ...report import netmap
         from ...core.store import Store
+
+        def _blank():
+            return Response("<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>",
+                            media_type="image/svg+xml")
+
+        if view not in _NETMAP_VIEWS:
+            raise HTTPException(400, f"unknown view {view!r}; "
+                                     f"expected one of {sorted(_NETMAP_VIEWS)}")
         with Store(db_path) as st:
             hosts = st.all_hosts()
             domains = st.all_domains()
+            ad = _ad_blob(st)
         up = [h for h in hosts if h.is_up]
         if not up:
-            return Response(
-                "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>",
-                media_type="image/svg+xml")
-        out = netmap.svg(up, domains)
-        if "<svg " in out and 'xmlns=' not in out:
+            return _blank()
+
+        if view == "ad":
+            arch = ad.get("architecture") or {}
+            if not arch.get("nodes"):
+                return _blank()
+            out = netmap.ad_svg(arch)
+        elif view == "architecture":
+            out = netmap.architecture_svg(up, domains, ad)
+        elif view == "tiered":
+            out = netmap.tiered_svg(up, domains, ad)
+        elif view == "reachability":
+            out = netmap.reachability_svg(up, ad)
+        else:                                     # overview | full
+            out = netmap.svg(up, domains, ad, aggregate=(view == "overview"))
+
+        # The report embeds these inside a page that already declares the ns; a
+        # standalone response has to carry its own or the browser renders nothing.
+        if "<svg " in out and "xmlns=" not in out:
             out = out.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
         return Response(out, media_type="image/svg+xml")
 
