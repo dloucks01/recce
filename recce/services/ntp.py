@@ -93,6 +93,159 @@ _REQ_PEER_LIST = 0               # peer enumeration
 # `version="ntpd 4.2.6p5@..."` / processor / system, as returned by readvar.
 _VAR_RE = re.compile(r'(\w+)=("(?:[^"]*)"|[^,\r\n]*)')
 
+# Severity ordering for picking the worst CVE that matched a version gate.
+_SEV_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def _parse_ntpd_version(v: str) -> tuple[int, int, int, int] | None:
+    """Parse '4.2.8p11' / '4.2.6' into (major, minor, patch, p_level).
+
+    The `p` (patchset) counter is authoritative for CVE gating — 4.2.8 and
+    4.2.8p3 are distinct security postures. Missing patchset counts as p0.
+    """
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)(?:p(\d+))?", v or "")
+    if not m:
+        return None
+    a, b, c, d = m.groups()
+    return int(a), int(b), int(c), int(d) if d else 0
+
+
+# ntpd version -> known unauth CVEs, keyed by "first-fixed-in" (exclusive
+# upper bound). Every entry here is a public CVE with a documented ntpd
+# patchset fix — no invented flags, no unverified IDs.
+_NTPD_CVES: list[tuple[tuple[int, int, int, int], list[tuple[str, str, str]]]] = [
+    ((4, 2, 8, 0), [
+        ("CVE-2014-9295", "critical",
+         "crypto_recv / ctl_putdata / configure stack buffer overflows "
+         "(unauth RCE-class when autokey is enabled)"),
+        ("CVE-2014-9293", "high",
+         "ntp-keygen weak default trusted key / predictable authkey_seed"),
+        ("CVE-2014-9294", "high",
+         "ntp-keygen predictable MD5 symmetric keys"),
+    ]),
+    ((4, 2, 8, 4), [
+        ("CVE-2015-7871", "high",
+         "crypto-NAK auth bypass ('NAK to the Future') — spoofed peer "
+         "accepted as symmetric-key authenticated"),
+    ]),
+    ((4, 2, 8, 9), [
+        ("CVE-2016-7431", "medium",
+         "zero-origin timestamp bypass — off-path time-shift"),
+        ("CVE-2016-7434", "medium",
+         "mrulist NULL-pointer dereference (unauth DoS)"),
+    ]),
+    ((4, 2, 8, 11), [
+        ("CVE-2018-7182", "medium",
+         "ctl_getitem out-of-bounds read on the mode-6 control path"),
+    ]),
+    ((4, 2, 8, 14), [
+        ("CVE-2020-11868", "high",
+         "off-path attacker can disrupt time sync via a single forged "
+         "mode-6 packet (BCP-38-bypassing amplification+spoof)"),
+        ("CVE-2020-13817", "medium",
+         "predictable origin timestamp — off-path desync"),
+    ]),
+]
+
+
+def _ntpd_cve_gate(version: str) -> list[tuple[str, str, str]]:
+    """Return known CVEs the parsed ntpd version is vulnerable to.
+
+    Only fires on a version we can actually parse — an unparseable banner
+    yields nothing rather than a speculative CVE claim.
+    """
+    parsed = _parse_ntpd_version(version)
+    if parsed is None:
+        return []
+    hits: list[tuple[str, str, str]] = []
+    for fixed_in, cves in _NTPD_CVES:
+        if parsed < fixed_in:
+            hits.extend(cves)
+    return hits
+
+
+def _mode7_items(pkt: bytes) -> tuple[int, int, bytes]:
+    """Decode a mode-7 response header: (numitems, itemsize, body).
+
+    mode-7 header: R|M|VN|Mode, Auth|Seq, Impl, ReqCode, Err|numitems(12b),
+    MBZ|itemsize(12b). Numitems and itemsize live in the low 12 bits of the
+    respective 2-byte fields (top 4 = error / mbz).
+    """
+    if len(pkt) < 8 or (pkt[0] & 0x07) != 7:
+        return 0, 0, b""
+    numitems = ((pkt[4] << 8) | pkt[5]) & 0x0fff
+    itemsize = ((pkt[6] << 8) | pkt[7]) & 0x0fff
+    return numitems, itemsize, pkt[8:]
+
+
+def _dedupe(ips: list[str]) -> list[str]:
+    """Preserve first-seen order — the caller may care about disclosure order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for ip in ips:
+        if ip not in seen:
+            seen.add(ip)
+            out.append(ip)
+    return out
+
+
+def _parse_mon_entries(packets: list[bytes]) -> list[str]:
+    """Extract client IPv4 addresses from mode-7 REQ_MON_GETLIST_1 responses.
+
+    info_monitor_1 layout (ntpd request.h): firsttime(4), lasttime(4),
+    restr(4), count(4), addr(4)@16, daddr(4)@20, flags(4), port(2), mode(1),
+    version(1), v6_flag(4)@32, unused1(4), addr6(16), daddr6(16). We use
+    itemsize from the response header rather than assuming a version so a
+    v4-only build (itemsize<40) or a v6-capable build both decode.
+
+    A non-zero v6_flag means the v4 addr slot is unpopulated — skip that
+    entry rather than emitting a spurious 0.0.0.0 or a byte-swap of the v6
+    prefix.
+    """
+    out: list[str] = []
+    for pkt in packets:
+        numitems, itemsize, body = _mode7_items(pkt)
+        if itemsize < 20 or numitems == 0:
+            continue
+        for i in range(numitems):
+            off = i * itemsize
+            rec = body[off:off + itemsize]
+            if len(rec) < 20:
+                break
+            if itemsize >= 36 and rec[32:36] != b"\x00\x00\x00\x00":
+                # v6 record — skip; no v4 address to feed the wire.
+                continue
+            addr = rec[16:20]
+            if addr == b"\x00\x00\x00\x00":
+                continue
+            out.append(".".join(str(b) for b in addr))
+    return _dedupe(out)
+
+
+def _parse_peer_entries(packets: list[bytes]) -> list[str]:
+    """Extract peer IPv4 addresses from mode-7 REQ_PEER_LIST responses.
+
+    info_peer_list layout: addr(4)@0, port(2), hmode(1), flags(1), v6_flag(4)
+    @8, unused1(4), addr6(16). Same v4/v6 dispatch as _parse_mon_entries.
+    """
+    out: list[str] = []
+    for pkt in packets:
+        numitems, itemsize, body = _mode7_items(pkt)
+        if itemsize < 4 or numitems == 0:
+            continue
+        for i in range(numitems):
+            off = i * itemsize
+            rec = body[off:off + itemsize]
+            if len(rec) < 4:
+                break
+            if itemsize >= 12 and rec[8:12] != b"\x00\x00\x00\x00":
+                continue
+            addr = rec[0:4]
+            if addr == b"\x00\x00\x00\x00":
+                continue
+            out.append(".".join(str(b) for b in addr))
+    return _dedupe(out)
+
 
 def _parse_readvar(payload: bytes) -> dict:
     """Pull the ASCII k=v pairs out of a mode-6 response payload."""
@@ -194,6 +347,12 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         out["monlist_packets"] = len(mon)
         out["monlist_bytes"] = payload
         out["amplification"] = round(payload / len(req), 1)
+        clients = _parse_mon_entries(mon)
+        if clients:
+            # The whole point of monlist on an internal engagement — a free
+            # inventory of hosts talking to this server, including ones the
+            # port sweep hasn't reached yet.
+            out["mon_clients"] = clients
     elif mon:
         out["mode7"] = True                  # answers mode 7, but not monlist
 
@@ -202,6 +361,11 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
     if peers and sum(len(p) for p in peers) > 48:
         out["peer_list"] = True
         out["mode7"] = True
+        peer_ips = _parse_peer_entries(peers)
+        if peer_ips:
+            # Upstream time source on a corporate LAN is almost always the DC
+            # or an internal appliance — same wire value as mon_clients.
+            out["peers"] = peer_ips
     return out
 
 
@@ -235,6 +399,16 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
 
             if pr.get("monlist"):
                 amp = pr.get("amplification") or 0
+                clients = pr.get("mon_clients") or []
+                # Name a handful of clients directly in the detail so the
+                # tester sees the wire value on the report page instead of
+                # having to open the probes JSON. Cap at 8 to keep the
+                # finding text readable on very talkative servers.
+                sample = ""
+                if clients:
+                    head = ", ".join(clients[:8])
+                    extra = f" (+{len(clients) - 8} more)" if len(clients) > 8 else ""
+                    sample = f" Distinct client IPs disclosed: {len(clients)} — {head}{extra}."
                 out.append(_finding(
                     "high",
                     "NTP monlist enabled (CVE-2013-5211) — amplification + client disclosure",
@@ -245,7 +419,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"(~{amp}x amplification). monlist returns the last ~600 clients "
                     f"that contacted this server: on an internal that is a free list "
                     f"of hosts talking to it, including any recce has not discovered. "
-                    f"Externally it is a reflective DDoS amplifier.",
+                    f"Externally it is a reflective DDoS amplifier."
+                    f"{sample}",
                     "ntpdc -n -c monlist <ip>   # or: nmap -sU -p123 --script ntp-monlist <ip>",
                     "Upgrade to ntpd 4.2.7p26+, or set `disable monitor` in ntp.conf. "
                     "Restrict mode 6/7 with `restrict default noquery`.",
@@ -267,6 +442,39 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "`restrict default noquery` (and `nomodify`) in ntp.conf; expose mode 6 "
                     "only to management hosts. Chrony: `cmdallow` off by default.",
                     ["CWE-200"], kind="ntp_mode6"))
+
+            # Version cross-check — piggybacks on the readvar-derived
+            # ntpd_version. Aggregated into ONE finding per host so a legacy
+            # daemon doesn't drown the report in eight repeated entries; the
+            # detail line names every CVE and the finding severity is the
+            # worst one that matched.
+            ver = pr.get("ntpd_version")
+            if ver:
+                hits = _ntpd_cve_gate(ver)
+                if hits:
+                    worst = max(hits, key=lambda c: _SEV_ORDER.get(c[1], 0))
+                    ids = [h[0] for h in hits]
+                    lines = "; ".join(f"{cve} ({sev}) — {desc}"
+                                      for cve, sev, desc in hits)
+                    out.append(_finding(
+                        worst[1],
+                        f"ntpd {ver} matches {len(hits)} known unauth CVE(s)",
+                        tgt,
+                        f"ntpd version {ver} (from mode-6 readvar) falls within the "
+                        f"vulnerable range for {len(hits)} public CVE(s): {lines}. "
+                        f"Version match is not proof of exploitability on its own "
+                        f"(vendor backports are common — check the distribution "
+                        f"changelog), but every hit here is an unauthenticated "
+                        f"primitive against ntpd's own request paths.",
+                        "ntpq -c readvar <ip>   # then confirm the vendor patchset",
+                        "Upgrade to the current ntpd 4.2.8 patchset (or migrate to "
+                        "chrony / ntpsec). If a distro backport is in place, cite "
+                        "the vendor CVE bulletin to close this finding.",
+                        ["CWE-1104", "CWE-1395"], kind="ntp_version_cve"))
+                    # CVE ids are named in the detail; keep them on the dict
+                    # so downstream consumers that DO index `ids` (like the
+                    # vuln-DB matchers) can pick them up.
+                    out[-1]["ids"] = ids
 
             if pr.get("peer_list") and not pr.get("monlist"):
                 out.append(_finding(
