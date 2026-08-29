@@ -108,6 +108,106 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         if allow:
             out["methods"] = allow.group(1).decode("ascii", "replace").strip()
         break
+    # Extension enumeration piggybacks on the same probe when the server is
+    # reachable — bounded to the default 20 extensions so a single scan does
+    # not saturate a fragile PBX. Skip on TCP: svwar's asymmetry works on UDP
+    # where the response is fast enough to fingerprint.
+    if out.get("reachable") and out.get("transport") == "udp":
+        try:
+            out["ext_enum"] = enumerate_extensions(ip, port, timeout=timeout)
+        except OSError:
+            pass
+    return out
+
+
+# --- Extension enumeration (svwar-style) ------------------------------------
+# A REGISTER for an EXISTING extension returns 401/407 (auth required); a
+# REGISTER for a NONEXISTENT one returns 404 on servers without
+# `alwaysauthreject`. That asymmetry — different status codes for existing vs
+# missing users — is what svwar exploits.
+#
+# recce keeps this bounded: only tests a small range (default 100-119) and
+# stops the moment the server proves it has `alwaysauthreject` enabled (both
+# statuses match). Sends REGISTER not INVITE, so no phones ring; UDP only.
+
+_EXT_RANGE = range(100, 120)         # 20 probes by default — a fingerprint
+_401_407 = (401, 407)
+
+
+def _register(source_port: int, ip: str, port: int, ext: str) -> bytes:
+    """Minimal REGISTER for an extension. Same header shape as OPTIONS, just
+    a different method + a To/From that names the extension."""
+    return (f"REGISTER sip:{ip} SIP/2.0\r\n"
+            f"Via: SIP/2.0/UDP recce:{source_port};branch=z9hG4bK-recce-r-{ext}\r\n"
+            f"Max-Forwards: 70\r\n"
+            f"From: <sip:{ext}@{ip}>;tag=recce-r-{ext}\r\n"
+            f"To: <sip:{ext}@{ip}>\r\n"
+            f"Call-ID: recce-r-{ext}@recce\r\n"
+            f"CSeq: 1 REGISTER\r\n"
+            f"Contact: <sip:recce@127.0.0.1>\r\n"
+            f"User-Agent: recce-sip/1.0\r\n"
+            f"Expires: 0\r\n"
+            f"Content-Length: 0\r\n\r\n").encode("ascii")
+
+
+def _sip_status(reply: bytes) -> int:
+    """Extract the numeric status code from a SIP response line."""
+    if not reply.startswith(b"SIP/"):
+        return 0
+    try:
+        return int(reply.split(b" ", 2)[1])
+    except (ValueError, IndexError):
+        return 0
+
+
+def enumerate_extensions(ip: str, port: int, extensions=_EXT_RANGE,
+                         timeout: float = _TIMEOUT) -> dict:
+    """Probe each extension with REGISTER. Returns:
+        {existing: [ext], missing: [ext], always_reject: bool}
+
+    A server with `alwaysauthreject` (Asterisk) returns the same auth-required
+    reply for existing AND missing extensions, so recce cannot distinguish
+    them — and shouldn't invent findings. Signaled by seen_missing_401=True.
+    """
+    out = {"existing": [], "missing": [], "always_reject": False,
+           "seen_ok": False, "probed": 0}
+    seen_missing_401 = False
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("", 0))
+    s.settimeout(timeout)
+    src = s.getsockname()[1]
+    try:
+        for ext in extensions:
+            out["probed"] += 1
+            try:
+                s.sendto(_register(src, ip, port, str(ext)), (ip, port))
+                data, _ = s.recvfrom(65535)
+            except (OSError, socket.timeout):
+                continue
+            status = _sip_status(data)
+            if status in _401_407:
+                out["existing"].append(str(ext))
+            elif status == 404:
+                out["missing"].append(str(ext))
+            elif status == 403:
+                # 403 for both existing and missing = alwaysauthreject variant
+                # (some Asterisk builds). Match on it.
+                seen_missing_401 = True
+            # 200 OK on REGISTER = an extension that accepts unauthenticated
+            # registrations — critical on its own; log as existing.
+            elif status == 200:
+                out["existing"].append(str(ext))
+                out["seen_ok"] = True
+    finally:
+        s.close()
+    # If EVERY probe came back the same auth-required status, treat that as
+    # `alwaysauthreject` and clear the "existing" list — the server is not
+    # actually leaking which extensions exist.
+    if out["existing"] and not out["missing"] and out["probed"] > 0:
+        out["always_reject"] = True
+        out["existing"] = []
+    elif seen_missing_401 and not out["missing"]:
+        out["always_reject"] = True
     return out
 
 
@@ -159,6 +259,38 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "for existing vs missing extensions) so extension enumeration "
                 "cannot distinguish valid users.",
                 ["CWE-200"], kind="sip_fingerprint"))
+
+            # Extension enumeration signals:
+            #   existing[] populated -> the server distinguishes 401/407 vs 404,
+            #     so valid extensions are discoverable (svwar's classic target).
+            #   seen_ok=True         -> a REGISTER returned 200: the extension
+            #     accepts UNAUTHENTICATED registration - toll fraud vector.
+            #   always_reject=True   -> hardened server; do not report anything.
+            ext = pr.get("ext_enum") or {}
+            existing = ext.get("existing") or []
+            if existing and not ext.get("always_reject"):
+                sample = ", ".join(existing[:10])
+                out.append(_finding(
+                    "high" if ext.get("seen_ok") else "medium",
+                    "SIP extension enumeration succeeded (svwar-style)", tgt,
+                    f"Probed {ext.get('probed', 0)} candidate extension(s); "
+                    f"{len(existing)} returned auth-required (401/407) or 200 "
+                    f"OK — the server distinguishes existing vs missing "
+                    f"extensions, so an attacker can enumerate the entire "
+                    f"dial plan. Existing: {sample}"
+                    + (" …" if len(existing) > 10 else "")
+                    + ("\n\nAt least one extension accepted UNAUTHENTICATED "
+                       "REGISTER (200 OK) — toll-fraud primitive: register "
+                       "an attacker endpoint and place calls as that "
+                       "extension." if ext.get("seen_ok") else ""),
+                    "svwar / sipvicious",
+                    f"svwar.py -e100-999 -m REGISTER {h.ip}:{p.portid}   "
+                    "# to sweep further, then svcrack.py against a hit",
+                    "Set alwaysauthreject=yes (Asterisk) or the equivalent — "
+                    "return the same reply for existing vs missing extensions. "
+                    "Require authentication on REGISTER even for extensions "
+                    "that historically accepted anonymous registrations.",
+                    ["CWE-200", "CWE-306"], kind="sip_ext_enum"))
     return out
 
 

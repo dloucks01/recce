@@ -82,6 +82,124 @@ def axfr(ip: str, port: int, zone: str, timeout: float = _TIMEOUT) -> dict:
     return {"ok": rcode == 0 and an > 0, "records": an, "rcode": rcode}
 
 
+_QTYPE_NSEC = 47
+_QTYPE_ANY = 255
+_MAX_NSEC_STEPS = 500       # bound: /24-sized zones fit, wildcards can't tarpit us
+
+
+def _decode_name(msg: bytes, i: int) -> tuple[str, int]:
+    """Decode a wire-format DNS name at offset i, following compression
+    pointers. Returns (name, next_index_past_the_top_level_name).
+
+    RFC 1035 §4.1.4: a name may be pure labels + a null terminator, a
+    2-byte pointer, or labels + a pointer. `end` records the index AFTER
+    the top-level name (past the pointer or the terminator) so the caller
+    can keep parsing; pointer chains are followed for the name but the
+    return index stays at the top-level end. Bounded to 30 hops to kill
+    a malformed pointer loop cleanly."""
+    labels: list[str] = []
+    hops = 0
+    end: int | None = None                          # top-level end, set once
+    while i < len(msg) and hops < 30:
+        lb = msg[i]
+        if lb == 0:
+            if end is None:
+                end = i + 1
+            return (".".join(labels) or "."), end
+        if lb & 0xC0 == 0xC0:
+            if i + 2 > len(msg):
+                return ".".join(labels), (end if end is not None else i)
+            ptr = ((lb & 0x3F) << 8) | msg[i + 1]
+            if end is None:                         # top-level end is past ptr
+                end = i + 2
+            i = ptr
+            hops += 1
+            continue
+        if i + 1 + lb > len(msg):
+            return ".".join(labels), (end if end is not None else i)
+        labels.append(msg[i + 1:i + 1 + lb].decode("ascii", "replace"))
+        i += 1 + lb
+    # Fell off the end without a terminator — return what we have and let
+    # the caller decide whether to trust it.
+    return ".".join(labels), (end if end is not None else i)
+
+
+def _next_name(candidate: str) -> str:
+    """Given an NSEC "next owner" name, produce the smallest name that
+    would sort just AFTER it. Used to step the walk: query
+    "candidate + \\x00" and the authoritative server hands us the NEXT
+    NSEC record that covers the gap.
+
+    Appends a null-label prefix (`\\x00.<candidate>`) - the DNS canonical
+    ordering places a name with an extra label BEFORE any sibling, so a
+    query for it lands in the "no such name" NSEC gap immediately after
+    `candidate`."""
+    candidate = candidate.strip(".")
+    return "\x00." + candidate if candidate else "\x00"
+
+
+def nsec_walk(ip: str, port: int, zone: str, timeout: float = _TIMEOUT,
+              max_steps: int = _MAX_NSEC_STEPS) -> dict:
+    """Enumerate every name in a DNSSEC-signed zone by following the NSEC chain.
+
+    NSEC records prove non-existence by naming the NEXT owner in canonical
+    order - so a server that returns an NSEC for a nonexistent name has just
+    told you what the next real name is. Repeat until the walk wraps back to
+    the zone apex.
+
+    Returns {ok, names, steps, wrapped}. `ok` is True when at least one
+    NSEC record was returned; `wrapped` is True if the chain closed cleanly
+    on the apex (a complete walk). Bounded by max_steps so a misconfigured
+    zone that never wraps cannot pin the tester.
+    """
+    zone_norm = zone.strip(".").lower()
+    out = {"ok": False, "names": [], "steps": 0, "wrapped": False}
+    current = zone_norm
+    seen: set[str] = set()
+    for step in range(max_steps):
+        # Ask for NSEC directly on `current` when it is the apex, and for a
+        # nonexistent sibling everywhere else - both yield an NSEC covering
+        # the gap after `current` on a DNSSEC-signed authoritative server.
+        query_name = current if step == 0 else _next_name(current)
+        resp = _tcp_dns(ip, port, _query(query_name, _QTYPE_NSEC, rd=False), timeout)
+        if not resp or len(resp) < 12:
+            break
+        _id, flags, qd, an, ns, ar = struct.unpack("!HHHHHH", resp[:12])
+        rcode = flags & 0x000F
+        # An authoritative server without DNSSEC may return NOERROR + 0 answers
+        # or REFUSED / NOTIMP - stop cleanly.
+        if rcode not in (0, 3):                     # 0 NOERROR / 3 NXDOMAIN
+            break
+        # Skip the question section (variable-length name + 4 bytes qtype/qclass).
+        i = 12
+        _q_name, i = _decode_name(resp, i)
+        i += 4
+        next_owner = ""
+        for _ in range(an + ns):
+            _r_name, i = _decode_name(resp, i)
+            if i + 10 > len(resp):
+                break
+            rtype, _rc, _ttl, rdlen = struct.unpack("!HHIH", resp[i:i + 10])
+            i += 10
+            if rtype == _QTYPE_NSEC:
+                # RDATA of an NSEC is: next-domain-name (wire) + type-bitmaps.
+                next_owner, _ = _decode_name(resp, i)
+                break
+            i += rdlen
+        if not next_owner:
+            break
+        out["ok"] = True
+        out["steps"] = step + 1
+        owner_norm = next_owner.strip(".").lower()
+        if owner_norm in seen or owner_norm == zone_norm and step > 0:
+            out["wrapped"] = True
+            break
+        seen.add(owner_norm)
+        out["names"].append(next_owner)
+        current = next_owner
+    return out
+
+
 def version_bind(ip: str, port: int, timeout: float = _TIMEOUT) -> str:
     resp = _tcp_dns(ip, port, _query("version.bind", _QTYPE_TXT, _CLASS_CH), timeout)
     if not resp or len(resp) < 12:
@@ -228,6 +346,32 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict zone transfers to authorized secondaries "
                     "(allow-transfer / xfer-out ACLs); disable AXFR to the world.",
                     ["CWE-200", "CWE-284"], kind="dns_axfr"))
+            # NSEC walk — signed-zone enumeration without needing AXFR.
+            for z, walk in (pr.get("nsec") or {}).items():
+                names = walk.get("names") or []
+                if not names:
+                    continue
+                sample = ", ".join(names[:10])
+                closed = " (chain closed cleanly)" if walk.get("wrapped") else \
+                         f" (walk truncated at {_MAX_NSEC_STEPS} steps — zone " \
+                         "larger than the cap)"
+                out.append(_finding(
+                    "medium",
+                    f"DNS zone enumerated via NSEC walk ({z})", tgt,
+                    f"The signed zone '{z}' returns NSEC records for nonexistent "
+                    f"names, so recce walked the NSEC chain and enumerated "
+                    f"{len(names)} name(s) in {walk.get('steps', 0)} step(s){closed}. "
+                    f"Sample: {sample}"
+                    + (" …" if len(names) > 10 else "")
+                    + ". Same disclosure as AXFR (every internal service name "
+                    "leaks) without needing zone-transfer rights.",
+                    f"dig NSEC {z} @{h.ip}   # then chase next-owners "
+                    "(nsec3walker for NSEC3, nsec_walk-style tooling)",
+                    "Serve NSEC3 with an opt-out flag AND a large iterations "
+                    "count on public zones; better, use NSEC3 white-lies (RFC "
+                    "7129 §5.5) or DNSSEC minimal-cover to answer 'no such name' "
+                    "without disclosing neighbours.",
+                    ["CWE-200"], kind="dns_nsec_walk"))
             if pr.get("version") and "bind" in (pr.get("version") or "").lower():
                 out.append(_finding(
                     "low", "DNS server version disclosed (version.bind)", tgt,
@@ -316,8 +460,19 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
         email_sec = {}
         for z in zones:
             email_sec[z] = email_security_records(t["ip"], t["port"], z)
+        # NSEC walk per zone. Skipped for zones where AXFR already succeeded
+        # (redundant — AXFR gives every record, NSEC only gives every name).
+        # Bounded per zone by _MAX_NSEC_STEPS so a wildcard-heavy zone cannot
+        # tarpit the probe.
+        nsec = {}
+        for z in zones:
+            if z in axfr_zones:
+                continue
+            w = nsec_walk(t["ip"], t["port"], z)
+            if w["ok"] and w["names"]:
+                nsec[z] = w
         return {"reachable": True, "version": ver, "axfr_zones": axfr_zones,
-                "records": rec, "email_sec": email_sec}
+                "records": rec, "email_sec": email_sec, "nsec": nsec}
 
     if active:
         for t, pr in svcprobe.iter_probe(targets, _probe, budget=budget,
