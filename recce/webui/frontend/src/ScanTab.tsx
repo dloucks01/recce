@@ -135,6 +135,9 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
   const [command, setCommand] = useState<string | null>(null);
+  // Which discovered hosts qualify for each command, so the Target(s) field
+  // can say what belongs in it instead of leaving the tester to guess.
+  const [scanCtx, setScanCtx] = useState<Record<string, {count: number; sample: string[]; hint?: string}>>({});
   const [targets, setTargets] = useState("");
 
   useEffect(() => { if (prefillTarget) setTargets(prefillTarget); }, [prefillTarget]);
@@ -161,6 +164,8 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
   const suggestRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    getJSON<{hosts: number; commands: Record<string, {count: number; sample: string[]; hint?: string}>}>(
+      "/api/scan/context").then((r) => setScanCtx(r.commands)).catch(() => {});
     getCommands().then((c) => {
       setCatalog(c);
       const groups = Object.keys(groupBy(c));
@@ -404,6 +409,23 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
             disabled={isBusy}
           />
         </label>
+        {command && scanCtx[command] && (
+          scanCtx[command].count > 0 ? (
+            <div className="sv2-target-hint">
+              <b>{scanCtx[command].count}</b> discovered host
+              {scanCtx[command].count === 1 ? "" : "s"} expose {command}:{" "}
+              <span className="mono">{scanCtx[command].sample.join(", ")}</span>
+              {scanCtx[command].count > scanCtx[command].sample.length && " …"}
+              <button
+                className="sv2-target-fill"
+                disabled={isBusy}
+                onClick={() => setTargets(scanCtx[command].sample.join(", "))}
+              >use these</button>
+            </div>
+          ) : (
+            <div className="sv2-target-hint warn">{scanCtx[command].hint}</div>
+          )
+        )}
         {showSuggest && filteredHosts.length > 0 && (
           <div className="sv2-suggest">
             <div className="sv2-suggest-h">Discovered hosts</div>

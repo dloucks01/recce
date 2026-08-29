@@ -24,6 +24,66 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
                     ("label", "group", "targets", "profile", "creds", "lhost", "flags")}
                 for k, v in _COMMANDS.items()}
 
+    # Commands whose surface a plain TCP `enum` will never find, with the scan
+    # that does find it. Without this a tester runs `recce ntp`, gets "no
+    # targets", and has no way to know the reason is that 123 is UDP-only.
+    _PREREQ = {
+        "snmp": "SNMP is 161/udp — run `enum -U` (UDP sweep) first.",
+        "ntp": "NTP is 123/udp — run `enum -U` (UDP sweep) first.",
+        "ipmi": "IPMI is 623/udp — run `enum -U` (UDP sweep) first.",
+        "modbus": "Modbus is 502/tcp but rarely in the default top-ports — "
+                  "run `enum --all-ports` or scan 502 explicitly.",
+    }
+
+    @app.get("/api/scan/context")
+    def scan_context():
+        """Which discovered hosts qualify for each command.
+
+        The targets field is free text, so a tester picking `mssql` has no way to
+        know whether anything in the engagement even runs MSSQL. Counts come from
+        each module's OWN `*_targets()` predicate rather than a port list copied
+        into the web layer, so a module that changes what it matches cannot drift
+        away from the hint shown here.
+        """
+        import importlib
+        from ...cli._service_helpers import _MODULE_PATH
+        from ...core.store import Store
+
+        with Store(ctx.db_path) as st:
+            hosts = [h for h in st.all_hosts() if h.is_up]
+
+        out: dict = {}
+        for cmd, path in sorted(_MODULE_PATH.items()):
+            try:
+                mod = importlib.import_module(path)
+            except ImportError:
+                continue
+            fn = next((getattr(mod, n) for n in dir(mod)
+                       if n.endswith("_targets") and callable(getattr(mod, n))), None)
+            if fn is None:
+                continue                     # web/api are HTTP-wide; handled below
+            try:
+                ips = sorted({t["ip"] for t in fn(hosts) if t.get("ip")})
+            except Exception:                # noqa: BLE001 - a hint must never 500 the tab
+                continue
+            entry = {"count": len(ips), "sample": ips[:8]}
+            if not ips and cmd in _PREREQ:
+                entry["hint"] = _PREREQ[cmd]
+            elif not ips:
+                entry["hint"] = (f"No host in this engagement exposes {cmd}. "
+                                 "Run `enum` first, or scan a host directly.")
+            out[cmd] = entry
+
+        # web/api have no *_targets(): they apply to every discovered HTTP surface.
+        web_ips = sorted({h.ip for h in hosts for p in h.open_ports
+                          if (p.service or "").lower().startswith("http")
+                          or p.portid in (80, 443, 8080, 8443, 8000, 8888)})
+        for cmd in ("web", "api"):
+            out[cmd] = {"count": len(web_ips), "sample": web_ips[:8],
+                        **({} if web_ips else
+                           {"hint": "No HTTP surface discovered yet — run `enum` first."})}
+        return {"hosts": len(hosts), "commands": out}
+
     @app.get("/api/wordlists")
     def list_wordlists(kind: str | None = None):
         """The bundled wordlist catalog. Frontend renders these as a

@@ -365,3 +365,46 @@ def test_credentials_pagination(client):
     page = client.get("/api/credentials?limit=2&offset=0").json()
     assert len(page["items"]) <= 2
     assert page["total"] == full["total"]
+
+
+# --- scan context: what belongs in the Target(s) field ----------------------
+
+def test_scan_context_reports_qualifying_hosts_per_command(client):
+    """The Target(s) box is free text. This is what lets the UI say which
+    discovered hosts actually expose the command the tester picked."""
+    r = client.get("/api/scan/context")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["hosts"] > 0
+    cmds = body["commands"]
+    # Every registered service module is represented, plus web/api.
+    from recce.cli._service_helpers import _MODULE_PATH
+    assert set(cmds) >= (set(_MODULE_PATH) | {"web", "api"}) - {"api"}
+    for entry in cmds.values():
+        assert isinstance(entry["count"], int)
+        assert len(entry["sample"]) <= 8
+        if entry["count"] == 0:
+            assert entry.get("hint"), "a zero-count command must explain why"
+
+
+def test_scan_context_counts_come_from_the_modules_own_predicate(client):
+    """Counts must not be a port list copied into the web layer - a module that
+    changes what it matches would silently drift from the hint shown."""
+    from recce.services import smb
+    from recce.core.store import Store
+    cmds = client.get("/api/scan/context").json()["commands"]
+    with Store(client._eng_dir + "/results.sqlite") as st:
+        hosts = [h for h in st.all_hosts() if h.is_up]
+    expected = sorted({t["ip"] for t in smb.smb_targets(hosts)})
+    assert cmds["smb"]["count"] == len(expected)
+    assert cmds["smb"]["sample"] == expected[:8]
+
+
+def test_scan_context_explains_udp_only_services(client):
+    """`recce ntp` on a TCP-only sweep finds nothing, and the tester has no way
+    to know the reason is the protocol rather than the environment."""
+    cmds = client.get("/api/scan/context").json()["commands"]
+    for cmd in ("ntp", "ipmi", "snmp"):
+        entry = cmds[cmd]
+        if entry["count"] == 0:
+            assert "udp" in entry["hint"].lower()

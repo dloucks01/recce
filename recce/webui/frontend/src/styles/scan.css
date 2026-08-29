@@ -138,3 +138,24 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 .sv2-chain-clear { background: none; border: 1px solid var(--line); color: var(--muted); font-size: 11px; font-weight: 700; padding: 6px 12px; border-radius: var(--radius-sm); cursor: pointer; }
 .sv2-chain-clear:hover { border-color: var(--crit); color: var(--crit); }
 
+
+/* ---- Target(s) field: command-aware guidance ----------------------------- */
+/* The targets box is free text, so without this a tester picking `mssql` has
+   no way to know whether anything in the engagement runs MSSQL - or that the
+   reason `ntp` finds nothing is that 123 is UDP and the sweep was TCP. */
+.sv2-target-hint {
+  margin-top: 6px; font-size: 12px; color: var(--muted);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.sv2-target-hint b { color: var(--text); font-variant-numeric: tabular-nums; }
+.sv2-target-hint .mono { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.sv2-target-hint.warn { color: var(--med); }
+
+.sv2-target-fill {
+  font: 600 11px/1 var(--sans);
+  padding: 4px 9px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: var(--surface); color: var(--accent);
+  cursor: pointer;
+}
+.sv2-target-fill:hover:not(:disabled) { border-color: var(--accent); }
+.sv2-target-fill:disabled { opacity: .5; cursor: not-allowed; }
