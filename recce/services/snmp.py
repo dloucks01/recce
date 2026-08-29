@@ -38,6 +38,7 @@ _SYS_LOCATION = "1.3.6.1.2.1.1.6.0"
 # Walk bases.
 _LANMGR_USERS = "1.3.6.1.4.1.77.1.2.25"        # Windows local user accounts
 _HR_SW_RUN = "1.3.6.1.2.1.25.4.2.1.2"          # running process names
+_HR_SW_RUN_PARAMS = "1.3.6.1.2.1.25.4.2.1.5"   # process command-line arguments
 _HR_SW_INSTALLED = "1.3.6.1.2.1.25.6.3.1.2"    # installed software names
 _IF_DESCR = "1.3.6.1.2.1.2.2.1.2"              # interface descriptions
 
@@ -350,6 +351,169 @@ def read_routes(sock, ip: str, port: int, community: str, timeout: float,
             for d, h in sorted(hops.items())]
 
 
+# ipCidrRouteTable (RFC 2096) supersedes the RFC1213 ipRouteTable that read_routes()
+# walks. Modern IOS-XE, Junos, ArubaOS and net-snmp populate CIDR only - the old
+# ipRouteTable comes back empty on those, and recce would miss the routing table
+# entirely without this fallback. The INDEX is dest.mask.tos.nextHop (13 arcs), so
+# walking a single column (ipCidrRouteNextHop) recovers all four fields in one pass.
+_CIDR_ROUTE_NH = "1.3.6.1.2.1.4.24.4.1.4"      # ipCidrRouteNextHop
+
+
+def read_cidr_routes(sock, ip: str, port: int, community: str, timeout: float,
+                     start_id: int = 9000, cap: int = 512) -> list[dict]:
+    """RFC 2096 routing table. Same shape as read_routes() so downstream code that
+    consumes 'routes' does not care which MIB the row came from."""
+    out: list[dict] = []
+    for oid, val in _walk_pairs(sock, ip, port, community, _CIDR_ROUTE_NH,
+                                timeout, start_id, cap):
+        arcs = _suffix_arcs(oid, _CIDR_ROUTE_NH)
+        # Suffix is dest[4] . mask[4] . tos[1] . nextHop[4] = 13 arcs.
+        if len(arcs) < 13 or not isinstance(val, str):
+            continue
+        dest = ".".join(str(a) for a in arcs[0:4])
+        mask = ".".join(str(a) for a in arcs[4:8])
+        out.append({"dest": dest, "next_hop": val, "mask": mask})
+    return out
+
+
+# --- SNMPv3 unauthenticated engine discovery (RFC 3411 §5, RFC 3414 §4) ---------
+# Sending msgUserName="" with empty authoritative engine fields provokes a Report
+# PDU whose msgSecurityParameters carry the agent's real engineID + boots + time.
+# Zero credentials required. This is what makes a v3-only agent (which ignores v2c
+# GETs entirely) show up as more than "closed" to recce.
+_SNMPV3_MSG_MAX = 65507
+
+
+def build_snmpv3_discovery(msg_id: int) -> bytes:
+    """RFC 3414 §4 discovery: v3 header + empty USM security + empty scoped GET."""
+    global_data = _tlv(0x30,
+                       _int(msg_id) +
+                       _int(_SNMPV3_MSG_MAX) +
+                       _tlv(0x04, b"\x04") +               # msgFlags: reportable, no auth/priv
+                       _int(3))                            # msgSecurityModel = USM
+    usm = _tlv(0x30,
+               _tlv(0x04, b"") +                           # msgAuthoritativeEngineID
+               _int(0) +                                   # msgAuthoritativeEngineBoots
+               _int(0) +                                   # msgAuthoritativeEngineTime
+               _tlv(0x04, b"") +                           # msgUserName
+               _tlv(0x04, b"") +                           # msgAuthenticationParameters
+               _tlv(0x04, b""))                            # msgPrivacyParameters
+    sec_params = _tlv(0x04, usm)                           # wrapped as OCTET STRING
+    scoped = _tlv(0x30,
+                  _tlv(0x04, b"") +                        # contextEngineID
+                  _tlv(0x04, b"") +                        # contextName
+                  _tlv(0xA0, _int(msg_id) + _int(0) + _int(0) + _tlv(0x30, b"")))
+    return _tlv(0x30, _int(3) + global_data + sec_params + scoped)
+
+
+def parse_snmpv3_report(data: bytes) -> dict | None:
+    """Pull engineID / boots / time out of a v3 Report response. None if malformed."""
+    try:
+        _, msg, _ = _parse_tlv(data, 0)
+        _, ver_b, i = _parse_tlv(msg, 0)
+        version = int.from_bytes(ver_b, "big") if ver_b else 0
+        if version != 3:
+            return None
+        _, _gd, i = _parse_tlv(msg, i)
+        _, sec_blob, _ = _parse_tlv(msg, i)                # msgSecurityParameters
+        _, usm, _ = _parse_tlv(sec_blob, 0)                # inner USM SEQUENCE
+        _, eid, k = _parse_tlv(usm, 0)
+        _, boots_b, k = _parse_tlv(usm, k)
+        _, time_b, k = _parse_tlv(usm, k)
+        return {"engine_id": bytes(eid).hex(),
+                "boots": int.from_bytes(boots_b, "big") if boots_b else 0,
+                "time": int.from_bytes(time_b, "big") if time_b else 0}
+    except (IndexError, ValueError):
+        return None
+
+
+def _decode_engine_id(engine_id_hex: str) -> dict:
+    """Best-effort RFC 3411 §5 breakdown. Format byte at offset 4 selects the layout:
+    1=IPv4, 2=IPv6, 3=MAC, 4=text, 5=octets. Missing fields => empty strings."""
+    out: dict[str, object] = {"enterprise": None, "format": None, "detail": ""}
+    try:
+        raw = bytes.fromhex(engine_id_hex)
+    except ValueError:
+        return out
+    if len(raw) < 5:
+        return out
+    # First 4 bytes are the enterprise ID with the high bit of byte 0 set (post-RFC3411).
+    ent = ((raw[0] & 0x7F) << 24) | (raw[1] << 16) | (raw[2] << 8) | raw[3]
+    fmt = raw[4]
+    body = raw[5:]
+    out["enterprise"] = ent
+    out["format"] = fmt
+    if fmt == 1 and len(body) == 4:
+        out["detail"] = ".".join(str(b) for b in body)
+    elif fmt == 3 and len(body) == 6:
+        out["detail"] = ":".join(f"{b:02x}" for b in body)
+    elif fmt == 4:
+        out["detail"] = body.decode("utf-8", "replace")
+    return out
+
+
+def snmpv3_discover(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
+                    msg_id: int = 9999) -> dict | None:
+    """RFC 3414 §4 unauthenticated engine discovery. Zero credentials."""
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(build_snmpv3_discovery(msg_id), (ip, port))
+        sock.settimeout(timeout)
+        for _ in range(4):
+            try:
+                data, _addr = sock.recvfrom(65535)
+            except (OSError, socket.timeout):
+                return None
+            info = parse_snmpv3_report(data)
+            if info is not None:
+                info["engine"] = _decode_engine_id(info["engine_id"])
+                return info
+        return None
+    except OSError:
+        return None
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+# Substrings that indicate a cleartext credential passed on the command line.
+# Kept intentionally narrow (avoid false positives on generic "-p" for port etc.):
+# a match requires "password", explicit env-style KEY=, a known cred tool, or the
+# mysql/postgres/redis inline password flag.
+_CMDLINE_CRED_MARKERS = (
+    "password=", "-password=", "--password=",
+    "pgpassword=", "mysql_pwd=",
+    "-p'", '-p"',                       # mysql -p'<pw>' / -p"<pw>"
+    ":password", "://", "curl -u ", "curl --user ",
+    "sshpass -p", "rsyncpassword=",
+    "-w ", " --password ", "-p ",       # last two are broad; caller strips known-safe
+)
+
+
+def _cmdline_looks_credful(param: str) -> bool:
+    """Heuristic: True iff `param` almost-certainly leaks a secret on argv."""
+    if not param:
+        return False
+    low = param.lower()
+    # Only flag "-p " / "-w " / "--password " when the tool that follows is a known
+    # DB/cred consumer, otherwise "-p 8080" (port) would fire constantly.
+    if "password" in low or "pgpassword=" in low or "sshpass -p" in low:
+        return True
+    if any(m in low for m in ("mysql -p", "mysqldump -p", "psql ", "redis-cli -a",
+                              "curl -u ", "curl --user ", "ftp://", "http://",
+                              "https://")):
+        # Only credful if the URL/tool actually carries a ':' password segment.
+        if "://" in low and "@" in low.split("://", 1)[1].split("/", 1)[0]:
+            return True
+        if "-a " in low or "-u " in low or "--user " in low or "-p" in low:
+            return True
+    return False
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
           known_open: bool = False) -> dict | None:
     """Find a readable community, then read the system group + walk the high-value
@@ -366,9 +530,21 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
                 community, sys_descr = c, vb[0][1]
                 break
         if community is None:
+            # No v2c community answered. A v3-only agent still leaks its engineID
+            # to an unauthenticated discovery message (RFC 3414 §4) - the same box
+            # that returned nothing to sixteen v2c GETs may hand this over gladly.
+            v3 = snmpv3_discover(ip, port, timeout)
+            if v3 is not None:
+                return {"ip": ip, "port": port, "community": None,
+                        "rw_likely": False, "sys_descr": "",
+                        "v3_engine": v3}
             return None
         out = {"ip": ip, "port": port, "community": community,
                "rw_likely": community in _RW_LIKELY, "sys_descr": sys_descr or ""}
+        # v3 discovery runs regardless: many agents accept v2c AND expose v3.
+        v3 = snmpv3_discover(ip, port, timeout)
+        if v3 is not None:
+            out["v3_engine"] = v3
         for key, oid in (("sys_name", _SYS_NAME), ("sys_contact", _SYS_CONTACT),
                          ("sys_location", _SYS_LOCATION)):
             vb = _get(sock, ip, port, community, oid, timeout, 2000)
