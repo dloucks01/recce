@@ -192,6 +192,22 @@ _COMMANDS: dict = {
     "modbus":          _cmd("Modbus/TCP (OT/ICS)", "Services", "optional"),
     "rdp":             _cmd("RDP (NLA detection)", "Services", "optional"),
     "ipmi":            _cmd("IPMI (cipher-zero + null-user)", "Services", "optional"),
+    "ntp":             _cmd("NTP (monlist + Kerberos skew)", "Services", "optional"),
+    "msrpc":           _cmd("MSRPC (EPM + IOXIDResolver + coercion targets)",
+                            "Services", "optional"),
+    "winrm":           _cmd("WinRM (WSMan Identify + auth mechanisms)",
+                            "Services", "optional"),
+    "netbios":         _cmd("NetBIOS Name Service (hostname / domain / MAC)",
+                            "Services", "optional"),
+    "tftp":            _cmd("TFTP (vendor config exfil)", "Services", "optional"),
+    "ipp":             _cmd("IPP / CUPS (CVE-2024-47176 reachability)",
+                            "Services", "optional"),
+    "x11":             _cmd("X11 (open display = screenshot / keylog)",
+                            "Services", "optional"),
+    "sip":             _cmd("SIP (PBX fingerprint + realm disclosure)",
+                            "Services", "optional"),
+    "rservices":       _cmd("r-services (rlogin / rsh / rexec) — legacy cleartext",
+                            "Services", "optional"),
     # --- Loot & Attack tier ---
     # Loot scanner mines <engagement>/evidence/** for cred files, Kerberos
     # tickets, .git dumps, and configs with embedded secrets. Idempotent
