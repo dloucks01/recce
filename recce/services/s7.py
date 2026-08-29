@@ -820,6 +820,33 @@ def findings_to_vulns(fs: list[dict]) -> dict:
     return _f2v(fs, "s7", _DEFAULT_PORT)
 
 
+def _record_asset(hosts: list[Host], ip: str, pr: dict) -> None:
+    """Feed the S7 identity into core.known_ot_assets — every Siemens CPU
+    reachable via S7COMM lands in the engagement-wide OT asset inventory."""
+    order = pr.get("order_code") or ""
+    fw = pr.get("fw_version") or ""
+    serial = (pr.get("component") or {}).get("serial_number") or ""
+    if not (order or serial):
+        return
+    family = ""
+    mlfb = order.upper().replace(" ", "")
+    if mlfb.startswith("6ES73"):
+        family = "S7-300"
+    elif mlfb.startswith("6ES74"):
+        family = "S7-400"
+    elif mlfb.startswith("6ES72"):
+        family = "S7-1200"
+    elif mlfb.startswith("6ES75"):
+        family = "S7-1500"
+    from ..core.known_ot_assets import record_ot_asset
+    for h in hosts:
+        if h.ip == ip:
+            record_ot_asset(h, "s7", vendor="Siemens", model=order,
+                            firmware=fw, serial=serial, cpu_family=family,
+                            source="s7:szl-0x0011")
+            break
+
+
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     from . import svcprobe
@@ -835,6 +862,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["reachable"] = pr.get("reachable", False)
                 t["order_code"] = pr.get("order_code", "")
                 t["fw_version"] = pr.get("fw_version", "")
+                _record_asset(hosts, t["ip"], pr)
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

@@ -1009,6 +1009,30 @@ def findings_to_vulns(fs: list[dict]) -> dict:
     return _f2v(fs, "enip", _DEFAULT_PORT)
 
 
+def _record_asset(hosts: list[Host], ip: str, ident: dict) -> None:
+    """Feed the CIP List Identity into core.known_ot_assets — the ODVA vendor
+    id + product name + revision + serial is the reference OT asset identity
+    for EtherNet/IP-speaking controllers (Vol 1 §5-2 Identity Object)."""
+    if not ident:
+        return
+    vid = ident.get("vendor_id") or 0
+    vendor = _VENDOR_NAMES.get(vid, "") or (f"ODVA vendor 0x{vid:04x}"
+                                            if vid else "")
+    model = ident.get("product_name") or ""
+    revision = ident.get("revision") or ""
+    serial = ident.get("serial_number") or 0
+    serial_s = f"{serial:08x}" if serial else ""
+    if not (vendor or model or serial_s):
+        return
+    from ..core.known_ot_assets import record_ot_asset
+    for h in hosts:
+        if h.ip == ip:
+            record_ot_asset(h, "enip", vendor=vendor, model=model,
+                            firmware=revision, serial=serial_s,
+                            source="enip:list-identity")
+            break
+
+
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     from . import svcprobe
@@ -1026,6 +1050,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["vendor_id"] = ident.get("vendor_id", 0)
                 t["product_name"] = ident.get("product_name", "")
                 t["revision"] = ident.get("revision", "")
+                _record_asset(hosts, t["ip"], ident)
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
