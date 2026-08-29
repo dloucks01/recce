@@ -34,6 +34,13 @@ _DEFAULT_PORT = 5432
 _TIMEOUT = 5.0
 _PROTO_V3 = 196608                      # 3.0
 _MAX_MSG = 64 * 1024
+# Per PostgreSQL v3 protocol (§55.2.10 SSL Session Encryption): a client that
+# wants TLS sends an 8-byte SSLRequest (length=8, code=80877103 == 0x04D2162F)
+# BEFORE the StartupMessage. The server answers with a SINGLE byte: 'S' = TLS
+# accepted (continue handshake over the same socket), 'N' = TLS refused
+# (proceed in cleartext or disconnect). Anything else is either not-Postgres
+# or a very old (<v7.4) server that predates the code.
+_SSL_REQUEST_CODE = 80877103
 
 
 def is_postgres(port: Port) -> bool:
@@ -216,6 +223,99 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres")
             res["auth_required"] = True
         return res
     except OSError as e:
+        res["error"] = str(e)
+        return res
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def probe_ssl(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
+    """Send SSLRequest and observe the single-byte response — reveals whether
+    the server offers TLS at all, the precondition for MITM/downgrade of any
+    later SCRAM handshake.
+
+    Returns:
+      {"reachable": bool, "tls_offered": bool, "response": "S"|"N"|"", "error": str}
+
+    Non-mutating: nothing beyond the 8-byte SSLRequest ever leaves the client,
+    and the socket is closed the moment the reply byte lands. No StartupMessage
+    is sent, so no connection is charged against pg_hba max-conn budgets.
+    """
+    res = {"reachable": False, "tls_offered": False, "response": "", "error": ""}
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            # SSLRequest is a fixed 8-byte packet: length prefix (8) + code.
+            sock.sendall(struct.pack("!I", 8) + struct.pack("!I", _SSL_REQUEST_CODE))
+            resp = sock.recv(1)
+            res["reachable"] = True
+            if resp:
+                ch = resp.decode("ascii", "replace")
+                res["response"] = ch
+                res["tls_offered"] = (ch == "S")
+    except OSError as e:
+        res["error"] = str(e)
+    return res
+
+
+def _startup_replication(user: str, db: str) -> bytes:
+    """Build a v3 StartupMessage that also carries `replication=true` — puts
+    the server into the streaming replication sub-protocol (§55.4). A role
+    that authenticates here can pg_basebackup the entire cluster (physical
+    copy of every database, every hash, every extension, every WAL) without
+    ever executing a single SQL statement."""
+    params = (f"user\x00{user}\x00database\x00{db}\x00"
+              f"replication\x00true\x00\x00").encode()
+    body = struct.pack("!I", _PROTO_V3) + params
+    return struct.pack("!I", len(body) + 4) + body
+
+
+def probe_replication(ip: str, port: int, timeout: float = _TIMEOUT,
+                       user: str = "postgres", db: str = "postgres") -> dict:
+    """Probe the replication startup path — pg_hba typically has a SEPARATE
+    `host replication all …` line that admins forget to lock down (default
+    `trust` from Debian/RedHat packages). The regular probe() only tries the
+    SQL surface and would completely miss this.
+
+    Returns:
+      {"reachable", "unauth", "auth_required", "version", "error"}
+
+    unauth=True means the server accepted AuthenticationOk WITHOUT a password
+    for the replication sub-protocol — pg_basebackup RCE-adjacent full-cluster
+    dump territory. auth_required=True means credentials would be needed.
+    """
+    res = {"reachable": False, "unauth": False, "auth_required": False,
+           "version": "", "error": ""}
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+        sock.settimeout(timeout)
+    except OSError as e:
+        res["error"] = str(e)
+        return res
+    try:
+        sock.sendall(_startup_replication(user, db))
+        res["reachable"] = True
+        typ, body = _read_message(sock)
+        if typ is None:
+            res["error"] = "no response to replication startup"
+        elif typ == b"R":
+            code = struct.unpack("!I", body[:4])[0] if len(body) >= 4 else -1
+            if code == 0:                       # AuthenticationOk = replication trust
+                res["unauth"] = True
+                res["version"] = _server_version(sock)
+            else:                               # 3 cleartext / 5 md5 / 10 SASL
+                res["auth_required"] = True
+        elif typ == b"E":
+            # ErrorResponse: could be "role does not have REPLICATION" (rejects
+            # the auth path even though pg_hba might allow it under other users),
+            # or "no pg_hba.conf entry for replication" (whole path locked down).
+            res["error"] = _pg_error(body)
+            res["auth_required"] = True
+        return res
+    except (OSError, struct.error, ValueError) as e:
         res["error"] = str(e)
         return res
     finally:
@@ -569,6 +669,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 continue
             tgt = f"{h.ip}:{p.portid}"
             ver = pr.get("version") or ""
+            # Wire-level findings — emitted for EVERY reachable Postgres port,
+            # regardless of whether trust or credentials landed. TLS-not-offered
+            # is a cleartext-wire finding even against a well-authenticated
+            # server; replication-trust is its own pg_hba path entirely.
+            _ssl_finding(out, tgt, h.ip, p.portid, pr.get("ssl"))
+            _replication_finding(out, tgt, h.ip, p.portid, pr.get("replication"))
             if pr.get("unauth"):
                 lt = pr.get("loot") or {}
                 out.append(_finding(
@@ -641,6 +747,74 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 _public_schema_finding(out, tgt, h.ip, p.portid, lt)
                 _cve_finding(out, tgt, h.ip, p.portid, lt)
     return out
+
+
+def _ssl_finding(out: list, tgt: str, ip: str, port: int, ssl: dict | None) -> None:
+    """Emit `pg_no_tls` when the server refuses TLS (`N` reply to SSLRequest).
+    That is the single most common wire finding on internal networks: every
+    later credential exchange (cleartext / md5 / SCRAM) travels in the clear,
+    and SCRAM-SHA-256 without a TLS wrapper is vulnerable to on-path relay.
+    Silent when the probe couldn't reach the port, so a network hiccup doesn't
+    invent a false finding."""
+    if not ssl or not ssl.get("reachable"):
+        return
+    if ssl.get("tls_offered"):
+        return
+    resp = ssl.get("response") or ""
+    if resp == "N":
+        detail = ("Server refused SSLRequest with `N` (§55.2.10) — TLS is not "
+                  "offered on this port. Every subsequent handshake (v3 startup, "
+                  "cleartext / md5 / SCRAM-SHA-256 password exchange) travels in "
+                  "cleartext, and SCRAM-SHA-256 without a TLS channel binding is "
+                  "vulnerable to on-path credential relay.")
+    else:
+        # Anything other than 'S' / 'N' (e.g. an ErrorResponse-shaped byte, or
+        # nothing at all) means the server predates the SSLRequest code or is
+        # not really Postgres — either way TLS is not on offer.
+        detail = ("Server did not answer SSLRequest with `S` — TLS is not "
+                  "offered on this port. Cleartext-only wire is the assumption "
+                  "for every subsequent auth handshake.")
+    out.append(_finding(
+        "medium",
+        "PostgreSQL reachable without TLS (cleartext wire)", tgt,
+        detail,
+        f"printf '\\x00\\x00\\x00\\x08\\x04\\xd2\\x16\\x2f' | nc {ip} {port} | head -c 1",
+        "Set `ssl = on` in postgresql.conf; require TLS via `hostssl` (not `host`) "
+        "rules in pg_hba.conf; disable weak protocols/ciphers via `ssl_min_protocol_"
+        "version = TLSv1.2` and a hardened `ssl_ciphers` list.",
+        ["CWE-319", "CWE-326"], kind="pg_no_tls"))
+
+
+def _replication_finding(out: list, tgt: str, ip: str, port: int,
+                          rep: dict | None) -> None:
+    """Emit `pg_replication_trust` when the replication startup path returns
+    AuthenticationOk with no password. That path bypasses SQL entirely: any
+    reachable client can pg_basebackup the whole cluster — physical dump of
+    every database, every pg_shadow hash, every extension, every WAL segment.
+    Debian/RedHat packages ship a default pg_hba with `host replication all
+    all trust` on the loopback that admins routinely widen and forget."""
+    if not rep or not rep.get("unauth"):
+        return
+    ver = rep.get("version") or ""
+    out.append(_finding(
+        "critical",
+        "PostgreSQL replication protocol accepts trust (pg_basebackup RCE-adjacent)",
+        tgt,
+        "Server accepted a v3 StartupMessage carrying `replication=true` for "
+        "user 'postgres' with NO password (AuthenticationOk). pg_hba.conf has a "
+        "`host replication … trust` (or equivalent) rule reachable from this "
+        "network — a completely separate trust surface from normal SQL auth."
+        + (f" server_version {ver}." if ver else "")
+        + " Anyone who reaches this port can pg_basebackup the ENTIRE cluster: "
+        "physical copy of every database, every pg_shadow hash (for offline "
+        "cracking), every extension, and every WAL segment — no SQL statements "
+        "involved, no query log entries.",
+        f"pg_basebackup -h {ip} -p {port} -U postgres -D /tmp/dump -X none -P",
+        "Remove the replication `trust` entry from pg_hba.conf; use "
+        "scram-sha-256 with a strong, unique password on every REPLICATION "
+        "role; restrict replication to a private interface via `listen_"
+        "addresses` and a CIDR-limited pg_hba rule.",
+        ["CWE-306", "CWE-284"], kind="pg_replication_trust"))
 
 
 def _public_schema_finding(out: list, tgt: str, ip: str, port: int,
@@ -940,6 +1114,17 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["unauth"] = pr.get("unauth", False)
                 t["auth_required"] = pr.get("auth_required", False)
                 t["version"] = pr.get("version", "") or t.get("version", "")
+                # Wire-level side probes — cheap (one packet each), both are
+                # completely independent of the SQL trust/cred path so their
+                # findings surface even when the primary handshake failed.
+                try:
+                    pr["ssl"] = probe_ssl(t["ip"], t["port"])
+                except Exception:                       # noqa: BLE001 — never break enum
+                    pr["ssl"] = None
+                try:
+                    pr["replication"] = probe_replication(t["ip"], t["port"])
+                except Exception:                       # noqa: BLE001 — never break enum
+                    pr["replication"] = None
                 lt = None
                 acc_user, acc_pw = "postgres", None
                 if pr.get("unauth"):
