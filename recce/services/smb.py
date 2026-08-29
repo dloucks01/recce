@@ -108,6 +108,162 @@ def parse_smb2_negotiate(data: bytes) -> dict | None:
             "signing_required": bool(sec_mode & 0x02)}
 
 
+# --- NTLMSSP CHALLENGE harvest (one extra credfree round-trip) ------------------
+
+_NTLM_AV = {0x0001: "netbios_computer", 0x0002: "netbios_domain",
+            0x0003: "dns_computer",     0x0004: "dns_domain",
+            0x0005: "dns_tree"}
+_SPNEGO_OID = b"\x06\x06\x2b\x06\x01\x05\x05\x02"
+_NTLMSSP_OID = b"\x06\x0a\x2b\x06\x01\x04\x01\x82\x37\x02\x02\x0a"
+
+
+def _der_len(n: int) -> bytes:
+    if n < 128:
+        return bytes([n])
+    b = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(b)]) + b
+
+
+def _der_tlv(tag: int, value: bytes) -> bytes:
+    return bytes([tag]) + _der_len(len(value)) + value
+
+
+def _spnego_neg_token_init(mech_token: bytes) -> bytes:
+    """Wrap an NTLMSSP Type1 blob as a SPNEGO NegTokenInit for SMB2 SESSION_SETUP."""
+    mech_types = _der_tlv(0x30, _NTLMSSP_OID)                        # SEQUENCE OF OID
+    token = _der_tlv(0xA2, _der_tlv(0x04, mech_token))               # [2] OCTET STRING
+    inner = _der_tlv(0x30, _der_tlv(0xA0, mech_types) + token)       # NegTokenInit SEQ
+    return _der_tlv(0x60, _SPNEGO_OID + _der_tlv(0xA0, inner))       # [APP 0]
+
+
+def _smb2_session_setup_header() -> bytes:
+    return (b"\xfeSMB"
+            + struct.pack("<H", 64) + struct.pack("<H", 0) + struct.pack("<I", 0)
+            + struct.pack("<H", 0x0001) + struct.pack("<H", 1)
+            + struct.pack("<I", 0) + struct.pack("<I", 0)
+            + struct.pack("<Q", 1) + struct.pack("<I", 0) + struct.pack("<I", 0)
+            + struct.pack("<Q", 0) + b"\x00" * 16)
+
+
+def _build_smb2_session_setup(sec_buffer: bytes) -> bytes:
+    body = (struct.pack("<H", 25)     # StructureSize (variable buffer follows)
+            + b"\x00" + b"\x01"       # Flags, SecurityMode=SIGNING_ENABLED
+            + struct.pack("<I", 0) + struct.pack("<I", 0)     # Capabilities, Channel
+            + struct.pack("<H", 64 + 24)                      # SecurityBufferOffset
+            + struct.pack("<H", len(sec_buffer))
+            + struct.pack("<Q", 0)                            # PreviousSessionId
+            + sec_buffer)
+    smb = _smb2_session_setup_header() + body
+    return struct.pack(">I", len(smb)) + smb
+
+
+def parse_smb2_session_setup_response(data: bytes) -> dict | None:
+    """Extract {status, session_flags, security_buffer} from an SMB2 SESSION_SETUP
+    response. STATUS_MORE_PROCESSING_REQUIRED (0xC0000016) is the expected challenge
+    stage; a plain 0 status also carries a valid buffer."""
+    if not data or len(data) < 4 + 64 + 8:
+        return None
+    smb = data[4:]
+    if smb[:4] != b"\xfeSMB":
+        return None
+    status = struct.unpack("<I", smb[8:12])[0]
+    command = struct.unpack("<H", smb[12:14])[0]
+    if command != 0x0001:
+        return None
+    body = smb[64:]
+    if len(body) < 8 or struct.unpack("<H", body[0:2])[0] != 9:
+        return None
+    session_flags = struct.unpack("<H", body[2:4])[0]
+    sec_off = struct.unpack("<H", body[4:6])[0]
+    sec_len = struct.unpack("<H", body[6:8])[0]
+    sec = data[4 + sec_off:4 + sec_off + sec_len] if sec_off and sec_len else b""
+    return {"status": status, "session_flags": session_flags,
+            "security_buffer": sec,
+            "is_guest": bool(session_flags & 0x0001),
+            "is_null": bool(session_flags & 0x0002)}
+
+
+def parse_ntlm_challenge_info(sec_buffer: bytes) -> dict | None:
+    """Parse an NTLMSSP CHALLENGE_MESSAGE (bare or SPNEGO-wrapped) into the info leak:
+    NetBIOS + DNS computer/domain names, AD tree, server timestamp, OS build. Every
+    field is optional -- present iff the server sent it."""
+    from ..ad import ntlm
+    base = ntlm.parse_type2(sec_buffer)
+    if not base:
+        return None
+    out: dict = {"challenge": base["challenge"].hex(),
+                 "ntlm_flags": base["flags"]}
+    ti = base.get("target_info") or b""
+    i, n = 0, len(ti)
+    while i + 4 <= n:
+        av_id, av_len = struct.unpack_from("<HH", ti, i)
+        i += 4
+        if av_id == 0x0000:
+            break
+        if i + av_len > n:
+            break
+        v = ti[i:i + av_len]
+        if av_id in _NTLM_AV:
+            out[_NTLM_AV[av_id]] = v.decode("utf-16-le", "replace")
+        elif av_id == 0x0007 and av_len == 8:
+            filetime = struct.unpack("<Q", v)[0]
+            out["server_time_epoch"] = (filetime // 10_000_000) - 11_644_473_600
+        i += av_len
+    # OS version at bytes 48..56 of the CHALLENGE header, present iff NEGOTIATE_VERSION
+    # (0x02000000) is set. Locate the NTLMSSP signature to skip any SPNEGO wrapper.
+    idx = sec_buffer.find(b"NTLMSSP\x00")
+    if idx >= 0 and idx + 56 <= len(sec_buffer) and (base["flags"] & 0x02000000):
+        ver = sec_buffer[idx + 48:idx + 56]
+        major, minor = ver[0], ver[1]
+        build = struct.unpack("<H", ver[2:4])[0]
+        if major or minor or build:
+            out["os_version"] = f"{major}.{minor}.{build}"
+            out["ntlm_revision"] = ver[7]
+    return out
+
+
+def probe_ntlm_info(ip: str, port: int = _DEFAULT_PORT,
+                    timeout: float = _TIMEOUT) -> dict | None:
+    """Credfree NTLMSSP CHALLENGE harvest. Opens one TCP session, runs NEGOTIATE then
+    SESSION_SETUP with a SPNEGO(NTLMSSP Type1), and parses the returned CHALLENGE."""
+    from ..ad import ntlm
+
+    def _read_pdu(s):
+        head = s.recv(4)
+        if len(head) < 4:
+            return None
+        n = struct.unpack(">I", head)[0] & 0x00FFFFFF
+        buf = b""
+        while len(buf) < n:
+            chunk = s.recv(min(4096, n - len(buf)))
+            if not chunk:
+                break
+            buf += chunk
+        return head + buf
+
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(_build_smb2_negotiate())
+            if not _read_pdu(s):
+                return None
+            sec = _spnego_neg_token_init(ntlm.type1())
+            s.sendall(_build_smb2_session_setup(sec))
+            data = _read_pdu(s)
+            if not data:
+                return None
+            resp = parse_smb2_session_setup_response(data)
+            if not resp or not resp.get("security_buffer"):
+                return None
+            info = parse_ntlm_challenge_info(resp["security_buffer"])
+            if info is None:
+                return None
+            info["session_flags"] = resp["session_flags"]
+            return info
+    except OSError:
+        return None
+
+
 def _build_smb1_negotiate() -> bytes:
     header = (b"\xffSMB" + b"\x72" + b"\x00\x00\x00\x00" + b"\x18"
               + b"\x01\x28" + b"\x00\x00" + b"\x00" * 8 + b"\x00\x00"
@@ -224,6 +380,15 @@ _NARRATIVE = {
         "with embedded passwords, database backups, private keys, and user home "
         "directories - the raw material for the next hop. Everything here is "
         "exfiltratable with a single smbclient / smbget."),
+    "smb_ntlm_info_disclosure": (
+        "SMB2 SESSION_SETUP with an NTLMSSP NEGOTIATE_MESSAGE forces the server to "
+        "return a CHALLENGE_MESSAGE whose TargetInfo AV_PAIR list leaks the machine's "
+        "NetBIOS and DNS names, the AD domain and forest, the exact OS build (directly "
+        "maps to missing-patch CVE queries), and the authoritative server clock "
+        "(Kerberos skew tolerance). Pre-authentication, credential-free, and hard to "
+        "disable on a Windows box that still accepts NTLM - this is the highest-value "
+        "single-packet intel SMB gives away for free and feeds host/domain identity "
+        "for the rest of the engagement."),
     "writable_share": (
         "A share is WRITABLE without administrative credentials. Beyond planting a "
         "web shell where a share backs a web root, a writable share enables passive "
@@ -336,6 +501,39 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "reflection-relay variants that target the initiator side of the "
                     "SMB conversation.",
                     ["CWE-287", "CWE-319"], kind="smb_signing_not_required"))
+            info = pr.get("ntlm_info") if pr else None
+            if info:
+                bits = []
+                for k, label in (("netbios_computer", "NetBIOS name"),
+                                 ("netbios_domain", "NetBIOS domain"),
+                                 ("dns_computer", "DNS FQDN"),
+                                 ("dns_domain", "AD DNS domain"),
+                                 ("dns_tree", "AD forest"),
+                                 ("os_version", "OS build")):
+                    v = info.get(k)
+                    if v:
+                        bits.append(f"{label}={v}")
+                if info.get("server_time_epoch"):
+                    import datetime as _dt
+                    bits.append("server clock=" + _dt.datetime.fromtimestamp(
+                        info["server_time_epoch"], _dt.timezone.utc).isoformat())
+                if bits:
+                    out.append(_finding(
+                        "low",
+                        "SMB pre-auth NTLM CHALLENGE leaks host/domain intel", tgt,
+                        "SMB2 SESSION_SETUP with an NTLMSSP NEGOTIATE returned a "
+                        "CHALLENGE carrying: " + "; ".join(bits) + ". Pre-auth, no "
+                        "credentials required. Reveals NetBIOS/DNS naming, AD "
+                        "domain and forest, exact OS build for CVE mapping, and "
+                        "the server clock (Kerberos skew).",
+                        "nxc / impacket",
+                        "nxc smb <ip>   # the banner line prints the same NetBIOS "
+                        "name, domain and OS build harvested from the CHALLENGE",
+                        "Default Windows/Samba behavior; disable NTLM entirely "
+                        "(Kerberos-only) where feasible. On dual-stack Windows, "
+                        "'Restrict NTLM: Outgoing NTLM traffic to remote servers' "
+                        "and the corresponding audit policies help scope exposure.",
+                        ["CWE-200"], kind="smb_ntlm_info_disclosure"))
     return out
 
 
@@ -713,15 +911,24 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     targets = smb_targets(hosts)
     probes: dict = {}
     state: dict = {}
+    def _full_probe(t):
+        pr = probe(t["ip"], t["port"])
+        if pr and pr.get("dialect"):                # SMB2 answered - one more RT for CHALLENGE
+            info = probe_ntlm_info(t["ip"], t["port"])
+            if info:
+                pr["ntlm_info"] = info
+        return pr
     if active:
         for t, pr in svcprobe.iter_probe(
-                targets, lambda t: probe(t["ip"], t["port"]),
+                targets, _full_probe,
                 budget=budget, progress=progress, state=state):
             if pr:
                 probes[(t["ip"], t["port"])] = pr
                 t["dialect"] = pr.get("dialect_name", "")
                 t["smbv1"] = pr.get("smbv1", False)
                 t["signing_required"] = pr.get("signing_required")
+                if pr.get("ntlm_info"):
+                    t["ntlm_info"] = pr["ntlm_info"]
     fs = findings(hosts, probes)
     runbooks = []
     for t in targets:
