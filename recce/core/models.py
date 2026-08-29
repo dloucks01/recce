@@ -230,6 +230,13 @@ class Domain:
     # Fine-grained Password Settings Objects (PSOs). Weaker settings for a
     # named group = high-priority spray target.
     password_policies: list[dict[str, Any]] = field(default_factory=list)
+    # Resource-Based Constrained Delegation victims. An object with a populated
+    # msDS-AllowedToActOnBehalfOfOtherIdentity attribute already trusts SOME
+    # principal to impersonate ANY user against it via S4U2Proxy. The presence
+    # itself is the discovery signal; parsing the SDDL to name the trusted-from
+    # principal is best-effort. Each entry: {name, kind (computer|user),
+    # trusted_from (list of SIDs / SDDL fragments), attr_len}.
+    rbcd_victims: list[dict[str, Any]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

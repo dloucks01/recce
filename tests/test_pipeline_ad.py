@@ -529,6 +529,60 @@ class LdapTest(unittest.TestCase):
         finally:
             srv.shutdown()
 
+    def test_rbcd_victim_surfaces_as_a_quick_win_row(self):
+        """Any object with a populated msDS-AllowedToActOnBehalf... blob is a
+        S4U2Proxy target - full compromise if the attacker controls (or can add)
+        the trusted-from principal. It must land in quick_wins with the trusted
+        SID(s) named where recce can extract them."""
+        from recce import ad
+        from recce.core.models import Host, Domain
+        dc = Host(ip="10.0.0.10", roles=["Domain Controller"])
+        dom = Domain(name="CORP.LOCAL")
+        dom.rbcd_victims = [
+            {"name": "FILESRV01", "kind": "computer",
+             "trusted_from": ["S-1-5-21-1111-2222-3333-1104"], "attr_len": 116},
+            {"name": "svc_delegated", "kind": "user",
+             "trusted_from": [], "attr_len": 48},
+        ]
+        dc.domains = [dom]
+        rbcd_rows = [r for r in ad.quick_wins([dc])
+                     if r["category"].startswith("RBCD")]
+        assert len(rbcd_rows) == 2
+        computer_row = next(r for r in rbcd_rows if "FILESRV01" in r["target"])
+        assert "computer" in computer_row["target"]
+        assert "1104" in computer_row["detail"]
+        # An entry with no extracted SID falls back to the blob-length hint,
+        # so a malformed SD still produces a usable row.
+        user_row = next(r for r in rbcd_rows if "svc_delegated" in r["target"])
+        assert "48B" in user_row["detail"]
+
+    def test_sids_in_sd_scan_finds_domain_sids_and_ignores_noise(self):
+        """The scanner walks bytes rather than parsing an SD; verify it picks a
+        real S-1-5-21-... SID out of a blob and does not confuse random bytes."""
+        from recce.ad import _sids_in_sd
+        import struct
+        # SID: revision(1)=1, subauth_count(1)=5, authority(6)=NT_AUTHORITY(5),
+        # 5 x uint32 LE subauths = S-1-5-21-100-200-300-1104
+        sid_blob = (b"\x01\x05" + (5).to_bytes(6, "big")
+                    + struct.pack("<I", 21)
+                    + struct.pack("<I", 100)
+                    + struct.pack("<I", 200)
+                    + struct.pack("<I", 300)
+                    + struct.pack("<I", 1104))
+        found = _sids_in_sd(b"\x00" * 8 + sid_blob + b"\xff" * 8)
+        assert "S-1-5-21-100-200-300-1104" in found
+        assert _sids_in_sd(b"") == [] and _sids_in_sd(b"\x00" * 20) == []
+
+    def test_adcs_esc_map_includes_esc16(self):
+        """ESC16 is the CA-global variant of the security-extension bypass -
+        reachable through ANY enrollable template, not just the ESC9 one."""
+        from recce.ad.adcs import _ESC
+        assert "ESC16" in _ESC
+        sev, title, cmd, remediation = _ESC["ESC16"]
+        assert sev == "critical"
+        assert "SID" in title or "security extension" in title.lower()
+        assert "certipy" in cmd.lower()
+
     def test_authenticated_accounts_feed_ad_quick_wins(self):
         from recce import ad
         from recce.services import ldap as L

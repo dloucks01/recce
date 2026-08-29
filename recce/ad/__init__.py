@@ -283,6 +283,17 @@ def quick_wins(hosts: list[Host]) -> list[dict]:
                     f"applies_to={', '.join(pso.get('applies_to') or []) or '-'}",
                     "PSOs relax password policy for specific groups. Groups "
                     "with weak PSO settings are priority spray targets.")
+            for victim in getattr(dom, "rbcd_victims", None) or []:
+                sids = victim.get("trusted_from") or []
+                add("RBCD victim (msDS-AllowedToActOnBehalf...)",
+                    f"{key}\\{victim.get('name','?')} ({victim.get('kind','?')})",
+                    "trusted from: " + (", ".join(sids[:3]) if sids
+                                        else f"SDDL blob {victim.get('attr_len',0)}B"),
+                    "This object trusts another principal to impersonate ANY user "
+                    "against it via S4U2Proxy. If you control the trusted-from "
+                    "principal (or can add a computer account and get RBCD "
+                    "written), S4U2Self -> S4U2Proxy yields a TGS as arbitrary "
+                    "user - domain admin included. Full compromise of this host.")
             for trust in getattr(dom, "trusts", None) or []:
                 add("Trust relationship",
                     f"{key} → {trust.get('name', '?')}",
@@ -383,6 +394,77 @@ def _uac_flags(value: int) -> list[str]:
 
 def _func_level(val: str) -> str:
     return _FUNC_LEVEL.get(str(val), str(val))
+
+
+# --- RBCD helpers -------------------------------------------------------------
+# The wire attribute msDS-AllowedToActOnBehalfOfOtherIdentity is a Windows
+# Security Descriptor in the standard SDDL/relative-security-descriptor binary
+# format. Parsing every ACE requires a full SD walker that is not worth writing
+# by hand for what is essentially "is this attribute populated on an object that
+# should not have it". The presence-alone signal is what turns into a finding;
+# any additional SID extraction is best-effort and never blocks the check.
+
+# S-1-5-21-<domain>-<rid>: the shape every domain-local SID takes on the wire.
+# A fixed-length S-1-5-XX-XX-XX-XX-XX with 4 subauths and a trailing RID.
+def _sids_in_sd(blob: bytes) -> list[str]:
+    """Best-effort scan for S-1-5-21-... SIDs inside a SD binary blob.
+
+    Windows SIDs on the wire are: rev(1) + subauth_count(1) + authority(6) +
+    subauths(4*count). Scan for that shape rather than walking every ACE, so a
+    malformed SD does not crash the enumeration - the finding value is the
+    presence of RBCD, not the exact principal list.
+    """
+    out: list[str] = []
+    if not isinstance(blob, (bytes, bytearray)) or len(blob) < 12:
+        return out
+    b = bytes(blob)
+    for i in range(len(b) - 12):
+        if b[i] != 0x01:                        # SID revision
+            continue
+        n = b[i + 1]
+        if not (1 <= n <= 15):
+            continue
+        end = i + 8 + 4 * n
+        if end > len(b):
+            continue
+        try:
+            authority = int.from_bytes(b[i + 2:i + 8], "big")
+        except ValueError:
+            continue
+        if authority != 5:                      # NT_AUTHORITY
+            continue
+        parts = [str(int.from_bytes(b[i + 8 + 4 * j:i + 12 + 4 * j], "little"))
+                 for j in range(n)]
+        sid = f"S-1-{authority}-" + "-".join(parts)
+        # Domain-object SIDs (S-1-5-21-*), well-known ones (S-1-5-32-*), or
+        # a computer/user SID all look identical here; keep any that name a
+        # principal that could plausibly be the delegated-from party.
+        if sid not in out and (parts[0] in ("21", "32") or len(parts) >= 4):
+            out.append(sid)
+    return out
+
+
+def _apply_rbcd(dom: Domain, dc_ip: str, entries, kind: str) -> None:
+    """Extract RBCD victims from a search-result set.
+
+    `entries` is the ldap3 conn.entries list; each entry may carry a populated
+    msDS-AllowedToActOnBehalfOfOtherIdentity attribute. We record every one:
+    the attribute existing at all is the finding.
+    """
+    for e in entries:
+        if "msDS-AllowedToActOnBehalfOfOtherIdentity" not in e:
+            continue
+        blob = e["msDS-AllowedToActOnBehalfOfOtherIdentity"].value
+        if not blob:
+            continue
+        raw = bytes(blob) if not isinstance(blob, (bytes, bytearray)) else blob
+        name = str(e.sAMAccountName.value or "?").rstrip("$") \
+            if "sAMAccountName" in e else "?"
+        dom.rbcd_victims.append({
+            "name": name, "kind": kind,
+            "trusted_from": _sids_in_sd(raw),
+            "attr_len": len(raw),
+        })
 
 
 def ldap_enumerate(
@@ -488,9 +570,23 @@ def _enum_ldap3(
                     search_scope=SUBTREE,
                     attributes=["sAMAccountName", "userAccountControl",
                                 "servicePrincipalName", "adminCount", "memberOf",
-                                "description", "pwdLastSet"],
+                                "description", "pwdLastSet",
+                                # RBCD victim marker: any principal whose SD is
+                                # written into a target's msDS-AllowedToAct*
+                                # attribute is trusted to impersonate ANY user
+                                # against that target via S4U2Proxy - the
+                                # standard "attacker adds computer + writes
+                                # RBCD -> full compromise of the target" chain.
+                                "msDS-AllowedToActOnBehalfOfOtherIdentity"],
                     paged_size=500)
         accounts += _accounts_from_entries(conn, dc_ip, domain, kind="user")
+        # RBCD victims are usually computers, but a user account with the
+        # attribute is still a valid S4U2Proxy target (a service account whose
+        # delegation was configured through an RBCD write).
+        try:
+            _apply_rbcd(dom, dc_ip, conn.entries, kind="user")
+        except Exception as e:                # noqa: BLE001
+            dom.enum_errors.append(f"rbcd_user: {e}")
     except Exception as e:
         dom.enum_errors.append(str(e))
 
@@ -502,9 +598,23 @@ def _enum_ldap3(
                                 # LAPS: legacy attr (ms-Mcs-AdmPwd) + new attr
                                 # (msLAPS-Password, Windows LAPS from Server 2019+).
                                 "ms-Mcs-AdmPwd", "msLAPS-Password",
-                                "msLAPS-EncryptedPassword"],
+                                "msLAPS-EncryptedPassword",
+                                # RBCD victim marker on computers (this is where
+                                # RBCD attacks usually LAND - a machine account
+                                # whose msDS-AllowedToActOnBehalf... has been
+                                # written to trust an attacker-controlled
+                                # principal is an S4U2Proxy target).
+                                "msDS-AllowedToActOnBehalfOfOtherIdentity"],
                     paged_size=500)
         accounts += _accounts_from_entries(conn, dc_ip, domain, kind="computer")
+        # RBCD victims: any object with a populated msDS-AllowedToAct... blob
+        # already trusts SOMEONE to impersonate against it. The presence itself
+        # is the discovery signal; parsing the SDDL to name the delegated-from
+        # principal is a second pass.
+        try:
+            _apply_rbcd(dom, dc_ip, conn.entries, kind="computer")
+        except Exception as e:                # noqa: BLE001 — never break enum
+            dom.enum_errors.append(f"rbcd_computer: {e}")
         # LAPS-readable tally: any computer where the CURRENT bind can read
         # ms-Mcs-AdmPwd or msLAPS-Password is a bug (that attribute should be
         # readable only to specific privileged groups). One readable = the

