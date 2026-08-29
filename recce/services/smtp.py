@@ -10,6 +10,7 @@ Findings fold into the severity totals / Vulnerabilities sheet (source="smtp").
 """
 from __future__ import annotations
 
+import re
 import smtplib
 import socket
 
@@ -225,6 +226,259 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"openssl s_client -starttls smtp -connect {h.ip}:{p.portid}",
                     "Offer/require STARTTLS; require TLS before AUTH.",
                     ["CWE-319"], kind="smtp_cleartext"))
+            # AUTH mech deep-parse: RFC 4954 §4 forbids AUTH before STARTTLS
+            # (credential-in-cleartext), and RFC 6409 §4.3 sharpens that on
+            # the submission port (587). Also flag deprecated / offline-
+            # crackable mechs, and info-disclosure-y NTLM/GSSAPI challenges.
+            mechs = _split_auth_mechs(pr.get("auth", ""))
+            if mechs and not pr.get("starttls"):
+                sev = "high" if p.portid == 587 else "medium"
+                rfc = ("RFC 6409 §4.3" if p.portid == 587
+                       else "RFC 4954 §4")
+                out.append(_finding(
+                    sev, "SMTP AUTH offered without STARTTLS", tgt,
+                    f"The server advertises AUTH mechanisms ({', '.join(mechs)}) "
+                    f"before offering STARTTLS. Credentials submitted here cross "
+                    f"the wire in cleartext, violating {rfc}.",
+                    f"openssl s_client -starttls smtp -connect {h.ip}:{p.portid}",
+                    "Require STARTTLS and only advertise AUTH after a TLS session "
+                    "is established (smtpd_tls_auth_only = yes on Postfix; "
+                    "REQUIRETLS on submission).",
+                    ["CWE-319", "CWE-522"], kind="smtp_auth_before_tls"))
+            weak = [m for m in mechs if m in _WEAK_AUTH_MECHS
+                    and m not in ("PLAIN", "LOGIN")]
+            if weak:
+                out.append(_finding(
+                    "low", "SMTP AUTH offers deprecated challenge mechs", tgt,
+                    f"AUTH mechanisms advertised include {', '.join(weak)}. "
+                    f"CRAM-MD5 and DIGEST-MD5 use MD5-based challenge/response "
+                    f"whose captured (challenge, response) pair is offline-"
+                    f"crackable with a modest wordlist.",
+                    f"openssl s_client -starttls smtp -connect {h.ip}:{p.portid}",
+                    "Disable CRAM-MD5 / DIGEST-MD5; require SCRAM-SHA-256 or "
+                    "AUTH PLAIN over TLS.",
+                    ["CWE-327", "CWE-916"], kind="smtp_auth_weak_mech"))
+            leaky = [m for m in mechs if m in _LEAKY_AUTH_MECHS]
+            if leaky:
+                out.append(_finding(
+                    "medium", "SMTP AUTH advertises NTLM/GSSAPI (info-disclosure primitive)",
+                    tgt,
+                    f"AUTH {', '.join(leaky)} is advertised. Sending an NTLM "
+                    f"Type-1 unsolicited returns a Type-2 CHALLENGE_MESSAGE whose "
+                    f"AV pairs leak NetBIOS computer/domain, DNS computer/domain, "
+                    f"forest, and OS build with no authentication required.",
+                    f"nmap -p{p.portid} --script smtp-ntlm-info {h.ip}",
+                    "Restrict AUTH NTLM to internal network segments; prefer AUTH "
+                    "PLAIN/EXTERNAL over TLS.",
+                    ["CWE-200"], kind="smtp_auth_ntlm_leak"))
+            # Banner fingerprint -> product + version-gated CVEs.
+            fp = pr.get("fingerprint") or {}
+            for c in (fp.get("cves") or []):
+                out.append(_finding(
+                    c.get("severity", "high"), c["title"], tgt,
+                    f"Banner identifies {fp.get('product','')} "
+                    f"{fp.get('version','')}. {c['id']} affects this version "
+                    f"per vendor advisory.",
+                    f"searchsploit {fp.get('product','').lower()} "
+                    f"{fp.get('version','')}",
+                    c.get("rem", "Apply vendor patch."),
+                    c.get("cwes", []) + [c["id"]], kind="smtp_cve"))
+            # EXPN alias expansion: a single 250 body naming N mailboxes on
+            # `all`, `everyone`, `staff` etc — the highest-yield single-shot
+            # user-roster leak on legacy /etc/aliases-driven MTAs.
+            ea = pr.get("expn_aliases") or {}
+            if ea:
+                lines = []
+                total = 0
+                for alias, members in sorted(ea.items()):
+                    lines.append(f"EXPN {alias} -> {len(members)}: "
+                                 f"{', '.join(members[:8])}"
+                                 + (" ..." if len(members) > 8 else ""))
+                    total += len(members)
+                out.append(_finding(
+                    "medium",
+                    "SMTP EXPN alias expansion leaks user roster",
+                    tgt,
+                    f"EXPN on {len(ea)} well-known list alias(es) expanded to "
+                    f"{total} member address(es). "
+                    + " | ".join(lines) + ". "
+                    "Each member is now a spray target across SSH / SMB / "
+                    "web-app / mail-transport logins.",
+                    f"for a in all everyone staff users; do echo EXPN $a "
+                    f"| nc {h.ip} {p.portid}; done",
+                    "Disable EXPN (disable_vrfy_command = yes on Postfix "
+                    "also blocks EXPN; smtpd_discard_ehlo_keywords = expn), "
+                    "or return 550 for list aliases.",
+                    ["CWE-200"], kind="smtp_expn_alias_leak"))
+    return out
+
+
+# Well-known list aliases that historically expand to full user rosters in
+# one shot on Sendmail/qmail/Postfix with an /etc/aliases file. RFC 5321
+# §3.5.2 allows EXPN to return a list of mailbox addresses.
+_EXPN_ALIASES = ("all", "everyone", "staff", "users", "root", "wheel",
+                 "postmaster", "abuse", "mailer-daemon")
+
+# EXPN reply body: continuation lines begin with `250-`, final `250 `.
+# smtplib.docmd() concatenates the reply body across lines with `\n`, so we
+# just split and extract each addr/local name.
+_EXPN_ADDR = re.compile(r"([A-Za-z0-9._%+\-]+(?:@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})?)")
+
+# AUTH mechs the SASL/RFC record marks as deprecated or offline-crackable
+# once the challenge/response is captured. Anonymous/plain-without-TLS is
+# handled by the AUTH-before-STARTTLS check separately.
+_WEAK_AUTH_MECHS = ("CRAM-MD5", "DIGEST-MD5", "LOGIN", "PLAIN")
+# Mechs whose challenge alone leaks NetBIOS/DNS/OS info (MS-NLMP §2.2.1.2).
+_LEAKY_AUTH_MECHS = ("NTLM", "GSSAPI")
+
+
+def _split_auth_mechs(auth_str: str) -> list[str]:
+    """EHLO's `auth` feature is a space-separated (sometimes `=`-prefixed)
+    mech list per RFC 4954 §3. Some servers use commas; some prefix `=`."""
+    s = (auth_str or "").strip()
+    if not s:
+        return []
+    s = s.lstrip("=").replace(",", " ")
+    return [m.upper() for m in s.split() if m]
+
+
+# Fingerprint patterns keyed to banner substrings that appear in the first
+# 220 line of well-known MTAs. Version regexes are conservative — only match
+# a real `x.y[.z]` — because a spurious digit sequence would put us over the
+# CVE gate.
+_EXIM_RE = re.compile(r"\bExim\s+(\d+\.\d+(?:\.\d+)?)", re.I)
+_SENDMAIL_RE = re.compile(r"\bSendmail\s+(\d+\.\d+(?:\.\d+)?)", re.I)
+_EXCH_RE = re.compile(r"Microsoft ESMTP MAIL Service.*?(\d+\.\d+\.\d+(?:\.\d+)?)", re.I)
+
+
+def _ver_tuple(v: str) -> tuple:
+    out: list[int] = []
+    for p in v.split("."):
+        try:
+            out.append(int(p))
+        except ValueError:
+            out.append(0)
+    return tuple(out)
+
+
+def _fingerprint(banner: str) -> dict:
+    """Parse a captured 220-line for product + version + version-gated CVEs.
+
+    Returns {product, version, cves:[{id, cwes, severity, title, rem}]}.
+    A CVE is emitted ONLY when the version was definitively parsed AND is
+    at or below the fixed-in threshold; else the caller still gets a bare
+    product/version fingerprint with no CVE claim.
+    """
+    b = banner or ""
+    out: dict = {"product": "", "version": "", "cves": []}
+    m = _EXIM_RE.search(b)
+    if m:
+        v = m.group(1)
+        out["product"], out["version"] = "Exim", v
+        vt = _ver_tuple(v)
+        if vt and vt < (4, 92):
+            out["cves"].append({
+                "id": "CVE-2019-10149", "cwes": ["CWE-77"],
+                "severity": "critical",
+                "title": "Exim <4.92 remote code execution (CVE-2019-10149)",
+                "rem": "Upgrade Exim to 4.92 or later."})
+        if vt and vt < (4, 94, 2):
+            out["cves"].append({
+                "id": "CVE-2020-28017", "cwes": ["CWE-787", "CWE-190"],
+                "severity": "critical",
+                "title": "Exim <4.94.2 '21Nails' memory-corruption cluster",
+                "rem": "Upgrade Exim to 4.94.2 or later (21Nails patchset)."})
+        if vt and vt < (4, 97, 1):
+            out["cves"].append({
+                "id": "CVE-2024-39929", "cwes": ["CWE-451"],
+                "severity": "high",
+                "title": "Exim <4.97.1 MIME filter bypass (CVE-2024-39929)",
+                "rem": "Upgrade Exim to 4.97.1 or later."})
+        return out
+    m = _SENDMAIL_RE.search(b)
+    if m:
+        out["product"], out["version"] = "Sendmail", m.group(1)
+        return out
+    m = _EXCH_RE.search(b)
+    if m:
+        out["product"], out["version"] = "Microsoft Exchange", m.group(1)
+        return out
+    # Product-only fingerprints (no version -> no CVE gate).
+    for needle, prod in (("Postfix", "Postfix"), ("Zimbra", "Zimbra"),
+                         ("IronPort", "Cisco IronPort"), ("qmail", "qmail"),
+                         ("Microsoft ESMTP", "Microsoft Exchange")):
+        if needle.lower() in b.lower():
+            out["product"] = prod
+            return out
+    return out
+
+
+def _parse_expn_members(msg: bytes | str) -> list[str]:
+    """Extract the member addresses from an EXPN reply body."""
+    text = msg.decode("utf-8", "replace") if isinstance(msg, bytes) else str(msg)
+    members: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # smtplib strips the leading `250-/250 ` code prefix already; each
+        # line body is of the form `Full Name <addr@host>` or `addr@host`
+        # or a bare local name. Pick the tightest addr-like token per line.
+        m = re.search(r"<([^>]+)>", line)
+        if m:
+            members.append(m.group(1).strip())
+            continue
+        # Bare token: grab the last address-shaped run on the line.
+        for tok in reversed(_EXPN_ADDR.findall(line)):
+            if tok and not tok.isdigit():
+                members.append(tok)
+                break
+    # Dedup preserving order, case-insensitive.
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for m in members:
+        k = m.lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(m)
+    return uniq
+
+
+def expn_aliases(ip: str, port: int, timeout: float = _TIMEOUT,
+                 aliases: tuple[str, ...] | list[str] | None = None) -> dict:
+    """Probe well-known list aliases via EXPN; return {alias: [members]}.
+
+    Only aliases that yielded ≥1 member (250 response with a parsable
+    address body) are included. Skips silently on transport errors."""
+    aliases = tuple(aliases) if aliases is not None else _EXPN_ALIASES
+    out: dict[str, list[str]] = {}
+    try:
+        cls = smtplib.SMTP_SSL if port == 465 else smtplib.SMTP
+        srv = cls(timeout=timeout)
+        srv.connect(ip, port)
+    except (OSError, smtplib.SMTPException):
+        return out
+    try:
+        srv.ehlo("recce-expn.local")
+        for a in aliases:
+            try:
+                code, msg = srv.docmd("EXPN", a)
+            except smtplib.SMTPException:
+                continue
+            if code != 250:
+                continue
+            members = _parse_expn_members(msg)
+            if members:
+                out[a] = members
+        try:
+            srv.quit()
+        except smtplib.SMTPException:
+            srv.close()
+    except (OSError, smtplib.SMTPException):
+        try:
+            srv.close()
+        except Exception:
+            pass
     return out
 
 
@@ -269,6 +523,8 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 # A dead port shouldn't burn the extra commands.
                 if pr.get("reachable") and pr.get("esmtp"):
                     pr["enum"] = enum_users(t["ip"], t["port"], users=enum_list)
+                    pr["expn_aliases"] = expn_aliases(t["ip"], t["port"])
+                    pr["fingerprint"] = _fingerprint(pr.get("banner", ""))
                     # Cross-transport wire: every VRFY / EXPN / RCPT hit lands
                     # on the host as a mail-kind Account so imap.py / pop3.py
                     # can retry it via known_mail_accounts.
