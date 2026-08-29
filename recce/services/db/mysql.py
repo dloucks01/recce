@@ -116,6 +116,80 @@ def _native_scramble(password: str, salt: bytes) -> bytes:
     return bytes(a ^ b for a, b in zip(p1, p3))
 
 
+def _sha256_scramble(password: str, salt: bytes) -> bytes:
+    """caching_sha2_password: SHA256(pw) XOR SHA256(SHA256(SHA256(pw)) + salt).
+    Empty password -> empty scramble (server compares against stored empty auth string)."""
+    if not password:
+        return b""
+    p1 = hashlib.sha256(password.encode()).digest()
+    p2 = hashlib.sha256(p1).digest()
+    p3 = hashlib.sha256(p2 + salt[:20]).digest()
+    return bytes(a ^ b for a, b in zip(p1, p3))
+
+
+def _auth_switch_response(plugin: str, password: str, salt: bytes) -> bytes | None:
+    """Build the AuthSwitchResponse body for a server-requested plugin.
+    Returns None when the plugin needs cryptographic material we don't carry
+    (sha256_password full-auth / ed25519) — the caller then abandons cleanly
+    rather than sending garbage."""
+    plugin = (plugin or "").lower()
+    if plugin in ("mysql_native_password", ""):
+        return _native_scramble(password, salt)
+    if plugin == "caching_sha2_password":
+        return _sha256_scramble(password, salt)
+    if plugin == "mysql_clear_password":
+        # PAM/LDAP: cleartext password terminated with NUL. Empty password is a
+        # bare NUL. Only safe over TLS — recce sends it because the alternative
+        # is missing every PAM-backed empty-password root.
+        return password.encode() + b"\x00"
+    # sha256_password (full auth needs RSA-OAEP), ed25519 (MariaDB) — unsupported.
+    return None
+
+
+def _finish_auth(sock: socket.socket, reply: bytes, seq: int,
+                 password: str | None) -> bytes | None:
+    """Drive the post-HandshakeResponse conversation to a terminal packet.
+
+    Handles the two 8.0-era branches recce previously treated as opaque:
+      * 0xFE AuthSwitchRequest — server asks for a different plugin; we
+        re-scramble with the correct algorithm (caching_sha2 / native /
+        mysql_clear) against the new salt and reply.
+      * 0x01 MoreData for caching_sha2_password —
+          0x01 0x03 = fast_auth_success (an OK packet follows),
+          0x01 0x04 = perform_full_authentication (needs RSA; we bail).
+
+    Returns the terminal packet payload (OK / ERR / whatever the server
+    finally sends) or None if we could not follow the negotiation."""
+    if reply is None:
+        return None
+    # AuthSwitchRequest: 0xFE + plugin_name\0 + salt\0
+    if reply[:1] == b"\xFE" and len(reply) > 1:
+        i = reply.find(b"\x00", 1)
+        if i < 0:
+            return None
+        plugin = reply[1:i].decode("ascii", "replace")
+        new_salt = reply[i + 1:].rstrip(b"\x00")[:20]
+        resp = _auth_switch_response(plugin, password or "", new_salt)
+        if resp is None:
+            return None
+        sock.sendall(struct.pack("<I", len(resp))[:3] + bytes([seq + 1]) + resp)
+        reply, seq = _read_packet(sock)
+        if reply is None:
+            return None
+    # caching_sha2_password MoreData: 0x01 <status>
+    if reply[:1] == b"\x01" and len(reply) >= 2:
+        status = reply[1]
+        if status == 0x03:                          # fast_auth_success
+            reply, seq = _read_packet(sock)
+        else:
+            # 0x04 = perform_full_authentication requires the server's RSA
+            # public key over an untrusted channel; we can't complete it
+            # without a real crypto dep. Return the MoreData as-is so the
+            # caller treats it as "auth negotiation required".
+            return reply
+    return reply
+
+
 def _handshake_response_auth(user: str, password: str, salt: bytes) -> bytes:
     """HandshakeResponse41 carrying a mysql_native_password scramble for `password`."""
     token = _native_scramble(password, salt)
@@ -146,7 +220,9 @@ def _login(ip: str, port: int, user: str, password: str | None, timeout: float):
         else:
             resp = _handshake_response(user)
         sock.sendall(struct.pack("<I", len(resp))[:3] + bytes([seq + 1]) + resp)
-        reply, _ = _read_packet(sock)
+        reply, reply_seq = _read_packet(sock)
+        # Follow AuthSwitchRequest / caching_sha2 MoreData before deciding.
+        reply = _finish_auth(sock, reply, reply_seq, password)
         if not reply or reply[0] != 0x00:        # not an OK packet
             sock.close()
             return None
@@ -199,7 +275,13 @@ def _login_empty(ip: str, port: int, user: str, timeout: float) -> dict:
         res["ssl"], res["auth_plugin"] = g["ssl"], g["auth_plugin"]
         resp = _handshake_response(user)
         sock.sendall(struct.pack("<I", len(resp))[:3] + bytes([seq + 1]) + resp)
-        reply, _ = _read_packet(sock)
+        reply, reply_seq = _read_packet(sock)
+        # Follow AuthSwitchRequest to caching_sha2_password (the MySQL 8.0
+        # default) or mysql_clear_password (PAM) before deciding — an empty
+        # password answers correctly through both paths. When we can't
+        # follow (sha256_password full-auth / ed25519), _finish_auth returns
+        # a MoreData packet and we fall through to "auth negotiation required".
+        reply = _finish_auth(sock, reply, reply_seq, "")
         if not reply:
             res["err"] = "no login reply"
         elif reply[0] == 0x00:                             # OK packet
@@ -207,7 +289,7 @@ def _login_empty(ip: str, port: int, user: str, timeout: float) -> dict:
         elif reply[0] == 0xFF:                             # ERR packet
             code = struct.unpack("<H", reply[1:3])[0] if len(reply) >= 3 else 0
             res["err"] = f"ERR {code}"
-        else:                                              # AuthSwitch(0xFE)/MoreData(0x01)
+        else:                                              # unresolved AuthSwitch/MoreData
             res["err"] = "auth negotiation required"
         return res
     except OSError as e:
@@ -300,7 +382,8 @@ def loot(ip: str, port: int, user: str = "root", timeout: float = _TIMEOUT,
     (password HASHES), the database list, and the connected account's FILE / privesc
     capability (FILE grant, secure_file_priv, plugin_dir). SELECT only."""
     out = {"users": [], "databases": [], "hashes": [], "current_user": "",
-           "file_priv": False, "secure_file_priv": None, "plugin_dir": "", "os": ""}
+           "file_priv": False, "secure_file_priv": None, "plugin_dir": "", "os": "",
+           "loaded_udfs": []}
     sock = _login(ip, port, user, password, timeout)
     if sock is None:
         return out
@@ -333,6 +416,14 @@ def loot(ip: str, port: int, user: str = "root", timeout: float = _TIMEOUT,
         grants = _query(sock, "SHOW GRANTS")
         blob = " ".join(g[0] for g in grants if g and g[0]).upper()
         out["file_priv"] = ("FILE" in blob) or ("ALL PRIVILEGES" in blob and "*.*" in blob)
+        # mysql.func — ALREADY-LOADED UDFs. sys_exec / sys_eval / lib_mysqludf_sys
+        # give OS command execution as the mysql user without any FILE-priv chain
+        # or writable plugin_dir. One SELECT surfaces it. Table may not exist on
+        # 8.0 with dynamic loading only — _query() degrades to [] on ERR.
+        for r in _query(sock, "SELECT name, dl FROM mysql.func"):
+            name, dl = (r + [None] * 2)[:2]
+            if name:
+                out["loaded_udfs"].append({"name": name, "dl": dl or ""})
     except OSError:
         pass
     finally:
@@ -407,6 +498,108 @@ def mysql_targets(hosts: list[Host]) -> list[dict]:
 
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
     return _base_finding("mysql", sev, title, target, detail, cmd, rem, cwes, kind)
+
+
+# UDF names universally packaged with lib_mysqludf_sys (raptor's) — presence of
+# any one of these in mysql.func = instant OS command execution as the mysql
+# service account, no plugin-dir writes needed. Case-insensitive.
+_UDF_RCE_NAMES = frozenset({"sys_exec", "sys_eval", "sys_get", "sys_set",
+                            "do_system", "exec_cmd", "cmdshell"})
+
+
+# Version → CVE map. Each entry: (flavor, (major, minor, patch)-INCLUSIVE ceiling,
+# CVE id, severity, blurb). A server at or BELOW the ceiling (same flavor) trips
+# the finding. Airgap-safe — no external CVE lookup, drawn from Oracle Critical
+# Patch Updates + MariaDB advisories. Kept intentionally short and high-confidence.
+_MYSQL_CVE_MAP: list[tuple[str, tuple[int, int, int], str, str, str]] = [
+    # CVE-2012-2122 — memcmp auth-bypass (glibc-dependent). MySQL <5.1.62 / <5.5.23
+    # / <5.6.6; MariaDB shared the fork so ceilings match the era.
+    ("mysql", (5, 1, 61), "CVE-2012-2122", "critical",
+     "memcmp() auth-bypass — one-in-256 chance any wrong password logs in as any "
+     "user on a vulnerable glibc build. Fixed in 5.1.62 / 5.5.23 / 5.6.6."),
+    ("mysql", (5, 5, 22), "CVE-2012-2122", "critical",
+     "memcmp() auth-bypass — one-in-256 chance any wrong password logs in as any "
+     "user on a vulnerable glibc build. Fixed in 5.5.23."),
+    ("mysql", (5, 6, 5), "CVE-2012-2122", "critical",
+     "memcmp() auth-bypass — one-in-256 chance any wrong password logs in as any "
+     "user on a vulnerable glibc build. Fixed in 5.6.6."),
+    ("mariadb", (5, 5, 22), "CVE-2012-2122", "critical",
+     "memcmp() auth-bypass in MariaDB fork of MySQL — one-in-256 chance any wrong "
+     "password logs in as any user on a vulnerable glibc build. Fixed in 5.5.23."),
+    # CVE-2016-6662 — mysqld_safe MALLOC_LIB privilege escalation to root via
+    # log config file. Fixed in 5.5.52 / 5.6.33 / 5.7.15.
+    ("mysql", (5, 5, 51), "CVE-2016-6662", "high",
+     "mysqld_safe MALLOC_LIB race — a low-priv DB account with FILE and log-config "
+     "writes escalates to root. Fixed in 5.5.52."),
+    ("mysql", (5, 6, 32), "CVE-2016-6662", "high",
+     "mysqld_safe MALLOC_LIB race — a low-priv DB account with FILE and log-config "
+     "writes escalates to root. Fixed in 5.6.33."),
+    ("mysql", (5, 7, 14), "CVE-2016-6662", "high",
+     "mysqld_safe MALLOC_LIB race — a low-priv DB account with FILE and log-config "
+     "writes escalates to root. Fixed in 5.7.15."),
+    # CVE-2021-2154 — partitioning DoS (post-auth). MySQL 5.7 <5.7.34, 8.0 <8.0.23.
+    ("mysql", (5, 7, 33), "CVE-2021-2154", "medium",
+     "Server: DML partitioning DoS — a post-auth attacker crashes the server. "
+     "Fixed in 5.7.34."),
+    ("mysql", (8, 0, 22), "CVE-2021-2154", "medium",
+     "Server: DML partitioning DoS — a post-auth attacker crashes the server. "
+     "Fixed in 8.0.23."),
+]
+
+
+def _parse_mysql_version(v: str) -> tuple[str, tuple[int, int, int]] | None:
+    """Return (flavor, (major, minor, patch)) or None. Handles MariaDB's
+    compatibility banner '5.5.5-10.6.7-MariaDB-…' (5.5.5 is a masquerade,
+    real version follows). Returns None on unparseable to skip CVE emission
+    — a false CVE flag is worse than a missed one."""
+    if not v:
+        return None
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)[^-]*-MariaDB", v)
+    if m:
+        try:
+            return "mariadb", (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", v)
+    if not m:
+        return None
+    try:
+        return "mysql", (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def _cve_findings(tgt: str, ver_str: str) -> list[dict]:
+    """Version → CVE correlation. Silent when the version string couldn't be
+    parsed. Deduplicates by CVE id (three separate entries key one bypass)."""
+    parsed = _parse_mysql_version(ver_str)
+    if not parsed:
+        return []
+    flavor, ver = parsed
+    seen: set[str] = set()
+    out: list[dict] = []
+    for cve_flavor, ceiling, cve, sev, blurb in _MYSQL_CVE_MAP:
+        if cve_flavor != flavor:
+            continue
+        # Compare only within the same (major, minor) train — a 5.6 ceiling never
+        # applies to an 8.0 server even though the tuple compares smaller.
+        if ver[:2] != ceiling[:2]:
+            continue
+        if ver > ceiling:
+            continue
+        if cve in seen:
+            continue
+        seen.add(cve)
+        pretty = ".".join(str(x) for x in ver)
+        kind = f"mysql_cve_{cve.lower().replace('-', '_')}"
+        out.append(_finding(
+            sev, f"{flavor.title()} {pretty} vulnerable to {cve}", tgt,
+            f"Server reports version {pretty} ({flavor}), at or below the "
+            f"vulnerable ceiling for {cve}. {blurb}",
+            f"# banner-driven; verify against the vendor advisory for {cve}",
+            f"Upgrade to a patched minor release addressing {cve}.",
+            ["CWE-1395"], kind=kind))
+    return out
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -545,6 +738,47 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Encrypt sensitive columns; least-privilege the app account; remove "
                     "embedded credentials; restrict network access.",
                     ["CWE-200", "CWE-312"], kind="mysql_datamine"))
+            # Loaded UDFs — mysql.func — that provide arbitrary command execution.
+            # Presence of sys_exec / sys_eval / lib_mysqludf_sys is INSTANT RCE as
+            # the mysql service account: no FILE priv, no writable plugin_dir needed.
+            udfs = lt.get("loaded_udfs") or []
+            rce_udfs = [u for u in udfs
+                        if (u.get("name") or "").lower() in _UDF_RCE_NAMES
+                        or "mysqludf_sys" in (u.get("dl") or "").lower()]
+            if rce_udfs:
+                names = ", ".join(f"{u['name']} ({u.get('dl') or '?'})"
+                                  for u in rce_udfs[:6])
+                out.append(_finding(
+                    "critical", "MySQL command-execution UDF already loaded (instant RCE)",
+                    tgt,
+                    "mysql.func lists user-defined function(s) that hand OS command "
+                    f"execution to any account that can CALL them: {names}. This "
+                    "bypasses the FILE-privilege / writable-plugin_dir chain "
+                    "entirely — a low-priv DB account with EXECUTE runs shell "
+                    "commands as the mysql service user.",
+                    f"mysql -h {h.ip} -P {p.portid} -u <u> -p -e "
+                    "\"SELECT sys_eval('id')\"   # confirms RCE (ROE)",
+                    "DROP FUNCTION for every dangerous UDF (sys_exec, sys_eval, "
+                    "cmdshell, do_system); remove the shared library from plugin_dir; "
+                    "revoke CREATE/DROP FUNCTION from application accounts; run "
+                    "mysqld as an unprivileged, chrooted user.",
+                    ["CWE-250", "CWE-269"], kind="mysql_udf_loaded"))
+            elif udfs:
+                # Non-RCE UDFs still worth surfacing as a lower-severity inventory.
+                names = ", ".join((u.get("name") or "?") for u in udfs[:8])
+                out.append(_finding(
+                    "low", "MySQL loaded UDF(s) present (privesc surface)", tgt,
+                    f"mysql.func lists {len(udfs)} loaded UDF(s): {names}. Review "
+                    "the backing shared libraries for known-vulnerable UDFs and "
+                    "confirm none grant shell/file/network primitives.",
+                    f"mysql -h {h.ip} -P {p.portid} -u <u> -p -e "
+                    "\"SELECT name, dl FROM mysql.func\"",
+                    "Audit each UDF against the vendor's signed catalogue; remove "
+                    "unused UDFs; restrict CREATE/DROP FUNCTION to admins.",
+                    ["CWE-250"], kind="mysql_udf_inventory"))
+            # Version → CVE correlation on the already-parsed server_version string.
+            if pr.get("reachable") and pr.get("version"):
+                out.extend(_cve_findings(tgt, pr["version"]))
             # TLS not offered by the server -> credentials + queries cross the wire in
             # cleartext (sniffable / MITM). Only assert it when we actually parsed a
             # greeting (reachable), never as a guess.
