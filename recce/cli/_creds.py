@@ -172,6 +172,16 @@ def cmd_creds(args: argparse.Namespace) -> int:
                   f"{len(kh['by_user'])} user(s): {modes}. "
                   f"Run `hashcat` against loot/*.hash then "
                   f"`recce creds --run` to auto-fold cracks into the spray.")
+        # NTLM relay target file: every non-DC SMB host where signing is
+        # NOT required. Ready for `ntlmrelayx.py -tf <path>`.
+        from ..core.relay_targets import write_relay_targets
+        relay = write_relay_targets(
+            hosts, os.path.join(args.output_dir, "relay-targets.txt"))
+        if relay["count"]:
+            print(f"    [+] {relay['count']} SMB relay target(s) -> "
+                  f"{relay['path']}. Run: "
+                  f"ntlmrelayx.py -tf {relay['path']} -smb2support "
+                  f"(or -socks for interactive).")
         print()
         for line in summary["commands"] or ["  (no sprayable services in scope yet)"]:
             print("  " + line if not line.startswith("#") else "\n  " + line)
