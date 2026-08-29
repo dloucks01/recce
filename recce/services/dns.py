@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import socket
 import struct
+from typing import Any
 
 from ..core.models import Host, Port
 
@@ -72,19 +73,63 @@ def _recvn(s: socket.socket, n: int) -> bytes:
 
 
 def axfr(ip: str, port: int, zone: str, timeout: float = _TIMEOUT) -> dict:
-    """Attempt a zone transfer. Returns {ok, records, rcode}. ok=True means the server
-    answered AXFR with records (NOERROR + answers) - the zone leaked."""
+    """Attempt a zone transfer. Returns {ok, records, rcode, data}.
+    ok=True means the server answered AXFR with records (NOERROR + answers) - the
+    zone leaked.
+
+    `data` is a bucketed parse of the answer section from the FIRST AXFR message
+    (see _bucket_rrs) — names, A/AAAA IPs, CNAME/NS/PTR targets, and MX/SRV
+    tuples. AXFR can span multiple TCP messages (RFC 5936 §2.2); we only walk
+    the first, so `data` is a best-effort SAMPLE, not a full-zone dump — but
+    even a partial name/IP list is a strict superset of the old return value
+    (which discarded the body entirely) and is what downstream scanners need
+    for cross-service pivoting."""
     resp = _tcp_dns(ip, port, _query(zone, _QTYPE_AXFR), timeout)
+    empty = {"names": [], "a": [], "aaaa": [], "cname": [],
+             "ns": [], "ptr": [], "mx": [], "srv": []}
     if not resp or len(resp) < 12:
-        return {"ok": False, "records": 0, "rcode": None}
+        return {"ok": False, "records": 0, "rcode": None, "data": empty}
     _id, flags, qd, an, ns, ar = struct.unpack("!HHHHHH", resp[:12])
     rcode = flags & 0x000F
-    return {"ok": rcode == 0 and an > 0, "records": an, "rcode": rcode}
+    data = empty
+    if rcode == 0 and an > 0:
+        i = _skip_question(resp, 12, qd)
+        rrs, _ = _parse_rrs(resp, i, an)
+        if rrs:
+            data = _bucket_rrs(rrs)
+    return {"ok": rcode == 0 and an > 0, "records": an, "rcode": rcode,
+            "data": data}
 
 
 _QTYPE_NSEC = 47
 _QTYPE_ANY = 255
 _MAX_NSEC_STEPS = 500       # bound: /24-sized zones fit, wildcards can't tarpit us
+# Answer RR types we know how to parse out of AXFR / question responses.
+# Kept minimal — the module only needs the types that carry hostnames or IPs.
+_QTYPE_A = 1
+_QTYPE_NS_ = 2
+_QTYPE_CNAME = 5
+_QTYPE_PTR = 12
+_QTYPE_MX = 15
+_QTYPE_AAAA = 28
+_QTYPE_SRV = 33
+# Canonical AD/Exchange/UC SRV anchors under a zone (RFC 2782). Kept short: these
+# are the labels an authoritative AD/Exchange/SIP deployment MUST publish, so any
+# hit is a high-signal service-discovery hint — the point is to feed cross-service
+# scanners, not to fingerprint every possible protocol.
+_WELL_KNOWN_SRV_LABELS = (
+    "_ldap._tcp",
+    "_kerberos._tcp",
+    "_kerberos._udp",
+    "_kpasswd._tcp",
+    "_gc._tcp",
+    "_autodiscover._tcp",
+    "_sip._tcp",
+    "_sip._udp",
+    "_sipfederationtls._tcp",
+)
+# The subset whose presence together says "this zone is an AD-integrated domain".
+_AD_ANCHOR_LABELS = ("_ldap._tcp", "_kerberos._tcp")
 
 
 def _decode_name(msg: bytes, i: int) -> tuple[str, int]:
@@ -136,6 +181,170 @@ def _next_name(candidate: str) -> str:
     `candidate`."""
     candidate = candidate.strip(".")
     return "\x00." + candidate if candidate else "\x00"
+
+
+def _skip_question(msg: bytes, i: int, qd: int) -> int:
+    """Advance `i` past `qd` question entries. Each is name + QTYPE(2) + QCLASS(2).
+    Compression-safe via _decode_name; bounded — never runs off the message end
+    thanks to _decode_name's own end-guard."""
+    for _ in range(qd):
+        _, i = _decode_name(msg, i)
+        i += 4
+        if i > len(msg):
+            return len(msg)
+    return i
+
+
+def _parse_rrs(msg: bytes, i: int, count: int) -> tuple[list[dict], int]:
+    """Parse `count` resource records starting at offset `i`.
+
+    Returns (rrs, next_index). Each rr is a plain dict:
+        {"name": owner_name, "type": qtype_int, "value": <type-specific>}
+
+    Malformed / short buffers stop the walk cleanly rather than raising —
+    matches the module's read-only, best-effort posture. Only the RR types the
+    module cares about (A/AAAA/CNAME/NS/PTR/MX/SRV/TXT) get a decoded `value`;
+    other types get value=None but the walk still advances correctly using
+    RDLENGTH so following RRs are readable.
+    """
+    rrs: list[dict] = []
+    for _ in range(count):
+        if i >= len(msg):
+            break
+        owner, i = _decode_name(msg, i)
+        if i + 10 > len(msg):
+            break
+        rtype, _rclass, _ttl, rdlen = struct.unpack("!HHIH", msg[i:i + 10])
+        i += 10
+        rdata_end = i + rdlen
+        if rdata_end > len(msg):
+            break
+        value: Any = None
+        if rtype == _QTYPE_A and rdlen == 4:
+            value = ".".join(str(b) for b in msg[i:i + 4])
+        elif rtype == _QTYPE_AAAA and rdlen == 16:
+            try:
+                value = socket.inet_ntop(socket.AF_INET6, msg[i:i + 16])
+            except (OSError, ValueError):
+                value = None
+        elif rtype in (_QTYPE_CNAME, _QTYPE_NS_, _QTYPE_PTR):
+            if rdlen >= 1:
+                value, _ = _decode_name(msg, i)
+        elif rtype == _QTYPE_MX and rdlen >= 3:
+            pref = struct.unpack("!H", msg[i:i + 2])[0]
+            target, _ = _decode_name(msg, i + 2)
+            value = (pref, target)
+        elif rtype == _QTYPE_SRV and rdlen >= 7:
+            pri, wt, port_ = struct.unpack("!HHH", msg[i:i + 6])
+            target, _ = _decode_name(msg, i + 6)
+            value = (pri, wt, port_, target)
+        elif rtype == _QTYPE_TXT and rdlen >= 1:
+            parts: list[str] = []
+            j = i
+            while j < rdata_end:
+                ln = msg[j]
+                j += 1
+                if j + ln > rdata_end:
+                    break
+                parts.append(msg[j:j + ln].decode("utf-8", "replace"))
+                j += ln
+            value = "".join(parts)
+        i = rdata_end
+        rrs.append({"name": owner, "type": rtype, "value": value})
+    return rrs, i
+
+
+def _rr_query(ip: str, port: int, name: str, qtype: int,
+              timeout: float = _TIMEOUT) -> list[dict]:
+    """Recursive TCP query for a single (name, qtype); returns parsed answer RRs
+    (best-effort). Empty list on transport error, non-NOERROR rcode, or no answers.
+
+    Kept separate from nsec_walk/version_bind on purpose: those two want tight
+    control of flags and rcodes; this one is the generic 'give me the answer
+    section' helper used by srv_mx_ns() and by AXFR body parsing."""
+    resp = _tcp_dns(ip, port, _query(name, qtype, rd=True), timeout)
+    if not resp or len(resp) < 12:
+        return []
+    _id, flags, qd, an, _ns, _ar = struct.unpack("!HHHHHH", resp[:12])
+    if (flags & 0x000F) != 0 or an < 1:
+        return []
+    i = _skip_question(resp, 12, qd)
+    rrs, _ = _parse_rrs(resp, i, an)
+    return rrs
+
+
+def _bucket_rrs(rrs: list[dict]) -> dict:
+    """Group parsed RRs into a shape convenient for probe blob + findings.
+
+    Everything is a list of strings/tuples ready for JSON serialization:
+        names   - every owner-name that appeared (unique, lowercased, apex-stripped)
+        a       - [(owner, ipv4)]
+        aaaa    - [(owner, ipv6)]
+        cname   - [(owner, target)]
+        ns      - [(owner, nsdname)]
+        ptr     - [(owner, target)]
+        mx      - [(owner, pref, target)]
+        srv     - [(owner, pri, wt, port, target)]
+    """
+    out: dict = {"names": [], "a": [], "aaaa": [], "cname": [],
+                 "ns": [], "ptr": [], "mx": [], "srv": []}
+    seen_names: set[str] = set()
+    for rr in rrs:
+        owner = (rr.get("name") or "").strip(".").lower()
+        if owner and owner not in seen_names:
+            seen_names.add(owner)
+            out["names"].append(owner)
+        val = rr.get("value")
+        if val is None:
+            continue
+        t = rr["type"]
+        if t == _QTYPE_A:
+            out["a"].append((owner, val))
+        elif t == _QTYPE_AAAA:
+            out["aaaa"].append((owner, val))
+        elif t == _QTYPE_CNAME:
+            out["cname"].append((owner, val))
+        elif t == _QTYPE_NS_:
+            out["ns"].append((owner, val))
+        elif t == _QTYPE_PTR:
+            out["ptr"].append((owner, val))
+        elif t == _QTYPE_MX:
+            pref, target = val
+            out["mx"].append((owner, pref, target))
+        elif t == _QTYPE_SRV:
+            pri, wt, port_, target = val
+            out["srv"].append((owner, pri, wt, port_, target))
+    return out
+
+
+def srv_mx_ns(ip: str, port: int, zone: str,
+              timeout: float = _TIMEOUT) -> dict:
+    """Enumerate the well-known SRV anchors under `zone` plus MX and NS at the apex.
+
+    RFC 2782 SRV probes cover AD (_ldap/_kerberos/_gc/_kpasswd), Exchange
+    autodiscover, and SIP UC. MX (RFC 1035 §3.3.9) and NS (§3.3.11) give mail
+    routing + the true zone masters (which are the servers most likely to still
+    allow AXFR when the recon-hit resolver refuses).
+
+    Returns {srv: {label: [(pri, wt, port, target), ...]}, mx: [(pref, target), ...],
+    ns: [nsdname, ...]}. Empty structures on refused / unauthoritative servers —
+    nothing raises, air-gap safe (recursive lookup only; no follow-ups off the
+    target).
+    """
+    out: dict = {"srv": {}, "mx": [], "ns": []}
+    for label in _WELL_KNOWN_SRV_LABELS:
+        qname = f"{label}.{zone.strip('.')}"
+        entries = [rr for rr in _rr_query(ip, port, qname, _QTYPE_SRV, timeout)
+                   if rr["type"] == _QTYPE_SRV and rr["value"]]
+        if entries:
+            out["srv"][label] = [rr["value"] for rr in entries]
+    for rr in _rr_query(ip, port, zone, _QTYPE_MX, timeout):
+        if rr["type"] == _QTYPE_MX and rr["value"]:
+            out["mx"].append(rr["value"])
+    for rr in _rr_query(ip, port, zone, _QTYPE_NS_, timeout):
+        if rr["type"] == _QTYPE_NS_ and rr["value"]:
+            out["ns"].append(rr["value"])
+    return out
 
 
 def nsec_walk(ip: str, port: int, zone: str, timeout: float = _TIMEOUT,
@@ -337,15 +546,50 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 continue
             tgt = f"{h.ip}:{p.portid}"
             for z in pr.get("axfr_zones", []):
+                # If we parsed the AXFR body, surface a small sample of the
+                # leaked names in the finding text — turns "128 records" into
+                # something the operator can act on immediately.
+                zdata = (pr.get("axfr_data") or {}).get(z) or {}
+                sample_names = (zdata.get("names") or [])[:8]
+                sample_note = ""
+                if sample_names:
+                    sample_note = (" Sample leaked names: "
+                                   + ", ".join(sample_names)
+                                   + (" ..." if len(zdata.get("names") or []) > 8 else "")
+                                   + ".")
                 out.append(_finding(
                     "high", f"DNS zone transfer allowed ({z})", tgt,
                     f"AXFR of '{z}' succeeded from an unauthenticated client "
                     f"({pr.get('records', {}).get(z, '?')} records) - the full internal "
-                    "zone (every host/service name + IP) is exposed as an instant map.",
+                    "zone (every host/service name + IP) is exposed as an instant map."
+                    + sample_note,
                     f"dig AXFR {z} @{h.ip}",
                     "Restrict zone transfers to authorized secondaries "
                     "(allow-transfer / xfer-out ACLs); disable AXFR to the world.",
                     ["CWE-200", "CWE-284"], kind="dns_axfr"))
+            # SRV/MX/NS discovery per zone. The AD anchor set (_ldap._tcp +
+            # _kerberos._tcp under a zone) authoritatively identifies an
+            # AD-integrated domain — high-value recon intel (points every
+            # downstream AD scanner at the right DCs), so surface as an
+            # info-severity discovery finding rather than a config bug.
+            for z, sr in (pr.get("service_records") or {}).items():
+                srv_map = sr.get("srv") or {}
+                have_ad = all(lbl in srv_map for lbl in _AD_ANCHOR_LABELS)
+                if have_ad:
+                    dcs = sorted({tgt_[3].strip(".").lower()
+                                  for tgt_ in srv_map.get("_ldap._tcp", [])
+                                  if isinstance(tgt_, tuple) and len(tgt_) == 4})
+                    out.append(_finding(
+                        "info",
+                        f"AD-integrated DNS domain discovered ({z})", tgt,
+                        f"Zone '{z}' publishes both _ldap._tcp and _kerberos._tcp SRV "
+                        "records under it (RFC 2782), which is how an Active Directory "
+                        "domain advertises its Domain Controllers. Candidate DC "
+                        f"hostname(s): {', '.join(dcs) if dcs else '(none decoded)'}.",
+                        f"dig SRV _ldap._tcp.{z} @{h.ip}; dig SRV _kerberos._tcp.{z} @{h.ip}",
+                        "Not a defect on its own; verify these SRV records are meant "
+                        "to be publicly visible and that the exposed DCs are hardened.",
+                        ["CWE-200"], kind="dns_ad_srv"))
             # NSEC walk — signed-zone enumeration without needing AXFR.
             for z, walk in (pr.get("nsec") or {}).items():
                 names = walk.get("names") or []
@@ -448,12 +692,13 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
 
     def _probe(t):
         ver = version_bind(t["ip"], t["port"])
-        axfr_zones, rec = [], {}
+        axfr_zones, rec, axfr_data = [], {}, {}
         for z in zones:
             r = axfr(t["ip"], t["port"], z)
             if r["ok"]:
                 axfr_zones.append(z)
                 rec[z] = r["records"]
+                axfr_data[z] = r.get("data") or {}
         # Email-security posture per zone. Cheap: at most 12 TXT lookups per
         # zone (SPF + DMARC + 10 DKIM selectors). Zones with none of these
         # records skip cleanly with empty strings.
@@ -471,8 +716,19 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             w = nsec_walk(t["ip"], t["port"], z)
             if w["ok"] and w["names"]:
                 nsec[z] = w
+        # SRV/MX/NS enumeration per zone. Skipped for zones where AXFR already
+        # succeeded (the AXFR body already carried these RRs — no point paying
+        # for the same records twice). Empty result skips cleanly.
+        service_records: dict = {}
+        for z in zones:
+            if z in axfr_zones:
+                continue
+            data = srv_mx_ns(t["ip"], t["port"], z)
+            if data["srv"] or data["mx"] or data["ns"]:
+                service_records[z] = data
         return {"reachable": True, "version": ver, "axfr_zones": axfr_zones,
-                "records": rec, "email_sec": email_sec, "nsec": nsec}
+                "records": rec, "email_sec": email_sec, "nsec": nsec,
+                "axfr_data": axfr_data, "service_records": service_records}
 
     if active:
         for t, pr in svcprobe.iter_probe(targets, _probe, budget=budget,
