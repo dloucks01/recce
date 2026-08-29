@@ -922,6 +922,56 @@ def findings_to_vulns(fs: list[dict]) -> dict:
     return _f2v(fs, "mqtt", _DEFAULT_PORT)
 
 
+# Retained-topic prefixes that identify the broker's role as an IoT hub.
+# These are the vendor-canonical topic conventions on the wire (Shelly HTTP
+# API docs §MQTT, Tasmota docs §MQTT topics, zigbee2mqtt.io §Topics).
+_IOT_TOPIC_HINTS: tuple[tuple[str, str], ...] = (
+    ("shelly/", "shelly"),
+    ("tasmota/", "tasmota"),
+    ("zigbee2mqtt/", "zigbee2mqtt"),
+    ("homeassistant/", "homeassistant"),
+    ("esphome/", "esphome"),
+    ("owntracks/", "owntracks"),
+)
+
+
+def _record_device(hosts: list[Host], ip: str, pr: dict) -> None:
+    """Feed the MQTT broker fingerprint into core.known_devices — pinned
+    product/version identifies the broker; retained-topic prefixes
+    (shelly/, tasmota/, zigbee2mqtt/) reveal it as an IoT hub."""
+    if not pr or not pr.get("reachable"):
+        return
+    pinned = pr.get("version") or ""
+    vendor = ""
+    firmware = ""
+    if pinned:
+        parts = pinned.split(None, 1)
+        vendor = parts[0]
+        firmware = parts[1] if len(parts) > 1 else ""
+    hits: set[str] = set()
+    for entry in (pr.get("retained") or []) + (pr.get("live") or []):
+        topic = (entry.get("topic") or "").lower()
+        for prefix, name in _IOT_TOPIC_HINTS:
+            if topic.startswith(prefix):
+                hits.add(name)
+                break
+    if hits:
+        device_type = "iot-hub"
+        source = "mqtt:retained-topic"
+    elif vendor:
+        device_type = "mqtt-broker"
+        source = "mqtt:sys-version"
+    else:
+        return
+    from ..core.known_devices import record_device
+    for h in hosts:
+        if h.ip == ip:
+            model = vendor or "mqtt-broker"
+            record_device(h, source, vendor=vendor, model=model,
+                          firmware=firmware, device_type=device_type)
+            break
+
+
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None,
             users: list[str] | None = None,
@@ -944,6 +994,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["anon_ok"] = pr.get("anon_ok", False)
                 t["retained"] = len(pr.get("retained") or [])
                 t["publish_ok"] = pr.get("publish_ok", False)
+                _record_device(hosts, t["ip"], pr)
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

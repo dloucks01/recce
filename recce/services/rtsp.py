@@ -912,6 +912,41 @@ def findings_to_vulns(fs: list[dict]) -> dict:
     return svccommon.findings_to_vulns(fs, "rtsp", _DEFAULT_PORT)
 
 
+def _record_device(hosts: list[Host], ip: str, pr: dict) -> None:
+    """Feed the RTSP fingerprint into core.known_devices — the Server header
+    names the IP-camera product line, cve_hits (matched off that header)
+    carries the vendor tag and known-vulnerable build set."""
+    if not pr or not pr.get("reachable"):
+        return
+    server = (pr.get("server") or "").strip()
+    cve_hits = pr.get("cve_hits") or []
+    vendor = cve_hits[0].get("vendor", "") if cve_hits else ""
+    model = server
+    firmware = ""
+    if "/" in server:
+        tail = server.split("/", 1)[1].strip()
+        v: list[str] = []
+        for ch in tail:
+            if ch.isdigit() or ch in ".-":
+                v.append(ch)
+            else:
+                break
+        firmware = "".join(v).strip(".-")
+    if not (vendor or model):
+        return
+    from ..core.known_devices import record_device
+    for h in hosts:
+        if h.ip == ip:
+            record_device(h, "rtsp:server-header",
+                          vendor=vendor, model=model,
+                          firmware=firmware, device_type="ip-camera",
+                          cves=[{"cve": c.get("cve", ""),
+                                 "kev": bool(c.get("kev")),
+                                 "note": c.get("note", "")}
+                                for c in cve_hits if c.get("cve")])
+            break
+
+
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None,
             do_default_creds: bool = True) -> dict:
@@ -932,6 +967,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             t["reachable"] = pr.get("reachable", False)
             t["server"] = pr.get("server", "")
             t["unauth_stream"] = pr.get("unauth_stream", False)
+            _record_device(hosts, t["ip"], pr)
             if do_default_creds and pr.get("reachable") and pr.get("auth") \
                     and (pr["auth"].get("digest") or pr["auth"].get("basic")) \
                     and not pr.get("unauth_stream"):
