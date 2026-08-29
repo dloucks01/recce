@@ -335,14 +335,235 @@ def rakp_hash(ip: str, port: int = _DEFAULT_PORT, username: str = "admin",
         sock.close()
 
 
+# --- Session-less IPMI 1.5 helpers -----------------------------------------
+# Both Get Device ID (App/0x01) and Get Channel Cipher Suites (App/0x54) are
+# permitted without an established session (IPMI 2.0 §13.6 / §22.15). We reuse
+# the same auth-type-0 IPMI 1.5 session header the GCAC request already uses.
+
+
+def _ipmi15_request(cmd: int, data: bytes = b"") -> bytes:
+    """Build a session-less App-netfn (0x06) IPMI 1.5 request for `cmd`.
+
+    Layout (see comment on `_GCAC_REQUEST` above):
+      RMCP(4) + session hdr(9: auth 0, seq 0, sid 0) + msg_len(1) + msg.
+    The two 8-bit checksums are 2's-complement of the preceding field bytes
+    (IPMI spec §13.8). Kept minimal — no session sequence, no MAC — because
+    the two commands we use it for are session-less.
+    """
+    rs_addr = 0x20
+    netfn = 0x06 << 2                           # App, lun 0
+    csum1 = (-(rs_addr + netfn)) & 0xff
+    rq_addr = 0x81
+    rq_seq = 0x00
+    body = bytes([rq_addr, rq_seq, cmd]) + data
+    csum2 = (-sum(body)) & 0xff
+    msg = bytes([rs_addr, netfn, csum1]) + body + bytes([csum2])
+    rmcp = b"\x06\x00\xff\x07"
+    sess = b"\x00" + b"\x00" * 4 + b"\x00" * 4
+    return rmcp + sess + bytes([len(msg)]) + msg
+
+
+def _parse_ipmi15_response(pkt: bytes, expect_cmd: int) -> bytes | None:
+    """Return the IPMI response data bytes (between completion code and the
+    trailing checksum) for a well-formed successful response to `expect_cmd`,
+    else None. Guards against out-of-range indexes on truncated replies and
+    against a matching-shape response for a DIFFERENT command (a BMC that
+    replies with GCAC to our device-id request would otherwise be mis-parsed).
+    """
+    # Same 14-byte header as the GCAC parser: RMCP(4) + auth_type(1) +
+    # seq(4) + session_id(4) + msg_len(1).
+    if len(pkt) < 14 or pkt[0] != 0x06 or pkt[3] != 0x07:
+        return None
+    msg = pkt[14:]
+    # msg layout: rqAddr(1) netFn|lun(1) csum1(1) rsAddr(1) rsSeq|lun(1)
+    #             cmd(1) compCode(1) [data...] csum2(1)
+    if len(msg) < 8:
+        return None
+    if msg[5] != expect_cmd:                    # wrong cmd echoed back
+        return None
+    if msg[6] != 0:                             # non-zero completion code
+        return None
+    return msg[7:-1]
+
+
+# IANA private enterprise numbers for common BMC vendors. Populated only with
+# well-known IANA assignments (https://www.iana.org/assignments/enterprise-
+# numbers/) — no invented CVEs are attached; the vendor tag alone is what the
+# finding surfaces so other tools/operators can steer follow-up.
+_IANA_VENDORS = {
+    2:     "IBM",
+    11:    "HP/HPE",              # iLO
+    343:   "Intel",
+    674:   "Dell",                # iDRAC
+    4413:  "Fujitsu",
+    4753:  "Sun/Oracle",          # ILOM
+    5771:  "Cisco",
+    10876: "Supermicro",
+    19046: "Lenovo",
+    20301: "IBM (Lenovo)",
+    26200: "Aten",
+    42817: "ASRock Rack",
+    45771: "AMI (MegaRAC)",
+}
+
+
+def get_device_id(ip: str, port: int = _DEFAULT_PORT,
+                  timeout: float = _TIMEOUT) -> dict:
+    """Get Device ID (App/0x01), session-less. Returns vendor/firmware
+    fingerprint per IPMI 2.0 §20.1 (Table 20-2):
+      {reachable, device_id, firmware_major, firmware_minor,
+       ipmi_version, manufacturer_id, product_id, vendor}
+    `manufacturer_id` is the 3-byte IANA enterprise number; `vendor` is the
+    human-readable label when it's one recce recognises, "" otherwise.
+    """
+    out = {"reachable": False, "device_id": 0,
+           "firmware_major": 0, "firmware_minor": 0, "firmware_version": "",
+           "ipmi_version": "", "manufacturer_id": 0, "product_id": 0,
+           "vendor": ""}
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        try:
+            sock.sendto(_ipmi15_request(0x01), (ip, port))
+            data, _ = sock.recvfrom(1024)
+        except (OSError, socket.timeout):
+            return out
+    finally:
+        sock.close()
+    body = _parse_ipmi15_response(data, 0x01)
+    # Get Device ID data: device_id, device_rev, fw_maj (bit7=avail),
+    # fw_min, ipmi_ver (BCD), aux_dev_support, mfg_id (3 LE), prod_id (2 LE),
+    # optional aux fw rev (4). Minimum 11 bytes before the aux fw rev.
+    if body is None or len(body) < 11:
+        return out
+    out["reachable"] = True
+    out["device_id"] = body[0]
+    # bit 7 of fw_major is "device available" flag — mask it off.
+    out["firmware_major"] = body[2] & 0x7f
+    out["firmware_minor"] = body[3]
+    out["firmware_version"] = f"{out['firmware_major']}.{out['firmware_minor']:02x}"
+    # IPMI Version field is BCD encoded with the digits SWAPPED
+    # (spec §20.1: bits 7:4 hold the least-significant digit).
+    v = body[4]
+    major = v & 0x0f
+    minor = (v >> 4) & 0x0f
+    out["ipmi_version"] = f"{major}.{minor}"
+    out["manufacturer_id"] = body[6] | (body[7] << 8) | (body[8] << 16)
+    out["product_id"] = body[9] | (body[10] << 8)
+    out["vendor"] = _IANA_VENDORS.get(out["manufacturer_id"], "")
+    return out
+
+
+def _parse_cipher_records(data: bytes) -> tuple[list[int], dict[int, int]]:
+    """Split the cipher-suite-record byte stream (IPMI 2.0 Table 22-19) into
+    (suite_ids, auth_alg_by_suite).
+
+    Record framing:
+      * 0xC0 <suite_id> <tagged-algs>...                       (standard)
+      * 0xC1 <iana_lo> <iana_mid> <iana_hi> <suite_id> <algs>  (OEM)
+    Tagged algorithm bytes are 1 byte each:
+      * bits 7:6 = 00  → auth  alg (value in bits 5:0)
+      * bits 7:6 = 01  → integrity alg
+      * bits 7:6 = 10  → confidentiality alg
+    Records run back-to-back; we stop when we hit an unrecognised tag or run
+    out of bytes. Malformed data yields whatever parsed cleanly rather than
+    raising — an on-wire BMC that returns a truncated record is common.
+    """
+    suites: list[int] = []
+    auth_by_suite: dict[int, int] = {}
+    i = 0
+    n = len(data)
+    while i < n:
+        tag = data[i]
+        if tag == 0xC0:
+            if i + 2 > n:
+                break
+            suite_id = data[i + 1]
+            i += 2
+        elif tag == 0xC1:
+            if i + 5 > n:
+                break
+            suite_id = data[i + 4]
+            i += 5
+        else:
+            break
+        auth_alg: int | None = None
+        while i < n and data[i] not in (0xC0, 0xC1):
+            b = data[i]
+            if (b & 0xC0) == 0x00:              # auth alg tag
+                auth_alg = b & 0x3f
+            i += 1
+        suites.append(suite_id)
+        if auth_alg is not None:
+            auth_by_suite[suite_id] = auth_alg
+    return suites, auth_by_suite
+
+
+def get_channel_cipher_suites(ip: str, port: int = _DEFAULT_PORT,
+                              timeout: float = _TIMEOUT,
+                              channel: int = 0x0e,
+                              max_indices: int = 4) -> dict:
+    """Get Channel Cipher Suites (App/0x54), session-less. Enumerates the
+    per-record cipher suites the BMC will negotiate on `channel`. Returns:
+      {reachable, cipher_suite_ids: [int], auth_algs: {suite_id: alg_num},
+       cipher_zero: bool}
+    `cipher_zero` is True iff at least one record has auth_alg == 0 (RAKP
+    with a zero-length HMAC — CVE-2013-4786). This REPLACES the GCAC
+    heuristic when the BMC answers this command.
+
+    Bounded by `max_indices` list-index requests; a response with fewer than
+    16 record bytes signals end of records (spec §22.15).
+    """
+    out = {"reachable": False, "cipher_suite_ids": [],
+           "auth_algs": {}, "cipher_zero": False}
+    collected = bytearray()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        for idx in range(max_indices):
+            # request byte 0: channel (bits 3:0), bit 7 = 0 → request cipher
+            # SUITE RECORDS (not cipher suite IDs alone).
+            data_field = bytes([channel & 0x0f, idx & 0x3f])
+            try:
+                sock.sendto(_ipmi15_request(0x54, data_field), (ip, port))
+                data, _ = sock.recvfrom(1024)
+            except (OSError, socket.timeout):
+                break
+            body = _parse_ipmi15_response(data, 0x54)
+            if body is None or len(body) < 1:
+                break
+            out["reachable"] = True
+            record_data = body[1:]              # skip channel echo
+            if not record_data:
+                break
+            collected.extend(record_data)
+            if len(record_data) < 16:           # last page (spec §22.15)
+                break
+    finally:
+        sock.close()
+    suites, auth_by_suite = _parse_cipher_records(bytes(collected))
+    out["cipher_suite_ids"] = suites
+    out["auth_algs"] = auth_by_suite
+    out["cipher_zero"] = any(a == 0 for a in auth_by_suite.values())
+    return out
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
           rakp_users: list[str] | None = None) -> dict:
     """Send one Get Channel Auth Capabilities request; parse response for
     auth-type bitmap + support flags. Returns {reachable, ipmi_version,
-    auth_types, null_user, anonymous_login, cipher_zero, ipmi_20}."""
+    auth_types, null_user, anonymous_login, cipher_zero, ipmi_20, plus
+    vendor/firmware from Get Device ID and cipher-suite enumeration}."""
     out = {"reachable": False, "ipmi_version": "", "auth_types": [],
            "null_user": False, "anonymous_login": False,
-           "cipher_zero": False, "ipmi_20": False}
+           "cipher_zero": False, "cipher_zero_confirmed": False,
+           "ipmi_20": False,
+           "user_level_auth_disabled": False,
+           "per_msg_auth_disabled": False,
+           "kg_set": False,
+           "vendor": "", "manufacturer_id": 0, "product_id": 0,
+           "firmware_version": "",
+           "cipher_suite_ids": [], "cipher_suite_auth_algs": {}}
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
@@ -390,23 +611,65 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
     # Auth Status byte (bits 0..5):
     #   bit 0: anonymous logon    bit 1: null user
     #   bit 2: non-null user      bit 3: user-level auth disabled
-    #   bit 4: per-msg auth disabled  bit 5: KG set
+    #   bit 4: per-msg auth disabled  bit 5: KG set (BMC key configured)
     out["anonymous_login"] = bool(auth_status & 0x01)
     out["null_user"] = bool(auth_status & 0x02)
+    # Bits 3/4/5 — the module already read the byte but never surfaced
+    # these; each is a distinct posture signal, not a duplicate of the
+    # anonymous/null bits above:
+    #   bit 3 = user-privilege IPMI commands accept auth-type NONE
+    #   bit 4 = individual messages inside an open session need no MAC
+    #   bit 5 = KG (BMC key) is configured; when NOT set, K_uid collapses
+    #           to HMAC(password) — combined with cipher-0 or captured
+    #           RAKP2 this is the reason cracking is straightforward.
+    out["user_level_auth_disabled"] = bool(auth_status & 0x08)
+    out["per_msg_auth_disabled"] = bool(auth_status & 0x10)
+    out["kg_set"] = bool(auth_status & 0x20)
     # Extended capabilities:
     #   bit 0: IPMI 2.0 supported     bit 1: IPMI 1.5 supported
     out["ipmi_20"] = bool(ext_caps & 0x01)
     # Cipher suite 0 (CVE-2013-4786) shows up in the IPMI 2.0 auth type
     # bitmap as auth-alg 0 in the RAKP negotiation. The GCAC response doesn't
     # carry the cipher-suite list directly — that's a separate command
-    # (Get Channel Cipher Suites, 0x54). But the "none" auth type here plus
-    # IPMI 2.0 = strong indicator that cipher 0 is at least offered as an
-    # option; we mark it accordingly with a caveat in the finding.
+    # (Get Channel Cipher Suites, 0x54). The heuristic below ("none" auth
+    # type + IPMI 2.0) is the fallback; when the 0x54 probe below succeeds
+    # it OVERRIDES this with a definitive answer.
     out["cipher_zero"] = "none" in accepted and out["ipmi_20"]
     if out["ipmi_20"]:
         out["ipmi_version"] = "2.0"
     else:
         out["ipmi_version"] = "1.5"
+    # --- Pre-session Get Device ID (App/0x01): vendor + firmware -----------
+    # Session-less; runs on every reachable BMC. Failures are silent (leaves
+    # vendor="" and skips the ipmi_device_id finding).
+    try:
+        did = get_device_id(ip, port, timeout=timeout)
+    except OSError:
+        did = {"reachable": False}
+    if did.get("reachable"):
+        out["manufacturer_id"] = did["manufacturer_id"]
+        out["product_id"] = did["product_id"]
+        out["vendor"] = did["vendor"]
+        out["firmware_version"] = did["firmware_version"]
+        # Get Device ID reports the on-BMC IPMI implementation version
+        # directly; when GCAC's IPMI 2.0 bit was ambiguous, prefer this.
+        if did.get("ipmi_version") and not out["ipmi_20"]:
+            out["ipmi_version"] = did["ipmi_version"]
+            if did["ipmi_version"].startswith("2."):
+                out["ipmi_20"] = True
+    # --- Get Channel Cipher Suites (App/0x54): definitive cipher-0 ----------
+    # When this succeeds it replaces the "none + IPMI 2.0" heuristic with a
+    # hard yes/no — removes the "if cipher 0 is actually enabled" hedge from
+    # the CVE-2013-4786 finding.
+    try:
+        cs = get_channel_cipher_suites(ip, port, timeout=timeout)
+    except OSError:
+        cs = {"reachable": False}
+    if cs.get("reachable"):
+        out["cipher_suite_ids"] = cs["cipher_suite_ids"]
+        out["cipher_suite_auth_algs"] = cs["auth_algs"]
+        out["cipher_zero"] = cs["cipher_zero"]
+        out["cipher_zero_confirmed"] = True
     # RAKP hash capture, only meaningful on IPMI 2.0. Best-effort: any failure
     # (server refuses, no auth-alg match, timeout) leaves out["rakp_sweep"]
     # empty and findings() reports nothing new. The GCAC probe above is what
@@ -450,21 +713,41 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             tgt = f"{h.ip}:{p.portid}"
             # Cipher suite 0 (CVE-2013-4786): critical — ANY password works.
             if pr.get("cipher_zero"):
+                confirmed = pr.get("cipher_zero_confirmed")
+                suites = pr.get("cipher_suite_ids") or []
+                if confirmed:
+                    # Get Channel Cipher Suites answered → hard confirm,
+                    # no "if actually enabled" hedge.
+                    detail = (
+                        f"BMC's Get Channel Cipher Suites (App/0x54) response "
+                        f"includes an auth_alg=0 cipher suite — cipher zero is "
+                        f"CONFIRMED enabled on channel 0x0E. ANY valid username "
+                        f"with ANY password authenticates as admin. Enumerated "
+                        f"cipher suite IDs: {suites}. Verify with: ipmitool "
+                        f"-I lanplus -C 0 -H {h.ip} -U root -P '' chassis power "
+                        f"status")
+                    kind = "ipmi_cipher_zero_confirmed"
+                else:
+                    detail = (
+                        f"BMC advertises 'none' auth in IPMI "
+                        f"{pr.get('ipmi_version','2.0')} capabilities (Get "
+                        f"Channel Cipher Suites did not respond so cipher-0 is "
+                        f"HEURISTIC). If cipher suite 0 is actually enabled, ANY "
+                        f"valid username with ANY password authenticates as "
+                        f"admin. Verify with: ipmitool -I lanplus -C 0 "
+                        f"-H {h.ip} -U root -P '' chassis power status")
+                    kind = "ipmi_cipher_zero"
                 out.append(_finding(
                     "critical",
                     "IPMI cipher suite 0 supported (CVE-2013-4786)", tgt,
-                    f"BMC advertises 'none' auth in IPMI {pr.get('ipmi_version','2.0')} "
-                    f"capabilities. If cipher suite 0 is actually enabled (Get Channel "
-                    f"Cipher Suites confirms), ANY valid username with ANY password "
-                    f"authenticates as admin. Verify with: ipmitool -I lanplus -C 0 "
-                    f"-H {h.ip} -U root -P '' chassis power status",
+                    detail,
                     f"ipmitool -I lanplus -C 0 -H {h.ip} -U <user> -P anything user list",
                     "Disable cipher suite 0 on the BMC (vendor-specific — Dell iDRAC: "
                     "Racadm config -g cfgIpmiLan -o cfgIpmiLanEnable 0 or set only "
                     "cipher suites 3+; HPE iLO: ipmi cipher-suite disable). If BMC "
                     "management is not needed remotely, restrict to a dedicated OOB "
                     "management network.",
-                    ["CWE-287", "CWE-306"], kind="ipmi_cipher_zero"))
+                    ["CWE-287", "CWE-306"], kind=kind))
             # Anonymous / null-user logon.
             if pr.get("anonymous_login") or pr.get("null_user"):
                 which = []
@@ -568,6 +851,84 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "management network remains the primary control.",
                         ["CWE-204", "CWE-200"], kind="ipmi_user_enum"))
 
+            # --- Auth Status posture bits (parsed but previously silent) ---
+            # Bit 4: per-message auth disabled — once a session is open, any
+            # datagram inside it (spoofable source IP + guessed session ID)
+            # is accepted without a MAC. Meaningful even without cipher-0.
+            if pr.get("per_msg_auth_disabled"):
+                out.append(_finding(
+                    "high",
+                    "IPMI per-message authentication disabled", tgt,
+                    "Auth Status byte (bit 4) reports 'per-message auth "
+                    "disabled'. Individual IPMI messages inside an established "
+                    "session are accepted without a MAC — an on-path attacker "
+                    "who observes a legitimate session can inject arbitrary "
+                    "commands (power off, mount virtual media, dump SEL).",
+                    f"ipmitool -H {h.ip} -I lan channel authcap 14 4",
+                    "Re-enable per-message authentication on the BMC channel "
+                    "(vendor-specific: ipmitool lan set <chan> auth ADMIN "
+                    "MD5,PASSWORD; on iDRAC via racadm set idrac.ipmilan.*).",
+                    ["CWE-306", "CWE-345"],
+                    kind="ipmi_per_msg_auth_disabled"))
+            # Bit 3: user-level auth disabled — user-priv commands take no
+            # auth type at all, so sensor reads / SEL dumps / vendor info
+            # commands leak with no credential.
+            if pr.get("user_level_auth_disabled"):
+                out.append(_finding(
+                    "high",
+                    "IPMI user-level authentication disabled", tgt,
+                    "Auth Status byte (bit 3) reports 'user-level auth "
+                    "disabled'. Commands issued at USER privilege accept auth "
+                    "type NONE — sensor data, event log dumps, and some vendor "
+                    "extensions can be queried with no credential at all.",
+                    f"ipmitool -H {h.ip} -I lan channel authcap 14 2",
+                    "Require authentication at the USER privilege level on the "
+                    "BMC channel (vendor-specific channel-authcap setting).",
+                    ["CWE-306"],
+                    kind="ipmi_userlevel_auth_disabled"))
+            # Bit 5: KG (BMC key) set or NOT set. When not set, K_uid
+            # collapses to HMAC(password) so any captured RAKP2 (see the
+            # ipmi_rakp_hash finding above) is straight-line crackable.
+            # Info-level fact — reported so the operator can see it in the
+            # report and correlate with any captured RAKP hashes.
+            if pr.get("reachable") and not pr.get("kg_set"):
+                out.append(_finding(
+                    "info",
+                    "IPMI BMC key (KG) not configured", tgt,
+                    "Auth Status byte (bit 5) reports KG=not-set (the default "
+                    "on most rack BMCs). K_uid then reduces to HMAC(password), "
+                    "so any captured RAKP2 is crackable with the user password "
+                    "as the only unknown. Setting KG adds a second key that "
+                    "must be recovered independently.",
+                    f"ipmitool -H {h.ip} -I lanplus lan print 1",
+                    "Set a strong random KG on each BMC channel (vendor-"
+                    "specific: ipmitool lan set <chan> cipher_privs / racadm "
+                    "config -g cfgIpmiLan -o cfgIpmiLanEncryptionKey).",
+                    ["CWE-1391"],
+                    kind="ipmi_kg_key_status"))
+            # --- Get Device ID (vendor + firmware fingerprint) --------------
+            # Info-level fact so the operator can eyeball the BMC vendor and
+            # cross-reference against vendor advisories out-of-band. No CVEs
+            # are asserted from a version alone — see the airgap constraint.
+            vendor = pr.get("vendor") or ""
+            mfg = pr.get("manufacturer_id") or 0
+            if vendor or mfg:
+                fw = pr.get("firmware_version") or "unknown"
+                mfg_txt = f"IANA {mfg}" + (f" ({vendor})" if vendor else "")
+                out.append(_finding(
+                    "info",
+                    f"IPMI BMC identified: {vendor or 'unknown vendor'}"
+                    f" firmware {fw}", tgt,
+                    f"Get Device ID (App/0x01) returned manufacturer_id="
+                    f"{mfg_txt}, product_id={pr.get('product_id',0)}, "
+                    f"firmware={fw}. Use this to correlate against the "
+                    f"vendor's own security advisories (iDRAC / iLO / "
+                    f"Supermicro / MegaRAC) — recce does not embed a CVE "
+                    f"database for BMC firmware.",
+                    f"ipmitool -H {h.ip} -I lan mc info",
+                    "Keep BMC firmware current with the vendor's release "
+                    "cadence; restrict IPMI to a dedicated OOB network.",
+                    ["CWE-200"], kind="ipmi_device_id"))
             # Always emit an info-level fingerprint so IPMI presence is in the report.
             out.append(_finding(
                 "info", "IPMI endpoint reachable", tgt,
