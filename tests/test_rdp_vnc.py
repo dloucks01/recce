@@ -90,6 +90,132 @@ class RDPTest(unittest.TestCase):
         self.assertFalse(p["reachable"])
 
 
+# --- CredSSP TSRequest + NTLM CHALLENGE parsing (wire-shape fixtures) ----------
+
+def _av(av_id: int, value: bytes) -> bytes:
+    return struct.pack("<HH", av_id, len(value)) + value
+
+
+def _utf16(s: str) -> bytes:
+    return s.encode("utf-16-le")
+
+
+def _build_ntlm_type2(av_pairs: bytes, flags: int = 0x02028215,
+                      version: bytes = b"\x0a\x00\x69\x4a\x00\x00\x00\x0f") -> bytes:
+    """A wire-shape NTLMSSP CHALLENGE_MESSAGE (Type 2) with a Version field
+    (default 10.0.19049) and the caller's AV_PAIR TargetInfo block."""
+    ti_off = 56                                             # 48-byte header + 8-byte Version
+    return (b"NTLMSSP\x00" + struct.pack("<I", 2)
+            + struct.pack("<HHI", 0, 0, 0)                  # TargetName (empty)
+            + struct.pack("<I", flags)
+            + b"\x01" * 8                                   # ServerChallenge
+            + b"\x00" * 8                                   # Reserved
+            + struct.pack("<HHI", len(av_pairs), len(av_pairs), ti_off)
+            + version
+            + av_pairs)
+
+
+class RDPCredSSPTest(unittest.TestCase):
+    def test_tsrequest_roundtrip_preserves_version_and_negotoken(self):
+        """build -> parse yields the same negoToken and version."""
+        token = b"NTLMSSP\x00\x02\x00\x00\x00" + b"\xaa" * 32
+        built = rdp_svc.build_credssp_tsrequest(token, version=6)
+        # Outer must be a DER SEQUENCE.
+        self.assertEqual(built[0], 0x30)
+        ts = rdp_svc.parse_credssp_tsrequest(built)
+        self.assertIsNotNone(ts)
+        self.assertEqual(ts["version"], 6)
+        self.assertEqual(ts["negoToken"], token)
+
+    def test_tsrequest_parse_rejects_garbage(self):
+        self.assertIsNone(rdp_svc.parse_credssp_tsrequest(b""))
+        self.assertIsNone(rdp_svc.parse_credssp_tsrequest(b"not-asn1"))
+        # A SEQUENCE with a bad inner length must not crash.
+        self.assertIsNone(rdp_svc.parse_credssp_tsrequest(b"\x30\x82\xff\xff"))
+
+    def test_tsrequest_version_encodes_high_bit_safely(self):
+        """A one-byte INTEGER whose high bit is set must not be misread as negative;
+        we ship the extra leading 0x00 byte, and the parser reads it back verbatim."""
+        for v in (0, 2, 6, 128, 200):
+            built = rdp_svc.build_credssp_tsrequest(b"tok", version=v)
+            ts = rdp_svc.parse_credssp_tsrequest(built)
+            self.assertIsNotNone(ts, f"parse failed for version {v}")
+            self.assertEqual(ts["version"], v)
+
+    def test_parse_ntlm_challenge_extracts_avpairs_and_os_build(self):
+        ti = (_av(0x0002, _utf16("CORP"))                   # MsvAvNbDomainName
+              + _av(0x0001, _utf16("RDPHOST"))              # MsvAvNbComputerName
+              + _av(0x0004, _utf16("corp.local"))           # MsvAvDnsDomainName
+              + _av(0x0003, _utf16("rdphost.corp.local"))   # MsvAvDnsComputerName
+              + _av(0x0005, _utf16("corp.local"))           # MsvAvDnsTreeName
+              + _av(0x0007, struct.pack("<Q", 133518912000000000))  # MsvAvTimestamp
+              + _av(0x0000, b""))                           # MsvAvEOL
+        version = b"\x0a\x00\xfb\x43\x00\x00\x00\x0f"       # 10.0.17403
+        info = rdp_svc.parse_ntlm_challenge_info(_build_ntlm_type2(ti, version=version))
+        self.assertIsNotNone(info)
+        self.assertEqual(info["netbios_computer"], "RDPHOST")
+        self.assertEqual(info["netbios_domain"], "CORP")
+        self.assertEqual(info["dns_computer"], "rdphost.corp.local")
+        self.assertEqual(info["dns_domain"], "corp.local")
+        self.assertEqual(info["dns_tree"], "corp.local")
+        self.assertEqual(info["os_version"], "10.0.17403")
+        self.assertEqual(info["ntlm_revision"], 0x0F)
+        self.assertGreater(info["server_time_epoch"], 0)
+
+    def test_parse_ntlm_challenge_rejects_non_ntlm(self):
+        self.assertIsNone(rdp_svc.parse_ntlm_challenge_info(b""))
+        self.assertIsNone(rdp_svc.parse_ntlm_challenge_info(b"no-ntlmssp-here"))
+
+    def test_findings_emit_rdp_ntlm_info_and_credssp_unpatched(self):
+        from recce.core.models import Host, Port
+        h = Host(ip="10.0.0.5", ports=[Port(portid=3389, service="ms-wbt-server",
+                                            state="open")])
+        pr = {"reachable": True, "standard_rdp_accepted": False,
+              "nla_required": True, "protocol_code": 0x03,
+              "protocol": "CredSSP+SSL", "failure_reason": "",
+              "ntlm_info": {"netbios_computer": "RDPHOST",
+                            "netbios_domain": "CORP",
+                            "dns_domain": "corp.local",
+                            "os_version": "10.0.17403",
+                            "credssp_version": 2}}
+        fs = rdp_svc.findings([h], {("10.0.0.5", 3389): pr})
+        kinds = {f["kind"] for f in fs}
+        self.assertIn("rdp_ntlm_info", kinds)
+        self.assertIn("rdp_credssp_unpatched", kinds)
+        info_f = next(f for f in fs if f["kind"] == "rdp_ntlm_info")
+        # Detail carries the extracted intel.
+        self.assertIn("RDPHOST", info_f["detail"])
+        self.assertIn("corp.local", info_f["detail"])
+        self.assertIn("10.0.17403", info_f["detail"])
+        # CVE-2018-0886 finding is medium.
+        credssp_f = next(f for f in fs if f["kind"] == "rdp_credssp_unpatched")
+        self.assertEqual(credssp_f["severity"], "medium")
+
+    def test_findings_no_credssp_unpatched_when_version_ge_3(self):
+        from recce.core.models import Host, Port
+        h = Host(ip="10.0.0.5", ports=[Port(portid=3389, service="ms-wbt-server",
+                                            state="open")])
+        pr = {"reachable": True, "standard_rdp_accepted": False,
+              "protocol_code": 0x03,
+              "ntlm_info": {"netbios_computer": "PATCHED",
+                            "credssp_version": 6}}
+        fs = rdp_svc.findings([h], {("10.0.0.5", 3389): pr})
+        kinds = {f["kind"] for f in fs}
+        self.assertIn("rdp_ntlm_info", kinds)
+        self.assertNotIn("rdp_credssp_unpatched", kinds)
+
+    def test_findings_no_ntlm_finding_when_probe_lacks_ntlm_info(self):
+        from recce.core.models import Host, Port
+        h = Host(ip="10.0.0.5", ports=[Port(portid=3389, service="ms-wbt-server",
+                                            state="open")])
+        pr = {"reachable": True, "standard_rdp_accepted": False,
+              "protocol_code": 0x03, "protocol": "CredSSP+SSL"}
+        fs = rdp_svc.findings([h], {("10.0.0.5", 3389): pr})
+        kinds = {f["kind"] for f in fs}
+        self.assertNotIn("rdp_ntlm_info", kinds)
+        self.assertNotIn("rdp_credssp_unpatched", kinds)
+
+
 def _vnc_server_handler(sec_types: list[int]):
     """Return a connection handler that speaks VNC 3.8 with the given
     security-type list."""
