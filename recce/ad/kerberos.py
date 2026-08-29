@@ -837,8 +837,15 @@ def analyze(hosts: list[Host], users: list[str] | None = None,
     from ..services import svcprobe
     dc_ip = dc_ip or dc_ip_for(hosts)
     if not realm:
-        doms = ad.derive_domains([h for h in hosts if h.is_up])
-        realm = (doms[0].name if doms else "").upper()
+        # Prefer the cross-service known_domains reader: it unions LDAP
+        # defaultNamingContext, NTLM AV pairs, BloodHound, and per-cred
+        # domains — ad.derive_domains() only sees NSE + NTLM. Fall back
+        # to derive_domains only when the reader turns up nothing.
+        from ..core.known_domains import kerberos_realm
+        realm = kerberos_realm([h for h in hosts if h.is_up])
+        if not realm:
+            doms = ad.derive_domains([h for h in hosts if h.is_up])
+            realm = (doms[0].name if doms else "").upper()
     users = users or candidate_users(hosts)
     # If we STILL have no candidates (no LDAP/AD enum run yet), fall back to
     # the well-known list so a tester who runs `recce kerberos` first-thing

@@ -271,7 +271,17 @@ def cmd_kerberos(args: argparse.Namespace) -> int:
                                   or a.name.lower() in ("administrator", "admin")))}
 
     active = not args.no_probe
-    realm = getattr(args, "domain", "") or store.get_meta("domain") or ""
+    # Realm resolution order: (1) explicit --domain, (2) store meta from a
+    # prior --domain, (3) known_domains(hosts) — the cross-service reader
+    # that unions LDAP defaultNamingContext + NTLM AV pairs + BloodHound +
+    # per-cred domain. Before this reader wired in, an operator who ran
+    # `recce enum` (which learns the domain via NTLM) but never explicitly
+    # passed --domain still hit the "no realm known" error path.
+    from ..core.known_domains import kerberos_realm
+    realm = (getattr(args, "domain", "")
+             or store.get_meta("domain")
+             or kerberos_realm(hosts)
+             or "")
     # AS-REQ is one TCP connection to the DC per user, sequentially. Warn before a
     # large, slow, and network-noisy run so it isn't mistaken for a hang.
     n_users = len(users) if users is not None else len(_krb.candidate_users(hosts))
