@@ -1088,6 +1088,60 @@ def findings_to_vulns(analysis: dict, ip: str, hostname: str = "") -> list:
     return out
 
 
+def analysis_to_accounts(graph: dict, dc_ip: str) -> list:
+    """Extract user/computer nodes from a SharpHound graph as Account rows.
+
+    Every user-enum path in recce already produces Account(kind="user") rows
+    that other capability probes union together (see creds.known_users) —
+    BloodHound was the outlier: it built findings on the DC but never lifted
+    its 1000+ user list into that shared surface. Now IPMI RAKP, SMB SAMR,
+    and any future user-consuming probe see the domain users too.
+
+    Only nodes marked `enabled != False` are emitted — disabled accounts
+    still exist in the store but they're not spray-relevant.
+    """
+    from ..core.models import Account
+    accounts: list = []
+    for sid, node in (graph.get("nodes") or {}).items():
+        ntype = node.get("type") or ""
+        if ntype not in ("User", "Computer"):
+            continue
+        name_raw = (node.get("name") or "").strip()
+        if not name_raw:
+            continue
+        # SharpHound canonicalises names as UPPER@DOMAIN.TLD; the leading
+        # component is what BMCs / SAMR compare against.
+        user_part = name_raw.split("@", 1)[0]
+        domain_part = node.get("domain") or (
+            name_raw.split("@", 1)[1] if "@" in name_raw else "")
+        # Computer accounts land with a trailing $ — carry it, since some
+        # probes want the literal machine-account name.
+        props = node.get("props") or {}
+        if str(props.get("enabled")).lower() == "false":
+            continue
+        # Pack the discriminators every downstream consumer needs.
+        attrs: dict = {}
+        if props.get("admincount"):
+            attrs["admincount"] = "1" if props["admincount"] else "0"
+        if props.get("hasspn"):
+            attrs["kerberoastable"] = True
+        if props.get("dontreqpreauth"):
+            attrs["asrep_roastable"] = True
+        if props.get("unconstraineddelegation"):
+            attrs["delegation"] = "unconstrained"
+        # Group memberships come from edges in the raw SharpHound layout, not
+        # per-node props — attach a coarse "memberof" hint only when the
+        # analysis loop already flagged it (findings/paths cite Domain Admins
+        # etc.). Left empty by default so priority stays "user" and the sweep
+        # is not artificially widened.
+        accounts.append(Account(
+            ip=dc_ip, source="bloodhound",
+            kind="user" if ntype == "User" else "computer",
+            name=user_part, domain=domain_part, rid=str(sid),
+            attrs=attrs))
+    return accounts
+
+
 def empty_analysis() -> dict:
     """A base analysis dict for when there is no SharpHound graph (e.g. only a
     Certipy ADCS import). Findings get merged in by the caller."""

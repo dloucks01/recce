@@ -184,6 +184,30 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
             if v.key not in have:
                 have.add(v.key)
                 host.vulns.append(v)
+        # Lift the SharpHound user/computer node list into host.accounts so the
+        # cross-service known-users helper (creds.known_users) sees them. Every
+        # spray + user-enum consumer already reads Account rows; BloodHound was
+        # the outlier that produced only Vulns. Best-effort: re-parse the first
+        # SharpHound zip to keep the flow one-way (analyze() throws the graph
+        # away). Dedup against what enum/LDAP already recorded, first-source
+        # wins so the earlier attribution stays intact.
+        try:
+            graph = bh.load_graph(sh_paths[0]) if sh_paths else None
+            if graph is not None:
+                extracted = bh.analysis_to_accounts(graph, ad_ip)
+                seen = {(a.source, a.kind, a.name, a.domain)
+                        for a in host.accounts}
+                for a in extracted:
+                    key = (a.source, a.kind, a.name, a.domain)
+                    if key not in seen:
+                        host.accounts.append(a)
+                        seen.add(key)
+                if extracted:
+                    print(f"    -> {len(extracted)} BloodHound account(s) "
+                          "added to the engagement's user list "
+                          "(feeds IPMI RAKP / SMB user-enum / spray).")
+        except Exception:                       # noqa: BLE001 — never break
+            pass
         # merge=False on replace so the old AD vulns aren't re-introduced by the
         # union-merge (we've already loaded and rewritten the full host).
         store.upsert_host(host, merge=not replace)

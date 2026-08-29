@@ -872,7 +872,36 @@ def _probe_kwargs(args, label: str) -> dict:
     wl = getattr(args, "wordlist", None)
     if wl:
         kw["wordlist"] = wl
+    # IPMI --rakp-users: accept comma-separated inline OR @file. Parsed here
+    # so the analyzer receives a clean list. `analyze()` signatures that
+    # don't take rakp_users accept **_ignored, so a stray key does not break.
+    rakp = getattr(args, "rakp_users", None)
+    if rakp:
+        kw["rakp_users"] = _parse_user_list(rakp)
     return kw
+
+
+def _parse_user_list(spec: str) -> list[str]:
+    """`user1,user2,user3` OR `@file.txt` (one per line). Blanks + comments
+    dropped, whitespace stripped, order preserved so priority stays
+    predictable."""
+    spec = str(spec or "").strip()
+    if not spec:
+        return []
+    if spec.startswith("@"):
+        try:
+            with open(spec[1:], encoding="utf-8", errors="replace") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            return []
+    else:
+        lines = spec.split(",")
+    out: list[str] = []
+    for raw in lines:
+        s = raw.strip()
+        if s and not s.startswith("#") and s not in out:
+            out.append(s)
+    return out
 
 
 

@@ -1162,7 +1162,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_t4("vnc",             "VNC RFB 3.x handshake: security-type list; no-auth (type 1) = CRITICAL")
     _add_t4("modbus",          "Modbus/TCP Function 0x03 Read Holding Registers + Function 0x2B Read Device ID")
     _add_t4("rdp",             "RDP X.224 Connection Request: NLA (Network Level Authentication) detection")
-    _add_t4("ipmi",            "IPMI 623/udp Get Channel Auth Capabilities: cipher-zero (CVE-2013-4786) + null-user + weak MD2/MD5")
+    _ipmi_p = _add_t4("ipmi", "IPMI 623/udp Get Channel Auth Capabilities: cipher-zero (CVE-2013-4786) + null-user + weak MD2/MD5, plus RMCP+ RAKP hash capture for hashcat -m 7300/-m 7302")
+    # `--rakp-users` overrides the sweep list. Without it recce unions 8
+    # vendor BMC defaults with users learned from AD enum / BloodHound / SNMP
+    # / SMB SAMR (creds.known_users), capped so a big BloodHound import
+    # doesn't translate to thousands of round-trips per BMC. Accepts
+    # `user1,user2` or `@file.txt` (one per line).
+    _ipmi_p.add_argument("--rakp-users", metavar="LIST",
+                         help="RAKP username sweep list: `user1,user2` or "
+                              "`@file.txt`. Overrides the auto-union of BMC "
+                              "defaults + engagement-known users.")
     _add_t4("ntp",             "NTP 123/udp: monlist amplification + client disclosure (CVE-2013-5211), mode-6 readvar OS/version leak, peer list, Kerberos-breaking clock skew")
     _add_t4("msrpc",           "MSRPC 135/tcp: endpoint mapper dump + IOXIDResolver interface leak, PetitPotam/PrinterBug/DFSCoerce coercion targets")
     _add_t4("winrm",           "WinRM 5985/5986: unauth WSMan Identify (version + product), auth mechanisms advertised, TLS posture on 5986")

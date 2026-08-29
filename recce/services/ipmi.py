@@ -208,7 +208,7 @@ _DEFAULT_RAKP_USERS = ("root", "admin", "ADMIN", "Administrator",
 
 
 def rakp_sweep(ip: str, port: int = _DEFAULT_PORT,
-               usernames=_DEFAULT_RAKP_USERS,
+               usernames=None,
                timeout: float = _TIMEOUT,
                algs=(_AUTH_HMAC_SHA1, _AUTH_HMAC_SHA256)) -> dict:
     """Multi-user + multi-algorithm RAKP hash capture.
@@ -229,6 +229,8 @@ def rakp_sweep(ip: str, port: int = _DEFAULT_PORT,
       {reachable, hashes: [{user, alg, mode, hashcat_line}],
        existing_users: [str], distinguishes_users: bool, errors: [str]}
     """
+    if usernames is None:
+        usernames = _DEFAULT_RAKP_USERS
     out: dict = {"reachable": False, "hashes": [], "existing_users": [],
                  "distinguishes_users": False, "errors": []}
     alg_status: dict = {}                       # per-alg: True if it produced ANY hash
@@ -333,7 +335,8 @@ def rakp_hash(ip: str, port: int = _DEFAULT_PORT, username: str = "admin",
         sock.close()
 
 
-def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
+def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
+          rakp_users: list[str] | None = None) -> dict:
     """Send one Get Channel Auth Capabilities request; parse response for
     auth-type bitmap + support flags. Returns {reachable, ipmi_version,
     auth_types, null_user, anonymous_login, cipher_zero, ipmi_20}."""
@@ -410,7 +413,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
     # confirms the port; this is the additional value.
     if out["ipmi_20"]:
         try:
-            sweep = rakp_sweep(ip, port, timeout=timeout)
+            sweep = rakp_sweep(ip, port, usernames=rakp_users, timeout=timeout)
             if sweep.get("hashes"):
                 out["rakp_sweep"] = sweep
         except OSError:
@@ -511,6 +514,18 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"-m {m} for {len(users)} user(s) ({', '.join(sorted(set(users)))})"
                     for m, users in sorted(by_mode.items()))
                 first_mode = min(by_mode)
+                meta = pr.get("_rakp_meta") or {}
+                known = meta.get("known") or {}
+                total_known = known.get("total_known") or 0
+                sources = known.get("sources") or []
+                users_probed = len(meta.get("users") or []) or "the BMC defaults"
+                context = (
+                    f"\n\nUser list: probed {users_probed} account(s). "
+                    f"Engagement knows {total_known} user(s) total"
+                    + (f" from {', '.join(sources)}" if sources else "")
+                    + (" — sweep was CAPPED (pass --rakp-users to include the rest)"
+                       if known.get("capped") else "")
+                    + "." if total_known else "")
                 out.append(_finding(
                     "high",
                     "IPMI RAKP hashes captured (RMCP+ password HMAC is offline-crackable)",
@@ -521,7 +536,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"as the key. ANY IPMI 2.0 BMC leaks this to ANY client that "
                     f"starts the exchange — design of the protocol, not a "
                     f"misconfiguration. Recce wrote the captured lines to "
-                    f"loot/ipmi*.hash.",
+                    f"loot/ipmi*.hash." + context,
                     f"hashcat -m {first_mode} loot/ipmi.hash wordlist.txt   "
                     f"# then: ipmitool -H {h.ip} -U <user> -P <cracked> user list",
                     "There is no protocol-level fix — restrict IPMI to a dedicated "
@@ -582,16 +597,46 @@ def findings_to_vulns(fs: list[dict]) -> dict:
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
-            budget: float | None = None, progress=None) -> dict:
+            budget: float | None = None, progress=None,
+            rakp_users: list[str] | None = None) -> dict:
+    """Analyze IPMI targets. `rakp_users` overrides the RAKP username sweep;
+    when None, recce unions the 8 vendor defaults with users learned from AD
+    enum / BloodHound / SNMP LanMan / SMB SAMR (see creds.known_users).
+    Bounded by a per-scan cap so a BloodHound import of thousands of users
+    does not translate into thousands of RAKP round-trips per BMC."""
     from . import svcprobe
+    from ..creds.known_users import known_users
     targets = ipmi_targets(hosts)
+
+    # Compute the RAKP user list ONCE per scan, not per host. Cap the extras
+    # at 17 so total (8 defaults + 17 known) stays inside a reasonable
+    # per-BMC budget of ~50 UDP round-trips (25 users x 2 algs).
+    rakp_meta: dict = {"users": [], "known": {"total_known": 0, "capped": False,
+                                              "sources": []}}
+    if rakp_users:
+        rakp_meta["users"] = list(rakp_users)
+        rakp_meta["known"] = {"total_known": len(rakp_users), "capped": False,
+                              "sources": ["operator-supplied"]}
+    else:
+        picked = known_users(hosts, cap=17, extras=list(_DEFAULT_RAKP_USERS))
+        rakp_meta["users"] = picked["users"]
+        rakp_meta["known"] = {"total_known": picked["total_known"],
+                              "capped": picked["capped"],
+                              "sources": picked["sources"]}
+
     probes: dict = {}
     state: dict = {}
     if active:
         for t, pr in svcprobe.iter_probe(
-                targets, lambda t: probe(t["ip"], t["port"]),
+                targets,
+                lambda t: probe(t["ip"], t["port"], rakp_users=rakp_meta["users"]),
                 budget=budget, progress=progress, state=state):
             if pr:
+                # Stash the shared sweep meta on every probe so findings() can
+                # surface the "N of M known users tested" and source-list
+                # context per host without a separate pipe. Cheap: it's a
+                # small dict, shared by reference.
+                pr["_rakp_meta"] = rakp_meta
                 probes[(t["ip"], t["port"])] = pr
                 t["reachable"] = pr.get("reachable", False)
                 t["cipher_zero"] = pr.get("cipher_zero", False)
@@ -602,5 +647,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 for t in targets]
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
+            "rakp": rakp_meta,
             "stats": {"targets": len(targets), "findings": len(fs),
+                      "rakp_users": len(rakp_meta["users"]),
                       "stopped": state.get("stopped")}}
