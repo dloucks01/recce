@@ -6,7 +6,9 @@ so a decoder change in recce cannot be masked by a symmetric fixture bug.
 """
 from __future__ import annotations
 
+import base64
 import socket
+import struct
 import threading
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -138,3 +140,236 @@ def test_findings_map_to_vulns_on_port_5985():
 def test_analyze_shape_matches_the_service_convention():
     res = winrm.analyze([_host()], active=False)
     assert set(res) >= {"targets", "findings", "runbooks", "probes", "stats"}
+
+
+# --- NTLM Type-2 CHALLENGE harvest -------------------------------------------
+
+def _av_pair(av_id: int, value: bytes) -> bytes:
+    return struct.pack("<HH", av_id, len(value)) + value
+
+
+def _build_type2_challenge(*, nb_computer: str = "WIN10",
+                           nb_domain: str = "CORP",
+                           dns_computer: str = "win10.corp.local",
+                           dns_domain: str = "corp.local",
+                           dns_tree: str = "corp.local",
+                           filetime: int = 133_777_777_777_777_777,
+                           os_ver: tuple[int, int, int] = (10, 0, 19041)
+                           ) -> bytes:
+    """Assemble a wire-legal NTLMSSP CHALLENGE_MESSAGE from RFC/MS-NLMP fixed
+    offsets (§2.2.1.2 header, §2.2.2.1 AV_PAIRs). The fixture is built here
+    from the spec, not by round-tripping recce's own decoder, so a decoder
+    change cannot be masked by a symmetric fixture bug."""
+    tgt_name = nb_domain.encode("utf-16-le")
+    tinfo = (_av_pair(0x0002, nb_domain.encode("utf-16-le"))
+             + _av_pair(0x0001, nb_computer.encode("utf-16-le"))
+             + _av_pair(0x0004, dns_domain.encode("utf-16-le"))
+             + _av_pair(0x0003, dns_computer.encode("utf-16-le"))
+             + _av_pair(0x0005, dns_tree.encode("utf-16-le"))
+             + _av_pair(0x0007, struct.pack("<Q", filetime))
+             + _av_pair(0x0000, b""))
+
+    # Fixed header = 56 bytes: sig(8)+type(4)+tgtname_fields(8)+flags(4)+
+    # challenge(8)+reserved(8)+tinfo_fields(8)+version(8) = 56
+    flags = (0x00000001 | 0x00000004 | 0x00000200 | 0x00080000
+             | 0x02000000)  # +NEGOTIATE_VERSION so the OS bytes populate
+    payload_off = 56
+    tgt_off = payload_off
+    tinfo_off = payload_off + len(tgt_name)
+    version = struct.pack("<BBHBBBB", os_ver[0], os_ver[1], os_ver[2],
+                          0, 0, 0, 15)
+    header = (b"NTLMSSP\x00"
+              + struct.pack("<I", 2)
+              + struct.pack("<HHI", len(tgt_name), len(tgt_name), tgt_off)
+              + struct.pack("<I", flags)
+              + b"\x11\x22\x33\x44\x55\x66\x77\x88"        # ServerChallenge
+              + b"\x00" * 8                                # Reserved
+              + struct.pack("<HHI", len(tinfo), len(tinfo), tinfo_off)
+              + version)
+    return header + tgt_name + tinfo
+
+
+def _ntlm_server(*, offer_auth: str = "Negotiate",
+                 challenge_blob: bytes | None = None) -> HTTPServer:
+    """POST /wsman without Authorization -> 401 advertising `offer_auth`.
+    POST /wsman with Authorization: Negotiate <b64> -> 401 carrying
+    `challenge_blob` (or a canonical Type-2 if unset) in the same header slot.
+    The server also returns a valid Identify body so probe() treats it as reachable."""
+    blob = challenge_blob if challenge_blob is not None else _build_type2_challenge()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a, **k):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0") or 0))
+            authz = self.headers.get("Authorization", "")
+            if authz.lower().startswith("negotiate "):
+                # Second round-trip: return the Type-2 challenge.
+                b64 = base64.b64encode(blob).decode("ascii")
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", f"Negotiate {b64}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            # First round-trip: Identify + auth advertisement.
+            body = _IDENTIFY_XML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/soap+xml;charset=UTF-8")
+            for scheme in offer_auth.split(","):
+                self.send_header("WWW-Authenticate", scheme.strip())
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_parse_av_pairs_extracts_every_documented_field():
+    """MS-NLMP §2.2.2.1 AV_PAIR list decode is wire-driven — build the bytes
+    from the spec, feed them through recce's parser, expect every field."""
+    ti = (_av_pair(0x0001, "WIN10".encode("utf-16-le"))
+          + _av_pair(0x0002, "CORP".encode("utf-16-le"))
+          + _av_pair(0x0003, "win10.corp.local".encode("utf-16-le"))
+          + _av_pair(0x0004, "corp.local".encode("utf-16-le"))
+          + _av_pair(0x0005, "corp.local".encode("utf-16-le"))
+          + _av_pair(0x0007, struct.pack("<Q", 132_000_000_000_000_000))
+          + _av_pair(0x0000, b""))
+    got = winrm._parse_av_pairs(ti)
+    assert got["netbios_computer"] == "WIN10"
+    assert got["netbios_domain"] == "CORP"
+    assert got["dns_computer"] == "win10.corp.local"
+    assert got["dns_domain"] == "corp.local"
+    assert got["dns_tree"] == "corp.local"
+    assert "server_time_epoch" in got
+
+
+def test_parse_ntlm_challenge_gets_names_and_os_version_from_type2():
+    """A canonical Type-2 blob with NEGOTIATE_VERSION set carries the OS bytes
+    at offset 48; the parser should surface them as 'os_version' plus every
+    AV_PAIR name pulled from the target-info payload."""
+    blob = _build_type2_challenge(os_ver=(10, 0, 19041))
+    info = winrm._parse_ntlm_challenge(blob)
+    assert info is not None
+    assert info["netbios_computer"] == "WIN10"
+    assert info["dns_computer"] == "win10.corp.local"
+    assert info["dns_domain"] == "corp.local"
+    assert info["os_version"] == "10.0.19041"
+
+
+def test_probe_harvests_ntlm_info_when_server_offers_negotiate():
+    srv = _ntlm_server(offer_auth="Negotiate")
+    try:
+        pr = winrm.probe("127.0.0.1", srv.server_address[1], timeout=2.0)
+    finally:
+        _stop(srv)
+    assert pr["reachable"] is True
+    assert "Negotiate" in pr["auth"]
+    info = pr.get("ntlm_info")
+    assert info and info["netbios_computer"] == "WIN10"
+    assert info["dns_domain"] == "corp.local"
+    assert info["os_version"] == "10.0.19041"
+
+
+def test_probe_skips_ntlm_round_trip_when_negotiate_not_advertised():
+    """If the server advertises only Basic/Kerberos there's no NTLMSSP path —
+    the second POST would just get a 401 without a Type-2, so probe() shouldn't
+    fire it and shouldn't set ntlm_info."""
+    srv = _ntlm_server(offer_auth="Basic, Kerberos")
+    try:
+        pr = winrm.probe("127.0.0.1", srv.server_address[1], timeout=2.0)
+    finally:
+        _stop(srv)
+    assert pr["reachable"] is True
+    assert "ntlm_info" not in pr
+
+
+def test_probe_parses_structured_productversion():
+    """'OS: 10.0.19041 SP: 0.0 Stack: 3.0' should split into version_parsed."""
+    srv = _fake_server(auth="Negotiate")
+    try:
+        pr = winrm.probe("127.0.0.1", srv.server_address[1], timeout=2.0)
+    finally:
+        _stop(srv)
+    vp = pr.get("version_parsed") or {}
+    assert vp.get("os_build") == "10.0.19041"
+    assert vp.get("stack") == "3.0"
+
+
+def test_ntlm_info_finding_emits_names_and_kerberos_skew_evidence():
+    """The winrm_ntlm_info finding should carry the harvested identity in its
+    detail — that's the whole point (feeds the operator's report and any
+    downstream reader that grep-matches the detail string)."""
+    fs = winrm.findings([_host()], {("10.0.0.10", 5985): {
+        "reachable": True, "port": 5985, "tls": False,
+        "auth": ["Negotiate"],
+        "ntlm_info": {"netbios_computer": "WIN10", "netbios_domain": "CORP",
+                      "dns_computer": "win10.corp.local",
+                      "dns_domain": "corp.local", "dns_tree": "corp.local",
+                      "os_version": "10.0.19041",
+                      "server_time_epoch": 1_700_000_000}}})
+    f = next(f for f in fs if f["kind"] == "winrm_ntlm_info")
+    assert f["severity"] == "low"
+    assert "CWE-200" in f["cwes"]
+    for token in ("WIN10", "CORP", "win10.corp.local", "corp.local",
+                  "10.0.19041", "server clock="):
+        assert token in f["detail"]
+
+
+def test_relay_target_finding_only_over_plain_http():
+    """Negotiate on 5985/tcp = canonical impacket ntlmrelayx victim; the same
+    posture on 5986 (TLS) is not a relay target here because EPA/CBT would
+    be tested separately, so the finding must NOT fire on TLS."""
+    fs_http = winrm.findings([_host(5985)], {("10.0.0.10", 5985): {
+        "reachable": True, "port": 5985, "tls": False,
+        "auth": ["Negotiate", "Kerberos"]}})
+    kinds_http = {f["kind"] for f in fs_http}
+    assert "winrm_relay_target" in kinds_http
+    f = next(f for f in fs_http if f["kind"] == "winrm_relay_target")
+    assert "CWE-294" in f["cwes"]
+    assert "ntlmrelayx" in f["command"].lower()
+
+    fs_tls = winrm.findings([_host(5986)], {("10.0.0.10", 5986): {
+        "reachable": True, "port": 5986, "tls": True,
+        "auth": ["Negotiate", "Kerberos"]}})
+    assert "winrm_relay_target" not in {f["kind"] for f in fs_tls}
+
+
+def test_analyze_folds_ntlm_info_into_host_ntlm_store():
+    """Cross-service feed: the AV_PAIR intel WinRM harvests must land in
+    host.ntlm so known_hostnames / known_domains / kerberos consumers see it."""
+    srv = _ntlm_server(offer_auth="Negotiate")
+    try:
+        port = srv.server_address[1]
+        h = Host(ip="127.0.0.1", ports=[Port(portid=port, state="open",
+                                             service="wsman")])
+        # Make is_winrm() recognise the ephemeral port via service string.
+        res = winrm.analyze([h], active=True)
+    finally:
+        _stop(srv)
+    assert h.ntlm.get("netbios_computer") == "WIN10"
+    assert h.ntlm.get("dns_computer") == "win10.corp.local"
+    assert h.ntlm.get("dns_domain") == "corp.local"
+    assert h.ntlm.get("fqdn") == "win10.corp.local"
+    assert h.ntlm.get("os_version") == "10.0.19041"
+    kinds = {f["kind"] for f in res["findings"]}
+    assert "winrm_ntlm_info" in kinds
+
+
+def test_analyze_does_not_clobber_a_preexisting_dns_domain():
+    """LDAP writes host.ntlm['dns_domain'] first in practice — WinRM must
+    only fill blanks, never overwrite a value another module established."""
+    srv = _ntlm_server(offer_auth="Negotiate")
+    try:
+        port = srv.server_address[1]
+        h = Host(ip="127.0.0.1", ports=[Port(portid=port, state="open",
+                                             service="wsman")])
+        h.ntlm = {"dns_domain": "other.example"}
+        winrm.analyze([h], active=True)
+    finally:
+        _stop(srv)
+    assert h.ntlm["dns_domain"] == "other.example"
+    # But other blanks got filled.
+    assert h.ntlm.get("netbios_computer") == "WIN10"
