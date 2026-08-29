@@ -339,12 +339,15 @@ class PostgresDeepRce(unittest.TestCase):
         def result(rows):
             return b"".join(datarow(r) for r in rows) + msg(b"C", b"SELECT\x00") + msg(b"Z", b"I")
 
-        # loot() query order: databases, pg_shadow, ident, pg_has_role, pg_extension.
+        # loot() query order: databases, pg_shadow, ident, pg_has_role,
+        # has_table_privilege(pg_largeobject) + has_function_privilege(lo_*),
+        # pg_extension.
         answers = [
             [["app_prod"], ["billing"]],
             [["postgres", "SCRAM-SHA-256$x", "t"]],
             [["postgres", "on", "PostgreSQL 16.2"]],
             [["t", "f", "t"]],                       # exec_program=t, read=f, write=t
+            [["f", "f", "f"]],                       # lo_select / lo_import / lo_export
             [["plpython3u"]],
         ]
 

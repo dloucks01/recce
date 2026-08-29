@@ -313,14 +313,23 @@ def loot(ip: str, port: int, user: str = "root", timeout: float = _TIMEOUT,
                 out["hashes"].append({"user": u, "host": host, "hash": ash, "plugin": plugin})
         out["databases"] = [r[0] for r in _query(sock, "SHOW DATABASES")]
         # Privesc surface: FILE grant + where files can be read/written + plugin dir (UDF).
+        # @@local_infile is the SERVER-SIDE toggle that allows LOAD DATA LOCAL —
+        # when a compromised app connects with a client that sets local_infile=1,
+        # a hostile server (or an SQLi that forces the client into a fake-server
+        # exchange) can read arbitrary files from the APP HOST. That is why
+        # MySQL 8.0 flipped this to OFF by default. Whether the server allows
+        # it is scanner-visible via @@local_infile.
         srv = _query(sock, "SELECT CURRENT_USER(), @@secure_file_priv, @@plugin_dir, "
-                           "@@version_compile_os")
+                           "@@version_compile_os, @@local_infile")
         if srv and srv[0]:
-            row = (srv[0] + [None] * 4)[:4]
+            row = (srv[0] + [None] * 5)[:5]
             out["current_user"] = row[0] or ""
             out["secure_file_priv"] = row[1]           # NULL=disabled, ''=anywhere, path=limited
             out["plugin_dir"] = row[2] or ""
             out["os"] = row[3] or ""
+            # @@local_infile arrives as 1/0 or ON/OFF depending on the row shape.
+            v = str(row[4] or "").lower()
+            out["local_infile"] = v in ("1", "on", "true", "yes")
         grants = _query(sock, "SHOW GRANTS")
         blob = " ".join(g[0] for g in grants if g and g[0]).upper()
         out["file_priv"] = ("FILE" in blob) or ("ALL PRIVILEGES" in blob and "*.*" in blob)
@@ -449,9 +458,41 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Rotate the credential; enforce least privilege; bind to a trusted "
                     "interface.",
                     ["CWE-522", "CWE-284"], kind="mysql_cred_access"))
+            lt = pr.get("loot") or {}
+
+            # @@local_infile ON allows LOAD DATA LOCAL against consenting clients.
+            # The exposure is on the APP HOST — an SQLi that steers the app into
+            # a fake-server exchange reads files off the app server, not the DB.
+            # MySQL 8.0 defaulted this OFF for a reason; recce reports when the
+            # server still allows it so the tester can pair this finding with a
+            # SQLi surface in the app.
+            if lt.get("local_infile"):
+                # NOTE: mysql._finding takes 7 positionals (no `tool` — the
+                # tool string is folded into cmd here). This is different from
+                # the msrpc/winrm shape, so keep the argument list to 7 or the
+                # kind= kwarg lands on cmd positionally.
+                out.append(_finding(
+                    "medium",
+                    "MySQL server allows LOAD DATA LOCAL (client-file read chain)",
+                    tgt,
+                    f"@@local_infile is ON on {tgt}. Any client that connects "
+                    "with local_infile=1 can be told by the server to send a "
+                    "local file — so a compromised (or rogue) MySQL server "
+                    "reads files from the APP HOST, and an SQLi that steers the "
+                    "app into a fake-server exchange (mysql_ldi / RogueMySql) "
+                    "does the same without server access. MySQL 8.0 defaulted "
+                    "this OFF; still-ON is a pairing target for any web SQLi.",
+                    # tool + example command (rogue-mysql-server or direct)
+                    "# rogue-mysql-server: python3 rogue-mysql-server.py, then "
+                    "trigger the app to connect. Direct with creds: "
+                    f"mysql -h {h.ip} -P {p.portid} -u <u> --local-infile=1 "
+                    "-e \"LOAD DATA LOCAL INFILE '/etc/passwd' INTO TABLE t\"",
+                    "Set local_infile=0 in my.cnf (MySQL 8.0 default). Configure "
+                    "app-side clients to disable local_infile in the driver.",
+                    ["CWE-269", "CWE-284"], kind="mysql_local_infile"))
+
             # FILE privilege -> arbitrary file read/write, and (with a writable plugin
             # dir) UDF OS command execution as the mysql service account.
-            lt = pr.get("loot") or {}
             if lt.get("file_priv"):
                 who = pr.get("cred_user") or pr.get("user") or "root"
                 sfp = lt.get("secure_file_priv")
