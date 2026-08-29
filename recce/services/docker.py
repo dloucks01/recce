@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import ssl
 
 from ..core.models import Host, Port
@@ -19,6 +20,138 @@ from .svccommon import finding_builder
 
 _PORTS = (2375, 2376)
 _TIMEOUT = 6.0
+
+# Capabilities each of which is a documented single-flag container escape on
+# top of the default seccomp profile - independent of --privileged.
+_DANGER_CAPS = {"SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE", "DAC_READ_SEARCH",
+                "SYS_BOOT", "NET_ADMIN"}
+_DANGER_SECOPT_SUBSTR = ("seccomp=unconfined", "apparmor=unconfined",
+                         "no-new-privileges:false")
+# Host devices that hand a container direct kernel / raw-disk access.
+_DANGER_DEV_PREFIXES = ("/dev/mem", "/dev/kmsg", "/dev/port", "/dev/sd",
+                        "/dev/nvme", "/dev/vd", "/dev/xvd", "/dev/hd")
+
+# Env-var keys that classically carry a credential. Value is treated as loot
+# when the key matches, regardless of length - short values are common
+# (base32 API keys, short JWTs, single tokens) and false-positive noise on an
+# already-exposed daemon is cheap.
+_SECRET_KEY_RE = re.compile(
+    r"(?i)(password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|"
+    r"credential|jwt|hmac|private[_-]?key|database[_-]?url|db[_-]?url|"
+    r"jdbc[_-]?url|connection[_-]?string|s3[_-]?key|aws[_-]?(secret|access)|"
+    r"github[_-]?token|gh[_-]?token|npm[_-]?token|ssh[_-]?key|"
+    r"root[_-]?password|admin[_-]?password)")
+
+
+def _parse_semver(s: str):
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", s or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _engine_cves(server_version: str) -> list[dict]:
+    v = _parse_semver(server_version)
+    if not v:
+        return []
+    maj, mn, pt = v
+    hits: list[dict] = []
+    # CVE-2024-41110 (GHSA-v23v-6jw2-98fq): AuthZ plugin bypass, fixed in
+    # 23.0.14, 26.1.4, 27.1.0. Vulnerable windows: <23.0.14, all of
+    # 24.x/25.x (no fix on those lines), 26.x <26.1.4, 27.0.x <27.1.0.
+    vuln = False
+    if maj < 23:
+        vuln = True
+    elif maj == 23 and (mn, pt) < (0, 14):
+        vuln = True
+    elif maj in (24, 25):
+        vuln = True
+    elif maj == 26 and (mn, pt) < (1, 4):
+        vuln = True
+    elif maj == 27 and (mn, pt) < (1, 0):
+        vuln = True
+    if vuln:
+        hits.append({"cve": "CVE-2024-41110", "product": "docker-engine",
+                     "version": server_version,
+                     "fixed_in": "23.0.14 / 26.1.4 / 27.1.0",
+                     "title": "Docker Engine AuthZ plugin bypass"})
+    return hits
+
+
+def _runc_cves(runc_id: str) -> list[dict]:
+    if not runc_id:
+        return []
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", runc_id)
+    if not m:
+        # A bare git commit tells us nothing about the version. Do not guess.
+        return []
+    v = tuple(int(x) for x in m.groups())
+    hits: list[dict] = []
+    if v < (1, 1, 12):
+        hits.append({"cve": "CVE-2024-21626", "product": "runc",
+                     "version": ".".join(str(x) for x in v),
+                     "fixed_in": "1.1.12",
+                     "title": "runc leaked-fd container escape"})
+    if v < (1, 0, 0):
+        hits.append({"cve": "CVE-2019-5736", "product": "runc",
+                     "version": ".".join(str(x) for x in v),
+                     "fixed_in": "1.0.0-rc6",
+                     "title": "runc /proc/self/exe host binary overwrite"})
+    return hits
+
+
+def _classify_ns_escape(hc: dict) -> list[str]:
+    """Return a list of human-readable escape enablers set on HostConfig,
+    independent of the existing bind/privileged check."""
+    hits: list[str] = []
+    for field, val in (("NetworkMode", hc.get("NetworkMode")),
+                       ("PidMode", hc.get("PidMode")),
+                       ("IpcMode", hc.get("IpcMode")),
+                       ("UTSMode", hc.get("UTSMode"))):
+        if isinstance(val, str) and val.strip().lower() == "host":
+            hits.append(f"{field}=host")
+    caps = hc.get("CapAdd") or []
+    if isinstance(caps, list):
+        bad = sorted({str(c).upper().removeprefix("CAP_")
+                      for c in caps if isinstance(c, str)} & _DANGER_CAPS)
+        if bad:
+            hits.append("CapAdd=" + ",".join(bad))
+    sec = hc.get("SecurityOpt") or []
+    if isinstance(sec, list):
+        for opt in sec:
+            s = str(opt).lower().replace(" ", "")
+            for sub in _DANGER_SECOPT_SUBSTR:
+                if sub in s:
+                    hits.append(opt if isinstance(opt, str) else sub)
+                    break
+    devs = hc.get("Devices") or []
+    if isinstance(devs, list):
+        for d in devs:
+            hp = ""
+            if isinstance(d, dict):
+                hp = str(d.get("PathOnHost", ""))
+            elif isinstance(d, str):
+                hp = d.split(":", 1)[0]
+            if hp.startswith(_DANGER_DEV_PREFIXES) or hp == "/dev":
+                hits.append(f"Device={hp}")
+    return hits
+
+
+def _scan_env_secrets(env: list) -> list[dict]:
+    """Return [{key, value, preview}] for any KEY=VALUE env entry whose key
+    matches the credential-key regex. Empty values are skipped."""
+    out: list[dict] = []
+    if not isinstance(env, list):
+        return out
+    for entry in env:
+        if not isinstance(entry, str) or "=" not in entry:
+            continue
+        k, _, v = entry.partition("=")
+        k = k.strip()
+        if not v or not k:
+            continue
+        if _SECRET_KEY_RE.search(k):
+            preview = v if len(v) <= 4 else v[:2] + "***" + v[-2:]
+            out.append({"key": k, "value": v, "preview": preview})
+    return out
 
 
 def is_docker(port: Port) -> bool:
@@ -101,6 +234,13 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
         out["images"] = d.get("Images")
         out["server_version"] = d.get("ServerVersion", "")
         out["kernel"] = out["kernel"] or d.get("KernelVersion", "")
+        runc = (d.get("RuncCommit") or {})
+        out["runc_id"] = runc.get("ID", "") if isinstance(runc, dict) else ""
+        out["runc_expected"] = runc.get("Expected", "") if isinstance(runc, dict) else ""
+    # Version-gated CVEs from already-fetched strings. Empty when we can't
+    # parse a semver out - never guessed.
+    out["engine_cves"] = _engine_cves(out.get("server_version") or out.get("version", ""))
+    out["runc_cves"] = _runc_cves(out.get("runc_id", ""))
     # Running containers + images (best-effort enrichment).
     cj = _get(ip, port, "/containers/json", timeout)
     if cj and cj[0] == 200 and isinstance(cj[1], list):
@@ -115,13 +255,29 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
         # the container — the tester needs to know per-container which
         # ones are dangerous. Capped at 15 to keep the probe bounded.
         risky_binds: list[dict] = []
+        ns_escapes: list[dict] = []
+        env_secrets: list[dict] = []
         for c in cj[1][:15]:
             if not isinstance(c, dict) or not c.get("Id"):
                 continue
             insp = _get(ip, port, f"/containers/{c['Id']}/json", timeout)
             if not insp or insp[0] != 200 or not isinstance(insp[1], dict):
                 continue
+            cname = (c.get("Names") or ["?"])[0].lstrip("/")
+            cimg = c.get("Image", "")
             hc = (insp[1].get("HostConfig") or {})
+            cfg = (insp[1].get("Config") or {})
+            # Namespace / cap / secopt / device escape enablers (distinct from
+            # the bind + privileged check below).
+            ns_hits = _classify_ns_escape(hc)
+            if ns_hits:
+                ns_escapes.append({"container": cname, "image": cimg,
+                                   "enablers": ns_hits})
+            # Env-var credentials baked into the container spec.
+            found = _scan_env_secrets(cfg.get("Env") or [])
+            if found:
+                env_secrets.append({"container": cname, "image": cimg,
+                                    "hits": found})
             binds = hc.get("Binds") or []
             privileged = bool(hc.get("Privileged"))
             for b in binds:
@@ -143,6 +299,8 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
                         "image": c.get("Image", ""),
                         "bind": "(privileged=true)", "privileged": True})
         out["risky_binds"] = risky_binds
+        out["ns_escapes"] = ns_escapes
+        out["env_secrets"] = env_secrets
     ij = _get(ip, port, "/images/json", timeout)
     if ij and ij[0] == 200 and isinstance(ij[1], list):
         tags = []
@@ -212,6 +370,30 @@ _NARRATIVE = {
         "versions and, via `docker inspect`-style data, environment variables holding "
         "database passwords, API keys and cloud credentials - reconnaissance that "
         "feeds the next hop even before the container-escape is used."),
+    "docker_env_secrets": (
+        "Every container's Config.Env is readable unauthenticated. Environment "
+        "variables are the single most common secret-leak vector on the Docker API - "
+        "database passwords, cloud API keys, JWT signing keys and CI tokens live "
+        "there in plaintext and survive a container restart. Nothing intrusive is "
+        "needed to read them - `GET /containers/{id}/json` returns them directly."),
+    "docker_ns_escape": (
+        "Namespace and capability escape enablers on running containers are separate "
+        "one-shot escape primitives from bind-mounts and --privileged. NetworkMode/"
+        "PidMode/IpcMode=host share the host namespace directly (nsenter into PID 1 "
+        "is one command). CapAdd SYS_ADMIN / SYS_PTRACE / SYS_MODULE / DAC_READ_SEARCH "
+        "each unlock a documented host-escape. seccomp=unconfined / apparmor="
+        "unconfined removes the runtime's syscall firewall. Devices exposing /dev, "
+        "/dev/mem or a raw disk hands the container the host kernel or filesystem."),
+    "docker_engine_cve": (
+        "Version-gated CVE against the daemon that answered /version. The finding "
+        "is emitted from the ServerVersion string alone - already fetched during "
+        "the unauth read - so it fires whether or not the daemon is otherwise "
+        "exposed. Match the fixed-in version against the running one and patch."),
+    "docker_runc_cve": (
+        "runc, the OCI runtime under every container start, has had multiple "
+        "single-shot host-escape CVEs. /info exposes RuncCommit.ID which carries "
+        "the runc version on modern daemons; recce flags known-vulnerable ranges. "
+        "A vulnerable runc + any writable container image = root on the host."),
 }
 
 
@@ -309,6 +491,96 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "/var/run/docker.sock into containers unless absolutely required. "
                     "Never run containers with --privileged in production.",
                     ["CWE-284", "CWE-250", "CWE-269"], kind="docker_host_escape"))
+            # Namespace / capability / secopt / device escape enablers - a
+            # separate finding from the bind + privileged check above.
+            nse = pr.get("ns_escapes") or []
+            if nse:
+                lines = [f"  {e['container']} ({e['image']}) "
+                         + "; ".join(e.get("enablers") or [])
+                         for e in nse[:10]]
+                out.append(_finding(
+                    "critical",
+                    "Docker containers with namespace / capability escape enablers",
+                    tgt,
+                    f"{len(nse)} running container(s) share a host namespace, hold "
+                    f"a dangerous capability, disable the seccomp/apparmor sandbox, "
+                    f"or expose a raw host device - each is a documented single-shot "
+                    f"escape independent of --privileged and independent of the "
+                    f"bind-mount check.\n" + "\n".join(lines)
+                    + (f"\n… (+{len(nse)-10} more)" if len(nse) > 10 else ""),
+                    "docker CLI",
+                    f"docker -H {_scheme(p.portid)}://<ip>:{p.portid} inspect "
+                    "<id> | jq '.[0].HostConfig | {NetworkMode,PidMode,IpcMode,"
+                    "CapAdd,SecurityOpt,Devices}'",
+                    "Drop --network=host / --pid=host / --ipc=host in favour of "
+                    "the default bridge namespaces. Never grant SYS_ADMIN, "
+                    "SYS_PTRACE, SYS_MODULE, DAC_READ_SEARCH or NET_ADMIN unless "
+                    "required. Never set seccomp=unconfined / apparmor=unconfined "
+                    "or no-new-privileges:false. Restrict --device to specific "
+                    "safe paths.",
+                    ["CWE-269", "CWE-250"], kind="docker_ns_escape"))
+            # Env-var credentials pulled from Config.Env on every container.
+            es = pr.get("env_secrets") or []
+            if es:
+                total = sum(len(e.get("hits") or []) for e in es)
+                lines = []
+                for e in es[:10]:
+                    for h_ in (e.get("hits") or [])[:6]:
+                        lines.append(f"  {e['container']} ({e['image']}) "
+                                     f"{h_['key']}={h_['preview']}")
+                out.append(_finding(
+                    "high",
+                    "Docker container env-var credentials readable unauthenticated",
+                    tgt,
+                    f"{total} credential-shaped env var(s) across "
+                    f"{len(es)} container(s) recovered from Config.Env via the "
+                    f"unauth inspect endpoint. These are ready-to-use secrets "
+                    f"(passwords, API keys, tokens) - no exec, no container "
+                    f"create, no privileged flag required.\n" + "\n".join(lines)
+                    + (f"\n… (+{total-len(lines)} more)" if total > len(lines) else ""),
+                    "docker CLI",
+                    f"docker -H {_scheme(p.portid)}://<ip>:{p.portid} inspect "
+                    "$(docker -H ... ps -q) | jq -r '.[].Config.Env[]'",
+                    "Never ship secrets in container env vars on a network-"
+                    "reachable daemon. Use Swarm/K8s secrets mounted as files, "
+                    "or a secrets manager. Rotate every value listed above.",
+                    ["CWE-522", "CWE-798", "CWE-200"], kind="docker_env_secrets"))
+            # Version-gated Docker Engine CVEs from ServerVersion (already
+            # fetched during the unauth read).
+            for cve in (pr.get("engine_cves") or []):
+                title = f"Docker Engine {cve['cve']} ({cve['title']})"
+                det = (f"Server version {cve['version']} is in the {cve['cve']} "
+                       f"vulnerable range (fixed in {cve['fixed_in']}). "
+                       "CVE-2024-41110 is an AuthZ-plugin bypass: crafted API "
+                       "requests skip a configured AuthZ plugin's checks, "
+                       "regaining full daemon control even when a plugin is in "
+                       "place. On a daemon that also has no AuthZ plugin the "
+                       "CVE is moot (nothing to bypass) but the version-hygiene "
+                       "finding still stands.")
+                out.append(_finding(
+                    "critical", title, tgt, det, "docker CLI",
+                    f"docker -H {_scheme(p.portid)}://<ip>:{p.portid} version   "
+                    "# confirm ServerVersion",
+                    f"Upgrade docker-engine to {cve['fixed_in']} or later on "
+                    "the matching release line.",
+                    ["CWE-863", "CWE-306"], kind="docker_engine_cve"))
+                out[-1]["cves"] = [cve["cve"]]
+            # Version-gated runc CVEs from /info.RuncCommit.
+            for cve in (pr.get("runc_cves") or []):
+                title = f"runc {cve['cve']} ({cve['title']})"
+                det = (f"/info.RuncCommit.ID parses as runc {cve['version']}, "
+                       f"in the {cve['cve']} vulnerable range (fixed in "
+                       f"{cve['fixed_in']}). Combined with an exposed daemon, "
+                       "runc CVEs are one-shot root-on-host escapes from any "
+                       "container start.")
+                out.append(_finding(
+                    "critical", title, tgt, det, "docker CLI",
+                    f"docker -H {_scheme(p.portid)}://<ip>:{p.portid} info "
+                    "--format '{{.RuncCommit.ID}}'",
+                    f"Upgrade runc to {cve['fixed_in']} or later (usually via "
+                    "a docker-engine / containerd package update).",
+                    ["CWE-668"], kind="docker_runc_cve"))
+                out[-1]["cves"] = [cve["cve"]]
             # Swarm secrets / configs / services enumeration.
             if pr.get("swarm_mode"):
                 sec_names = pr.get("swarm_secrets") or []
