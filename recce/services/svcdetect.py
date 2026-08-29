@@ -49,6 +49,7 @@ PORT_NAMES: dict[int, tuple[str, str]] = {
     49152: ("msrpc", "Dynamic MSRPC (ephemeral)"),
     102: ("iso-tsap", "Siemens S7 / ISO-TSAP"),
     623: ("ipmi", "IPMI / BMC (out-of-band mgmt)"),
+    123: ("ntp", "Network Time Protocol"),
     1900: ("upnp", "UPnP SSDP"),
     2049: ("nfs", "Network File System"),
     111: ("rpcbind", "ONC RPC portmapper"),

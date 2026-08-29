@@ -21,7 +21,7 @@ __all__ = ['cmd_web', 'cmd_smb', 'cmd_ftp', 'cmd_docker', 'cmd_kubernetes', 'cmd
            # T4 scanner-expansion additions:
            'cmd_zookeeper', 'cmd_kafka', 'cmd_etcd', 'cmd_consul', 'cmd_nomad',
            'cmd_prometheus', 'cmd_docker_registry', 'cmd_vnc', 'cmd_modbus',
-           'cmd_rdp', 'cmd_ipmi']
+           'cmd_rdp', 'cmd_ipmi', 'cmd_ntp']
 
 
 def cmd_web(args: argparse.Namespace) -> int:
@@ -809,4 +809,17 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
                    "Run `enum -U` (UDP) against the BMC targets first.",
         fmt=_fmt_simple(lambda t, a: 'cipher-zero' if t.get('cipher_zero')
                                      else ('anon' if t.get('anonymous') else '?')),
+        udp=True)
+
+
+def cmd_ntp(args: argparse.Namespace) -> int:
+    """NTP 123/udp: monlist amplification + client disclosure (CVE-2013-5211),
+    mode-6 readvar version/OS disclosure, peer list, and Kerberos-breaking skew."""
+    return _run_service_scan(
+        args, module="ntp", source="ntp", label="NTP",
+        noun="NTP server(s)",
+        no_targets="[!] No NTP servers in the datastore (port 123/udp). "
+                   "Run `enum -U` (UDP) first — 123 is UDP-only.",
+        fmt=_fmt_simple(lambda t, a: 'monlist' if t.get('monlist')
+                                     else ('mode6' if t.get('mode6') else '?')),
         udp=True)

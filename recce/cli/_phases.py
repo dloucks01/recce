@@ -1362,7 +1362,7 @@ _UNAUTH_SWEEP = [
     ("prometheus", "cmd_prometheus"),
     ("docker-registry", "cmd_docker_registry"),
     ("vnc", "cmd_vnc"), ("modbus", "cmd_modbus"),
-    ("rdp", "cmd_rdp"), ("ipmi", "cmd_ipmi"),
+    ("rdp", "cmd_rdp"), ("ipmi", "cmd_ipmi"), ("ntp", "cmd_ntp"),
     # Post-sweep: mine whatever landed under evidence/ during the sweep
     # (auto-collected loot from container escapes, credential-exposed
     # configs, .git dumps that path_enum pulled locally, etc.) into

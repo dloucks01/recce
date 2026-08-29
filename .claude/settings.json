@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ruff check *)",
+      "Bash(ruff --version)",
+      "Bash(mypy *)",
+      "Bash(.venv/bin/mypy *)",
+      "Bash(node_modules/.bin/tsc *)",
+      "Bash(./node_modules/.bin/tsc *)",
+
+      "Bash(python3 -m pytest *)",
+      "Bash(python3 -m pyflakes *)",
+      "Bash(python3 -m recce *)",
+      "Bash(./bin/recce *)",
+
+      "Bash(shellcheck *)",
+      "Bash(bash -n *)",
+
+      "Bash(npm run typecheck)",
+      "Bash(npm run build)",
+      "Bash(npm ci)",
+
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
+      "Bash(gh run watch *)",
+      "Bash(gh api repos/*)",
+
+      "Bash(git push)",
+      "Bash(git push *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git checkout -- *)",
+
+      "Bash(find *)",
+      "Bash(wc *)",
+      "Bash(du *)",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(touch *)",
+      "Bash(which *)",
+      "Bash(command -v *)"
+    ]
+  }
+}

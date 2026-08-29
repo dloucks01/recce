@@ -46,7 +46,7 @@ _MODULE_PATH = {
     "zookeeper": "recce.services.zookeeper", "kafka": "recce.services.kafka",
     "etcd": "recce.services.etcd", "consul": "recce.services.consul",
     "nomad": "recce.services.nomad", "modbus": "recce.services.modbus",
-    "ipmi": "recce.services.ipmi", "prometheus": "recce.services.prometheus",
+    "ipmi": "recce.services.ipmi", "ntp": "recce.services.ntp", "prometheus": "recce.services.prometheus",
     "rdp": "recce.services.rdp", "vnc": "recce.services.vnc",
     "docker_registry": "recce.services.docker_registry",
     "api": "recce.services.api", "web": "recce.services.web",
