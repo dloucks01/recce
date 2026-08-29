@@ -416,6 +416,12 @@ _BUILD_CVES: list[tuple[str, str, int, str, str]] = [
      "vCenter DCE-RPC out-of-bounds write pre-auth RCE"),
     ("VirtualCenter", "8.0", 22385739, "CVE-2023-34048",
      "vCenter DCE-RPC out-of-bounds write pre-auth RCE"),
+    # CVE-2024-37085 — ESXi 'ESX Admins' AD auto-promote priv-esc
+    # (VMSA-2024-0013). Fixed builds: 7.0 U3q = 23794027, 8.0 U2b = 23305546.
+    ("HostAgent", "7.0", 23794027, "CVE-2024-37085",
+     "ESXi 'ESX Admins' AD group auto-promote priv-esc"),
+    ("HostAgent", "8.0", 23305546, "CVE-2024-37085",
+     "ESXi 'ESX Admins' AD group auto-promote priv-esc"),
 ]
 
 
@@ -656,6 +662,25 @@ def _linked_vcenters(hosts: list[dict]) -> list[str]:
     return sorted(seen)
 
 
+def _stale_snapshot_vms(vms: list[dict]) -> list[str]:
+    """Names of powered-off VMs that hold at least one snapshot.
+
+    Powered-off + snapshot present = revert candidate: rolling back the VM
+    undoes any post-compromise credential rotation on the guest OS.
+    """
+    out: list[str] = []
+    for vm in vms:
+        props = vm.get("props") or {}
+        if props.get("runtime.powerState") != "poweredOff":
+            continue
+        if not (props.get("snapshot") or "").strip():
+            continue
+        name = props.get("name", "") or vm.get("ref", "")
+        if name:
+            out.append(name)
+    return out
+
+
 def _extract_sso_domain(parsed: dict, cert: dict) -> str:
     """Extract the SSO / PSC domain from ServiceContent + cert.
 
@@ -714,6 +739,17 @@ _NARRATIVE = {
     "vsphere_cve_2021_21985": (
         "vSphere Client vROps plugin pre-auth RCE. Recce detects the "
         "vulnerable build; the exploit is opt-in — the operator drives it."),
+    "vsphere_cve_2024_37085": (
+        "ESXi domain-joined hosts auto-promote members of the AD group "
+        "'ESX Admins' to full admin. Widely used by Scattered Spider and "
+        "similar ransomware crews to lateral into virtualisation. Patched "
+        "builds require the group name to be explicitly configured."),
+    "vsphere_stale_snapshot": (
+        "Powered-off VMs with an existing snapshot are revert candidates — "
+        "reverting bypasses any post-compromise password rotation, EDR "
+        "install, or IR containment applied to the guest OS since the "
+        "snapshot was taken. Domain controllers and jump hosts are the "
+        "highest-value revert targets."),
 }
 
 _finding = finding_builder("vsphere", _NARRATIVE)
@@ -805,6 +841,27 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             "the vROps plugin if unused.",
                             ["CWE-306", "CWE-502"],
                             kind="vsphere_cve_2021_21985"))
+                    if any(c["cve"] == "CVE-2024-37085" for c in cves):
+                        out.append(_finding(
+                            "critical",
+                            "ESXi CVE-2024-37085 candidate "
+                            "('ESX Admins' AD auto-promote)",
+                            tgt,
+                            f"Build {build} predates the VMSA-2024-0013 "
+                            "patch. If this ESXi is AD-joined, any AD group "
+                            "named 'ESX Admins' is auto-granted full admin "
+                            "on the host — used in the wild by Scattered "
+                            "Spider et al. for hypervisor lateral movement.",
+                            "manual",
+                            "# If AD-joined: create AD group 'ESX Admins', "
+                            "add attacker principal; SSH/UI as that "
+                            "principal grants full ESXi admin.",
+                            "Patch to the VMSA-2024-0013 fixed build; if "
+                            "AD-joined, set Config.HostAgent.plugins.hostsvc"
+                            ".esxAdminsGroup to an unused name and disable "
+                            "the auto-add behaviour.",
+                            ["CWE-284", "CWE-269"],
+                            kind="vsphere_cve_2024_37085"))
 
                 if pr.get("sso_domain"):
                     out.append(_finding(
@@ -886,6 +943,23 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Alert on inventory reads from non-management IPs; "
                         "rotate the account used to enumerate.",
                         ["CWE-284"], kind="vsphere_inventory"))
+
+                stale = _stale_snapshot_vms(mv)
+                if stale:
+                    out.append(_finding(
+                        "high",
+                        f"vCenter powered-off VMs with snapshots "
+                        f"({len(stale)})", tgt,
+                        f"Reverting a powered-off VM to an existing snapshot "
+                        f"undoes any post-compromise password rotation, EDR "
+                        f"install, or IR containment on the guest OS since "
+                        f"the snapshot was taken. Affected VMs: "
+                        f"{', '.join(stale[:20])[:400]}.",
+                        "govc", "govc snapshot.tree -vm <name>",
+                        "Consolidate and remove stale snapshots on critical "
+                        "assets (DCs, DBs, jump hosts); audit snapshot "
+                        "revert operations.",
+                        ["CWE-284"], kind="vsphere_stale_snapshot"))
 
                 linked = pr.get("linked_vcenters") or []
                 if linked:

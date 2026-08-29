@@ -240,8 +240,11 @@ class BuildCveMapTests(unittest.TestCase):
 
     def test_esxi_never_matches_vcenter_cves(self):
         # HostAgent must not pick up vCenter-only CVEs even at ancient builds.
+        # (HostAgent-scoped CVEs, e.g. 2024-37085, may still match.)
         hits = vsphere.build_cves("HostAgent", "7.0.3", "1")
-        self.assertEqual(hits, [])
+        cves = {h["cve"] for h in hits}
+        for vc_only in ("CVE-2021-21985", "CVE-2021-22005", "CVE-2023-34048"):
+            self.assertNotIn(vc_only, cves)
 
     def test_unparseable_build_never_cites_cve(self):
         self.assertEqual(
@@ -561,6 +564,165 @@ class FindingsToVulnsTests(unittest.TestCase):
         self.assertEqual(v.source, "vsphere")
         self.assertEqual(v.port, 443)
         self.assertTrue(v.script_id.startswith("vsphere:"))
+
+
+# --- CVE-2024-37085 (ESXi 'ESX Admins' AD auto-promote priv-esc) --------------
+
+# Wire-derived AboutInfo for an unpatched ESXi 7.0 U3o (build 22348816 <
+# 23794027 which is the VMSA-2024-0013 fix). Reduced from a lab capture.
+ESXI_7U3O_SC = b"""<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+ <soapenv:Body>
+  <RetrieveServiceContentResponse xmlns="urn:vim25">
+   <returnval>
+    <about>
+     <name>VMware ESXi</name>
+     <fullName>VMware ESXi 7.0.3 build-22348816</fullName>
+     <vendor>VMware, Inc.</vendor>
+     <version>7.0.3</version>
+     <build>22348816</build>
+     <apiType>HostAgent</apiType>
+     <apiVersion>7.0.3.0</apiVersion>
+    </about>
+   </returnval>
+  </RetrieveServiceContentResponse>
+ </soapenv:Body>
+</soapenv:Envelope>"""
+
+
+class Cve202437085Tests(unittest.TestCase):
+    def test_unpatched_esxi_7_matches(self):
+        hits = vsphere.build_cves("HostAgent", "7.0.3", "22348816")
+        self.assertIn("CVE-2024-37085", {h["cve"] for h in hits})
+
+    def test_unpatched_esxi_8_matches(self):
+        hits = vsphere.build_cves("HostAgent", "8.0.2", "22380479")
+        self.assertIn("CVE-2024-37085", {h["cve"] for h in hits})
+
+    def test_patched_esxi_7_u3q_clears(self):
+        # 7.0 U3q fixed build = 23794027; boundary must NOT fire.
+        hits = vsphere.build_cves("HostAgent", "7.0.3", "23794027")
+        self.assertNotIn("CVE-2024-37085", {h["cve"] for h in hits})
+
+    def test_patched_esxi_8_u2b_clears(self):
+        hits = vsphere.build_cves("HostAgent", "8.0.2", "23305546")
+        self.assertNotIn("CVE-2024-37085", {h["cve"] for h in hits})
+
+    def test_vcenter_never_matches_37085(self):
+        # HostAgent-only advisory must not fire on VirtualCenter builds.
+        hits = vsphere.build_cves("VirtualCenter", "8.0.2", "1")
+        self.assertNotIn("CVE-2024-37085", {h["cve"] for h in hits})
+
+    def test_service_content_parse_of_unpatched_7u3o(self):
+        parsed = vsphere._parse_service_content(ESXI_7U3O_SC)
+        self.assertIsNotNone(parsed)
+        cves = {h["cve"] for h in vsphere.build_cves(
+            parsed["api_type"], parsed["version"], parsed["build"])}
+        self.assertIn("CVE-2024-37085", cves)
+
+    def test_findings_emit_dedicated_37085_row(self):
+        h = Host(ip="10.0.0.6")
+        h.ports.append(Port(portid=443, state="open", service="https"))
+        pr = {
+            "ip": h.ip, "port": 443, "role": "sdk", "reachable": True,
+            "sdk": True, "api_type": "HostAgent", "version": "7.0.3",
+            "build": "22348816",
+            "cves": vsphere.build_cves("HostAgent", "7.0.3", "22348816"),
+            "cert": {"cn": "", "sans": []},
+        }
+        fs = vsphere.findings([h], {(h.ip, 443): pr})
+        kinds = {f["kind"] for f in fs}
+        self.assertIn("vsphere_cve_2024_37085", kinds)
+        self.assertIn("vsphere_outdated_build", kinds)
+        row = next(f for f in fs if f["kind"] == "vsphere_cve_2024_37085")
+        self.assertEqual(row["severity"], "critical")
+        self.assertIn("ESX Admins", row["title"])
+        self.assertIn("CWE-269", row["cwes"])
+
+
+# --- stale-snapshot finding ---------------------------------------------------
+
+# Wire-derived shape: RetrievePropertiesEx on VirtualMachine returns a
+# `snapshot` propSet only when the VM has at least one snapshot; the
+# `<val>` element contains a serialised VirtualMachineSnapshotInfo tree.
+# _parse_property_objects concatenates the val's itertext(), so the parsed
+# `snapshot` prop is non-empty iff a snapshot exists. Below is the parsed
+# equivalent — matches what _parse_property_objects yields.
+
+VM_SNAPSHOT_INFO_TEXT = (
+    "snapshot-9 pre-patch before Tuesday"
+)
+
+
+class StaleSnapshotTests(unittest.TestCase):
+    def _parsed_vms(self):
+        return [
+            {"type": "VirtualMachine", "ref": "vm-101",
+             "props": {"name": "dc01", "runtime.powerState": "poweredOff",
+                       "snapshot": "snapshot-9 pre-patch before Tuesday"}},
+            {"type": "VirtualMachine", "ref": "vm-102",
+             "props": {"name": "app01", "runtime.powerState": "poweredOn",
+                       "snapshot": "snapshot-1 fresh"}},
+            {"type": "VirtualMachine", "ref": "vm-103",
+             "props": {"name": "legacy01", "runtime.powerState": "poweredOff"}},
+        ]
+
+    def test_helper_returns_only_powered_off_with_snapshot(self):
+        vms = self._parsed_vms()
+        stale = vsphere._stale_snapshot_vms(vms)
+        self.assertEqual(stale, ["dc01"])
+
+    def test_helper_ignores_empty_snapshot_string(self):
+        vms = [{"type": "VirtualMachine", "ref": "vm-0",
+                "props": {"name": "x", "runtime.powerState": "poweredOff",
+                          "snapshot": "   "}}]
+        self.assertEqual(vsphere._stale_snapshot_vms(vms), [])
+
+    def test_helper_empty_input(self):
+        self.assertEqual(vsphere._stale_snapshot_vms([]), [])
+
+    def test_finding_emits_when_stale_snapshot_present(self):
+        h = Host(ip="10.0.0.5")
+        h.ports.append(Port(portid=443, state="open", service="https"))
+        pr = {
+            "ip": h.ip, "port": 443, "role": "sdk", "reachable": True,
+            "sdk": True, "api_type": "VirtualCenter", "version": "8.0.2",
+            "build": "22385740", "cves": [],
+            "cert": {"cn": "", "sans": []},
+            "login": {"success": True, "user": "administrator@vsphere.local",
+                      "cookie": "vmware_soap_session=z", "attempts": 1},
+            "managed_hosts": [],
+            "managed_vms": self._parsed_vms(),
+        }
+        fs = vsphere.findings([h], {(h.ip, 443): pr})
+        kinds = {f["kind"] for f in fs}
+        self.assertIn("vsphere_stale_snapshot", kinds)
+        row = next(f for f in fs if f["kind"] == "vsphere_stale_snapshot")
+        self.assertEqual(row["severity"], "high")
+        self.assertIn("dc01", row["detail"])
+        # Only dc01 (powered-off with snapshot) — app01 is on, legacy01 has none.
+        self.assertNotIn("app01", row["detail"])
+        self.assertNotIn("legacy01", row["detail"])
+
+    def test_finding_suppressed_when_no_stale_snapshots(self):
+        h = Host(ip="10.0.0.5")
+        h.ports.append(Port(portid=443, state="open", service="https"))
+        pr = {
+            "ip": h.ip, "port": 443, "role": "sdk", "reachable": True,
+            "sdk": True, "api_type": "VirtualCenter", "version": "8.0.2",
+            "build": "22385740", "cves": [],
+            "cert": {"cn": "", "sans": []},
+            "login": {"success": True, "user": "u", "cookie": "c",
+                      "attempts": 1},
+            "managed_hosts": [],
+            "managed_vms": [
+                {"type": "VirtualMachine", "ref": "vm-1",
+                 "props": {"name": "app", "runtime.powerState": "poweredOn",
+                           "snapshot": "snapshot-1 x"}},
+            ],
+        }
+        fs = vsphere.findings([h], {(h.ip, 443): pr})
+        self.assertNotIn("vsphere_stale_snapshot", {f["kind"] for f in fs})
 
 
 if __name__ == "__main__":
