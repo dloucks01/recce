@@ -19,6 +19,7 @@ Authorized testing only.
 from __future__ import annotations
 
 import socket
+import struct
 
 from ...core.models import Host, Port
 from ..svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
@@ -30,6 +31,16 @@ _MAX_REPLY = 256 * 1024            # stats are a few KB; cap so a hostile peer c
                                   # make us buffer unbounded.
 _CACHEDUMP_SLABS = 4              # sample at most this many slabs ...
 _CACHEDUMP_KEYS = 20              # ... and this many keys per slab (proof, not a dump).
+# --- bounded value + metadump caps (additive capabilities) ---------------------
+_METADUMP_MAX_KEYS = 200          # `lru_crawler metadump all` can stream forever - cap.
+_METADUMP_MAX_BYTES = 128 * 1024  # ...and cap the raw stream too so a huge cache
+                                  # can't make us buffer unbounded.
+_VALUE_FETCH_MAX_KEYS = 8         # multi-`get` at most this many keys (proof, not a
+                                  # dump - a full dump is what an attacker does).
+_VALUE_PREVIEW_BYTES = 256        # per-value preview cap (redact the rest to a length).
+_VALUE_TOTAL_BYTES = 4 * 1024     # aggregate cap across all captured previews.
+_UDP_TIMEOUT = 2.0                # UDP probe budget (single datagram round trip).
+_UDP_REPLY_CAP = 65_507           # max UDP payload; also the single-recv upper bound.
 
 
 def is_memcached(port: Port) -> bool:
@@ -114,13 +125,180 @@ def _parse_cachedump_keys(raw: bytes) -> list[str]:
     return keys
 
 
+def _pct_unquote(s: str) -> str:
+    """URL-decode `%XX` escapes in metadump key names (protocol.txt encodes any
+    byte outside `[a-zA-Z0-9._-]` as %XX). stdlib-only, tolerant to malformed
+    escapes (leave them literal rather than crash on a hostile peer)."""
+    if "%" not in s:
+        return s
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "%" and i + 2 < len(s):
+            try:
+                out.append(chr(int(s[i + 1:i + 3], 16)))
+                i += 3
+                continue
+            except ValueError:
+                pass
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _parse_metadump_keys(raw: bytes) -> list[str]:
+    """`lru_crawler metadump all` -> lines starting with `key=<pct-encoded>` and
+    space-separated `k=v` metadata. Returns the decoded key names in order, up to
+    `_METADUMP_MAX_KEYS`. Also returns cleanly on:
+      * `BUSY` / `NOTFOUND` / `CLIENT_ERROR` (added <1.4.31 or crawler disabled)
+      * `ERROR` (command unknown on very old servers)
+    ...i.e. an empty list means 'not supported here', never a crash."""
+    keys: list[str] = []
+    for line in raw.split(b"\n"):
+        if len(keys) >= _METADUMP_MAX_KEYS:
+            break
+        line = line.rstrip(b"\r")
+        if line.startswith(b"key="):
+            head = line.split(b" ", 1)[0]     # key=<encoded>
+            try:
+                enc = head[4:].decode("ascii", "replace")
+            except Exception:                  # noqa: BLE001
+                continue
+            keys.append(_pct_unquote(enc))
+    return keys
+
+
+def _parse_values(raw: bytes) -> list[dict]:
+    """`get k1 k2 ...` reply -> [{key, bytes, preview, truncated}]. Reply lines:
+        VALUE <key> <flags> <bytes>[ <cas>]\r\n
+        <data of exactly <bytes> bytes>\r\n
+        ...
+        END\r\n
+    We walk the buffer as bytes (values are opaque - may contain CR/LF), pull
+    the first `_VALUE_PREVIEW_BYTES` of each value as a printable-with-replace
+    preview, and stop when we hit END or the total-preview budget."""
+    out: list[dict] = []
+    total = 0
+    i = 0
+    n = len(raw)
+    while i < n:
+        # Find next line end
+        nl = raw.find(b"\r\n", i)
+        if nl == -1:
+            break
+        line = raw[i:nl]
+        i = nl + 2
+        if line == b"END":
+            break
+        if not line.startswith(b"VALUE "):
+            # ERROR, CLIENT_ERROR, SERVER_ERROR, or unexpected -> stop cleanly.
+            break
+        parts = line.split(b" ")
+        # VALUE <key> <flags> <bytes> [<cas>]
+        if len(parts) < 4:
+            break
+        try:
+            key = parts[1].decode("ascii", "replace")
+            length = int(parts[3])
+        except (ValueError, IndexError):
+            break
+        if length < 0 or length > _MAX_REPLY:
+            break
+        end = i + length
+        if end > n:
+            break
+        data = raw[i:end]
+        i = end + 2                            # skip trailing \r\n after value
+        preview_len = min(length, _VALUE_PREVIEW_BYTES,
+                          max(0, _VALUE_TOTAL_BYTES - total))
+        preview_bytes = data[:preview_len]
+        preview = preview_bytes.decode("utf-8", "replace")
+        out.append({"key": key, "bytes": length, "preview": preview,
+                    "truncated": length > preview_len})
+        total += preview_len
+        if total >= _VALUE_TOTAL_BYTES:
+            break
+    return out
+
+
+def _udp_frame(payload: bytes, request_id: int = 0x0001) -> bytes:
+    """Build the memcached UDP frame: 8-byte header (request_id, seq_num=0,
+    num_datagrams=1, reserved=0) followed by the ASCII text command. See
+    memcached protocol.txt 'UDP protocol'."""
+    return struct.pack("!HHHH", request_id & 0xFFFF, 0, 1, 0) + payload
+
+
+def udp_stats_probe(ip: str, port: int, timeout: float = _UDP_TIMEOUT) -> dict:
+    """Send a single `stats\\r\\n` UDP datagram and measure the reply. Returns
+    {responded, request_bytes, response_bytes, amp_ratio, num_datagrams, error}.
+
+    The 8-byte UDP frame header is included in both counts (that's what an
+    attacker's spoofed packet and its reflected reply actually carry on the wire).
+    Reads at most one datagram - a real memcrashed abuser gets many, but for a
+    CONFIRMATION-of-exposure probe one is enough to prove the port answers and
+    to fingerprint the amplification factor.
+    """
+    res = {"responded": False, "request_bytes": 0, "response_bytes": 0,
+           "amp_ratio": 0.0, "num_datagrams": 0, "error": ""}
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(timeout)
+        frame = _udp_frame(b"stats\r\n")
+        res["request_bytes"] = len(frame)
+        sock.sendto(frame, (ip, port))
+        try:
+            data, _ = sock.recvfrom(_UDP_REPLY_CAP)
+        except (socket.timeout, OSError) as e:
+            res["error"] = str(e) or "no reply"
+            return res
+        res["responded"] = True
+        res["response_bytes"] = len(data)
+        if len(data) >= 8:
+            _req, _seq, nd, _res = struct.unpack("!HHHH", data[:8])
+            res["num_datagrams"] = int(nd)
+        if res["request_bytes"] > 0:
+            res["amp_ratio"] = round(res["response_bytes"] / res["request_bytes"], 2)
+    except OSError as e:
+        res["error"] = res["error"] or str(e)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    return res
+
+
+def _classify_key(name: str) -> str:
+    """Return a short tag ('session' / 'auth' / 'csrf' / 'apikey' / '') for a
+    key name - purely a string-shape hint, no value inspection. Order matters:
+    more specific tags win over generic 'auth'."""
+    low = name.lower()
+    if "csrf" in low or "xsrf" in low:
+        return "csrf"
+    for hint in ("sess", "sessid", "phpsessid", "jsessionid", "asp.net_sessionid",
+                 "django.contrib.sessions", "laravel_session", "connect.sid"):
+        if hint in low:
+            return "session"
+    for hint in ("api_key", "apikey", "api-key", "secret", "password", "passwd"):
+        if hint in low:
+            return "apikey"
+    for hint in ("jwt", "token", "bearer", "oauth", "refresh", "auth"):
+        if hint in low:
+            return "auth"
+    return ""
+
+
 def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     """Read version + stats and (if exposed) sample live keys, all without a credential.
     Returns {reachable, unauth, version, stats, items, keys_sampled, sample_keys, arch,
-    error}."""
+    error, sample_values, metadump_supported, sensitive_key_tags, udp}."""
     res: dict = {"reachable": False, "unauth": False, "version": "", "stats": {},
                  "items": 0, "keys_sampled": 0, "sample_keys": [], "arch": "",
-                 "error": ""}
+                 "error": "",
+                 # additive fields for new capabilities (empty on failure/unsupported)
+                 "sample_values": [], "metadump_supported": False,
+                 "sensitive_key_tags": {}, "udp": {}}
     try:
         with socket.create_connection((ip, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
@@ -156,9 +334,55 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
                                         (b"END\r\n", b"ERROR"))
                         res["sample_keys"].extend(_parse_cachedump_keys(dump))
                     res["sample_keys"] = res["sample_keys"][:_CACHEDUMP_KEYS]
+                    # Modern servers (>=1.4.31) often truncate/disable cachedump for
+                    # large slabs. `lru_crawler metadump all` streams metadata for
+                    # every item. Cap the raw stream and the key count so a huge
+                    # cache can't make us buffer unbounded (see _METADUMP_MAX_*).
+                    meta_raw = _command(sock, "lru_crawler metadump all",
+                                        (b"END\r\n", b"BUSY", b"NOTFOUND",
+                                         b"CLIENT_ERROR", b"ERROR"))
+                    meta_raw = meta_raw[:_METADUMP_MAX_BYTES]
+                    meta_keys = _parse_metadump_keys(meta_raw)
+                    if meta_keys:
+                        res["metadump_supported"] = True
+                        # Merge without losing insertion order; metadump is authoritative
+                        # (full enumeration) but keep cachedump names first for stability.
+                        seen = set(res["sample_keys"])
+                        for k in meta_keys:
+                            if k not in seen:
+                                res["sample_keys"].append(k)
+                                seen.add(k)
+                        res["sample_keys"] = res["sample_keys"][:_METADUMP_MAX_KEYS]
                     res["keys_sampled"] = len(res["sample_keys"])
+                    # Classify key names (session/JWT/csrf/apikey shapes) and use
+                    # those tags to prioritise which keys we `get` for the value proof.
+                    tags: dict[str, str] = {}
+                    for k in res["sample_keys"]:
+                        t = _classify_key(k)
+                        if t:
+                            tags[k] = t
+                    res["sensitive_key_tags"] = tags
+                    # Value-retrieval proof: multi-`get` on a bounded selection, keeping
+                    # per-value + total previews small. Sensitive-shaped keys first.
+                    if res["sample_keys"]:
+                        ranked = sorted(res["sample_keys"],
+                                        key=lambda k: (0 if k in tags else 1))
+                        picks = ranked[:_VALUE_FETCH_MAX_KEYS]
+                        # `get` accepts up to ~250-byte keys space-separated; keep the
+                        # command well under _MAX_REPLY on the send side too.
+                        get_line = "get " + " ".join(picks)
+                        vals_raw = _command(sock, get_line, (b"END\r\n", b"ERROR"))
+                        res["sample_values"] = _parse_values(vals_raw)
     except (OSError, socket.timeout) as e:
         res["error"] = res["error"] or str(e)
+    # UDP amplification-vector confirmation. Independent of the TCP session so a
+    # TCP-only bind still gets an honest "no UDP" answer (and old builds where
+    # UDP defaults on get a MEASURED amplification ratio, not a narrative claim).
+    try:
+        res["udp"] = udp_stats_probe(ip, port, timeout=min(timeout, _UDP_TIMEOUT))
+    except OSError as e:
+        res["udp"] = {"responded": False, "request_bytes": 0, "response_bytes": 0,
+                      "amp_ratio": 0.0, "num_datagrams": 0, "error": str(e)}
     return res
 
 
@@ -179,6 +403,20 @@ _NARRATIVE = {
         "The memcached build is old. Pre-1.4.32 releases have integer-overflow RCE bugs "
         "in the binary/SASL protocol (CVE-2016-8704/8705/8706); confirm the version and "
         "upgrade."),
+    "memcached_values_readable": (
+        "recce fetched actual cached VALUES with `get` and no credential - not just key "
+        "names. Whatever the application caches (session tokens, JWTs, rendered pages, "
+        "API responses, DB query results, secrets) is directly readable by anyone who "
+        "can reach this port. Session/JWT-shaped keys are session-hijack primitives; "
+        "cached responses may contain PII. Bind to localhost, enable SASL (-S), and "
+        "firewall the port."),
+    "memcached_udp_amplification": (
+        "UDP 11211 answered a `stats` datagram and the reply was many times larger "
+        "than the request - this instance is USABLE as a DDoS reflection/amplification "
+        "source (the memcrashed class of attack, historic factors up to ~50,000x). "
+        "Attackers spoof a victim's source IP, send small UDP `stats`/`get` queries, "
+        "and the server floods the victim with the replies. Disable UDP (-U 0) on "
+        "modern builds and firewall UDP 11211 at the network edge."),
 }
 
 TESTING_NARRATIVE = [
@@ -240,6 +478,47 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "ncat", f"printf 'version\\r\\n' | ncat {h.ip} {p.portid}",
                     "Upgrade memcached to a supported release (>= 1.6).",
                     ["CWE-1104", "CWE-190"], kind="memcached_version"))
+            # Value-retrieval proof - upgrades unauth-key-names to unauth-values.
+            vals = pr.get("sample_values") or []
+            if vals:
+                tags = pr.get("sensitive_key_tags") or {}
+                sample_bits = []
+                for v in vals[:4]:
+                    k = v.get("key", "")
+                    tag = tags.get(k, "")
+                    tag_s = f" [{tag}]" if tag else ""
+                    sample_bits.append(f"{k}{tag_s}={v.get('bytes', 0)}B")
+                sens = sorted({t for t in tags.values() if t})
+                sens_s = f"; sensitive-shaped keys: {', '.join(sens)}" if sens else ""
+                out.append(_finding(
+                    "critical", "memcached cached values readable without credential",
+                    tgt,
+                    f"recce fetched {len(vals)} cached value(s) with `get` and no "
+                    f"authentication (sample: {'; '.join(sample_bits)}){sens_s}.",
+                    "ncat",
+                    f"printf 'get <key>\\r\\n' | ncat {h.ip} {p.portid}   "
+                    f"# after: stats cachedump <slab> <n>",
+                    "Bind to localhost, enable SASL (-S), firewall the port.",
+                    ["CWE-200", "CWE-522"], kind="memcached_values_readable"))
+            # UDP amplification-vector confirmation - only fires when we actually
+            # got a datagram back (never on inference).
+            udp = pr.get("udp") or {}
+            if udp.get("responded") and udp.get("amp_ratio", 0.0) >= 2.0:
+                out.append(_finding(
+                    "critical", "memcached UDP reflection/amplification confirmed",
+                    tgt,
+                    f"UDP {p.portid} replied to `stats` with "
+                    f"{udp.get('response_bytes', 0)} bytes for a "
+                    f"{udp.get('request_bytes', 0)}-byte request "
+                    f"(amplification ~{udp.get('amp_ratio', 0.0)}x, "
+                    f"{udp.get('num_datagrams', 0)} datagram(s)).",
+                    "ncat",
+                    f"# UDP is answering - reflection-usable\n"
+                    f"# hexdump -C <<< $'\\x00\\x01\\x00\\x00\\x00\\x01\\x00\\x00stats\\r\\n'"
+                    f" | ncat -u {h.ip} {p.portid}",
+                    "Disable UDP with `-U 0` (memcached >= 1.5.6 default) and firewall "
+                    "UDP 11211 at the edge.",
+                    ["CWE-406", "CWE-405"], kind="memcached_udp_amplification"))
     return out
 
 
