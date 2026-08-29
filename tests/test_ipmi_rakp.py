@@ -17,15 +17,18 @@ import threading
 from recce.services import ipmi
 
 
-def _fake_bmc(password: bytes = b"admin", *, refuse: bool = False):
-    """A minimal fake BMC that does one RMCP+ Open Session + one RAKP2
-    conversation and closes. Returns (port, socket)."""
+def _fake_bmc(password: bytes = b"admin", *, refuse: bool = False,
+              alg: int = 0x01):
+    """A minimal fake BMC that does ONE RMCP+ Open Session + ONE RAKP2 (or
+    refuses at Open Session). `alg` picks HMAC-SHA1 (0x01) or HMAC-SHA256
+    (0x03). Returns (port, socket)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind(("127.0.0.1", 0))
     s.settimeout(6)
     port = s.getsockname()[1]
     state = {"managed_sid": 0xDEADBEEF, "server_random": b"\x11" * 16,
              "server_guid": b"\x22" * 16}
+    hash_mod = hashlib.sha1 if alg == 0x01 else hashlib.sha256
 
     def run():
         try:
@@ -36,7 +39,7 @@ def _fake_bmc(password: bytes = b"admin", *, refuse: bool = False):
             payload = (bytes([0x00, status, 0x04, 0x00])
                        + struct.pack("<I", remote_sid)
                        + struct.pack("<I", state["managed_sid"])
-                       + b"\x00\x00\x00\x08\x01\x00\x00\x00"
+                       + bytes([0x00, 0x00, 0x00, 0x08, alg, 0x00, 0x00, 0x00])
                        + b"\x01\x00\x00\x08\x00\x00\x00\x00"
                        + b"\x02\x00\x00\x08\x00\x00\x00\x00")
             resp = (b"\x06\x00\xff\x07\x06\x11"
@@ -57,7 +60,7 @@ def _fake_bmc(password: bytes = b"admin", *, refuse: bool = False):
                    + struct.pack("<I", state["managed_sid"])
                    + client_random + state["server_random"]
                    + state["server_guid"] + bytes([role, ulen]) + uname)
-            mac = hmac_mod.new(password, msg, hashlib.sha1).digest()
+            mac = hmac_mod.new(password, msg, hash_mod).digest()
             payload = (bytes([0x00, 0x00, 0x00, 0x00])
                        + struct.pack("<I", remote_sid)
                        + state["server_random"] + state["server_guid"] + mac)
@@ -154,7 +157,7 @@ def test_hashloot_collect_from_probe_returns_nothing_when_rakp_missing():
 
 
 def test_ipmi_finding_fires_only_when_a_hash_was_actually_captured():
-    """A failed capture (empty hashcat_line) must not generate the finding —
+    """A failed capture (empty sweep) must not generate the finding —
     otherwise every probe against a BMC that refuses would spam the report."""
     from recce.core.models import Host, Port
     h = Host(ip="10.0.0.5",
@@ -162,13 +165,87 @@ def test_ipmi_finding_fires_only_when_a_hash_was_actually_captured():
     good = {("10.0.0.5", 623): {"reachable": True, "ipmi_version": "2.0",
             "auth_types": ["md5", "hmac-sha1"], "null_user": False,
             "anonymous_login": False, "cipher_zero": False,
-            "rakp": {"hashcat_line": "abcd:ef01", "hashcat_mode": 7300,
-                     "hmac_alg": "HMAC-SHA1"}}}
+            "rakp_sweep": {"reachable": True, "distinguishes_users": False,
+                           "existing_users": [], "errors": [],
+                           "hashes": [{"user": "root", "alg": "HMAC-SHA1",
+                                       "mode": 7300, "category": "ipmi",
+                                       "hashcat_line": "abcd:ef01"}]}}}
     kinds = {f["kind"] for f in ipmi.findings([h], good)}
     assert "ipmi_rakp_hash" in kinds
 
     bad = {("10.0.0.5", 623): {"reachable": True, "ipmi_version": "2.0",
            "auth_types": ["md5"], "null_user": False, "anonymous_login": False,
-           "cipher_zero": False, "rakp": {"hashcat_line": "", "error": "refused"}}}
+           "cipher_zero": False}}
     kinds2 = {f["kind"] for f in ipmi.findings([h], bad)}
     assert "ipmi_rakp_hash" not in kinds2
+
+
+def test_sweep_captures_hashes_for_multiple_users_and_both_algorithms():
+    """Fake BMC that answers RAKP for two users with SHA1 and SHA256 — the
+    sweep should return four hashcat lines (2 users x 2 algs), grouped by
+    category so the writer lands them in ipmi.hash + ipmi-sha256.hash."""
+    port_sha1, srv1 = _fake_bmc(password=b"root-pw")
+    try:
+        r = ipmi.rakp_sweep("127.0.0.1", port_sha1,
+                            usernames=("root",),
+                            algs=(ipmi._AUTH_HMAC_SHA1,),
+                            timeout=2.0)
+    finally:
+        srv1.close()
+    assert r["reachable"]
+    assert len(r["hashes"]) == 1
+    assert r["hashes"][0]["mode"] == 7300
+    assert r["hashes"][0]["category"] == "ipmi"
+
+    # SHA256 alg produces mode 7302 lines and lands in ipmi-sha256
+    port_sha256, srv2 = _fake_bmc(password=b"root-pw", alg=ipmi._AUTH_HMAC_SHA256)
+    try:
+        r = ipmi.rakp_sweep("127.0.0.1", port_sha256,
+                            usernames=("root",),
+                            algs=(ipmi._AUTH_HMAC_SHA256,),
+                            timeout=2.0)
+    finally:
+        srv2.close()
+    assert r["hashes"][0]["mode"] == 7302
+    assert r["hashes"][0]["category"] == "ipmi-sha256"
+
+
+def test_sweep_skips_remaining_users_when_algorithm_is_refused():
+    """A BMC that refuses HMAC-SHA256 refuses every user of that alg — the
+    sweep must not burn a round-trip per user when the first was refused."""
+    port, srv = _fake_bmc(refuse=True)
+    try:
+        r = ipmi.rakp_sweep("127.0.0.1", port,
+                            usernames=("root", "admin", "sysadmin"),
+                            algs=(ipmi._AUTH_HMAC_SHA1,),
+                            timeout=1.5)
+    finally:
+        srv.close()
+    assert r["hashes"] == []
+    # Only one refusal line (the first user), not one per attempted user
+    assert len(r["errors"]) == 1
+
+
+def test_hashloot_collect_multiplexes_sweep_lines_to_the_right_files():
+    from recce.creds import hashloot
+    sweep = {"rakp_sweep": {"hashes": [
+        {"user": "root", "mode": 7300, "category": "ipmi",
+         "hashcat_line": "sha1line:sha1hmac"},
+        {"user": "root", "mode": 7302, "category": "ipmi-sha256",
+         "hashcat_line": "sha256line:sha256hmac"},
+    ]}}
+    pairs = hashloot.collect_from_probe(sweep, "ipmi")
+    by_cat = {c: l for c, l in pairs}
+    assert by_cat["ipmi"] == "sha1line:sha1hmac"
+    assert by_cat["ipmi-sha256"] == "sha256line:sha256hmac"
+    # Both files are registered so the writer can look up mode + filename
+    assert hashloot.CATEGORIES["ipmi-sha256"][:2] == ("ipmi-sha256.hash", 7302)
+
+
+def test_hashloot_legacy_single_hash_shape_still_works():
+    """Callers that pass the pre-sweep probe shape must still land in loot —
+    otherwise a downstream consumer that hasn't migrated silently produces
+    empty files."""
+    from recce.creds import hashloot
+    legacy = {"rakp": {"hashcat_line": "old:shape", "hashcat_mode": 7300}}
+    assert hashloot.collect_from_probe(legacy, "ipmi") == [("ipmi", "old:shape")]

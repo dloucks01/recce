@@ -36,6 +36,7 @@ CATEGORIES: dict[str, tuple[str, int, str]] = {
     "mongo-scram": ("mongo-scram.hash", 24100, "MongoDB SCRAM-SHA-1 (usersInfo showCredentials)"),
     "mongo-scram256": ("mongo-scram256.hash", 24200, "MongoDB SCRAM-SHA-256"),
     "ipmi":        ("ipmi.hash",        7300,  "IPMI 2.0 RAKP HMAC-SHA1"),
+    "ipmi-sha256": ("ipmi-sha256.hash", 7302,  "IPMI 2.0 RAKP HMAC-SHA256"),
     "vnc":         ("vnc.hash",         11600, "VNC challenge/response (8-byte DES)"),
     # Kerberos hashes are already written by cli/_service_helpers.py; listed
     # here so `recce creds --potfile` recognises them as loot too.
@@ -151,10 +152,21 @@ def collect_from_probe(probe: dict, service: str) -> list[tuple[str, str]]:
     for anything new.
     """
     if service == "ipmi":
-        rakp = probe.get("rakp") if isinstance(probe, dict) else None
-        if isinstance(rakp, dict) and rakp.get("hashcat_line"):
-            return [("ipmi", rakp["hashcat_line"])]
-        return []
+        out: list[tuple[str, str]] = []
+        # Multi-user + multi-alg sweep produces a list of {category, line}.
+        sweep = probe.get("rakp_sweep") if isinstance(probe, dict) else None
+        if isinstance(sweep, dict):
+            for h in sweep.get("hashes") or []:
+                cat = h.get("category")
+                line = h.get("hashcat_line")
+                if cat and line:
+                    out.append((cat, line))
+        # Legacy single-hash shape from the earlier iteration — kept so a
+        # future caller passing the old-format probe still gets the loot line.
+        legacy = probe.get("rakp") if isinstance(probe, dict) else None
+        if isinstance(legacy, dict) and legacy.get("hashcat_line") and not out:
+            out.append(("ipmi", legacy["hashcat_line"]))
+        return out
     return collect_from_db_probe(probe, service)
 
 
