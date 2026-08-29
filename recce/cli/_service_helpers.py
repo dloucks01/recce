@@ -630,6 +630,26 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
         extra(store, hosts, tgts, by_ip)
     if active:
         _mark_capability_scanned(store, tgts)
+    # Hashcat-format loot files. Each DB module already puts the "hashcat -m X"
+    # command in the finding text, so writing the file it wants is the only
+    # missing half — before this the tester had to grep the report to
+    # reconstruct the hash list. Deduped + appended, so a repeat scan grows
+    # loot/<source>.hash rather than overwriting.
+    try:
+        from ..creds import hashloot
+        loot_dir = os.path.join(args.output_dir, "loot")
+        by_cat: dict[str, list[str]] = {}
+        for _tgt_key, pr in (analysis.get("probes") or {}).items():
+            for category, line in hashloot.collect_from_db_probe(pr, source):
+                by_cat.setdefault(category, []).append(line)
+        for category, lines in by_cat.items():
+            n = hashloot.write_hashcat_file(loot_dir, category, lines)
+            if n:
+                fname, mode, _blurb = hashloot.CATEGORIES[category]
+                print(f"    -> {n} new hash(es) captured -> loot/{fname} "
+                      f"(hashcat -m {mode})")
+    except Exception:  # noqa: BLE001 — hashloot writing must never break the scan
+        pass
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
