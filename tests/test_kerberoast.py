@@ -93,5 +93,96 @@ class KerberosMessageTest(unittest.TestCase):
         self.assertIsNone(K._kdc_error_code(K._build_as_req_preauth("u", "R", nt_hash("p"))))
 
 
+class KerberosEtypePreflightTest(unittest.TestCase):
+    """PA-ETYPE-INFO2 read from KRB_ERR_PREAUTH_REQUIRED tells the operator
+    whether an SPN account will issue an RC4 hash (crackable) or AES-only
+    (crack-cost orders of magnitude higher) — the safest Kerberoast prep step.
+
+    Fixtures are DER built by hand, deliberately NOT via recce's encoders, so a
+    decoder change cannot be masked by a symmetric fixture bug."""
+
+    @staticmethod
+    def _der_int(n):
+        b = n.to_bytes(max(1, (n.bit_length() + 8) // 8), "big")
+        return b"\x02" + bytes([len(b)]) + b
+
+    @staticmethod
+    def _der_seq(*parts):
+        inner = b"".join(parts)
+        return b"\x30" + bytes([len(inner)]) + inner
+
+    @staticmethod
+    def _der_ctx(n, inner):
+        return bytes([0xA0 | n, len(inner)]) + inner
+
+    @staticmethod
+    def _der_octet(b):
+        return b"\x04" + bytes([len(b)]) + b
+
+    def _entry(self, etype, salt=""):
+        parts = [self._der_ctx(0, self._der_int(etype))]
+        if salt:
+            s = salt.encode()
+            parts.append(self._der_ctx(1, b"\x1B" + bytes([len(s)]) + s))
+        return self._der_seq(*parts)
+
+    def _krb_error(self, code, entries):
+        etype_info = self._der_seq(*entries)
+        pa = self._der_seq(self._der_ctx(1, self._der_int(19)),
+                           self._der_ctx(2, self._der_octet(etype_info)))
+        edata = self._der_octet(self._der_seq(pa))
+        body = self._der_seq(self._der_ctx(0, self._der_int(5)),
+                             self._der_ctx(1, self._der_int(30)),
+                             self._der_ctx(6, self._der_int(code)),
+                             self._der_ctx(12, edata))
+        return b"\x7E" + bytes([len(body)]) + body
+
+    def _patch_wire(self, payload_or_none):
+        orig = K._send_recv
+        K._send_recv = lambda *a, **kw: payload_or_none
+        self.addCleanup(lambda: setattr(K, "_send_recv", orig))
+
+    def test_rc4_and_aes_account_reports_has_rc4_true(self):
+        self._patch_wire(self._krb_error(25, [self._entry(23, "CORPsvc_sql"),
+                                              self._entry(17), self._entry(18)]))
+        r = K.etype_preflight("127.0.0.1", "CORP.LOCAL", "svc_sql")
+        self.assertTrue(r["reachable"] and r["code"] == 25)
+        self.assertEqual([e["etype"] for e in r["etypes"]], [23, 17, 18])
+        self.assertTrue(r["has_rc4"])
+        self.assertFalse(r["aes_only"])
+        # salt on the first entry survives the round trip
+        self.assertEqual(r["etypes"][0]["salt"], "CORPsvc_sql")
+
+    def test_aes_only_account_flags_aes_only_and_kills_has_rc4(self):
+        """The whole point of the pre-flight: catch this state BEFORE roasting
+        so the operator does not waste time on an unusable AES256 hash."""
+        self._patch_wire(self._krb_error(25, [self._entry(18, "salt")]))
+        r = K.etype_preflight("127.0.0.1", "CORP.LOCAL", "aes_svc")
+        self.assertFalse(r["has_rc4"])
+        self.assertTrue(r["aes_only"])
+        self.assertEqual([e["name"] for e in r["etypes"]],
+                         ["aes256-cts-hmac-sha1-96"])
+
+    def test_unreachable_kdc_returns_reachable_false(self):
+        self._patch_wire(None)
+        r = K.etype_preflight("127.0.0.1", "CORP.LOCAL", "svc_sql")
+        self.assertFalse(r["reachable"])
+        self.assertEqual(r["etypes"], [])
+
+    def test_non_preauth_error_still_returns_the_code_without_etypes(self):
+        """KDC_ERR_C_PRINCIPAL_UNKNOWN (6) means the account does not exist —
+        the KDC will not disclose etype info, so etypes must be empty but the
+        code is still surfaced so the caller can distinguish 'no such account'
+        from a network failure."""
+        body = self._der_seq(self._der_ctx(0, self._der_int(5)),
+                             self._der_ctx(1, self._der_int(30)),
+                             self._der_ctx(6, self._der_int(6)))
+        self._patch_wire(b"\x7E" + bytes([len(body)]) + body)
+        r = K.etype_preflight("127.0.0.1", "CORP.LOCAL", "ghost")
+        self.assertTrue(r["reachable"])
+        self.assertEqual(r["code"], 6)
+        self.assertEqual(r["etypes"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
