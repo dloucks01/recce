@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { HostDetail, VulnDetail, SessionInfo, Credential, Persistence,
-  getHost, getSessions, getCredentials, getPersistence, removePersistence } from "./api";
+  getHost, getSessions, getCredentials, getPersistence, removePersistence,
+  postCommand } from "./api";
 import { SevTag, NoteCell, useEscape, useResizableDrawer } from "./ui";
 import { FindingDetail } from "./FindingDetail";
 import { PortStatus } from "./collab";
@@ -207,6 +208,42 @@ export function HostDrawer(
   );
 }
 
+// Well-known port → catalog command for the T5+ single-service deep modules.
+// Each entry lets HostActivity render a one-click "run" chip for a discovered port,
+// so a tester doesn't have to hop to ScanTab and pick the module by hand.
+const NEW_SERVICE_PORTS: Record<number, { command: string; label: string }> = {
+  22: { command: "ssh", label: "ssh" },
+  23: { command: "telnet", label: "telnet" },
+  102: { command: "s7", label: "s7" },
+  110: { command: "pop3", label: "pop3" },
+  143: { command: "imap", label: "imap" },
+  179: { command: "bgp", label: "bgp" },
+  427: { command: "slp", label: "slp" },
+  515: { command: "cups_lpd", label: "cups-lpd" },
+  554: { command: "rtsp", label: "rtsp" },
+  993: { command: "imap", label: "imaps" },
+  995: { command: "pop3", label: "pop3s" },
+  1883: { command: "mqtt", label: "mqtt" },
+  2404: { command: "iec104", label: "iec-104" },
+  3260: { command: "iscsi", label: "iscsi" },
+  3478: { command: "stun", label: "stun/turn" },
+  4822: { command: "guacamole", label: "guacamole" },
+  4840: { command: "opcua", label: "opc-ua" },
+  5222: { command: "xmpp", label: "xmpp" },
+  5269: { command: "xmpp", label: "xmpp-s2s" },
+  5666: { command: "nrpe", label: "nrpe" },
+  5683: { command: "coap", label: "coap" },
+  8200: { command: "vault", label: "vault" },
+  8883: { command: "mqtt", label: "mqtts" },
+  10050: { command: "zabbix", label: "zabbix-agent" },
+  10051: { command: "zabbix", label: "zabbix-server" },
+  20000: { command: "dnp3", label: "dnp3" },
+  25565: { command: "minecraft", label: "minecraft" },
+  44818: { command: "enip", label: "ethernet/ip" },
+  47808: { command: "bacnet", label: "bacnet" },
+  50000: { command: "jenkins-jnlp", label: "jenkins-jnlp" },
+};
+
 // "What's been done" — the detailed per-host account, assembled from data recce already
 // has: the full phase set (not just 4 steps), and which modules produced findings.
 function HostActivity(
@@ -252,6 +289,33 @@ function HostActivity(
           </div>
         </div>
       )}
+
+      {(() => {
+        // Services fingerprinted — one chip per T5+ single-service module whose
+        // well-known port is open on this host, with a one-click run against
+        // this IP so the tester doesn't have to hop to ScanTab.
+        const hits = d.ports
+          .map((p) => ({ p, meta: NEW_SERVICE_PORTS[p.port] }))
+          .filter((x) => !!x.meta) as { p: typeof d.ports[number]; meta: { command: string; label: string } }[];
+        if (hits.length === 0) return null;
+        return (
+          <div className="by-source">
+            <div className="muted small">Services fingerprinted</div>
+            <div className="source-chips">
+              {hits.map(({ p, meta }) => (
+                <span key={`${meta.command}-${p.port}`} className="source-chip">
+                  <b>{meta.label}</b> <span className="muted small">{p.port}/{p.proto}</span>{" "}
+                  <button className="linkish" title={`run ${meta.command} against ${d.ip}`}
+                          onClick={() => postCommand({ command: meta.command, targets: d.ip })
+                            .catch((e) => alert(`could not run ${meta.command}: ${e}`))}>
+                    run
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {(shells.length > 0 || creds.length > 0) && (
         <div className="activity-tally">

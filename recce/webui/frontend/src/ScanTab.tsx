@@ -108,6 +108,11 @@ const GROUP_META: Record<string, { icon: string; desc: string }> = {
   credential: { icon: "🔑", desc: "Credential testing" },
   bruteforce: { icon: "🔨", desc: "Brute-force attacks" },
   auxiliary: { icon: "🧰", desc: "Utility modules" },
+  mail: { icon: "✉", desc: "Mail server enumeration (IMAP / POP3)" },
+  storage: { icon: "💾", desc: "Networked storage (iSCSI / NBD / WebDAV)" },
+  virtualization: { icon: "🖧", desc: "Hypervisors & cloud metadata surfaces" },
+  monitoring: { icon: "📊", desc: "Monitoring agents (NRPE / Zabbix)" },
+  "ot/ics": { icon: "⚙", desc: "OT / ICS / SCADA protocols" },
 };
 
 function elapsed(start: number, end?: number): string {
