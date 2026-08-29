@@ -160,6 +160,18 @@ def cmd_creds(args: argparse.Namespace) -> int:
                   f"engagement enum ({', '.join(sources) or 'unknown'}) folded "
                   f"into users.txt: {sample}"
                   + (" …" if len(enum_only) > 8 else ""))
+        # Hash-inventory summary: what recce is holding for cracking, so the
+        # operator sees whether a hashcat pass is worth their time and which
+        # -m modes to run.
+        from ..creds.known_hashes import known_hashes as _kh
+        kh = _kh(stacked, args.output_dir)
+        if kh["total"]:
+            modes = ", ".join(f"-m {m}×{n}" for m, n in
+                              sorted(kh["by_mode"].items()))
+            print(f"    [+] {kh['total']} hash(es) captured across "
+                  f"{len(kh['by_user'])} user(s): {modes}. "
+                  f"Run `hashcat` against loot/*.hash then "
+                  f"`recce creds --run` to auto-fold cracks into the spray.")
         print()
         for line in summary["commands"] or ["  (no sprayable services in scope yet)"]:
             print("  " + line if not line.startswith("#") else "\n  " + line)
@@ -198,6 +210,10 @@ def cmd_creds(args: argparse.Namespace) -> int:
                   f"engagement enum ({', '.join(sources) or 'unknown'}) "
                   f"included in the spray: {sample}"
                   + (" …" if len(enum_only) > 8 else ""))
+        absorbed = res.get("absorbed_from_potfile") or 0
+        if absorbed:
+            print(f"    [+] {absorbed} cracked password(s) auto-absorbed from "
+                  f"hashcat potfile(s) and folded into this spray.")
         hits = res["hits"]
         if hits:
             print(f"\n[+] {len(hits)} VALID login(s):")

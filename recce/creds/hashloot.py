@@ -178,3 +178,44 @@ def creds_to_hashcat_lines(creds: list[Credential]) -> list[str]:
     return [f"{c.username}:{c.secret}"
             for c in creds
             if c.kind == "nthash" and c.username and c.secret]
+
+
+# --- potfile absorb -----------------------------------------------------------
+# Between recce runs the operator will typically kick off hashcat against
+# `loot/*.hash` and let it grind. What was missing: getting those cracked
+# plaintexts back into recce automatically. The `--potfile PATH` flag
+# handles the case where the operator supplies a specific file, but nothing
+# scanned hashcat's OWN default potfile location — so cracks the operator
+# didn't explicitly export got left on the floor.
+#
+# `absorb_default_potfiles()` scans every potfile recce knows how to find
+# (hashcat's own defaults + any `*.pot` in the engagement out_dir) and
+# hands the concatenated content to `credentials.parse_potfile()`, which
+# already knows how to match hashes back to accounts. Returns the list of
+# new Credential(kind="password") entries. Safe to call opportunistically:
+# no error if no potfile exists.
+
+def absorb_default_potfiles(creds: list[Credential],
+                            out_dir: str = "") -> list[Credential]:
+    """Scan hashcat's default potfile locations + `{out_dir}/*.pot`.
+
+    Returns Credential(kind="password") entries for every crack that
+    matches a hash recce already holds. Non-matching lines and IO errors
+    are silently skipped — the caller wants "give me whatever you can get"
+    behaviour so a missing potfile doesn't break the spray.
+    """
+    from .credentials import parse_potfile
+    from .known_hashes import default_potfile_paths
+    paths = default_potfile_paths(out_dir)
+    if not paths:
+        return []
+    parts: list[str] = []
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                parts.append(fh.read())
+        except OSError:
+            continue
+    if not parts:
+        return []
+    return parse_potfile("\n".join(parts), creds, loot_dir=out_dir)

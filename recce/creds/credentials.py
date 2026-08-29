@@ -339,9 +339,22 @@ def run_spray(hosts: list[Host], creds: list[Credential], out_dir: str, *,
     domain lockout policy isn't tripped. safe=False drops --no-bruteforce = full
     user x password (real lockout risk - opt-in only). Needs nxc/netexec on PATH."""
     from . import credenum
+    from . import hashloot
     tool = credenum.smb_tool()
     if not tool:
         return {"ok": False, "error": "netexec/nxc not installed", "hits": [], "commands": []}
+    # Opportunistically absorb hashcat's own potfile + any {out_dir}/*.pot
+    # before building the spray, so cracks the operator ran BETWEEN recce
+    # invocations get folded into this run without needing --potfile PATH.
+    # No-op when nothing exists; safe to call every run.
+    absorbed = hashloot.absorb_default_potfiles(creds, out_dir)
+    if absorbed:
+        seen = {(c.username.lower(), c.domain.lower(), c.secret) for c in creds}
+        for c in absorbed:
+            k = (c.username.lower(), c.domain.lower(), c.secret)
+            if k not in seen:
+                seen.add(k)
+                creds.append(c)
     files = write_files(creds, os.path.join(out_dir, "creds"), hosts=hosts)
     if not files.get("users.txt"):
         return {"ok": False, "error": "no usernames to spray", "hits": [], "commands": []}
@@ -386,4 +399,5 @@ def run_spray(hosts: list[Host], creds: list[Credential], out_dir: str, *,
     return {"ok": True, "hits": uniq, "commands": ran, "files": files, "safe": safe,
             "enum_only_users": enum_only,
             "enum_only_sources": sorted({s for a in enum_accounts
-                                         for s in a["sources"]})}
+                                         for s in a["sources"]}),
+            "absorbed_from_potfile": len(absorbed)}
