@@ -328,8 +328,12 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
                 mod = importlib.import_module(path)
             except ImportError:
                 continue
+            # Only public `*_targets` functions — a `_rbcd_targets` helper
+            # inside ldap.py shouldn't shadow the module's own `ldap_targets`
+            # just because it sorts first alphabetically.
             fn = next((getattr(mod, n) for n in dir(mod)
-                       if n.endswith("_targets") and callable(getattr(mod, n))), None)
+                       if n.endswith("_targets") and not n.startswith("_")
+                       and callable(getattr(mod, n))), None)
             if fn is None:
                 continue                     # web/api are HTTP-wide; handled below
             try:
