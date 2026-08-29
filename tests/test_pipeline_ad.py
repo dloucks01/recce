@@ -849,12 +849,41 @@ class SmbTest(unittest.TestCase):
     def test_findings_from_probe(self):
         from recce.services import smb
         pr = {("10.0.0.60", 445): {"smbv1": True, "signing_required": False,
+                                   "signing_enabled": True,
                                    "dialect_name": "SMB 3.1.1"}}
         fs = smb.findings([self._host()], pr)
         titles = " ".join(f["title"] for f in fs)
         self.assertIn("SMBv1", titles)
         self.assertIn("signing not required", titles.lower())
         self.assertTrue(all(f.get("narrative") for f in fs))       # narratives attached
+
+    def test_signing_finding_distinguishes_enabled_but_not_required(self):
+        """nxc reports "signing enabled" as a boolean and calls it clean, but a
+        host that ADVERTISES signing without REQUIRING it is still a relay
+        target. Recce must state which of the two SecurityMode bits (0x01
+        SIGN_ENABLED / 0x02 SIGN_REQUIRED) it observed, or a report reader
+        can't tell if the finding is real."""
+        from recce.services import smb
+        # Case 1: enabled=True, required=False — the common misreporting case.
+        fs = smb.findings([self._host()], {("10.0.0.60", 445): {
+            "signing_enabled": True, "signing_required": False,
+            "dialect_name": "SMB 3.1.1"}})
+        f = next(f for f in fs if f["kind"] == "smb_signing_not_required")
+        assert "SIGN_ENABLED=True" in f["detail"]
+        assert "SIGN_REQUIRED=False" in f["detail"]
+        assert "available" in f["detail"]           # names the sub-state
+        # Case 2: enabled=False, required=False — the legacy fully-off case.
+        fs2 = smb.findings([self._host()], {("10.0.0.60", 445): {
+            "signing_enabled": False, "signing_required": False,
+            "dialect_name": "SMB 2.0.2"}})
+        f2 = next(f for f in fs2 if f["kind"] == "smb_signing_not_required")
+        assert "SIGN_ENABLED=False" in f2["detail"]
+        assert "not offer signing at all" in f2["detail"]
+        # Case 3: required=True — no finding at all (the actual clean state).
+        fs3 = smb.findings([self._host()], {("10.0.0.60", 445): {
+            "signing_enabled": True, "signing_required": True,
+            "dialect_name": "SMB 3.1.1"}})
+        assert not any(f["kind"] == "smb_signing_not_required" for f in fs3)
 
     def test_findings_to_vulns_have_classified_cwes(self):
         from recce.services import smb

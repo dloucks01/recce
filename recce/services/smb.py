@@ -192,7 +192,7 @@ _NARRATIVE = {
         "hardening failure; confirm the patch level with the non-intrusive "
         "smb-vuln-ms17-010 NSE check to separate 'legacy protocol on' from "
         "'remotely exploitable today'."),
-    "smb_signing": (
+    "smb_signing_not_required": (
         "SMB message signing that is 'not required' means the server will accept an "
         "unsigned session - the precondition for an NTLM relay TO this host. An "
         "attacker who coerces authentication from a privileged account (PetitPotam / "
@@ -294,21 +294,48 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable SMBv1 entirely (Windows: Remove-WindowsFeature FS-SMB1 / "
                     "registry SMB1=0; Samba: 'server min protocol = SMB2_10').",
                     ["CWE-1104", "CWE-477"], kind="smbv1"))
-            if pr and "signing_required" in pr and not pr["signing_required"]:
+            # SMB signing is TWO independent flags in the SMB2 NEGOTIATE
+            # SecurityMode byte, and conflating them is the difference between
+            # "the server can sign if the client asks" and "the server refuses
+            # a client that will not sign". nxc reports the boolean and calls it
+            # "signing enabled" — a host in that state is still a relay target,
+            # which is why a report that just says "signing enabled" repeatedly
+            # under-reports the exposure.
+            #
+            #   0x01 SIGN_ENABLED   — signing is available
+            #   0x02 SIGN_REQUIRED  — signing is mandatory (this is the fix)
+            #
+            # NOT REQUIRED is the actual relay-target condition. Split so the
+            # finding is unambiguous about which flag we observed.
+            enabled = pr and pr.get("signing_enabled")
+            required = pr and pr.get("signing_required")
+            if pr and required is False:
+                sub_state = ("advertises signing as *available* but not *required*"
+                             if enabled else
+                             "does not offer signing at all (neither enabled nor required)")
                 out.append(_finding(
                     "medium",
-                    "SMB signing not required (NTLM relay surface)", tgt,
-                    f"The SMB2 NEGOTIATE reported signing not required "
-                    f"(dialect {pr.get('dialect_name', '?')}) - directly observed. An NTLM "
-                    "relay TO this host will succeed, so coerced/poisoned authentication can "
-                    "be replayed here to act as the victim.",
+                    "SMB signing not required (NTLM relay target)", tgt,
+                    f"The SMB2 NEGOTIATE SecurityMode byte {sub_state} "
+                    f"on {pr.get('dialect_name', '?')} — SIGN_ENABLED="
+                    f"{bool(enabled)}, SIGN_REQUIRED=False. Directly observed. "
+                    "This host will accept a relayed NTLM authentication, so a "
+                    "coerced/poisoned login (PetitPotam / Responder / DFSCoerce) "
+                    "can be replayed here to act as the victim. The distinction "
+                    "matters: 'enabled but not required' is a common reporting "
+                    "false-clean because signing IS available — the server just "
+                    "will not enforce it, so an attacker's relayed session works.",
                     "impacket / nxc",
                     "nxc smb <ip> --gen-relay-list relays.txt ; "
                     "ntlmrelayx.py -t smb://<ip> -smb2support   # relay a coerced login "
                     "(PetitPotam/Responder) in ROE",
                     "Require SMB signing (GPO: 'Microsoft network server: Digitally sign "
-                    "communications (always)' = Enabled; Samba: 'server signing = mandatory').",
-                    ["CWE-287", "CWE-319"], kind="smb_signing"))
+                    "communications (always)' = Enabled; Samba: 'server signing = mandatory'). "
+                    "For client-side, set 'Microsoft network client: Digitally sign "
+                    "communications (always)' too — the client-side flag is what stops "
+                    "reflection-relay variants that target the initiator side of the "
+                    "SMB conversation.",
+                    ["CWE-287", "CWE-319"], kind="smb_signing_not_required"))
     return out
 
 
