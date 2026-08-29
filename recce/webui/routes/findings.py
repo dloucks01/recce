@@ -269,3 +269,203 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
         if not os.path.isfile(path):
             raise HTTPException(404, "no such evidence file")
         return FileResponse(path, filename=name)
+
+    # ---- /api/known/* — shared-surface readers ------------------------------
+    # These expose recce's cross-service union views (Phase 7b). Each reader
+    # module unions facts learned across every enumeration path into one
+    # engagement-wide view, which the KnownAssets tab renders for the operator.
+    #
+    # Hash-bearing endpoints (known/hashes) MUST NOT return full secret
+    # values — mimic CredentialsPanel and truncate the hash preview so a
+    # cross-origin read of the API (mis-shared workbench link, cached page)
+    # can't lift them wholesale. Kerberos blobs are never previewed at all;
+    # only their category counts and per-user attribution.
+
+    def _hosts_only():
+        """All hosts (up + down) — the shared-surface readers accept anything
+        the store has; keeping down hosts in the union means late enrichment
+        (an offline reboot, a DNS PTR added after the fact) isn't silently
+        dropped."""
+        from ...core.store import Store
+        with Store(db_path) as st:
+            return st.all_hosts()
+
+    def _creds_only():
+        from ...core.store import Store
+        with Store(db_path) as st:
+            return st.all_credentials()
+
+    def _mask_hash(v: str, keep: int = 12) -> str:
+        """Truncate a hash-like secret so a leaked API response can't lift
+        the full value. Kerberos blobs (start with `$`) are longer than the
+        preview budget; the same rule applies."""
+        s = (v or "").strip()
+        if len(s) <= keep:
+            return s
+        return s[:keep] + "…"
+
+    @app.get("/api/known/users")
+    def known_users():
+        """Prioritized union of user accounts across every host — the same
+        list that seeds IPMI RAKP / SSH spray / RID-cycle enrichment.
+        `cap=500` because this is the GUI (no spray budget); the returned
+        `sources` names every producer that contributed."""
+        from ...creds import known_users as ku
+        hosts = _hosts_only()
+        r = ku.known_users(hosts, cap=500)
+        return {"items": [{"name": n} for n in r["users"]],
+                "total": r["total_known"],
+                "sources": r["sources"],
+                "capped": r["capped"]}
+
+    @app.get("/api/known/hashes")
+    def known_hashes():
+        """Inventory of every crackable secret recce is holding — NT hashes
+        from the cred store + hashcat-format loot files. Hash values are
+        truncated for GUI display; the raw material stays on disk under
+        <eng>/loot/*.hash for hashcat."""
+        import os
+        from ...creds import known_hashes as kh
+        creds = _creds_only()
+        loot_dir = os.path.join(ctx.eng_dir, "loot")
+        r = kh.known_hashes(creds, loot_dir=loot_dir)
+        # Per-user rows — one entry per (user, kind) so the table can list
+        # "alice — nthash from cred_store, krb5tgs from loot/kerberoast.hash".
+        items = []
+        for user_lc, entries in r["by_user"].items():
+            for e in entries:
+                items.append({
+                    "user": user_lc,
+                    "domain": e.get("domain", ""),
+                    "kind": e.get("kind", ""),
+                    "source": e.get("source", ""),
+                    "hashcat_mode": e.get("hashcat_mode", 0),
+                    "value_preview": _mask_hash(str(e.get("value", ""))),
+                })
+        items.sort(key=lambda x: (x["user"], x["kind"]))
+        return {"items": items,
+                "total": r["total"],
+                "by_mode": r["by_mode"],
+                "categories": r["categories"],
+                "unique_users": len(r["by_user"])}
+
+    @app.get("/api/known/domains")
+    def known_domains():
+        """AD / Kerberos domain view: DNS <-> NetBIOS pairs, primary
+        selection, host / cred counts per domain."""
+        from ...core import known_domains as kd
+        hosts = _hosts_only()
+        creds = _creds_only()
+        r = kd.known_domains(hosts, creds=creds)
+        return {"items": r["domains"],
+                "total": r["total_known"],
+                "primary_dns": r["primary_dns"],
+                "primary_netbios": r["primary_netbios"],
+                "operator_domain": r["operator_domain"]}
+
+    @app.get("/api/known/hostnames")
+    def known_hostnames():
+        """Every DNS / short name recce learned, deduped engagement-wide.
+        `by_host` is included so the table can render the per-host name list
+        without a second call."""
+        from ...core import known_hostnames as kh
+        hosts = _hosts_only()
+        r = kh.known_hostnames(hosts)
+        items = [{"name": n} for n in r["names"]]
+        return {"items": items,
+                "total": r["total_known"],
+                "capped": r["capped"],
+                "by_host": r["by_host"]}
+
+    @app.get("/api/known/hostkeys")
+    def known_hostkeys():
+        """SHA256 host-key fingerprint correlation — a `reused` entry
+        (same fingerprint on >=2 distinct IPs) means shared cloning /
+        golden image and is the interesting signal."""
+        from ...core import known_hostkeys as kh
+        hosts = _hosts_only()
+        r = kh.known_hostkeys(hosts)
+        items = []
+        for fp, endpoints in r["by_fingerprint"].items():
+            # Pull key_type off the first reused-entry that matches, or
+            # walk by_ip. It's simpler to derive from the reused table
+            # when present; otherwise leave blank.
+            kt = ""
+            for reused in r["reused"]:
+                if reused["fingerprint"] == fp:
+                    kt = reused["key_type"]
+                    break
+            items.append({
+                "fingerprint": fp,
+                "key_type": kt,
+                "endpoints": endpoints,
+                "endpoint_count": len(endpoints),
+                "reused": any(ru["fingerprint"] == fp for ru in r["reused"]),
+            })
+        items.sort(key=lambda x: (not x["reused"], -x["endpoint_count"]))
+        return {"items": items,
+                "total": len(items),
+                "reused": r["reused"]}
+
+    @app.get("/api/known/mail-accounts")
+    def known_mail_accounts():
+        """SMTP / IMAP / POP3 identity union — a hit on one transport seeds
+        the other two, per RFC 8314 (they share one account namespace)."""
+        from ...creds import known_mail_accounts as km
+        hosts = _hosts_only()
+        r = km.known_mail_accounts(hosts)
+        return {"items": r["accounts"],
+                "total": len(r["accounts"]),
+                "by_user": r["by_user"]}
+
+    @app.get("/api/known/ot-assets")
+    def known_ot_assets():
+        """OT / ICS asset dictionary — vendor / model / serial / firmware
+        deduped across every OT probe path (Modbus / EtherNet-IP / etc.).
+        `by_firmware` powers a "how many boxes on that firmware rev" view."""
+        from ...core import known_ot_assets as ka
+        hosts = _hosts_only()
+        r = ka.known_ot_assets(hosts)
+        # by_firmware keys are tuples — flatten for JSON.
+        by_fw = [{"vendor": k[0], "model": k[1], "firmware": k[2], "count": v}
+                 for k, v in r.get("by_firmware", {}).items()]
+        return {"items": r["assets"],
+                "total": len(r["assets"]),
+                "by_vendor": {k: len(v) for k, v in r["by_vendor"].items()},
+                "by_firmware": by_fw}
+
+    @app.get("/api/known/devices")
+    def known_devices():
+        """Non-OT device registry — same shape as ot-assets but for IT
+        gear (routers, switches, NAS, printers) with per-device CVE
+        candidates when a vendor-model-firmware maps to a KEV entry."""
+        from ...core import known_devices as kd
+        hosts = _hosts_only()
+        r = kd.known_devices(hosts)
+        return {"items": r["devices"],
+                "total": len(r["devices"]),
+                "by_vendor": {k: len(v) for k, v in r["by_vendor"].items()},
+                "cve_candidates": r.get("cve_candidates", [])}
+
+    @app.get("/api/relay-targets")
+    def relay_targets():
+        """ntlmrelayx `-tf` target list: hosts where SMB signing is not
+        required and the port is open. `include_unknown` / `include_dcs`
+        stay at their safe defaults — the GUI shows the same set the
+        writer emits by default."""
+        from ...core import relay_targets as rt
+        hosts = _hosts_only()
+        lines = rt.relay_target_lines(hosts)
+        items = [{"target": ln} for ln in lines]
+        return {"items": items, "total": len(items)}
+
+    @app.get("/api/hashloot/categories")
+    def hashloot_categories():
+        """The hashcat category table — one row per loot file recce knows
+        how to write. Consumed by the KnownAssets 'hashloot' sub-tab as
+        the reference the operator maps a hashcat -m number to."""
+        from ...creds import hashloot as hl
+        items = [{"key": k, "filename": v[0], "mode": v[1], "description": v[2]}
+                 for k, v in hl.CATEGORIES.items()]
+        items.sort(key=lambda x: x["mode"])
+        return {"items": items, "total": len(items)}

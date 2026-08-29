@@ -1,6 +1,6 @@
 import { Fragment, useState, useEffect, useRef } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "exploit" | "credentials" | "playbook";
+export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "exploit" | "credentials" | "playbook" | "assets";
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
@@ -15,6 +15,9 @@ const TAB_LABELS: Record<TabId, string> = {
   exploit: "Exploit",
   credentials: "Creds",
   playbook: "Playbook",
+  // Power-user surface (Phase 7b): unions of everything recce learned across
+  // every enum path. Opt-in via the ⋮ menu; not in DEFAULT_VISIBLE.
+  assets: "Assets",
 };
 
 // Default tab order follows the natural pen-test workflow, grouped into
@@ -31,7 +34,7 @@ const TAB_LABELS: Record<TabId, string> = {
 // Testers can still drag-and-drop within the visible set to reorder.
 const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
                            "exploit", "sessions", "credentials", "report",
-                           "playbook", "timeline"];
+                           "playbook", "timeline", "assets"];
 // The DEFAULT visible set. Everything after "report" is optional.
 const DEFAULT_VISIBLE: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
                                    "exploit", "sessions", "credentials", "report"];

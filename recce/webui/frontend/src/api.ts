@@ -589,3 +589,96 @@ export async function removeAllPersistence(): Promise<{ removed: number; failed:
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
   return r.json();
 }
+
+// --- Phase 7b — shared-surface readers (KnownAssets tab) ---------------------
+// One helper per /api/known/* endpoint. Each returns the raw endpoint payload
+// so the view can render totals, per-item detail, and any secondary shape
+// (by_host / by_user / by_mode) without a second call.
+
+export type KnownUser = { name: string };
+export type KnownUsers = {
+  items: KnownUser[]; total: number; sources: string[]; capped: boolean;
+};
+export const getKnownUsers = () => getJSON<KnownUsers>("/api/known/users");
+
+export type KnownHash = {
+  user: string; domain: string; kind: string; source: string;
+  hashcat_mode: number; value_preview: string;
+};
+export type KnownHashes = {
+  items: KnownHash[]; total: number;
+  by_mode: Record<string, number>;
+  categories: Record<string, number>;
+  unique_users: number;
+};
+export const getKnownHashes = () => getJSON<KnownHashes>("/api/known/hashes");
+
+export type KnownDomain = {
+  dns: string; netbios: string; sources: string[];
+  host_count: number; cred_count: number; is_primary: boolean;
+};
+export type KnownDomains = {
+  items: KnownDomain[]; total: number;
+  primary_dns: string; primary_netbios: string; operator_domain: string;
+};
+export const getKnownDomains = () => getJSON<KnownDomains>("/api/known/domains");
+
+export type KnownHostnames = {
+  items: { name: string }[]; total: number; capped: boolean;
+  by_host: Record<string, string[]>;
+};
+export const getKnownHostnames = () => getJSON<KnownHostnames>("/api/known/hostnames");
+
+export type KnownHostkey = {
+  fingerprint: string; key_type: string;
+  endpoints: string[]; endpoint_count: number; reused: boolean;
+};
+export type KnownHostkeys = {
+  items: KnownHostkey[]; total: number;
+  reused: { fingerprint: string; key_type: string; ips: string[]; endpoints: string[] }[];
+};
+export const getKnownHostkeys = () => getJSON<KnownHostkeys>("/api/known/hostkeys");
+
+export type KnownMailAccount = {
+  user: string; domain: string; sources: string[]; hosts: string[];
+};
+export type KnownMailAccounts = {
+  items: KnownMailAccount[]; total: number; by_user: Record<string, string[]>;
+};
+export const getKnownMailAccounts = () =>
+  getJSON<KnownMailAccounts>("/api/known/mail-accounts");
+
+export type KnownOtAsset = {
+  vendor?: string; model?: string; serial?: string; firmware?: string;
+  protocol?: string; sources?: string[]; ip?: string;
+  [k: string]: unknown;
+};
+export type KnownOtAssets = {
+  items: KnownOtAsset[]; total: number;
+  by_vendor: Record<string, number>;
+  by_firmware: { vendor: string; model: string; firmware: string; count: number }[];
+};
+export const getKnownOtAssets = () => getJSON<KnownOtAssets>("/api/known/ot-assets");
+
+export type KnownDevice = {
+  vendor?: string; model?: string; firmware?: string; kind?: string;
+  sources?: string[]; ip?: string;
+  cves?: { cve: string; kev?: boolean; confidence?: string }[];
+  [k: string]: unknown;
+};
+export type KnownDevices = {
+  items: KnownDevice[]; total: number;
+  by_vendor: Record<string, number>;
+  cve_candidates: { device: unknown; cve: string; confidence: string }[];
+};
+export const getKnownDevices = () => getJSON<KnownDevices>("/api/known/devices");
+
+export type RelayTargets = { items: { target: string }[]; total: number };
+export const getRelayTargets = () => getJSON<RelayTargets>("/api/relay-targets");
+
+export type HashlootCategory = {
+  key: string; filename: string; mode: number; description: string;
+};
+export type HashlootCategories = { items: HashlootCategory[]; total: number };
+export const getHashlootCategories = () =>
+  getJSON<HashlootCategories>("/api/hashloot/categories");
