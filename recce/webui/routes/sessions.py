@@ -232,6 +232,57 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         return {"id": session_id, "host_ip": sess.host_ip,
                 "data": base64.b64encode(data).decode()}
 
+    @app.post("/api/sessions/{session_id}/task")
+    async def task(session_id: str, body: dict = Body(),
+                   x_tester: str = Header(default="someone")):
+        """Run one command on the target via this session and return its captured
+        output — the seam fieldkit's ``recce-session`` execution transport rides on.
+
+        Body: ``{"command": "<target-side string>", "timeout": <seconds>}``. The
+        command is what would run on the target (e.g. ``whoami``, ``id``,
+        ``powershell -c "Get-Process"``); recce runs it through
+        :meth:`Session.run_and_capture` and returns the captured bytes.
+
+        No shell wrapping happens here — the caller (fieldkit) is responsible for
+        rendering a valid target-side command. That keeps this endpoint honest:
+        recce is the transport, not the interpreter.
+        """
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not sess.connected:
+            raise HTTPException(409, "shell is not currently connected")
+        command = body.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise HTTPException(400, "body must include a non-empty 'command' string")
+        try:
+            timeout = float(body.get("timeout", 30.0))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "timeout must be a number of seconds")
+        if timeout <= 0 or timeout > 600:
+            raise HTTPException(400, "timeout must be between 0 and 600 seconds")
+        import time
+        t0 = time.monotonic()
+        out = await sess.run_and_capture(command.encode(), timeout=timeout)
+        captured_ms = int((time.monotonic() - t0) * 1000)
+        # log task attribution into the collab activity feed so team members see
+        # what fieldkit did through this session (transparency, not access control)
+        try:
+            from ...core.store import Store
+            from .. import collab
+            with Store(db_path) as st:
+                label = sess.host_ip
+                collab.add_activity(st, x_tester, "session",
+                                    f"tasked shell on {label}: {command[:80]}"
+                                    + ("…" if len(command) > 80 else ""))
+        except Exception:  # noqa: BLE001 — attribution must never break the task
+            pass
+        broker.publish({"type": "session", "event": "tasked",
+                        "id": session_id, "by": x_tester})
+        return {"id": session_id, "host_ip": sess.host_ip,
+                "output_b64": base64.b64encode(out or b"").decode(),
+                "captured_ms": captured_ms}
+
     @app.post("/api/sessions/{session_id}/upgrade")
     async def upgrade(session_id: str):
         """Auto-pivot: push a reconnecting-PTY stager into a RAW shell so it upgrades itself

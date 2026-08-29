@@ -21,7 +21,7 @@ __all__ = ['cmd_web', 'cmd_smb', 'cmd_ftp', 'cmd_docker', 'cmd_kubernetes', 'cmd
            # T4 scanner-expansion additions:
            'cmd_zookeeper', 'cmd_kafka', 'cmd_etcd', 'cmd_consul', 'cmd_nomad',
            'cmd_prometheus', 'cmd_docker_registry', 'cmd_vnc', 'cmd_modbus',
-           'cmd_rdp', 'cmd_ipmi', 'cmd_ntp']
+           'cmd_rdp', 'cmd_ipmi', 'cmd_ntp', 'cmd_msrpc', 'cmd_winrm']
 
 
 def cmd_web(args: argparse.Namespace) -> int:
@@ -823,3 +823,27 @@ def cmd_ntp(args: argparse.Namespace) -> int:
         fmt=_fmt_simple(lambda t, a: 'monlist' if t.get('monlist')
                                      else ('mode6' if t.get('mode6') else '?')),
         udp=True)
+
+
+def cmd_msrpc(args: argparse.Namespace) -> int:
+    """MSRPC 135/tcp: endpoint mapper dump + IOXIDResolver ServerAlive2 —
+    interface leak, coercion targets (PetitPotam / PrinterBug / DFSCoerce)."""
+    return _run_service_scan(
+        args, module="msrpc", source="msrpc", label="MSRPC",
+        noun="MSRPC endpoint(s)",
+        no_targets="[!] No MSRPC endpoints in the datastore (port 135/tcp). "
+                   "Run `enum` against the Windows hosts first.",
+        fmt=_fmt_simple(lambda t, a: (f"{t.get('coercion',0)} coercion" if t.get('coercion')
+                                       else (f"{t.get('interfaces',0)} interfaces"
+                                             if t.get('interfaces') else '?'))))
+
+
+def cmd_winrm(args: argparse.Namespace) -> int:
+    """WinRM 5985/5986: unauth WSMan Identify (version + product), Basic/
+    Kerberos/Negotiate auth advertisement, TLS posture on 5986."""
+    return _run_service_scan(
+        args, module="winrm", source="winrm", label="WinRM",
+        noun="WinRM endpoint(s)",
+        no_targets="[!] No WinRM endpoints in the datastore (5985/5986). "
+                   "Run `enum` against the Windows hosts first.",
+        fmt=_fmt_simple(lambda t, a: (','.join(t.get('auth') or []) or '?')))

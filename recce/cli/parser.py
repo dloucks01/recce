@@ -1164,6 +1164,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_t4("rdp",             "RDP X.224 Connection Request: NLA (Network Level Authentication) detection")
     _add_t4("ipmi",            "IPMI 623/udp Get Channel Auth Capabilities: cipher-zero (CVE-2013-4786) + null-user + weak MD2/MD5")
     _add_t4("ntp",             "NTP 123/udp: monlist amplification + client disclosure (CVE-2013-5211), mode-6 readvar OS/version leak, peer list, Kerberos-breaking clock skew")
+    _add_t4("msrpc",           "MSRPC 135/tcp: endpoint mapper dump + IOXIDResolver interface leak, PetitPotam/PrinterBug/DFSCoerce coercion targets")
+    _add_t4("winrm",           "WinRM 5985/5986: unauth WSMan Identify (version + product), auth mechanisms advertised, TLS posture on 5986")
 
     sk = sub.add_parser("fieldkit-export",
                         help="export the engagement as a seed for the fieldkit "

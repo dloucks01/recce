@@ -346,3 +346,85 @@ def test_input_ignored_from_non_driver(client):
             assert target.recv(64) == b"whoami\n"
     finally:
         target.close()
+
+
+def test_task_endpoint_404_for_unknown_session(client):
+    """The task endpoint is fieldkit's execution transport seam — a POST to a
+    non-existent session must fail cleanly, not silently."""
+    r = client.post("/api/sessions/does-not-exist/task",
+                    json={"command": "whoami", "timeout": 5})
+    assert r.status_code == 404
+
+
+def test_task_endpoint_400_for_bad_body(client):
+    """Missing/empty command → 400; non-numeric or out-of-range timeout → 400."""
+    lst = client.post("/api/listeners", json={"port": 0}).json()
+    target = socket.create_connection(("127.0.0.1", lst["port"]))
+    try:
+        sess = _wait(lambda: next((s for s in client.get("/api/sessions").json()
+                                   if s["status"] == "live"), None))
+        sid = sess["id"]
+        assert client.post(f"/api/sessions/{sid}/task", json={}).status_code == 400
+        assert client.post(f"/api/sessions/{sid}/task",
+                           json={"command": ""}).status_code == 400
+        assert client.post(f"/api/sessions/{sid}/task",
+                           json={"command": "id", "timeout": "soon"}).status_code == 400
+        assert client.post(f"/api/sessions/{sid}/task",
+                           json={"command": "id", "timeout": 0}).status_code == 400
+        assert client.post(f"/api/sessions/{sid}/task",
+                           json={"command": "id", "timeout": 999}).status_code == 400
+    finally:
+        target.close()
+
+
+def test_task_endpoint_runs_and_returns_captured_output(client):
+    """Happy path: send a command to a live session, get back the marker-framed
+    captured output. Uses a fake target that echoes what fieldkit would see."""
+    lst = client.post("/api/listeners", json={"port": 0}).json()
+    target = socket.create_connection(("127.0.0.1", lst["port"]))
+    try:
+        sess = _wait(lambda: next((s for s in client.get("/api/sessions").json()
+                                   if s["status"] == "live"), None))
+        sid = sess["id"]
+
+        # POST the task; recce will send a marker-wrapped command down the socket and
+        # wait to see the end-marker before returning. Fake target echoes an output
+        # line between the markers.
+        import threading
+        result_holder: dict = {}
+
+        def do_post():
+            r = client.post(f"/api/sessions/{sid}/task",
+                            json={"command": "whoami", "timeout": 3.0})
+            result_holder["r"] = r
+
+        poster = threading.Thread(target=do_post)
+        poster.start()
+
+        # read the wrapped command from the socket and reply with markers + output
+        target.settimeout(2.0)
+        sent = b""
+        deadline = time.time() + 2.0
+        while b"__RECCE" not in sent and time.time() < deadline:
+            sent += target.recv(4096)
+        # extract the marker tag from what recce sent so we can echo the matching end
+        import re
+        m = re.search(rb"__RECCE''_S_([0-9a-f]+)__", sent) or re.search(
+            rb"__RECCE_S_([0-9a-f]+)__", sent)
+        assert m, f"no start marker in wrapped command: {sent!r}"
+        tag = m.group(1)
+        target.sendall(b"__RECCE_S_" + tag + b"__\n"
+                       + b"fieldkit-alice\n"
+                       + b"__RECCE_E_" + tag + b"__\n")
+
+        poster.join(timeout=5)
+        r = result_holder["r"]
+        assert r.status_code == 200, r.text
+        payload = r.json()
+        assert payload["id"] == sid
+        assert "output_b64" in payload
+        assert "captured_ms" in payload and isinstance(payload["captured_ms"], int)
+        out = base64.b64decode(payload["output_b64"])
+        assert b"fieldkit-alice" in out
+    finally:
+        target.close()

@@ -33,6 +33,8 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
         "ipmi": "IPMI is 623/udp — run `enum -U` (UDP sweep) first.",
         "modbus": "Modbus is 502/tcp but rarely in the default top-ports — "
                   "run `enum --all-ports` or scan 502 explicitly.",
+        "winrm": "WinRM is 5985/5986 — outside the default top-ports on some profiles; "
+                 "try `enum --all-ports` if the sweep missed it.",
     }
 
     @app.get("/api/scan/context")
