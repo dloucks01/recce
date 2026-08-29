@@ -12,12 +12,24 @@ Findings:
     and full internal scrape-target URLs (a network map).
   * prom_query_open (MEDIUM) — /api/v1/query works without auth. Metric
     data leaks the deployment topology + baseline behavior.
-  * prom_admin_writable (CRITICAL) — /-/reload accepts POST unauth
-    (--web.enable-admin-api on the CLI). Attacker can reload with a
-    modified config to redirect scrapes / exfil.
+  * prom_admin_writable (CRITICAL) — /-/reload accepts POST unauth. The
+    lifecycle endpoints /-/reload and /-/quit are gated by the CLI flag
+    --web.enable-lifecycle (NOT --web.enable-admin-api, which gates the
+    separate /api/v1/admin/tsdb/* delete/snapshot surface). Attacker can
+    reload with a modified config to redirect scrapes / exfil, or POST
+    /-/quit for a monitoring blackout.
+  * prom_federate_open (CRITICAL) — /federate returned metric exposition
+    text for a permissive matcher. Federation is the bulk-exfil primitive:
+    one request dumps the current value of every matched series (labels
+    + values), often reachable even when /api/v1/query is fronted by auth.
+    Ref: Prometheus federation docs; historically CVE-2019-3826.
+  * prom_pprof_cmdline (CRITICAL) — /debug/pprof/cmdline returned the
+    NUL-separated process argv. net/http/pprof is registered on the same
+    listener by promhttp; argv leaks --web.config.file, --storage.tsdb.
+    path, and any secret passed via CLI flag. Ref: pkg net/http/pprof.
   * prom_fingerprint (info) — always emitted for report visibility.
 
-Airgap-safe: stdlib http.client + ssl. Bounded (~5 HTTP requests).
+Airgap-safe: stdlib http.client + ssl. Bounded (~7 HTTP requests).
 """
 from __future__ import annotations
 
@@ -69,10 +81,13 @@ def _http(ip: str, port: int, method: str, path: str,
 
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
     """Return {reachable, version, config_readable, query_open, admin_writable,
-    build_info, scrape_targets_hint}."""
+    federate_open, pprof_cmdline, build_info, scrape_targets_hint,
+    federate_series_hint, cmdline_sample}."""
     out = {"reachable": False, "version": "", "config_readable": False,
            "query_open": False, "admin_writable": False,
-           "build_info": {}, "scrape_targets_hint": 0}
+           "federate_open": False, "pprof_cmdline": False,
+           "build_info": {}, "scrape_targets_hint": 0,
+           "federate_series_hint": 0, "cmdline_sample": ""}
     # /-/healthy — Prometheus's canonical reachability endpoint. Answers 200
     # with body "Prometheus Server is Healthy.\n"
     r = _http(ip, port, "GET", "/-/healthy", timeout=timeout)
@@ -122,10 +137,61 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
             pass
 
     # /-/reload — only routable when Prometheus was started with
-    # --web.enable-admin-api. POST accepted = admin write is on.
+    # --web.enable-lifecycle. POST accepted = lifecycle write is on
+    # (same flag also gates /-/quit for a full shutdown DoS). This is a
+    # DIFFERENT flag from --web.enable-admin-api, which gates the
+    # /api/v1/admin/tsdb/* delete/snapshot surface.
     r = _http(ip, port, "POST", "/-/reload", body=b"", timeout=timeout)
     if r is not None and r[0] in (200, 204):
         out["admin_writable"] = True
+
+    # /federate — the bulk metric-exposition endpoint. A permissive matcher
+    # `{__name__=~".+"}` selects every series; response body is the standard
+    # Prometheus text-exposition format (`# HELP` / `# TYPE` comment lines
+    # followed by `metric{labels} value timestamp` samples). Prometheus
+    # answers with Content-Type: text/plain; charset=utf-8; version=... —
+    # a JSON or HTML 200 from a fronting proxy fails the format check so
+    # we don't over-claim. Ref: prometheus.io/docs/prometheus/latest/
+    # federation/ ; historically CVE-2019-3826.
+    r = _http(ip, port, "GET",
+              "/federate?match%5B%5D=%7B__name__%3D~%22.%2B%22%7D",
+              timeout=timeout)
+    if r is not None and r[0] == 200:
+        f_status, f_hdrs, f_body = r
+        ctype = (f_hdrs.get("content-type") or "").lower()
+        # Real federate response is text/plain exposition format. Accept when
+        # content-type says text/plain OR body has the exposition markers.
+        body_txt = f_body.decode("utf-8", "replace")
+        has_expo = ("# TYPE " in body_txt or "# HELP " in body_txt)
+        if "text/plain" in ctype or has_expo:
+            out["federate_open"] = True
+            # Cheap sample-line count: non-comment, non-empty lines are
+            # metric samples. Body is capped at 200KB upstream, so this is
+            # a floor (a real federation dump is many MB).
+            n = 0
+            for line in body_txt.splitlines():
+                s = line.strip()
+                if s and not s.startswith("#"):
+                    n += 1
+            out["federate_series_hint"] = n
+
+    # /debug/pprof/cmdline — net/http/pprof is registered by default on the
+    # Prometheus web listener. cmdline returns the process argv as
+    # NUL-separated bytes (mirrors /proc/self/cmdline). Argv frequently
+    # includes --web.config.file, --storage.tsdb.path, and any secret
+    # passed via CLI flag. Detect by: 200 status AND (NUL byte in body OR
+    # body contains "prometheus") to avoid false positives from generic
+    # 200 OK proxies. Ref: pkg.go.dev/net/http/pprof.
+    r = _http(ip, port, "GET", "/debug/pprof/cmdline", timeout=timeout)
+    if r is not None and r[0] == 200:
+        _, _, c_body = r
+        has_nul = b"\x00" in c_body
+        looks_prom = b"prometheus" in c_body.lower()
+        if c_body and (has_nul or looks_prom):
+            out["pprof_cmdline"] = True
+            # Compact sample: replace NULs with spaces, cap at 300 chars.
+            sample = c_body.replace(b"\x00", b" ").decode("utf-8", "replace")
+            out["cmdline_sample"] = sample.strip()[:300]
 
     return out
 
@@ -160,15 +226,62 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             if pr.get("admin_writable"):
                 out.append(_finding(
                     "critical",
-                    "Prometheus admin API accepts unauthenticated writes", tgt,
+                    "Prometheus lifecycle API accepts unauthenticated writes", tgt,
                     "POST /-/reload returned success without auth. The server was "
-                    "started with --web.enable-admin-api; an attacker can overwrite "
-                    "the config (via /-/reload after a scrape-target/rule swap) to "
-                    "exfiltrate metrics elsewhere or trigger denial-of-service.",
+                    "started with --web.enable-lifecycle (this flag gates the "
+                    "/-/reload and /-/quit management endpoints; it is a DIFFERENT "
+                    "flag from --web.enable-admin-api, which gates /api/v1/admin/"
+                    "tsdb/* delete/snapshot). An attacker can overwrite the config "
+                    "(via /-/reload after a scrape-target/rule swap) to exfiltrate "
+                    "metrics elsewhere, or POST /-/quit for a monitoring blackout.",
                     f"curl -X POST http://{h.ip}:{p.portid}/-/reload",
-                    "Never run Prometheus with --web.enable-admin-api on an exposed "
-                    "port. Bind the admin API to loopback / a management-only interface.",
+                    "Do not run Prometheus with --web.enable-lifecycle on an "
+                    "exposed port. Bind the management endpoints to loopback / a "
+                    "management-only interface, or gate them behind an "
+                    "authenticating reverse proxy.",
                     ["CWE-306", "CWE-284"], kind="prom_admin_writable"))
+            if pr.get("federate_open"):
+                sh = pr.get("federate_series_hint", 0)
+                out.append(_finding(
+                    "critical",
+                    "Prometheus /federate open (bulk metric exfil)", tgt,
+                    f"GET /federate with a permissive matcher "
+                    f"({{__name__=~\".+\"}}) returned Prometheus text-exposition "
+                    f"data anonymously (>= {sh} sample line(s) in the first "
+                    f"200KB — a real federation dump is many MB). Federation "
+                    f"streams the current value of every matched series in one "
+                    f"request; it is a distinct endpoint from /api/v1/query and "
+                    f"is frequently reachable even when the query API is fronted "
+                    f"by auth. This is the largest single-request metric-exfil "
+                    f"primitive on the daemon.",
+                    f"curl -sG --data-urlencode 'match[]={{__name__=~\".+\"}}' "
+                    f"http://{h.ip}:{p.portid}/federate",
+                    "Gate /federate behind authentication (reverse proxy or "
+                    "Prometheus's native web.config.file basic_auth_users / "
+                    "mTLS). Restrict allowed matchers if federation is required "
+                    "for legitimate downstream servers.",
+                    ["CWE-200", "CWE-306"], kind="prom_federate_open"))
+            if pr.get("pprof_cmdline"):
+                sample = pr.get("cmdline_sample", "")
+                short = (sample[:140] + "...") if len(sample) > 140 else sample
+                out.append(_finding(
+                    "critical",
+                    "Prometheus /debug/pprof/cmdline leaks process argv", tgt,
+                    f"GET /debug/pprof/cmdline returned the NUL-separated "
+                    f"process argv. net/http/pprof is registered on the same "
+                    f"listener by promhttp; argv frequently includes "
+                    f"--web.config.file, --storage.tsdb.path, --web.listen-"
+                    f"address, and any secret passed via CLI flag (auth tokens, "
+                    f"DB URIs). Additional pprof endpoints (goroutine, heap, "
+                    f"profile) are on the same path and leak internal state / "
+                    f"upstream URLs. Observed argv: {short!r}",
+                    f"curl http://{h.ip}:{p.portid}/debug/pprof/cmdline",
+                    "Disable pprof on the public listener: bind the Prometheus "
+                    "web listener to a management-only interface, or front it "
+                    "with a proxy that blocks /debug/pprof/*. Never pass "
+                    "secrets via CLI flags — use --web.config.file or "
+                    "environment variables.",
+                    ["CWE-200", "CWE-215"], kind="prom_pprof_cmdline"))
             if pr.get("config_readable"):
                 out.append(_finding(
                     "high",
@@ -201,7 +314,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             out.append(_finding(
                 "info", "Prometheus endpoint reachable", tgt,
                 f"Prometheus {ver} — config_readable={pr.get('config_readable')} "
-                f"query_open={pr.get('query_open')} admin_writable={pr.get('admin_writable')}",
+                f"query_open={pr.get('query_open')} admin_writable={pr.get('admin_writable')} "
+                f"federate_open={pr.get('federate_open')} "
+                f"pprof_cmdline={pr.get('pprof_cmdline')}",
                 f"curl http://{h.ip}:{p.portid}/-/healthy",
                 "Restrict to management interface.",
                 [], kind="prom_fingerprint"))
@@ -216,6 +331,11 @@ def runbook(ip: str, port: int) -> list[dict]:
          "cmd": f"curl -sk http://{ip}:{port}/api/v1/status/config | jq -r .data.yaml"},
         {"step": "Scrape topology",
          "cmd": f"curl -sk http://{ip}:{port}/api/v1/query?query=up"},
+        {"step": "Federation bulk-exfil (every series in one request)",
+         "cmd": (f"curl -skG --data-urlencode 'match[]={{__name__=~\".+\"}}' "
+                 f"http://{ip}:{port}/federate")},
+        {"step": "pprof cmdline (argv — often leaks CLI-flag secrets)",
+         "cmd": f"curl -sk http://{ip}:{port}/debug/pprof/cmdline"},
     ]
 
 
@@ -238,6 +358,8 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 probes[(t["ip"], t["port"])] = pr
                 t["reachable"] = pr.get("reachable", False)
                 t["config_readable"] = pr.get("config_readable", False)
+                t["federate_open"] = pr.get("federate_open", False)
+                t["pprof_cmdline"] = pr.get("pprof_cmdline", False)
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
