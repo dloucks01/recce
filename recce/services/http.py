@@ -233,6 +233,49 @@ _PATHS: list[tuple[str, str, str, list[str], str]] = [
     ("/log",                 "disclosure", "medium",   ["CWE-200"],  "Log directory exposed"),
     ("/tmp",                 "disclosure", "medium",   ["CWE-200"],  "Temp directory exposed"),
     ("/console",             "surface",    "medium",   [],           "Web console (Weblogic/Werkzeug/Jetty)"),
+
+    # -- Terraform / cloud / CI secret files (all critical/high when reachable) --
+    ("/terraform.tfstate",   "disclosure", "critical", ["CWE-538","CWE-200"], "Terraform state file exposed — every resource + inline secrets"),
+    ("/.terraform.lock.hcl", "disclosure", "medium",   ["CWE-200"],  "Terraform provider lock exposed"),
+    ("/.aws/credentials",    "disclosure", "critical", ["CWE-538"],  "AWS credentials file exposed"),
+    ("/.ssh/id_rsa",         "disclosure", "critical", ["CWE-538"],  "SSH private key exposed"),
+    ("/.npmrc",              "disclosure", "high",     ["CWE-538"],  "npm rc — often contains registry auth tokens"),
+    ("/.pypirc",             "disclosure", "high",     ["CWE-538"],  "PyPI rc — publish tokens"),
+    ("/.docker/config.json", "disclosure", "high",     ["CWE-538"],  "Docker config — registry credentials"),
+    ("/.git/index",          "disclosure", "high",     ["CWE-538"],  "Git index — enables full working-tree reconstruction"),
+    ("/.git/logs/HEAD",      "disclosure", "high",     ["CWE-538"],  "Git HEAD log exposed"),
+    ("/package-lock.json",   "disclosure", "info",     ["CWE-200"],  "npm lockfile exposed — dependency inventory"),
+    ("/composer.lock",       "disclosure", "info",     ["CWE-200"],  "Composer lockfile exposed"),
+    ("/Gemfile.lock",        "disclosure", "info",     ["CWE-200"],  "Ruby Gemfile.lock exposed"),
+    ("/requirements.txt",    "disclosure", "info",     ["CWE-200"],  "Python requirements.txt exposed"),
+    ("/Pipfile.lock",        "disclosure", "info",     ["CWE-200"],  "Pipenv lockfile exposed"),
+    ("/.gitlab-ci.yml",      "disclosure", "medium",   ["CWE-538"],  "GitLab CI config exposed"),
+    ("/docker-compose.yml",  "disclosure", "medium",   ["CWE-538"],  "docker-compose config exposed"),
+    ("/Dockerfile",          "disclosure", "info",     ["CWE-200"],  "Dockerfile exposed"),
+    ("/.vscode/settings.json", "disclosure", "info",   ["CWE-200"],  "VSCode workspace settings exposed"),
+    ("/.idea/workspace.xml", "disclosure", "info",     ["CWE-200"],  "JetBrains workspace exposed"),
+
+    # -- Debug / profiler / runtime introspection ---------------------------
+    ("/debug/pprof/",        "disclosure", "high",     ["CWE-200"],  "Go pprof profiling index exposed"),
+    ("/debug/pprof/goroutine", "disclosure", "high",   ["CWE-200"],  "Go pprof goroutines"),
+    ("/debug/vars",          "disclosure", "medium",   ["CWE-200"],  "Go expvar debug endpoint exposed"),
+    ("/metrics",             "disclosure", "medium",   ["CWE-200"],  "Prometheus metrics — leaks internal hostnames/URIs"),
+    ("/solr/admin/cores",    "disclosure", "medium",   ["CWE-200"],  "Solr admin cores endpoint"),
+    ("/_cluster/settings",   "disclosure", "high",     ["CWE-200"],  "Elasticsearch cluster settings"),
+    ("/_cat/indices",        "disclosure", "medium",   ["CWE-200"],  "Elasticsearch _cat/indices"),
+    ("/jolokia/list",        "disclosure", "critical", ["CWE-200"],  "Jolokia JMX-over-HTTP — MBean list; MLet is a common RCE vector"),
+    ("/api/v1/pods",         "disclosure", "critical", ["CWE-306"],  "Kubelet pods API — usually unauth when exposed"),
+
+    # -- Recent-CVE fingerprint paths (2021-2024) — one-request candidates ---
+    ("/mgmt/tm/util/bash",   "surface",    "high",     ["CWE-306","CWE-1395"], "F5 BIG-IP iControl REST — CVE-2022-1388 candidate surface"),
+    ("/api/v2/cmdb/system/admin", "surface","high",    ["CWE-306","CWE-1395"], "Fortinet FortiOS admin API — CVE-2022-40684 candidate"),
+    ("/autodiscover/autodiscover.json", "surface","high", ["CWE-918","CWE-1395"], "Exchange autodiscover — ProxyShell CVE-2021-34473 candidate"),
+    ("/owa/auth/logon.aspx", "surface",    "info",     ["CWE-1395"], "Exchange OWA login — ProxyLogon CVE-2021-26855 host"),
+    ("/setup/setupadministrator.action", "surface","high", ["CWE-306","CWE-1395"], "Confluence setup — CVE-2023-22515 candidate"),
+    ("/remote/logincheck",   "surface",    "info",     ["CWE-1395"], "Fortinet SSL-VPN logincheck — CVE-2023-27997 host"),
+    ("/dana-na/auth/url_default/welcome.cgi", "surface","info", ["CWE-1395"], "Ivanti Connect Secure — CVE-2024-21887 host"),
+    ("/moveitisapi/moveitisapi.dll", "surface","high", ["CWE-89","CWE-1395"], "MOVEit Transfer — CVE-2023-34362 candidate"),
+    ("/actuator/gateway/routes", "surface","high",     ["CWE-94","CWE-1395"], "Spring Cloud Gateway routes — CVE-2022-22947 candidate"),
 ]
 
 
@@ -1314,6 +1357,76 @@ def webdav_probe(ip: str, port: int, use_tls: bool,
     return hits
 
 
+# ---- Open-redirect probe ----------------------------------------------------
+
+# Query-parameter names that historically feed unvalidated Location redirects.
+_OPEN_REDIRECT_PARAMS = ("next", "url", "redirect", "redirect_url", "return",
+                          "returnTo", "returnUrl", "return_url", "to", "target",
+                          "goto", "dest", "destination", "continue", "u", "r")
+# Paths where redirect params commonly live. Purposefully small — every entry
+# is a real single request against the target.
+_OPEN_REDIRECT_PATHS = ("/login", "/logout", "/signin", "/redirect", "/out",
+                         "/go", "/r", "/link", "/url", "/")
+_OPEN_REDIRECT_CANARY = "recce-canary.invalid"
+
+
+def open_redirect_probe(ip: str, port: int, use_tls: bool) -> list[dict]:
+    """Try each (path, param) combination with the param set to an external
+    canary URL. If the response is a 3xx and the canary host appears in the
+    Location header, the target is an open redirect. Returns [{path, param,
+    location}, …]. Bails after the first hit per path — no need to enumerate
+    every parameter name once we've proved the primitive."""
+    from urllib.parse import quote
+    canary_target = f"https://{_OPEN_REDIRECT_CANARY}/"
+    encoded = quote(canary_target, safe="")
+    hits: list[dict] = []
+    for path in _OPEN_REDIRECT_PATHS:
+        found = False
+        for param in _OPEN_REDIRECT_PARAMS:
+            if found:
+                break
+            probe = f"{path}?{param}={encoded}"
+            r = _get(ip, port, use_tls, probe)
+            if r is None or r["status"] not in (301, 302, 303, 307, 308):
+                continue
+            loc = r["headers"].get("location", "")
+            if _OPEN_REDIRECT_CANARY in loc:
+                hits.append({"path": path, "param": param, "location": loc[:200]})
+                found = True
+    return hits
+
+
+# ---- CRLF header-injection probe --------------------------------------------
+
+# Marker header + value we search for in the response. Deliberately non-standard
+# so the presence of the header proves the payload split the response.
+_CRLF_MARKER_HEADER = "x-recce-canary"
+_CRLF_MARKER_VALUE = "recce-crlf-canary"
+
+
+def crlf_injection_probe(ip: str, port: int, use_tls: bool,
+                          path: str = "/") -> dict | None:
+    """Inject %0d%0a<header>: <value> into a query parameter and inspect the
+    response headers for the injected header. If it appears, the server is
+    splitting on the CRLF — cache poisoning, session fixation, Set-Cookie
+    injection all become reachable. Returns {payload, injected_value} on hit,
+    None otherwise."""
+    payloads = (
+        f"{path}?x=%0d%0a{_CRLF_MARKER_HEADER}:%20{_CRLF_MARKER_VALUE}",
+        f"{path}?x=%0d%0a%09{_CRLF_MARKER_HEADER}:%20{_CRLF_MARKER_VALUE}",
+        f"{path.rstrip('/')}/%0d%0a{_CRLF_MARKER_HEADER}:%20{_CRLF_MARKER_VALUE}",
+    )
+    for p in payloads:
+        r = _get(ip, port, use_tls, p)
+        if r is None:
+            continue
+        headers = r.get("headers") or {}
+        v = headers.get(_CRLF_MARKER_HEADER)
+        if v and _CRLF_MARKER_VALUE in v:
+            return {"payload": p, "injected_value": v[:200]}
+    return None
+
+
 # ---- Vuln conversion --------------------------------------------------------
 
 def _mk(host_ip: str, port: Port, sid: str, sev: str, title: str,
@@ -1619,5 +1732,33 @@ def enum_findings(host_ip: str, port: Port,
                 "routed) upload files.",
                 "Disable WebDAV on public endpoints (Apache: `Dav Off`; "
                 "IIS: remove WebDAV module; nginx: remove `dav_methods`)."))
+
+    # Open-redirect probe — enumerate a small (path, param) matrix. Any hit
+    # whose Location leaks the external canary host is a real primitive.
+    for h in open_redirect_probe(host_ip, port.portid, use_tls)[:5]:
+        out.append(_mk(
+            host_ip, port, "http-open-redirect", "medium",
+            f"Open redirect: {h['path']}?{h['param']}=",
+            ["CWE-601"],
+            f"GET {h['path']}?{h['param']}=https://{_OPEN_REDIRECT_CANARY}/ returned "
+            f"Location: {h['location']!r}. The parameter is not host-validated — "
+            "feeds phishing chains and OAuth code-theft.",
+            f"Validate the {h['param']} parameter against an allowlist of same-origin "
+            "paths; reject absolute URLs whose host differs from the canonical host."))
+
+    # CRLF header-injection probe — a single reflected header proves the split.
+    crlf = crlf_injection_probe(host_ip, port.portid, use_tls)
+    if crlf:
+        out.append(_mk(
+            host_ip, port, "http-crlf-injection", "high",
+            "CRLF header injection via URL parameter",
+            ["CWE-93", "CWE-113"],
+            f"Probe {crlf['payload']} caused injected header "
+            f"{_CRLF_MARKER_HEADER}: {crlf['injected_value']!r} to appear in the "
+            "response. Enables cache poisoning, session fixation, and Set-Cookie "
+            "injection.",
+            "Strip \\r and \\n from every value that reaches a response header. "
+            "Validate URL parameters against an allowlist and reject on control "
+            "characters at the framework layer."))
 
     return out

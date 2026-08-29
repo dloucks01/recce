@@ -292,5 +292,144 @@ class FormDiscoveryTest(unittest.TestCase):
             self.assertFalse(f["login"], f"non-login form wrongly flagged: {f}")
 
 
+class WordlistExpansionTest(unittest.TestCase):
+    """The bundled `_PATHS` list has to actually contain the new high-value
+    entries we added (recent CVEs, terraform/cloud/CI secrets, debug/profiler)
+    or path_enum would silently regress the moment someone reorders the file."""
+
+    def test_new_wordlist_entries_present(self):
+        paths = {entry[0] for entry in svc_http._PATHS}
+        for p in ("/terraform.tfstate", "/.aws/credentials", "/.ssh/id_rsa",
+                   "/.git/index", "/docker-compose.yml", "/.gitlab-ci.yml",
+                   "/debug/pprof/", "/metrics", "/jolokia/list",
+                   "/_cluster/settings", "/api/v1/pods",
+                   "/mgmt/tm/util/bash", "/api/v2/cmdb/system/admin",
+                   "/autodiscover/autodiscover.json",
+                   "/setup/setupadministrator.action",
+                   "/actuator/gateway/routes"):
+            self.assertIn(p, paths, f"wordlist regressed — {p} missing")
+
+    def test_terraform_tfstate_hit_is_critical(self):
+        class H(_FixedHandler):
+            ROUTES = {
+                "/terraform.tfstate": (200, [("Content-Type", "application/json")],
+                                        b'{"version":4,"terraform_version":"1.5.0"}'),
+            }
+        srv, _t = _serve(H)
+        try:
+            hits = svc_http.path_enum("127.0.0.1", srv.server_address[1], False)
+        finally:
+            srv.shutdown()
+        by_path = {h["path"]: h for h in hits}
+        self.assertIn("/terraform.tfstate", by_path)
+        self.assertEqual(by_path["/terraform.tfstate"]["severity"], "critical")
+
+
+class OpenRedirectTest(unittest.TestCase):
+    def test_redirect_echoing_param_flagged(self):
+        """Server that reflects `next=` into Location is an open redirect."""
+        from urllib.parse import urlparse, parse_qs
+
+        class H(_FixedHandler):
+            def do_GET(self):
+                q = parse_qs(urlparse(self.path).query)
+                nxt = (q.get("next") or q.get("url") or q.get("redirect") or [""])[0]
+                if nxt and self.path.startswith("/login"):
+                    self.send_response(302)
+                    self.send_header("Location", nxt)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(200); self.send_header("Content-Length","2")
+                self.end_headers(); self.wfile.write(b"OK")
+
+        srv, _t = _serve(H)
+        try:
+            hits = svc_http.open_redirect_probe("127.0.0.1", srv.server_address[1], False)
+        finally:
+            srv.shutdown()
+        # /login with any of the enumerated param names should trigger exactly one hit
+        login_hits = [h for h in hits if h["path"] == "/login"]
+        self.assertEqual(len(login_hits), 1,
+                         f"expected exactly one /login hit, got {hits}")
+        self.assertIn(svc_http._OPEN_REDIRECT_CANARY, login_hits[0]["location"])
+
+    def test_non_redirecting_server_returns_empty(self):
+        """A server that never issues 3xx must not produce open-redirect hits."""
+        class H(_FixedHandler):
+            def do_GET(self):
+                self.send_response(200); self.send_header("Content-Length", "2")
+                self.end_headers(); self.wfile.write(b"OK")
+
+        srv, _t = _serve(H)
+        try:
+            hits = svc_http.open_redirect_probe("127.0.0.1", srv.server_address[1], False)
+        finally:
+            srv.shutdown()
+        self.assertEqual(hits, [])
+
+
+class CrlfInjectionTest(unittest.TestCase):
+    """Requires a raw-socket server — BaseHTTPRequestHandler validates
+    outbound header names and would strip the injected line."""
+
+    def test_injected_header_detected(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(5)
+        port = s.getsockname()[1]
+
+        def serve():
+            while True:
+                try:
+                    c, _ = s.accept()
+                except OSError:
+                    return
+                try:
+                    data = c.recv(4096) or b""
+                    first_line = data.split(b"\r\n", 1)[0]
+                    # Simulate a naive server that URL-decodes ?x= into a
+                    # response header — the CRLF splits headers.
+                    if b"%0d%0a" in first_line.lower():
+                        resp = (b"HTTP/1.1 200 OK\r\n"
+                                b"X-Recce-Canary: recce-crlf-canary\r\n"
+                                b"Content-Length: 2\r\n\r\nOK")
+                    else:
+                        resp = (b"HTTP/1.1 200 OK\r\n"
+                                b"Content-Length: 2\r\n\r\nOK")
+                    c.sendall(resp)
+                except OSError:
+                    pass
+                finally:
+                    try:
+                        c.close()
+                    except OSError:
+                        pass
+
+        thr = threading.Thread(target=serve, daemon=True)
+        thr.start()
+        try:
+            hit = svc_http.crlf_injection_probe("127.0.0.1", port, False)
+        finally:
+            s.close()
+        self.assertIsNotNone(hit, "vulnerable server must yield a hit")
+        self.assertIn("recce-crlf-canary", hit["injected_value"])
+
+    def test_safe_server_returns_none(self):
+        """A server that echoes nothing back must not false-positive."""
+        class H(_FixedHandler):
+            def do_GET(self):
+                self.send_response(200); self.send_header("Content-Length", "2")
+                self.end_headers(); self.wfile.write(b"OK")
+
+        srv, _t = _serve(H)
+        try:
+            hit = svc_http.crlf_injection_probe("127.0.0.1", srv.server_address[1], False)
+        finally:
+            srv.shutdown()
+        self.assertIsNone(hit)
+
+
 if __name__ == "__main__":
     unittest.main()
