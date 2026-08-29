@@ -141,6 +141,22 @@ export type CmdSpec = {
 };
 export type CmdCatalog = Record<string, CmdSpec>;
 
+// "recce suggests…" — surfaced by /api/scan/suggestions above the command grid.
+// `command`/`field` empty means info-only (typically an external-tool handoff
+// like hashcat/ntlmrelayx); otherwise the frontend prefills that command's
+// form field with `suggested_value`. `key` is stable across page reloads so
+// the dismissed set can be persisted in localStorage.
+export type ScanSuggestion = {
+  key: string;
+  command: string;
+  field: "" | "domain" | "username" | "targets";
+  suggested_value: string;
+  reason: string;
+  confidence: "high" | "medium" | "low";
+  source: string;
+  external_cmd?: string;
+};
+
 export async function getCommands(): Promise<CmdCatalog> {
   const r = await fetch("/api/commands");
   if (!r.ok) throw new Error(r.statusText);

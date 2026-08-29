@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { CmdCatalog, CmdSpec, getCommands, postCommand, Host, getJSON } from "./api";
+import { CmdCatalog, CmdSpec, getCommands, postCommand, Host, getJSON, ScanSuggestion } from "./api";
 import { ScanConsole } from "./scan/ScanConsole";
 
 interface Job {
@@ -143,6 +143,17 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
   // Which discovered hosts qualify for each command, so the Target(s) field
   // can say what belongs in it instead of leaving the tester to guess.
   const [scanCtx, setScanCtx] = useState<Record<string, {count: number; sample: string[]; hint?: string}>>({});
+  // "recce suggests…" — engagement-wide facts (learned realm, admincount user,
+  // relay-vulnerable SMB hosts, hashloot ready for hashcat, …) surfaced as
+  // one-click prefills above the command grid. Dismissed keys persist across
+  // reloads via localStorage so a card the operator has rejected stays gone.
+  const [suggestions, setSuggestions] = useState<ScanSuggestion[]>([]);
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("recce.scan.dismissedSuggestions") || "[]";
+      return new Set<string>(JSON.parse(raw));
+    } catch { return new Set(); }
+  });
   const [targets, setTargets] = useState("");
 
   useEffect(() => { if (prefillTarget) setTargets(prefillTarget); }, [prefillTarget]);
@@ -171,6 +182,8 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
   useEffect(() => {
     getJSON<{hosts: number; commands: Record<string, {count: number; sample: string[]; hint?: string}>}>(
       "/api/scan/context").then((r) => setScanCtx(r.commands)).catch(() => {});
+    getJSON<{suggestions: ScanSuggestion[]}>(
+      "/api/scan/suggestions").then((r) => setSuggestions(r.suggestions || [])).catch(() => {});
     getCommands().then((c) => {
       setCatalog(c);
       const groups = Object.keys(groupBy(c));
@@ -356,6 +369,53 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
     setChainRunning(false);
   }
 
+  // Group active (non-dismissed) suggestions by target command so multiple
+  // hints for the same command render as one card. Info-only suggestions
+  // (command === "") land in a synthetic bucket keyed on the source module.
+  const visibleSuggestions = useMemo(
+    () => suggestions.filter((s) => !dismissedSuggestions.has(s.key)),
+    [suggestions, dismissedSuggestions]);
+  const groupedSuggestions = useMemo(() => {
+    const g: Record<string, ScanSuggestion[]> = {};
+    for (const s of visibleSuggestions) {
+      const bucket = s.command || `~${s.source}`;
+      (g[bucket] ||= []).push(s);
+    }
+    return g;
+  }, [visibleSuggestions]);
+
+  function dismissSuggestion(key: string) {
+    setDismissedSuggestions((prev) => {
+      const next = new Set(prev);
+      next.add(key);
+      try {
+        localStorage.setItem("recce.scan.dismissedSuggestions",
+          JSON.stringify(Array.from(next)));
+      } catch {}
+      return next;
+    });
+  }
+
+  // Apply a suggestion: select its target command, then dispatch the value
+  // to the same form-state slot manual typing writes.  Field slots map 1:1
+  // to setTargets / setCUser / setCDomain — the three prefillable inputs
+  // the ScanTab renders today.
+  function applySuggestion(s: ScanSuggestion) {
+    if (!s.command) return;                    // info-only card
+    const spec = catalog[s.command];
+    if (!spec) return;
+    // Selecting the command clears form state via the setCFlags reset in the
+    // command-picker onClick; do the same manually so a Prefill click also
+    // starts from a clean slate.
+    setActiveGroup(spec.group);
+    setCommand(s.command);
+    setCFlags({});
+    setCFlagValues({});
+    if (s.field === "targets")  setTargets(s.suggested_value);
+    if (s.field === "username") setCUser(s.suggested_value);
+    if (s.field === "domain")   setCDomain(s.suggested_value);
+  }
+
   const grouped = useMemo(() => groupBy(catalog), [catalog]);
   const groups = Object.entries(grouped);
   const currentCmds = activeGroup ? grouped[activeGroup] || [] : [];
@@ -455,6 +515,73 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
           </div>
         )}
       </div>
+
+      {/* "recce suggests…" — facts learned across the engagement, framed as
+          one-click prefills. Grouped by target command so multiple hints for
+          the same command render as one card; info-only suggestions (hashcat
+          handoff, ntlmrelayx handoff, SSH-key reuse cluster) sit under a
+          synthetic bucket keyed on the source reader. Dismissed keys persist
+          via localStorage so a card the operator rejected stays gone. */}
+      {visibleSuggestions.length > 0 && (
+        <div className="sv2-suggestions">
+          <div className="sv2-suggestions-h">
+            <span className="sv2-suggestions-label">recce suggests</span>
+            <span className="muted small">
+              {visibleSuggestions.length} hint{visibleSuggestions.length === 1 ? "" : "s"}
+              {" · "}based on what the engagement has already learned
+            </span>
+          </div>
+          <div className="sv2-suggestions-grid">
+            {Object.entries(groupedSuggestions).map(([bucket, items]) => {
+              const cmd = items[0].command;
+              const spec = cmd ? catalog[cmd] : null;
+              const title = spec ? spec.label : items[0].source.replace(/_/g, " ");
+              return (
+                <div key={bucket} className="sv2-suggest-card">
+                  <div className="sv2-suggest-card-h">
+                    <span className="sv2-suggest-card-title">{title}</span>
+                    {cmd && <span className="sv2-suggest-card-cmd mono">{cmd}</span>}
+                  </div>
+                  {items.map((s) => (
+                    <div key={s.key} className="sv2-suggest-row">
+                      <div className="sv2-suggest-reason">
+                        <span className={`sv2-conf-${s.confidence}`}>●</span>
+                        {" "}{s.reason}
+                        {s.suggested_value && s.field && (
+                          <div className="sv2-suggest-value">
+                            <span className="muted small">{s.field}:</span>{" "}
+                            <span className="mono">{s.suggested_value}</span>
+                          </div>
+                        )}
+                        {s.external_cmd && (
+                          <div className="sv2-suggest-value mono small">
+                            $ {s.external_cmd}
+                          </div>
+                        )}
+                      </div>
+                      <div className="sv2-suggest-actions">
+                        {s.command && s.field && (
+                          <button
+                            className="sv2-suggest-fill"
+                            onClick={() => applySuggestion(s)}
+                            disabled={isBusy}
+                            title={`Prefill ${s.command} → ${s.field}`}
+                          >Prefill</button>
+                        )}
+                        <button
+                          className="sv2-suggest-dismiss"
+                          onClick={() => dismissSuggestion(s.key)}
+                          title="Dismiss this suggestion"
+                        >×</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Category tabs */}
       <div className="sv2-tabs">
