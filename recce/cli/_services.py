@@ -22,7 +22,17 @@ __all__ = ['cmd_web', 'cmd_smb', 'cmd_ftp', 'cmd_docker', 'cmd_kubernetes', 'cmd
            'cmd_zookeeper', 'cmd_kafka', 'cmd_etcd', 'cmd_consul', 'cmd_nomad',
            'cmd_prometheus', 'cmd_docker_registry', 'cmd_vnc', 'cmd_modbus',
            'cmd_rdp', 'cmd_ipmi', 'cmd_ntp', 'cmd_msrpc', 'cmd_winrm',
-           'cmd_netbios', 'cmd_tftp', 'cmd_ipp', 'cmd_x11', 'cmd_sip', 'cmd_rservices']
+           'cmd_netbios', 'cmd_tftp', 'cmd_ipp', 'cmd_x11', 'cmd_sip', 'cmd_rservices',
+           # T5 scanner-expansion additions (remote-access / mail / storage /
+           # virt / monitoring / OT / cloud). Wired via _run_service_scan (or
+           # _run_svc_creds when the module's analyze() takes -u/-p):
+           'cmd_ssh', 'cmd_telnet', 'cmd_imap', 'cmd_pop3', 'cmd_webdav',
+           'cmd_iscsi', 'cmd_bacnet', 'cmd_s7', 'cmd_opcua', 'cmd_dnp3',
+           'cmd_iec104', 'cmd_enip', 'cmd_mqtt', 'cmd_rtsp', 'cmd_nrpe',
+           'cmd_zabbix', 'cmd_vault', 'cmd_vsphere', 'cmd_jenkins_jnlp',
+           'cmd_cups_lpd', 'cmd_nbd_ndmp', 'cmd_slp', 'cmd_bgp', 'cmd_stun',
+           'cmd_xmpp', 'cmd_guacamole', 'cmd_minecraft', 'cmd_nisyp',
+           'cmd_coap', 'cmd_cloud_metadata']
 
 
 def cmd_web(args: argparse.Namespace) -> int:
@@ -915,3 +925,397 @@ def cmd_rservices(args: argparse.Namespace) -> int:
         no_targets="[!] No r-services in the datastore (ports 512/513/514). "
                    "Run `enum` first.",
         fmt=_fmt_simple(lambda t, a: t.get('service') or '?'))
+
+
+# ─── T5 scanner-expansion service handlers ────────────────────────────────
+# 30 new services (remote-access / mail / storage / virt / monitoring / OT /
+# cloud). Non-credentialed handlers pass through _run_service_scan (same as
+# the T4 wave). Credentialed handlers (ssh/telnet/imap/pop3/webdav/iscsi/mqtt/
+# rtsp/zabbix/vault/vsphere/xmpp/guacamole/stun) delegate to the local
+# _run_svc_creds helper below — it mirrors _run_service_scan but builds a
+# single {user, secret} dict from -u/-p and threads it into analyze(creds=).
+
+def _run_svc_creds(args: argparse.Namespace, *, module: str, source: str,
+                   label: str, noun: str, no_targets: str, fmt,
+                   udp: bool = False) -> int:
+    """Same driver as _service_helpers._run_service_scan, except the creds
+    argument to analyze() is a single dict built from the CLI's -u/-p (not the
+    DB-login list _db_login_creds returns). Used for the T5 services whose
+    analyze() takes `creds: dict | None` for direct auth rather than a spray
+    plan."""
+    from importlib import import_module
+    from ..core import proxy
+    if udp and proxy.is_active():
+        # Same rationale as _run_service_scan's UDP guard: a datagram can't
+        # traverse a TCP proxy without leaking from the operator's real IP.
+        print(f"[!] {label} is UDP-only and can't traverse the proxy ({proxy.describe()}) "
+              f"- skipped. Run it from the pivot host directly, or without --proxy.")
+        return 0
+    mod = import_module(_MODULE_PATH.get(module, f"recce.{module}"))
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    active = not args.no_probe
+    creds = None
+    if getattr(args, "username", None):
+        creds = {"user": args.username, "secret": args.password or ""}
+    analysis = mod.analyze(hosts, creds=creds, active=active,
+                           **_probe_kwargs(args, source))
+    tgts = analysis["targets"]
+    if not tgts:
+        print(no_targets)
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} {noun}:")
+    for t in tgts:
+        print(f"      {fmt(t, active)}")
+    service_creds = analysis.pop("credentials", [])
+    _fold_service_findings(store, hosts, analysis, source,
+                           mod.findings_to_vulns, label)
+    looted = 0
+    for c in service_creds:
+        if store.add_credential(c):
+            looted += 1
+    if looted:
+        print(f"    [+] captured {looted} credential(s)/hash(es) -> credential store "
+              f"(recce creds -o {args.output_dir} to view; feeds credsweep)")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    try:
+        from ..creds import hashloot
+        loot_dir = os.path.join(args.output_dir, "loot")
+        by_cat: dict[str, list[str]] = {}
+        for _tgt_key, pr in (analysis.get("probes") or {}).items():
+            for category, line in hashloot.collect_from_probe(pr, source):
+                by_cat.setdefault(category, []).append(line)
+        for category, lines in by_cat.items():
+            n = hashloot.write_hashcat_file(loot_dir, category, lines)
+            if n:
+                fname, mode, _blurb = hashloot.CATEGORIES[category]
+                print(f"    -> {n} new hash(es) captured -> loot/{fname} "
+                      f"(hashcat -m {mode})")
+    except Exception:  # noqa: BLE001 — hashloot writing must never break the scan
+        pass
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print(f"    -> {label} sheet written; findings folded into the main totals.")
+    return 0
+
+
+# --- Remote-access & general services --------------------------------------
+
+def cmd_ssh(args: argparse.Namespace) -> int:
+    """SSH: banner + advertised auth methods (publickey/password/kbd-interactive)
+    + weak-cred sweep when -u/-p is supplied. Read-only."""
+    return _run_svc_creds(
+        args, module="ssh", source="ssh", label="SSH",
+        noun="SSH endpoint(s)",
+        no_targets="[!] No SSH endpoints in the datastore (port 22). Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('banner') or '?'))
+
+
+def cmd_telnet(args: argparse.Namespace) -> int:
+    """Telnet: banner + login prompt fingerprint, optional weak-cred sweep."""
+    return _run_svc_creds(
+        args, module="telnet", source="telnet", label="Telnet",
+        noun="Telnet endpoint(s)",
+        no_targets="[!] No Telnet endpoints in the datastore (port 23). Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('banner') or '?'))
+
+
+def cmd_guacamole(args: argparse.Namespace) -> int:
+    """Apache Guacamole guacd (4822/tcp): auth surface + default-cred sweep."""
+    return _run_svc_creds(
+        args, module="guacamole", source="guacamole", label="Guacamole",
+        noun="Guacamole guacd endpoint(s)",
+        no_targets="[!] No Guacamole endpoints in the datastore (port 4822). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('version') or '?'))
+
+
+def cmd_xmpp(args: argparse.Namespace) -> int:
+    """XMPP (5222/5269): stream:features — TLS/SASL posture + in-band reg."""
+    return _run_svc_creds(
+        args, module="xmpp", source="xmpp", label="XMPP",
+        noun="XMPP endpoint(s)",
+        no_targets="[!] No XMPP endpoints in the datastore (ports 5222/5269). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('server') or '?'))
+
+
+def cmd_bgp(args: argparse.Namespace) -> int:
+    """BGP 179/tcp: OPEN handshake — ASN + router-ID + capabilities."""
+    return _run_service_scan(
+        args, module="bgp", source="bgp", label="BGP",
+        noun="BGP endpoint(s)",
+        no_targets="[!] No BGP endpoints in the datastore (port 179). Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: f"AS{t.get('asn','?')}"))
+
+
+def cmd_stun(args: argparse.Namespace) -> int:
+    """STUN / TURN 3478/udp: public-IP disclosure + relay-allocation abuse."""
+    return _run_svc_creds(
+        args, module="stun", source="stun", label="STUN/TURN",
+        noun="STUN/TURN endpoint(s)",
+        no_targets="[!] No STUN/TURN endpoints in the datastore (port 3478). "
+                   "Run `enum -U` (UDP) first.",
+        fmt=_fmt_simple(lambda t, a: t.get('server') or '?'),
+        udp=True)
+
+
+def cmd_slp(args: argparse.Namespace) -> int:
+    """SLP 427/udp: Service Location Protocol — amplification + service directory."""
+    return _run_service_scan(
+        args, module="slp", source="slp", label="SLP",
+        noun="SLP endpoint(s)",
+        no_targets="[!] No SLP endpoints in the datastore (port 427). "
+                   "Run `enum -U` (UDP) first.",
+        fmt=_fmt_simple(lambda t, a: f"{t.get('services',0)} service(s)"),
+        udp=True)
+
+
+def cmd_minecraft(args: argparse.Namespace) -> int:
+    """Minecraft 25565/tcp: server-list ping — MOTD + version + player list."""
+    return _run_service_scan(
+        args, module="minecraft", source="minecraft", label="Minecraft",
+        noun="Minecraft server(s)",
+        no_targets="[!] No Minecraft servers in the datastore (port 25565). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('version') or '?'))
+
+
+def cmd_nisyp(args: argparse.Namespace) -> int:
+    """NIS / YP (ypserv): domain enum + passwd map extraction."""
+    return _run_service_scan(
+        args, module="nisyp", source="nisyp", label="NIS/YP",
+        noun="NIS endpoint(s)",
+        no_targets="[!] No NIS endpoints in the datastore. Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('domain') or '?'))
+
+
+# --- Mail ------------------------------------------------------------------
+
+def cmd_imap(args: argparse.Namespace) -> int:
+    """IMAP (143/993): CAPABILITY + STARTTLS posture + weak-cred sweep."""
+    return _run_svc_creds(
+        args, module="imap", source="imap", label="IMAP",
+        noun="IMAP endpoint(s)",
+        no_targets="[!] No IMAP endpoints in the datastore (ports 143/993). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('banner') or '?'))
+
+
+def cmd_pop3(args: argparse.Namespace) -> int:
+    """POP3 (110/995): CAPA + STARTTLS posture + weak-cred sweep."""
+    return _run_svc_creds(
+        args, module="pop3", source="pop3", label="POP3",
+        noun="POP3 endpoint(s)",
+        no_targets="[!] No POP3 endpoints in the datastore (ports 110/995). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('banner') or '?'))
+
+
+# --- Storage ---------------------------------------------------------------
+
+def cmd_iscsi(args: argparse.Namespace) -> int:
+    """iSCSI 3260/tcp: target discovery + CHAP posture."""
+    return _run_svc_creds(
+        args, module="iscsi", source="iscsi", label="iSCSI",
+        noun="iSCSI endpoint(s)",
+        no_targets="[!] No iSCSI endpoints in the datastore (port 3260). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: f"{t.get('targets',0)} target(s)"))
+
+
+def cmd_webdav(args: argparse.Namespace) -> int:
+    """WebDAV: HTTP methods + PROPFIND + default-cred sweep."""
+    return _run_svc_creds(
+        args, module="webdav", source="webdav", label="WebDAV",
+        noun="WebDAV endpoint(s)",
+        no_targets="[!] No WebDAV endpoints in the datastore. Run `enum`/`web` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('server') or '?'))
+
+
+def cmd_nbd_ndmp(args: argparse.Namespace) -> int:
+    """NBD / NDMP: export list + auth posture."""
+    return _run_service_scan(
+        args, module="nbd_ndmp", source="nbd_ndmp", label="NBD/NDMP",
+        noun="NBD/NDMP endpoint(s)",
+        no_targets="[!] No NBD/NDMP endpoints in the datastore (10809/10000). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('protocol') or '?'))
+
+
+# --- Virtualization / cloud -----------------------------------------------
+
+def cmd_vsphere(args: argparse.Namespace) -> int:
+    """vCenter / ESXi vSphere: build + SDK reachability + auth."""
+    return _run_svc_creds(
+        args, module="vsphere", source="vsphere", label="vSphere",
+        noun="vSphere endpoint(s)",
+        no_targets="[!] No vSphere endpoints in the datastore. Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('build') or t.get('version') or '?'))
+
+
+def cmd_cloud_metadata(args: argparse.Namespace) -> int:
+    """Cloud metadata: SSRF-reachable IMDS / metadata endpoints. Probes the
+    runner's own vantage — not the target set — for exposed metadata surfaces."""
+    return _run_service_scan(
+        args, module="cloud_metadata", source="cloud_metadata",
+        label="Cloud metadata", noun="cloud-metadata probe(s)",
+        no_targets="[!] Cloud metadata probe returned nothing.",
+        fmt=_fmt_simple(lambda t, a: t.get('provider') or 'IMDS'))
+
+
+# --- Monitoring / secrets / messaging -------------------------------------
+
+def cmd_nrpe(args: argparse.Namespace) -> int:
+    """NRPE 5666: Nagios remote plugin — command enum + CVE-2013-1362."""
+    return _run_service_scan(
+        args, module="nrpe", source="nrpe", label="NRPE",
+        noun="NRPE endpoint(s)",
+        no_targets="[!] No NRPE endpoints in the datastore (port 5666). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('version') or '?'))
+
+
+def cmd_zabbix(args: argparse.Namespace) -> int:
+    """Zabbix 10050/10051: agent item probe + server auth."""
+    return _run_svc_creds(
+        args, module="zabbix", source="zabbix", label="Zabbix",
+        noun="Zabbix endpoint(s)",
+        no_targets="[!] No Zabbix endpoints in the datastore (10050/10051). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('role') or '?'))
+
+
+def cmd_vault(args: argparse.Namespace) -> int:
+    """HashiCorp Vault 8200: seal status + auth mounts + KV probe."""
+    return _run_svc_creds(
+        args, module="vault", source="vault", label="Vault",
+        noun="Vault endpoint(s)",
+        no_targets="[!] No Vault endpoints in the datastore (port 8200). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: ('sealed' if t.get('sealed') else 'unsealed')))
+
+
+def cmd_mqtt(args: argparse.Namespace) -> int:
+    """MQTT 1883/8883: unauth SUBSCRIBE + retained-topic dump."""
+    return _run_svc_creds(
+        args, module="mqtt", source="mqtt", label="MQTT",
+        noun="MQTT broker(s)",
+        no_targets="[!] No MQTT endpoints in the datastore (1883/8883). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: 'UNAUTH' if t.get('unauth') else 'auth-required'))
+
+
+def cmd_rtsp(args: argparse.Namespace) -> int:
+    """RTSP 554: DESCRIBE fingerprint + weak-cred sweep on cameras."""
+    return _run_svc_creds(
+        args, module="rtsp", source="rtsp", label="RTSP",
+        noun="RTSP endpoint(s)",
+        no_targets="[!] No RTSP endpoints in the datastore (port 554). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('server') or '?'))
+
+
+def cmd_jenkins_jnlp(args: argparse.Namespace) -> int:
+    """Jenkins JNLP agent port: CLI RCE reachability."""
+    return _run_service_scan(
+        args, module="jenkins-jnlp", source="jenkins-jnlp", label="Jenkins JNLP",
+        noun="Jenkins JNLP endpoint(s)",
+        no_targets="[!] No Jenkins JNLP endpoints in the datastore. "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('version') or '?'))
+
+
+def cmd_cups_lpd(args: argparse.Namespace) -> int:
+    """CUPS LPD 515/tcp: LPR queue enum."""
+    return _run_service_scan(
+        args, module="cups_lpd", source="cups_lpd", label="CUPS LPD",
+        noun="LPD endpoint(s)",
+        no_targets="[!] No LPD endpoints in the datastore (port 515). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: f"{t.get('queues',0)} queue(s)"))
+
+
+# --- OT / ICS -------------------------------------------------------------
+
+def cmd_s7(args: argparse.Namespace) -> int:
+    """Siemens S7comm 102/tcp: CPU identity + module list."""
+    return _run_service_scan(
+        args, module="s7", source="s7", label="S7comm",
+        noun="S7 endpoint(s)",
+        no_targets="[!] No S7 endpoints in the datastore (port 102). "
+                   "Run `enum` against the OT segment first.",
+        fmt=_fmt_simple(lambda t, a: (t.get('module') or t.get('cpu') or '?')))
+
+
+def cmd_bacnet(args: argparse.Namespace) -> int:
+    """BACnet/IP 47808/udp: Who-Is + device object + vendor."""
+    return _run_service_scan(
+        args, module="bacnet", source="bacnet", label="BACnet",
+        noun="BACnet endpoint(s)",
+        no_targets="[!] No BACnet endpoints in the datastore (port 47808/udp). "
+                   "Run `enum -U` (UDP) against the OT segment first.",
+        fmt=_fmt_simple(lambda t, a: t.get('vendor') or '?'),
+        udp=True)
+
+
+def cmd_opcua(args: argparse.Namespace) -> int:
+    """OPC-UA 4840/tcp: GetEndpoints + security modes + anon posture."""
+    return _run_service_scan(
+        args, module="opcua", source="opcua", label="OPC-UA",
+        noun="OPC-UA endpoint(s)",
+        no_targets="[!] No OPC-UA endpoints in the datastore (port 4840). "
+                   "Run `enum` against the OT segment first.",
+        fmt=_fmt_simple(lambda t, a: ('anon' if t.get('anonymous') else 'auth-required')))
+
+
+def cmd_dnp3(args: argparse.Namespace) -> int:
+    """DNP3 20000/tcp: link-layer + outstation identity."""
+    return _run_service_scan(
+        args, module="dnp3", source="dnp3", label="DNP3",
+        noun="DNP3 endpoint(s)",
+        no_targets="[!] No DNP3 endpoints in the datastore (port 20000). "
+                   "Run `enum` against the OT segment first.",
+        fmt=_fmt_simple(lambda t, a: f"src={t.get('src','?')}"))
+
+
+def cmd_iec104(args: argparse.Namespace) -> int:
+    """IEC-104 2404/tcp: station interrogation — SCADA telemetry."""
+    return _run_service_scan(
+        args, module="iec104", source="iec104", label="IEC-104",
+        noun="IEC-104 endpoint(s)",
+        no_targets="[!] No IEC-104 endpoints in the datastore (port 2404). "
+                   "Run `enum` against the OT segment first.",
+        fmt=_fmt_simple(lambda t, a: f"CAA={t.get('caa','?')}"))
+
+
+def cmd_enip(args: argparse.Namespace) -> int:
+    """EtherNet/IP 44818: List Identity — Rockwell / Allen-Bradley PLC."""
+    return _run_service_scan(
+        args, module="enip", source="enip", label="EtherNet/IP",
+        noun="ENIP endpoint(s)",
+        no_targets="[!] No EtherNet/IP endpoints in the datastore (port 44818). "
+                   "Run `enum` against the OT segment first.",
+        fmt=_fmt_simple(lambda t, a: (t.get('vendor','?') + ' ' +
+                                       t.get('product','')).strip()))
+
+
+def cmd_coap(args: argparse.Namespace) -> int:
+    """CoAP 5683/udp: resource discovery + amplification."""
+    return _run_service_scan(
+        args, module="coap", source="coap", label="CoAP",
+        noun="CoAP endpoint(s)",
+        no_targets="[!] No CoAP endpoints in the datastore (port 5683/udp). "
+                   "Run `enum -U` (UDP) first.",
+        fmt=_fmt_simple(lambda t, a: f"{t.get('resources',0)} resource(s)"),
+        udp=True)

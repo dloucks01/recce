@@ -1182,6 +1182,62 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_t4("sip",             "SIP 5060: OPTIONS fingerprint — Server/User-Agent + realm disclosure, methods, PBX identification")
     _add_t4("rservices",       "Legacy Berkeley r-services 512/513/514: cleartext IP-trust auth — flagged categorically when present")
 
+    # ── T5 scanner-expansion services ────────────────────────────────────
+    # Same shape as T4 (targets nargs='*' + --no-probe + IO + budget). A
+    # subset takes -u/-p (with_creds=True) — those handlers in cli/_services.py
+    # build a single creds dict from the flags and thread it through to the
+    # module's analyze(); the rest ignore them and match the T4 dispatch.
+    def _add_t5(name, help_txt, *aliases, with_creds=False):
+        p = sub.add_parser(name, aliases=list(aliases), help=help_txt)
+        p.add_argument("targets", nargs="*",
+                       help="restrict to these IPs / ranges / CIDRs / @file "
+                            "(default: all matching hosts in the datastore)")
+        p.add_argument("--no-probe", action="store_true",
+                       help="skip the live probe; just write the commands")
+        if with_creds:
+            p.add_argument("-u", "--username",
+                           help="account for the authenticated probe / weak-cred sweep")
+            p.add_argument("-p", "--password", help="password for -u")
+        _add_io(p); _add_budget(p)
+        p.set_defaults(func=_h(name.replace("-", "_")))
+        return p
+    # Remote-access & general services
+    _add_t5("ssh",             "SSH 22/tcp: banner + auth-method advertisement + weak-cred sweep", with_creds=True)
+    _add_t5("telnet",          "Telnet 23/tcp: banner + login prompt + optional weak-cred sweep", with_creds=True)
+    _add_t5("guacamole",       "Apache Guacamole 4822/tcp guacd: auth surface + default-cred sweep", with_creds=True)
+    _add_t5("xmpp",            "XMPP 5222/5269: stream:features — TLS/SASL posture + in-band registration", with_creds=True)
+    _add_t5("bgp",             "BGP 179/tcp: OPEN handshake — ASN + router-ID + capabilities")
+    _add_t5("stun",            "STUN / TURN 3478/udp: public-IP disclosure + relay-allocation abuse", with_creds=True)
+    _add_t5("slp",             "SLP 427/udp: Service Location Protocol — amplification + service directory")
+    _add_t5("minecraft",       "Minecraft 25565/tcp: server-list ping — MOTD + version + player list")
+    _add_t5("nisyp",           "NIS / YP (ypserv): domain enum + passwd map extraction")
+    # Mail (STARTTLS-aware)
+    _add_t5("imap",            "IMAP 143/993: CAPABILITY + STARTTLS posture + weak-cred sweep", with_creds=True)
+    _add_t5("pop3",            "POP3 110/995: CAPA + STARTTLS posture + weak-cred sweep", with_creds=True)
+    # Storage
+    _add_t5("iscsi",           "iSCSI 3260/tcp: target discovery + CHAP posture", with_creds=True)
+    _add_t5("webdav",          "WebDAV: HTTP methods + PROPFIND + default-cred sweep", with_creds=True)
+    _add_t5("nbd_ndmp",        "NBD / NDMP: export list + auth posture")
+    # Virtualization / cloud
+    _add_t5("vsphere",         "vCenter / ESXi vSphere: build + SDK reachability + auth", with_creds=True)
+    _add_t5("cloud_metadata",  "Cloud metadata: SSRF-reachable IMDS / metadata endpoints")
+    # Monitoring / secrets / messaging
+    _add_t5("nrpe",            "NRPE 5666: Nagios remote plugin — command enum + CVE-2013-1362")
+    _add_t5("zabbix",          "Zabbix 10050/10051: agent item probe + server auth", with_creds=True)
+    _add_t5("vault",           "HashiCorp Vault 8200: seal status + auth mounts + KV probe", with_creds=True)
+    _add_t5("mqtt",            "MQTT 1883/8883: unauth SUBSCRIBE + retained-topic dump", with_creds=True)
+    _add_t5("rtsp",            "RTSP 554: DESCRIBE fingerprint + weak-cred sweep on cameras", with_creds=True)
+    _add_t5("jenkins-jnlp",    "Jenkins JNLP agent port: CLI RCE reachability")
+    _add_t5("cups_lpd",        "CUPS LPD 515/tcp: LPR queue enum")
+    # OT / ICS
+    _add_t5("s7",              "Siemens S7comm 102/tcp: CPU identity + module list")
+    _add_t5("bacnet",          "BACnet/IP 47808/udp: Who-Is + device object + vendor")
+    _add_t5("opcua",           "OPC-UA 4840/tcp: GetEndpoints + security modes + anon posture")
+    _add_t5("dnp3",            "DNP3 20000/tcp: link-layer + outstation identity")
+    _add_t5("iec104",          "IEC-104 2404/tcp: station interrogation — SCADA telemetry")
+    _add_t5("enip",            "EtherNet/IP 44818: List Identity — Rockwell / Allen-Bradley PLC")
+    _add_t5("coap",            "CoAP 5683/udp: resource discovery + amplification")
+
     sk = sub.add_parser("fieldkit-export",
                         help="export the engagement as a seed for the fieldkit "
                              "exploitation kit (gnmap + bridge JSON + attack plan)")
