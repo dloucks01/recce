@@ -173,6 +173,13 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
                 out["anon_exec_route"] = bool(
                     run_probe and run_probe[0] not in (404, 0))
                 out["exec_sample"] = (first_ns, first_pod, first_container)
+        # /logs/ - CVE-2020-8557 (disk-fill DoS) + CVE-2024-9042 (Windows RCE
+        # via parameter injection). Serves /var/log on the node as a directory
+        # index. A 200 with a href listing = confirmed exposure. Passive GET.
+        logs = _get(ip, port, "/logs/", tls=tls, timeout=timeout)
+        if logs and logs[0] == 200:
+            body = logs[1] if isinstance(logs[1], str) else ""
+            out["anon_logs_dir"] = _looks_like_dir_listing(body)
         return out
     if r == "kubelet-ro":
         pods = _get(ip, port, "/pods", tls=False, timeout=timeout)
@@ -235,6 +242,28 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
                 out["escape_pod_counts"] = {
                     "privileged": privileged, "hostPath": host_mounts,
                     "hostPID": host_pid, "hostNetwork": host_net}
+        # SelfSubjectRulesReview - one POST answers definitively what verbs the
+        # anonymous user actually holds on this cluster; catches create/exec/
+        # impersonate perms the LIST-only enumeration above misses. Probed
+        # whenever the apiserver is answering anon at all (200 list OR 403).
+        if out.get("anon_list") or out.get("anon_status") in (401, 403):
+            ssrr_body = ('{"kind":"SelfSubjectRulesReview","apiVersion":'
+                         '"authorization.k8s.io/v1","spec":'
+                         '{"namespace":"default"}}')
+            ssrr = _req(ip, port,
+                        "/apis/authorization.k8s.io/v1/selfsubjectrulesreview",
+                        tls, "POST", ssrr_body, timeout)
+            if ssrr and ssrr[0] in (200, 201) and isinstance(ssrr[1], dict):
+                st = (ssrr[1].get("status") or {})
+                rules = st.get("resourceRules") or []
+                nonres = st.get("nonResourceRules") or []
+                verbs: set[str] = set()
+                for rule in rules:
+                    for v in (rule.get("verbs") or []):
+                        if isinstance(v, str):
+                            verbs.add(v)
+                out["anon_ssrr_rules"] = len(rules) + len(nonres)
+                out["anon_ssrr_verbs"] = sorted(verbs)
         return out
     if r == "etcd":
         ver, tls = _try_get(ip, port, "/version", timeout)
@@ -282,6 +311,19 @@ def _is_list(body) -> bool:
         b = body.replace(" ", "")
         return '"items"' in b or bool(re.search(r'"kind":"\w+List"', b))
     return False
+
+
+def _looks_like_dir_listing(body: str) -> bool:
+    if not isinstance(body, str) or not body:
+        return False
+    s = body[:8192].lower()
+    if "index of" in s or "directory listing" in s:
+        return True
+    return "<a href=" in s and (".log" in s or "/</a>" in s)
+
+
+_SSRR_DANGEROUS = frozenset({"*", "create", "update", "patch", "delete",
+                             "deletecollection", "impersonate"})
 
 
 def _etcd_version(body) -> str:
@@ -332,6 +374,20 @@ _NARRATIVE = {
         "Listing was refused by RBAC here, but anonymous-auth being on is the "
         "precondition for every RBAC-misconfiguration and CVE that grants the "
         "anonymous user access - it should be disabled (--anonymous-auth=false)."),
+    "kubelet_logs_dir": (
+        "The kubelet /logs/ endpoint serves the node's /var/log directory over "
+        "HTTP with no authentication. On Linux this is CVE-2020-8557 (a disk-fill "
+        "DoS by streaming huge log files, and immediate disclosure of every "
+        "container's stdout/stderr on the node). On Windows kubelets it is "
+        "CVE-2024-9042 - parameter injection in this same endpoint turns it into "
+        "unauthenticated remote command execution on the node."),
+    "api_anon_ssrr": (
+        "SelfSubjectRulesReview is the apiserver's own answer to 'what can this "
+        "caller do here'. Answered anonymously, it hands the tester a full, "
+        "authoritative RBAC map for the system:anonymous user - including verbs "
+        "that plain LIST enumeration misses (create pods, exec, impersonate, "
+        "approve CSRs). If a mutating or impersonate verb appears, the anonymous "
+        "user can persist inside the cluster or become another identity."),
     "etcd_open": (
         "etcd is the cluster's backing store and it answered unauthenticated. Every "
         "Kubernetes object lives here in the clear, including all Secrets - every "
@@ -398,6 +454,24 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "on the kubelet. Restrict the kubelet port to control-plane "
                     "traffic only.",
                     ["CWE-306", "CWE-77", "CWE-284"], kind="kubelet_exec"))
+
+            if r == "kubelet" and pr.get("anon_logs_dir"):
+                out.append(_finding(
+                    "critical",
+                    "Kubelet /logs/ exposes node /var/log without auth", tgt,
+                    "GET /logs/ returned a directory index of the node's "
+                    "/var/log tree. On Linux kubelets this is CVE-2020-8557 "
+                    "(disk-fill DoS + live container stdout/stderr disclosure). "
+                    "On Windows kubelets CVE-2024-9042 turns the same endpoint "
+                    "into unauthenticated RCE via parameter injection.",
+                    "curl",
+                    f"curl -sk https://<ip>:{p.portid}/logs/ ; "
+                    f"curl -sk https://<ip>:{p.portid}/logs/kube-apiserver.log",
+                    "Disable the /logs/ endpoint (--enable-debugging-handlers=false) "
+                    "or turn off anonymous auth on the kubelet "
+                    "(--anonymous-auth=false, --authorization-mode=Webhook); "
+                    "patch Windows kubelets to a version that fixes CVE-2024-9042.",
+                    ["CWE-22", "CWE-306", "CWE-532"], kind="kubelet_logs_dir"))
 
             if r == "kubelet" and pr.get("anon_pods"):
                 out.append(_finding(
@@ -502,6 +576,32 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Disable anonymous auth (--anonymous-auth=false) unless a health "
                         "endpoint requires it.",
                         ["CWE-306"], kind="api_anon_open"))
+                if pr.get("anon_ssrr_rules"):
+                    verbs = pr.get("anon_ssrr_verbs") or []
+                    dangerous = sorted(v for v in verbs if v in _SSRR_DANGEROUS)
+                    sev = "critical" if dangerous else "high"
+                    vsummary = (f"including mutating verbs {', '.join(dangerous)}"
+                                if dangerous
+                                else f"read-only verbs ({', '.join(verbs) or 'get/list/watch'})")
+                    out.append(_finding(
+                        sev,
+                        "Kubernetes API leaks anon RBAC via SelfSubjectRulesReview",
+                        tgt,
+                        f"POST /apis/authorization.k8s.io/v1/selfsubjectrulesreview "
+                        f"returned {pr['anon_ssrr_rules']} rule(s) bound to "
+                        f"system:anonymous, {vsummary}. This is the apiserver's "
+                        f"own authoritative statement of what the anonymous user "
+                        f"can do here - any mutating verb (create, patch, delete, "
+                        f"impersonate, *) is a direct route to persistence or "
+                        f"privilege escalation.",
+                        "kubectl",
+                        "kubectl --server https://<ip>:<port> --insecure-skip-tls-verify "
+                        "auth can-i --list --as=system:anonymous -n default",
+                        "Remove every ClusterRoleBinding / RoleBinding that names "
+                        "system:anonymous or system:unauthenticated; set "
+                        "--anonymous-auth=false on the apiserver.",
+                        ["CWE-306", "CWE-284"] + (["CWE-269"] if dangerous else []),
+                        kind="api_anon_ssrr"))
             elif r == "etcd" and (pr.get("v2_readable") or pr.get("v3_readable")):
                 api = "v2 keys" if pr.get("v2_readable") else "v3 gRPC-gateway"
                 out.append(_finding(
@@ -580,7 +680,8 @@ def analyze(hosts: list[Host], active: bool = True,
                 t["reachable"] = True
                 for k in ("anon_pods", "anon_list", "anon_secrets", "v2_readable",
                           "v3_readable", "version", "etcd_version", "pod_count",
-                          "anon_status"):
+                          "anon_status", "anon_logs_dir", "anon_ssrr_rules",
+                          "anon_ssrr_verbs"):
                     if k in pr:
                         t[k] = pr[k]
     fs = findings(hosts, probes)
