@@ -34,6 +34,13 @@ _DEFAULT_PORT = 4646
 _TIMEOUT = 3.0
 _UA = "recce-probe/1.0"
 _VARS_MAX = 40
+_JOB_SPEC_MAX = 10          # cap /v1/job/:id fetches — keeps probe bounded
+_ENV_KEYS_MAX = 20          # per-task Env keys captured
+_TMPL_MAX = 8               # per-job Template destinations captured
+# Minimal valid HCL used to probe /v1/jobs/parse — parser-only, does NOT
+# register a job. If the endpoint returns 200 for this on an anonymous
+# request, the parser accepts submissions from unauthenticated clients.
+_PARSE_PROBE_HCL = 'job "recce-probe" {}'
 
 
 def is_nomad(port: Port) -> bool:
@@ -43,12 +50,35 @@ def is_nomad(port: Port) -> bool:
             or "nomad" in svc or "nomad" in prod)
 
 
+def _extract_token(creds: dict | None) -> str:
+    """Pull a Nomad SecretID out of the shared creds dict. Recognises the
+    top-level `nomad_token` / `token` keys and a nested `nomad` sub-dict
+    (which is the shape the exploit-session-wiring subagent uses)."""
+    if not isinstance(creds, dict):
+        return ""
+    for key in ("nomad_token", "token"):
+        v = creds.get(key)
+        if isinstance(v, str) and v:
+            return v
+    sub = creds.get("nomad")
+    if isinstance(sub, dict):
+        for key in ("token", "secret_id", "SecretID"):
+            v = sub.get(key)
+            if isinstance(v, str) and v:
+                return v
+    return ""
+
+
 def _http(ip: str, port: int, method: str, path: str,
-          timeout: float = _TIMEOUT, token: str = "") -> tuple[int, bytes] | None:
+          timeout: float = _TIMEOUT, token: str = "",
+          body: bytes | None = None,
+          content_type: str = "") -> tuple[int, bytes] | None:
     """One request. Transparently retries HTTPS if plain HTTP is rejected."""
     headers = {"User-Agent": _UA, "Connection": "close"}
     if token:
         headers["X-Nomad-Token"] = token
+    if body is not None and content_type:
+        headers["Content-Type"] = content_type
     for use_tls in (False, True):
         conn = None
         try:
@@ -57,7 +87,7 @@ def _http(ip: str, port: int, method: str, path: str,
                 conn = http.client.HTTPSConnection(ip, port, timeout=timeout, context=ctx)
             else:
                 conn = http.client.HTTPConnection(ip, port, timeout=timeout)
-            conn.request(method, path, headers=headers)
+            conn.request(method, path, body=body, headers=headers)
             resp = conn.getresponse()
             return resp.status, resp.read(500_000)
         except (OSError, http.client.HTTPException, ssl.SSLError, ValueError):
@@ -145,12 +175,102 @@ def _enumerate_variables(ip: str, port: int, timeout: float,
     return out
 
 
+def _fetch_job_spec(ip: str, port: int, timeout: float, job_id: str,
+                    token: str = "") -> dict:
+    """GET /v1/job/:job_id. Extract the fields that carry secret material:
+    per-task Env keys, Template destinations, Vault{Policies,Namespace}
+    references, and TaskGroup Meta keys. Returns {} if the fetch failed
+    or was ACL-denied — the caller distinguishes 'no data' from 'no job'
+    by list length."""
+    if not job_id:
+        return {}
+    r = _http(ip, port, "GET", f"/v1/job/{quote(job_id, safe='')}",
+              timeout=timeout, token=token)
+    if r is None or r[0] != 200:
+        return {}
+    try:
+        spec = json.loads(r[1].decode("utf-8", "replace"))
+    except (ValueError, UnicodeDecodeError):
+        return {}
+    if not isinstance(spec, dict):
+        return {}
+    env_keys: list[str] = []
+    tmpl_dests: list[str] = []
+    vault_refs: list[dict] = []
+    meta_keys: list[str] = []
+    groups = spec.get("TaskGroups") or []
+    if isinstance(groups, list):
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            gmeta = g.get("Meta") or {}
+            if isinstance(gmeta, dict):
+                meta_keys.extend(str(k)[:80] for k in list(gmeta.keys())[:10])
+            tasks = g.get("Tasks") or []
+            if not isinstance(tasks, list):
+                continue
+            for t in tasks:
+                if not isinstance(t, dict):
+                    continue
+                env = t.get("Env") or {}
+                if isinstance(env, dict):
+                    env_keys.extend(str(k)[:80] for k in env.keys())
+                tmpls = t.get("Templates") or []
+                if isinstance(tmpls, list):
+                    for tm in tmpls:
+                        if isinstance(tm, dict):
+                            dst = str(tm.get("DestPath") or "")
+                            if dst:
+                                tmpl_dests.append(dst[:200])
+                v = t.get("Vault") or {}
+                if isinstance(v, dict) and (v.get("Policies") or v.get("Namespace")):
+                    pols = v.get("Policies") or []
+                    if isinstance(pols, list):
+                        vault_refs.append({
+                            "policies": [str(p)[:60] for p in pols[:8]],
+                            "namespace": str(v.get("Namespace") or "")[:80],
+                        })
+    # Cap after collection so ordering across task-groups is preserved.
+    return {
+        "id": job_id[:120],
+        "env_keys": env_keys[:_ENV_KEYS_MAX],
+        "template_dests": tmpl_dests[:_TMPL_MAX],
+        "vault_refs": vault_refs[:5],
+        "meta_keys": meta_keys[:_ENV_KEYS_MAX],
+    }
+
+
+def _probe_job_submit(ip: str, port: int, timeout: float,
+                      token: str = "") -> str:
+    """POST /v1/jobs/parse with a trivial HCL body. This is the parser-only
+    endpoint and does NOT register a job. Result is one of:
+      * "writable" — 200 OK: parser accepted the payload from this caller,
+        so /v1/jobs is at minimum reachable and job registration is
+        plausible (subject to a separate submit-job ACL check server-side).
+      * "gated"    — 401/403: ACLs enforce on the parse endpoint.
+      * ""         — unknown (5xx, unparseable, or transport error).
+    """
+    body = json.dumps({"JobHCL": _PARSE_PROBE_HCL,
+                       "Canonicalize": True}).encode("utf-8")
+    r = _http(ip, port, "POST", "/v1/jobs/parse", timeout=timeout,
+              token=token, body=body, content_type="application/json")
+    if r is None:
+        return ""
+    status = r[0]
+    if status == 200:
+        return "writable"
+    if status in (401, 403):
+        return "gated"
+    return ""
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
           token: str = "") -> dict:
     """Return {reachable, version, acl_enabled, jobs, allocations, nodes, ...}."""
     out: dict = {"reachable": False, "version": "", "acl_enabled": None,
                  "jobs": [], "allocations": 0, "nodes": 0, "leader": "",
-                 "vault": {}, "consul": {}, "vars": [], "acl_bootstrap_token": ""}
+                 "vault": {}, "consul": {}, "vars": [], "acl_bootstrap_token": "",
+                 "job_specs": [], "job_submit": ""}
 
     r = _http(ip, port, "GET", "/v1/agent/self", timeout=timeout, token=token)
     if r is None:
@@ -211,6 +331,21 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
             pass
 
     out["vars"] = _enumerate_variables(ip, port, timeout, token=token)
+
+    # Fetch per-job spec for the first N discovered jobs — where secret
+    # material (Env/Templates/Vault refs) actually lives.
+    specs: list[dict] = []
+    for jrec in out["jobs"][:_JOB_SPEC_MAX]:
+        jid = jrec.get("name") or ""
+        s = _fetch_job_spec(ip, port, timeout, jid, token=token)
+        if s:
+            specs.append(s)
+    out["job_specs"] = specs
+
+    # One-shot write-access probe against the HCL parser endpoint. Kept
+    # separate from the read-side status so a caller can distinguish
+    # 'anonymous read' from 'anonymous read + writable API'.
+    out["job_submit"] = _probe_job_submit(ip, port, timeout, token=token)
 
     return out
 
@@ -311,6 +446,67 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "behind an ACL policy that requires management scope.",
                     ["CWE-522", "CWE-200"], kind="nomad_integration_token_leak"))
 
+            job_specs = pr.get("job_specs") or []
+            secretful = [s for s in job_specs
+                         if s.get("env_keys") or s.get("template_dests")
+                         or s.get("vault_refs")]
+            if secretful:
+                # Prefer showing env-key names — those are the highest-signal
+                # tokens (e.g. AWS_SECRET_ACCESS_KEY, DB_PASSWORD).
+                env_hits: list[str] = []
+                for s in secretful:
+                    for k in s.get("env_keys") or []:
+                        env_hits.append(f"{s.get('id','?')}:{k}")
+                        if len(env_hits) >= 12:
+                            break
+                    if len(env_hits) >= 12:
+                        break
+                tmpl_hits = [t for s in secretful for t in (s.get("template_dests") or [])][:6]
+                vault_hits = sum(1 for s in secretful if s.get("vault_refs"))
+                detail = (
+                    f"GET /v1/job/:id returned full specs for {len(secretful)} "
+                    f"job(s). Env keys observed (job:key): "
+                    + (", ".join(env_hits) or "-")
+                    + (f". Template destinations: {', '.join(tmpl_hits)}" if tmpl_hits else "")
+                    + (f". {vault_hits} job(s) reference Vault policies." if vault_hits else "")
+                    + " Env, Templates, and Vault policy references are where "
+                    "operators embed DB URIs, API keys, and TLS material."
+                )
+                first_id = secretful[0].get("id") or "?"
+                out.append(_finding(
+                    "critical",
+                    "Nomad job specs disclose task Env / Templates / Vault refs", tgt,
+                    detail,
+                    f"curl -sk http://{h.ip}:{p.portid}/v1/job/{first_id}",
+                    "Move secret material out of job Env{} and Templates into "
+                    "Vault (with Nomad's Vault integration) or Nomad Variables "
+                    "with a scoped ACL; deny anonymous read on /v1/job/:id.",
+                    ["CWE-200", "CWE-522", "CWE-798"],
+                    kind="nomad_job_spec_secrets"))
+
+            submit = pr.get("job_submit") or ""
+            if submit == "writable":
+                out.append(_finding(
+                    "critical",
+                    "Nomad HCL parse endpoint accepts anonymous submissions", tgt,
+                    f"POST /v1/jobs/parse returned 200 for an anonymous, minimal "
+                    f"HCL payload on Nomad {pr.get('version','?')}. The parser "
+                    f"endpoint does not require a token, indicating the API is "
+                    f"reachable for job-registration attempts. Where the exec / "
+                    f"raw_exec / docker drivers are enabled on client nodes, an "
+                    f"attacker who can PUT /v1/jobs runs arbitrary code on any "
+                    f"eligible client (typically as root for raw_exec).",
+                    f"curl -sk -X POST -H 'Content-Type: application/json' "
+                    f"--data '{{\"JobHCL\":\"job \\\"x\\\" {{}}\","
+                    f"\"Canonicalize\":true}}' "
+                    f"http://{h.ip}:{p.portid}/v1/jobs/parse",
+                    "Require an ACL token for /v1/jobs/parse and /v1/jobs; "
+                    "disable the raw_exec driver on client nodes unless "
+                    "explicitly needed; scope the submit-job capability to "
+                    "operators only.",
+                    ["CWE-306", "CWE-94", "CWE-78"],
+                    kind="nomad_job_submit_rce"))
+
             variables = pr.get("vars") or []
             readable = [v for v in variables if v.get("values_readable")]
             if variables:
@@ -343,6 +539,21 @@ def runbook(ip: str, port: int) -> list[dict]:
     ]
 
 
+def credentialed_runbook(ip: str, port: int) -> list[dict]:
+    """Steps that assume a valid X-Nomad-Token is in hand."""
+    return [
+        {"step": "Validate the token",
+         "cmd": f"curl -sk -H 'X-Nomad-Token: $TOKEN' "
+                f"http://{ip}:{port}/v1/acl/token/self"},
+        {"step": "List Nomad Variables (native secret store)",
+         "cmd": f"curl -sk -H 'X-Nomad-Token: $TOKEN' "
+                f"http://{ip}:{port}/v1/vars?namespace=*"},
+        {"step": "Dump a job spec (Env / Templates / Vault refs)",
+         "cmd": f"curl -sk -H 'X-Nomad-Token: $TOKEN' "
+                f"http://{ip}:{port}/v1/job/<job-id>"},
+    ]
+
+
 def findings_to_vulns(fs: list[dict]) -> dict:
     from .svccommon import findings_to_vulns as _f2v
     return _f2v(fs, "nomad", _DEFAULT_PORT)
@@ -354,9 +565,10 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     targets = nomad_targets(hosts)
     probes: dict = {}
     state: dict = {}
+    tok = _extract_token(creds)
     if active:
         for t, pr in svcprobe.iter_probe(
-                targets, lambda t: probe(t["ip"], t["port"]),
+                targets, lambda t: probe(t["ip"], t["port"], token=tok),
                 budget=budget, progress=progress, state=state):
             if pr:
                 probes[(t["ip"], t["port"])] = pr
@@ -365,8 +577,10 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["unauth"] = not pr.get("acl_enabled") and bool(
                     pr.get("jobs") or pr.get("allocations") or pr.get("nodes"))
     fs = findings(hosts, probes)
+    cred_steps = credentialed_runbook if tok else (lambda ip, port: [])
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
-                 "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
+                 "credfree": runbook(t["ip"], t["port"]),
+                 "credentialed": cred_steps(t["ip"], t["port"])}
                 for t in targets]
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
