@@ -250,7 +250,10 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     extra_users = load_wordlist(wordlist)
     enum_list = _SMTP_ENUM_USERS + [u for u in extra_users
                                      if u not in _SMTP_ENUM_USERS]
+    from ..creds.known_mail_accounts import (_mail_domain_for_host,
+                                             record_mail_account)
     targets = smtp_targets(hosts)
+    by_ip = {h.ip: h for h in hosts}
     probes: dict = {}
     state: dict = {}
     if active:
@@ -266,6 +269,16 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 # A dead port shouldn't burn the extra commands.
                 if pr.get("reachable") and pr.get("esmtp"):
                     pr["enum"] = enum_users(t["ip"], t["port"], users=enum_list)
+                    # Cross-transport wire: every VRFY / EXPN / RCPT hit lands
+                    # on the host as a mail-kind Account so imap.py / pop3.py
+                    # can retry it via known_mail_accounts.
+                    host = by_ip.get(t["ip"])
+                    if host is not None:
+                        dom = _mail_domain_for_host(host)
+                        for u in ((pr["enum"].get("vrfy") or [])
+                                  + (pr["enum"].get("expn") or [])
+                                  + (pr["enum"].get("rcpt") or [])):
+                            record_mail_account(host, u, dom, "smtp")
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

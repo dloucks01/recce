@@ -895,7 +895,10 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None, **_ignored) -> dict:
     """Full IMAP analysis. `creds` = {"user", "secret"} for a credentialed pass."""
     from . import svcprobe
+    from ..creds.known_mail_accounts import (_mail_domain_for_host,
+                                             record_mail_account)
     targets = imap_targets(hosts)
+    by_ip = {h.ip: h for h in hosts}
     probes: dict = {}
     state: dict = {}
     if active:
@@ -915,6 +918,14 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                     pr["enum"] = enum_users(t["ip"], t["port"])
                 except OSError:
                     pass
+                # Cross-transport wire: every LOGIN-differential hit lands on
+                # the host as a mail-kind Account so smtp.py / pop3.py can
+                # retry it via known_mail_accounts.
+                host = by_ip.get(t["ip"])
+                if host is not None:
+                    dom = _mail_domain_for_host(host)
+                    for u in (pr.get("enum") or {}).get("existing") or []:
+                        record_mail_account(host, u, dom, "imap")
             # Credentialed follow-up: operator creds first, then a bounded
             # default-cred spray if none of them log in.
             login_pair = None
