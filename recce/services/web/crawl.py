@@ -114,6 +114,7 @@ def crawl(ip: str, port: Port, auth: dict | None = None,
     pages: list[dict] = []
     forms: list[dict] = []
     params: list[tuple] = []
+    params_v: list[tuple[str, str, str]] = []
     pseen: set = set()
     while q and len(pages) < max_pages:
         path, depth = q.popleft()
@@ -126,10 +127,16 @@ def crawl(ip: str, port: Port, auth: dict | None = None,
             bp, qs = path.split("?", 1)
             for kv in qs.split("&"):
                 if "=" in kv:
-                    key = (bp, kv.split("=", 1)[0])
+                    name, val = kv.split("=", 1)
+                    key = (bp, name)
                     if key not in pseen:
                         pseen.add(key)
                         params.append(key)
+                        # Keep a value-carrying copy for checks that need it
+                        # (BOLA increments the value; the plain fuzz path
+                        # rewrites it, so `params` stays a name-only list for
+                        # the existing consumer at scan_crawl:761).
+                        params_v.append((path, name, val))
         if "html" not in headers.get("content-type", "").lower() and body.lstrip()[:1] != "<":
             continue
         cur_url = base + path
@@ -141,7 +148,8 @@ def crawl(ip: str, port: Port, auth: dict | None = None,
                     q.append((npath, depth + 1))
         for fm in _FORM_RE.findall(body):
             forms.append(_parse_form(fm, path))
-    return {"pages": pages, "forms": forms, "params": params[:15]}
+    return {"pages": pages, "forms": forms, "params": params[:15],
+            "params_v": params_v[:30]}
 
 
 
@@ -592,6 +600,158 @@ def _inject_param(ip, port, where, param, send, sqli, time_based):
 
 
 
+# --- BOLA / IDOR: numeric-id increment probe ------------------------------------
+# For each discovered URL that carries a numeric-looking id parameter, request the
+# same URL with the id shifted by +1 and by -1. If the response body is materially
+# DIFFERENT from the baseline (but still 200/OK) it strongly suggests the app is
+# returning ANOTHER user's / another object's data — the classic BOLA finding.
+# All three requests are GETs, so this NEVER causes a side effect.
+#
+# Same-response = properly authorized (or the app 404s / redirects), no finding.
+# Redirect/401/403 on the shifted id = correct authorization, no finding.
+_NUMERIC_ID_PARAM = re.compile(r"^(?:id|user_?id|acct|account|order|invoice|"
+                               r"customer|profile|doc|file_?id|item)$", re.I)
+
+
+def _looks_bola_worth(param: str, value: str) -> bool:
+    if not _NUMERIC_ID_PARAM.match(param):
+        return False
+    try:
+        int(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _idor_scan(ip: str, port, params: list[tuple[str, str, str]],
+               auth: dict | None) -> list["Vuln"]:
+    """params = [(page_path, param_name, param_value)]. Emits at most one finding
+    per (path, param) pair. Budgeted to keep the request count bounded."""
+    from .http import _fetch, _mk
+    out: list[Vuln] = []
+    seen: set[tuple[str, str]] = set()
+    budget = 8
+    for pth, prm, val in params:
+        if budget <= 0:
+            break
+        key = (pth, prm)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            base_id = int(val)
+        except ValueError:
+            continue
+        base_url = _replace_id(pth, prm, base_id)
+        r_base = _fetch(ip, port, base_url, auth=auth)
+        if not r_base or r_base[0] != 200:
+            continue
+        body_base = r_base[2] or ""
+        if len(body_base) < 80:            # near-empty pages are unreliable
+            continue
+        hits = 0
+        different_ids: list[int] = []
+        for shift in (1, -1):
+            other = base_id + shift
+            if other == base_id or other <= 0:
+                continue
+            r = _fetch(ip, port, _replace_id(pth, prm, other), auth=auth)
+            budget -= 1
+            if not r or r[0] != 200 or not r[2]:
+                continue
+            sim = _similar(body_base, r[2])
+            # 0.98–1.00 = the app ignored the id (or served the same object) —
+            # not BOLA, no finding.
+            # < 0.30 = the shifted id returned a materially different page
+            # (login redirect, 404 wrapper, error) — not BOLA either.
+            # 0.30 <= sim <= 0.98 = same template, different data — the
+            # canonical BOLA signature.
+            if 0.30 <= sim <= 0.98:
+                hits += 1
+                different_ids.append(other)
+        if hits >= 1:
+            out.append(_mk(
+                ip, port, "web-bola", "high",
+                "BOLA / IDOR: incrementing an id parameter returns different content",
+                ["CWE-639"],
+                f"GET {pth} with {prm}={base_id} returned one document; the same "
+                f"request with {prm} shifted to {different_ids} returned a "
+                f"materially different 200 response body — indicative of an "
+                f"authorization check the app is not performing (Broken Object "
+                f"Level Authorization). recce sent only GETs, no mutations. "
+                f"Verify by hand that the alternate id belongs to another user.",
+                "Enforce per-request authorization: the caller's session must own "
+                "the object referenced by any id in the URL / body.",
+                confidence="potential"))
+    return out
+
+
+def _replace_id(path: str, param: str, new_val: int) -> str:
+    """Return `path` with the query value of `param` swapped for new_val, keeping
+    every other parameter intact."""
+    if "?" not in path:
+        return path
+    base, _, qs = path.partition("?")
+    parts = []
+    replaced = False
+    for kv in qs.split("&"):
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            if k == param and not replaced:
+                parts.append(f"{k}={new_val}")
+                replaced = True
+                continue
+        parts.append(kv)
+    return base + "?" + "&".join(parts) if parts else path
+
+
+# --- CSRF: sensitive POST forms missing an anti-CSRF token ---------------------
+# For each POST form recce discovered that mutates state (has a password field,
+# writes anything sensitive, or matches the risky-form heuristic) but does NOT
+# carry an anti-CSRF hidden field, emit a low-severity finding. The form parser
+# already tracks `csrf: bool`, so this is a filter over the crawl result.
+_MUTATING_METHODS = {"post", "put", "patch", "delete"}
+
+
+def _csrf_scan(host_ip: str, port, forms: list[dict]) -> list["Vuln"]:
+    from .http import _mk
+    out: list[Vuln] = []
+    for form in forms[:30]:
+        method = (form.get("method") or "get").lower()
+        if method not in _MUTATING_METHODS:
+            continue
+        if form.get("csrf"):
+            continue
+        # If the form is trivial (only a submit button / query string) skip —
+        # a "search" POST with no side effect is common on legacy apps.
+        real_fields = [n for n, t in form.get("fields") or []
+                       if t not in ("submit", "button", "image", "reset")]
+        if not real_fields:
+            continue
+        action = form.get("action") or "/"
+        pw = " (has password field)" if form.get("password") else ""
+        # Risky-form heuristic elevates the severity because those forms are the
+        # ones a real CSRF attack would target.
+        risk = _form_risk(form, allow_risky=True)
+        sev = "medium" if (risk or form.get("password")) else "low"
+        out.append(_mk(
+            host_ip, port, "web-csrf", sev,
+            f"POST form without a CSRF token ({action})",
+            ["CWE-352"],
+            f"The {method.upper()} form at {action}{pw} carries {len(real_fields)} "
+            f"field(s) and NO hidden CSRF/authenticity/nonce token — a "
+            f"cross-site request from a browser holding the victim's session "
+            f"cookie will succeed. Risky-form heuristic: "
+            f"{risk or 'not-flagged (still mutating)'}.",
+            "Add a per-session anti-CSRF token to every mutating form (framework "
+            "helpers: Django csrf_token, Rails authenticity_token, ASP.NET "
+            "AntiForgeryToken, Spring CsrfToken). Enforce SameSite=Lax or "
+            "Strict on the session cookie so cross-site POSTs from a browser "
+            "do not carry it.",
+            confidence="confirmed"))
+    return out
+
+
 def scan_crawl(host: Host, auth: dict | None = None, sqli: bool = True,
                time_based: bool = False, fuzz_risky: bool = False) -> tuple[int, int]:
     """Crawl every web endpoint (authenticated if auth is set), test discovered GET
@@ -609,6 +769,20 @@ def scan_crawl(host: Host, auth: dict | None = None, sqli: bool = True,
         cres = crawl(host.ip, port, auth=auth)
         pages += len(cres["pages"])
         fs = _crawl_findings(host.ip, port, cres)
+
+        # BOLA / IDOR: shift numeric id parameters by ±1 and diff the responses.
+        # Only fires when a numeric-looking id param actually surfaced during the
+        # crawl; GET-only, no writes, budgeted to 8 requests.
+        bola_targets = [(pth, name, val)
+                        for pth, name, val in (cres.get("params_v") or [])
+                        if _looks_bola_worth(name, val)]
+        if bola_targets:
+            fs += _idor_scan(host.ip, port, bola_targets, auth)
+
+        # CSRF-token presence on mutating forms. Uses the `csrf: bool` field
+        # already populated by _parse_form so this is a zero-request check.
+        fs += _csrf_scan(host.ip, port, cres.get("forms") or [])
+
         budget = 24                        # cap injectable targets per endpoint
 
         # Discovered GET query params (idempotent - always safe to fuzz).
