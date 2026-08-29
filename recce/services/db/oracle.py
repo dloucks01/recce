@@ -36,6 +36,19 @@ _TNS_TYPES = {1: "CONNECT", 2: "ACCEPT", 4: "REFUSE", 5: "REDIRECT", 6: "DATA",
 _VER_RE = re.compile(rb"Version\s+(\d+\.\d+\.\d+\.\d+(?:\.\d+)?)", re.I)
 _TNSLSNR_RE = re.compile(rb"TNSLSNR for [^\r\n]+", re.I)
 
+# Extractors for the (COMMAND=services)/(COMMAND=status) DATA payload — a legacy
+# listener returns a text `(DESCRIPTION=...(SERVICE=(SERVICE_NAME=..)(INSTANCE=..))..)`
+# blob whose keys are stable across 9i/10g/11g/12c/19c.
+_SID_RE = re.compile(rb"SID(?:_NAME)?\s*=\s*([A-Za-z0-9_$.\-]+)")
+_SVC_NAME_RE = re.compile(rb"SERVICE_NAME\s*=\s*([A-Za-z0-9_$.\-]+)")
+_INSTANCE_RE = re.compile(rb"INSTANCE_NAME\s*=\s*([A-Za-z0-9_$.\-]+)")
+_MACHINE_RE = re.compile(rb"MACHINE\s*=\s*([A-Za-z0-9_\-.]+)")
+_HOST_HDR_RE = re.compile(rb"on host\s+([A-Za-z0-9_\-.]+)", re.I)
+# REDIRECT (packet type 5) payload — SCAN/RAC listener directs the client to an
+# internal cluster node; the HOST/PORT are plain text inside an (ADDRESS=..) tuple.
+_REDIRECT_HOST_RE = re.compile(rb"HOST\s*=\s*([A-Za-z0-9_\-.]+)", re.I)
+_REDIRECT_PORT_RE = re.compile(rb"PORT\s*=\s*(\d+)", re.I)
+
 
 def is_oracle(port: Port) -> bool:
     if port.portid in _PORTS:
@@ -92,6 +105,100 @@ def _tns_connect(connect_data: bytes) -> bytes:
     return bytes(packet)
 
 
+# --- offline version -> CVE mapping ---------------------------------------------
+
+def _version_tuple(version: str) -> tuple:
+    """Turn a dotted Oracle version like '11.2.0.3.0' into a 4-tuple (major, minor,
+    patch, security) for range comparison. Extra components are dropped; short
+    versions are right-padded with zeros. Returns () when nothing parseable."""
+    if not version:
+        return ()
+    parts = re.findall(r"\d+", version)[:4]
+    if not parts:
+        return ()
+    ints = [int(x) for x in parts]
+    while len(ints) < 4:
+        ints.append(0)
+    return tuple(ints[:4])
+
+
+# (predicate(vt) -> bool, finding-dict). Ranges from Oracle CPU advisories; the
+# same version can hit more than one entry (e.g. 11.2.0.1 -> both 2012 CVEs).
+_CVE_MAP: tuple = (
+    (lambda v: bool(v) and v < (11, 2, 0, 4),
+     {"id": "CVE-2012-1675", "severity": "high",
+      "title": "TNS Poison (remote instance registration)",
+      "description": "Listener accepts unsolicited remote instance registration from any "
+                     "IP; a rogue instance can MITM subsequent client sessions. "
+                     "Mitigation: ADMIN_RESTRICTIONS_<listener>=ON and valid-node "
+                     "checking (Oracle Alert CVE-2012-1675)."}),
+    (lambda v: bool(v) and v <= (11, 2, 0, 3),
+     {"id": "CVE-2012-3137", "severity": "high",
+      "title": "o5logon pre-auth hash disclosure",
+      "description": "The AUTH exchange for a known SID returns AUTH_SESSKEY + "
+                     "AUTH_VFR_DATA to any client that names a user, yielding a "
+                     "SHA-1/AES-192 hash that JtR ('oracle11') and hashcat (mode 3100) "
+                     "crack offline."}),
+)
+
+
+def _known_cves(version: str) -> list[dict]:
+    """Offline lookup: return the CVE entries whose vulnerable-range predicate matches
+    `version`. Empty list when the version is unknown or post-patch."""
+    v = _version_tuple(version)
+    return [entry for pred, entry in _CVE_MAP if pred(v)]
+
+
+# --- listener status / REDIRECT parsing -----------------------------------------
+
+def _tns_probe(ip: str, port: int, timeout: float, payload: bytes) -> bytes:
+    """Send one TNS CONNECT carrying `payload` and return the raw reply bytes (or
+    b'' on any socket / framing error). Used for the follow-on services/status
+    probes; each Oracle listener CONNECT is stateless so a fresh socket is fine."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(_tns_connect(payload))
+            return _recv(sock)
+    except (OSError, socket.timeout, struct.error):
+        return b""
+
+
+def _parse_listener_dump(reply: bytes) -> dict:
+    """Extract SIDs / SERVICE_NAMEs / INSTANCE_NAMEs / machine hostname from a
+    (COMMAND=services|status) DATA payload. All keys empty when nothing matches -
+    a hardened listener that refused the request leaves this a no-op."""
+    if not reply:
+        return {"sids": [], "service_names": [], "instances": [], "machine": ""}
+    sids = sorted({m.group(1).decode("ascii", "replace")
+                   for m in _SID_RE.finditer(reply)})
+    services = sorted({m.group(1).decode("ascii", "replace")
+                       for m in _SVC_NAME_RE.finditer(reply)})
+    instances = sorted({m.group(1).decode("ascii", "replace")
+                        for m in _INSTANCE_RE.finditer(reply)})
+    machine = ""
+    m = _MACHINE_RE.search(reply) or _HOST_HDR_RE.search(reply)
+    if m:
+        machine = m.group(1).decode("ascii", "replace")
+    return {"sids": sids, "service_names": services, "instances": instances,
+            "machine": machine}
+
+
+def _parse_redirect(reply: bytes) -> dict:
+    """A REDIRECT (packet type 5) reply carries an (ADDRESS=(HOST=..)(PORT=..)) with
+    the internal cluster node the SCAN listener wants the client to talk to - often
+    an RFC1918 address not otherwise reachable. Returns {} for non-REDIRECT or
+    when no HOST= is present."""
+    if not reply or len(reply) < 5 or reply[4] != 5:
+        return {}
+    h = _REDIRECT_HOST_RE.search(reply)
+    if not h:
+        return {}
+    p = _REDIRECT_PORT_RE.search(reply)
+    return {"host": h.group(1).decode("ascii", "replace"),
+            "port": int(p.group(1)) if p else 0}
+
+
 def _recv(sock: socket.socket) -> bytes:
     buf = b""
     while len(buf) < _MAX_REPLY:
@@ -109,9 +216,18 @@ def _recv(sock: socket.socket) -> bytes:
 
 def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     """Send a TNS status/version request and identify the listener. Returns
-    {reachable, is_oracle, tns_type, version, banner, version_leaked, error}."""
+    {reachable, is_oracle, tns_type, version, banner, version_leaked, error,
+    sids, service_names, instances, machine, known_cves, redirect}.
+
+    After the initial (COMMAND=version) confirms the listener, best-effort
+    (COMMAND=services) + (COMMAND=status) probes are sent on fresh connections;
+    a legacy / unhardened listener returns a DATA blob carrying SIDs /
+    SERVICE_NAMEs / INSTANCE_NAMEs and the machine hostname (Oracle Note 260986.1).
+    Version -> CVE mapping is an offline lookup off `_CVE_MAP`."""
     res: dict = {"reachable": False, "is_oracle": False, "tns_type": "", "version": "",
-                 "banner": "", "version_leaked": False, "error": ""}
+                 "banner": "", "version_leaked": False, "error": "",
+                 "sids": [], "service_names": [], "instances": [], "machine": "",
+                 "known_cves": [], "redirect": {}}
     payload = b"(CONNECT_DATA=(COMMAND=version))"
     try:
         with socket.create_connection((ip, port), timeout=timeout) as sock:
@@ -139,8 +255,39 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
                 res["is_oracle"] = True
             if not res["is_oracle"]:
                 res["error"] = "not a TNS listener"
+            # SCAN/RAC listeners frequently answer the version probe with a REDIRECT
+            # to the internal cluster node — parse it before the connection closes.
+            redir = _parse_redirect(reply)
+            if redir:
+                res["redirect"] = redir
+            # Machine hostname sometimes leaks in the primary banner too (e.g.
+            # "TNSLSNR for Linux: Version 11.2.0.4.0 ... on host prod-db01.corp.local").
+            primary = _parse_listener_dump(reply)
+            if primary["machine"]:
+                res["machine"] = primary["machine"]
     except (OSError, socket.timeout, struct.error) as e:
         res["error"] = res["error"] or str(e)
+        return res
+
+    # Follow-on probes: only if we're sure this is Oracle. Each opens its own
+    # short socket (listener CONNECT is stateless); failures are non-fatal.
+    if res["is_oracle"]:
+        for cmd in (b"(CONNECT_DATA=(COMMAND=services))",
+                    b"(CONNECT_DATA=(COMMAND=status))"):
+            dump = _tns_probe(ip, port, timeout, cmd)
+            if not dump:
+                continue
+            parsed = _parse_listener_dump(dump)
+            for key in ("sids", "service_names", "instances"):
+                res[key] = sorted(set(res[key]) | set(parsed[key]))
+            if not res["machine"] and parsed["machine"]:
+                res["machine"] = parsed["machine"]
+            if not res["redirect"]:
+                redir = _parse_redirect(dump)
+                if redir:
+                    res["redirect"] = redir
+        # Offline version -> CVE lookup; empty when version is unknown / post-patch.
+        res["known_cves"] = _known_cves(res.get("version", ""))
     return res
 
 
@@ -161,6 +308,26 @@ _NARRATIVE = {
         "Version disclosure lets an attacker target the exact patch level (and, on "
         "pre-11g, the listener accepts remote administration commands). Restrict "
         "listener administration to local OS auth and firewall the port."),
+    "oracle_listener_status_leak": (
+        "The listener answered a (COMMAND=services)/(COMMAND=status) request without "
+        "authentication, dumping SIDs / SERVICE_NAMEs / instance names and (often) the "
+        "machine hostname. Each SID is a foothold candidate: post-auth default-cred "
+        "spray (sys/change_on_install, system/manager, dbsnmp/dbsnmp, scott/tiger), "
+        "the o5logon pre-auth hash grab (CVE-2012-3137) against known SIDs, and "
+        "credential-material feeds for downstream attacks. Enable "
+        "LOCAL_OS_AUTHENTICATION_<listener>=ON and restrict admin to the local UNIX "
+        "socket / named-pipe."),
+    "oracle_known_vulnerable_version": (
+        "The banner version falls in a range with a published Oracle CVE. This is a "
+        "candidate flag (the exact CPU patch level isn't in the banner) - confirm "
+        "with the listed advisory / CPU. High-value chains include TNS Poison "
+        "(CVE-2012-1675: MITM future clients) and the o5logon pre-auth hash grab "
+        "(CVE-2012-3137: offline crackable hashes)."),
+    "oracle_rac_internal_endpoint_leak": (
+        "A SCAN / RAC listener answered with a REDIRECT to an internal cluster node "
+        "(often RFC1918) - a fresh host for lateral movement and a data point for "
+        "network-topology reconstruction. Front-end the SCAN listener with a firewall "
+        "or NAT that does not leak internal cluster addresses."),
 }
 
 TESTING_NARRATIVE = [
@@ -221,6 +388,60 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict listener admin to local OS auth; set ADMIN_RESTRICTIONS_"
                     "<listener>=ON; firewall the port.",
                     ["CWE-200"], kind="oracle_version_leak"))
+            # NEW: version -> CVE mapping (offline; each entry a separate finding).
+            for cve in pr.get("known_cves") or []:
+                out.append(_finding(
+                    cve.get("severity", "high"),
+                    f"Oracle {cve['id']} candidate: {cve.get('title', '')}".rstrip(": "),
+                    tgt,
+                    f"Reported version {ver or '(unknown)'} is in the vulnerable range "
+                    f"for {cve['id']}. {cve.get('description', '')}",
+                    "odat",
+                    f"# {cve['id']}: consult Oracle CPU / security-alert advisory for "
+                    f"{cve['id']} and apply the fix.",
+                    "Apply the corresponding Oracle CPU / security-alert patch and "
+                    "harden the listener (ADMIN_RESTRICTIONS_<listener>=ON, "
+                    "valid-node checking, remove default accounts).",
+                    ["CWE-1035"], kind="oracle_known_vulnerable_version"))
+            # NEW: listener status / services dump (SIDs, service names, machine).
+            sids = pr.get("sids") or []
+            svc_names = pr.get("service_names") or []
+            instances = pr.get("instances") or []
+            machine = pr.get("machine") or ""
+            if sids or svc_names or instances or machine:
+                names = sorted(set(sids) | set(svc_names) | set(instances))
+                detail = ("The listener returned service/status data to an "
+                          "unauthenticated request."
+                          + (f" SIDs / services: {', '.join(names[:12])}."
+                             if names else "")
+                          + (f" Machine: {machine}." if machine else "")
+                          + " Each SID is a candidate for post-auth logon (default "
+                            "credentials, o5logon pre-auth hash grab, etc.).")
+                out.append(_finding(
+                    "high", "Oracle listener status / services leak", tgt, detail,
+                    "tnscmd10g",
+                    f"tnscmd10g services -h {h.ip} -p {p.portid} ; "
+                    f"tnscmd10g status -h {h.ip} -p {p.portid}",
+                    "Enable LOCAL_OS_AUTHENTICATION_<listener>=ON, set "
+                    "ADMIN_RESTRICTIONS_<listener>=ON, and restrict listener admin "
+                    "to the local UNIX socket / named-pipe.",
+                    ["CWE-200"], kind="oracle_listener_status_leak"))
+            # NEW: SCAN/RAC REDIRECT payload exposes an internal cluster endpoint.
+            redir = pr.get("redirect") or {}
+            if redir.get("host"):
+                rt = redir["host"] + (f":{redir['port']}" if redir.get("port") else "")
+                out.append(_finding(
+                    "medium", "Oracle SCAN/RAC redirect leaks internal endpoint",
+                    tgt,
+                    f"The listener redirected the client to internal node '{rt}', "
+                    "revealing a cluster member - often an RFC1918 address not "
+                    "otherwise reachable from outside the perimeter.",
+                    "tnscmd10g",
+                    f"tnscmd10g services -h {h.ip} -p {p.portid}",
+                    "Front-end the SCAN listener with a firewall / NAT that does not "
+                    "leak internal cluster addresses; use REMOTE_LISTENER only inside "
+                    "the trusted cluster network.",
+                    ["CWE-200"], kind="oracle_rac_internal_endpoint_leak"))
     return out
 
 
