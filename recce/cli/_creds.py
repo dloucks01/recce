@@ -149,6 +149,17 @@ def cmd_creds(args: argparse.Namespace) -> int:
               f"{summary['dir']}/")
         if summary["files"]:
             print("    " + ", ".join(sorted(summary["files"])))
+        # Show what came from the cross-service enum fold-in so the operator
+        # sees the spray reach the accounts recce enumerated but never had
+        # creds for — the whole point of the wire-up.
+        enum_only = summary.get("enum_only_users") or []
+        if enum_only:
+            sources = summary.get("enum_only_sources") or []
+            sample = ", ".join(enum_only[:8])
+            print(f"    [+] {len(enum_only)} additional username(s) from "
+                  f"engagement enum ({', '.join(sources) or 'unknown'}) folded "
+                  f"into users.txt: {sample}"
+                  + (" …" if len(enum_only) > 8 else ""))
         print()
         for line in summary["commands"] or ["  (no sprayable services in scope yet)"]:
             print("  " + line if not line.startswith("#") else "\n  " + line)

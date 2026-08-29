@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from recce.creds import credentials as cr, credenum
-from recce.core.models import Credential, Host, Port
+from recce.core.models import Account, Credential, Host, Port
 
 
 def _h(ip, port, svc):
@@ -169,3 +169,87 @@ def test_cracked_passwords_reach_the_spray_files(tmp_path):
 
 def test_potfile_without_any_known_hashes_returns_nothing(tmp_path):
     assert cr.parse_potfile("abc:def", [], "") == []
+
+
+# --- users.txt now folds in the engagement's enumerated user list ---------
+# Any spray consumer (netexec ssh / smb / winrm / mssql / ldap) reads
+# users.txt, so folding known_users() in here means SSH spray automatically
+# tries every account BloodHound / LDAP / SNMP / SAMR / netexec enum'd —
+# same principle as the crack loop and the IPMI RAKP wire-up.
+
+def test_write_files_folds_bloodhound_users_into_users_txt(tmp_path):
+    """A host with BloodHound-parsed accounts + one credentialed user should
+    produce a users.txt containing BOTH — recce's spray now reaches every
+    account it enumerated, not just those it had a password for."""
+    h = Host(ip="10.0.0.10")
+    h.accounts = [
+        Account(ip="10.0.0.10", source="bloodhound", kind="user", name="alice"),
+        Account(ip="10.0.0.10", source="bloodhound", kind="user",
+                name="svc_backup"),
+    ]
+    creds = [Credential(username="administrator", secret="Passw0rd!",
+                        kind="password")]
+    files = cr.write_files(creds, str(tmp_path), hosts=[h])
+    lines = open(files["users.txt"], encoding="utf-8").read().splitlines()
+    assert set(lines) == {"administrator", "alice", "svc_backup"}
+    # Ordering: credential users first (recce SAW them), then enum users
+    # priority-ordered — the credential one lands ahead of any enum-only.
+    assert lines[0] == "administrator"
+
+
+def test_write_files_without_hosts_arg_falls_back_to_creds_only(tmp_path):
+    """Legacy call path (no hosts=) MUST stay working — otherwise every
+    caller not yet migrated silently drops the enum-only users. And when
+    hosts= is omitted the ordering / dedup logic must still work."""
+    creds = [Credential(username="alice", secret="pw", kind="password"),
+             Credential(username="bob", secret="nt" * 16, kind="nthash")]
+    files = cr.write_files(creds, str(tmp_path))
+    lines = open(files["users.txt"], encoding="utf-8").read().splitlines()
+    assert lines == ["alice", "bob"]
+
+
+def test_write_files_dedupes_case_insensitively_across_creds_and_enum(tmp_path):
+    """BloodHound gives ADMIN, credentials store gives Admin — one account.
+    Cred-side casing wins because it was seen first."""
+    h = Host(ip="10.0.0.1")
+    h.accounts = [
+        Account(ip="10.0.0.1", source="bloodhound", kind="user", name="ADMIN"),
+    ]
+    creds = [Credential(username="Admin", secret="pw", kind="password")]
+    files = cr.write_files(creds, str(tmp_path), hosts=[h])
+    lines = open(files["users.txt"], encoding="utf-8").read().splitlines()
+    assert lines == ["Admin"]
+
+
+def test_build_spray_reports_the_enum_only_folded_in_users(tmp_path):
+    """The CLI prints '[+] N additional username(s) from engagement enum
+    folded into users.txt' — that requires build_spray() to return the
+    count + source list, not just the file list."""
+    h = Host(ip="10.0.0.10", ports=[Port(portid=22, service="ssh", state="open")])
+    h.accounts = [
+        Account(ip="10.0.0.10", source="bloodhound", kind="user", name="alice"),
+        Account(ip="10.0.0.10", source="ldap", kind="user", name="bob"),
+    ]
+    creds = [Credential(username="administrator", secret="pw", kind="password")]
+    summary = cr.build_spray(creds, [h], str(tmp_path))
+    enum_only = summary["enum_only_users"]
+    assert set(enum_only) == {"alice", "bob"}
+    assert set(summary["enum_only_sources"]) == {"bloodhound", "ldap"}
+
+
+def test_ssh_spray_line_now_targets_the_widened_users_txt(tmp_path):
+    """The SSH spray command uses users.txt verbatim — extending users.txt
+    means the SSH spray automatically tries every enumerated account with
+    no other change to the spray path."""
+    h = Host(ip="10.0.0.10",
+             ports=[Port(portid=22, service="ssh", state="open")])
+    h.accounts = [Account(ip="10.0.0.10", source="ldap", kind="user",
+                          name="svc_backup")]
+    creds = [Credential(username="alice", secret="pw", kind="password")]
+    summary = cr.build_spray(creds, [h], str(tmp_path))
+    files = summary["files"]
+    users = open(files["users.txt"], encoding="utf-8").read().splitlines()
+    assert "svc_backup" in users                              # got folded in
+    ssh_lines = [line for line in summary["commands"]
+                 if line.lstrip().startswith("netexec ssh")]
+    assert ssh_lines and "users.txt" in ssh_lines[0]         # spray uses it

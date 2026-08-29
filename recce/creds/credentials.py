@@ -197,17 +197,51 @@ def parse_potfile(text: str, creds: list[Credential],
     return out
 
 
-def write_files(creds: list[Credential], out_dir: str) -> dict[str, str]:
-    """Write users.txt / passwords.txt / nthashes.txt for the stacked set."""
+def write_files(creds: list[Credential], out_dir: str,
+                hosts: list[Host] | None = None) -> dict[str, str]:
+    """Write users.txt / passwords.txt / nthashes.txt for the stacked set.
+
+    When `hosts` is provided, ALSO merges in usernames recce learned from
+    AD/BloodHound/SNMP/SMB SAMR/netexec user-enum (creds.known_users) — the
+    spray tries every known account, not just those recce already has a
+    credential for. Priority ordering is preserved (admins first, service
+    accounts second) so a truncated tail is the ordinary-user tail rather
+    than the interesting one.
+
+    The default IS to include known users when `hosts` is available. That's
+    what the operator running a spray expects — recce enumerated these
+    accounts, the spray should try them. Lockout-safety (--no-bruteforce =
+    one password per user per pass) is unchanged; the extra names just
+    lengthen the pass rather than multiplying auth attempts.
+    """
     os.makedirs(out_dir, exist_ok=True)
     users, passwords, hashes = [], [], []
+    seen_users: set = set()
+
+    def _add_user(name: str) -> None:
+        if not name:
+            return
+        key = name.lower()
+        if key in seen_users:
+            return
+        seen_users.add(key)
+        users.append(name)
+
+    # 1) Credentials first — these have a proven username (recce saw them
+    # somewhere concrete: manual, secretsdump, gpp, autologon).
     for c in creds:
-        if c.username and c.username not in users:
-            users.append(c.username)
+        _add_user(c.username)
         if c.kind == "password" and c.secret and c.secret not in passwords:
             passwords.append(c.secret)
         if c.kind == "nthash" and c.secret and c.secret not in hashes:
             hashes.append(c.secret)
+    # 2) Then anything the enumeration paths surfaced but never captured a
+    # secret for — BloodHound / LDAP / SNMP / SAMR. Priority-ordered so
+    # admins land at the top of users.txt.
+    if hosts:
+        from .known_users import collect_user_accounts
+        for a in collect_user_accounts(hosts):
+            _add_user(a["name"])
     files = {}
     for name, rows in (("users.txt", users), ("passwords.txt", passwords),
                        ("nthashes.txt", hashes)):
@@ -253,10 +287,21 @@ def spray_commands(creds: list[Credential], hosts: list[Host],
 def build_spray(creds: list[Credential], hosts: list[Host], out_dir: str) -> dict:
     """Write the credential files + assemble the spray plan. Returns a summary."""
     cred_dir = os.path.join(out_dir, "creds")
-    files = write_files(creds, cred_dir)
+    # hosts= threads AD/BloodHound/SNMP/SAMR user enum into users.txt so the
+    # spray tries every account recce enumerated, not just those with creds.
+    files = write_files(creds, cred_dir, hosts=hosts)
     commands = spray_commands(creds, hosts, files)
+    # Count how many usernames came from the enumeration paths vs credentials
+    # so the CLI can print e.g. "45 usernames (3 with creds, 42 enum-only)".
+    from .known_users import collect_user_accounts
+    cred_users = {c.username.lower() for c in creds if c.username}
+    enum_only = [a["name"] for a in collect_user_accounts(hosts)
+                 if a["name"].lower() not in cred_users]
     return {"dir": cred_dir, "files": files, "commands": commands,
-            "targets": spray_targets(hosts)}
+            "targets": spray_targets(hosts),
+            "enum_only_users": enum_only,
+            "enum_only_sources": sorted({s for a in collect_user_accounts(hosts)
+                                         for s in a["sources"]})}
 
 
 def _parse_nxc_hits(output: str) -> list[dict]:
@@ -297,7 +342,7 @@ def run_spray(hosts: list[Host], creds: list[Credential], out_dir: str, *,
     tool = credenum.smb_tool()
     if not tool:
         return {"ok": False, "error": "netexec/nxc not installed", "hits": [], "commands": []}
-    files = write_files(creds, os.path.join(out_dir, "creds"))
+    files = write_files(creds, os.path.join(out_dir, "creds"), hosts=hosts)
     if not files.get("users.txt"):
         return {"ok": False, "error": "no usernames to spray", "hits": [], "commands": []}
     targets = spray_targets(hosts)
