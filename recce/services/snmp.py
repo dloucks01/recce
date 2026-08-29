@@ -168,8 +168,14 @@ def build_request(community: str, oid: str, request_id: int,
     return _tlv(0x30, _int(1) + _octet(community) + pdu)   # version 1 == v2c
 
 
-def parse_response(data: bytes) -> tuple[int, list[tuple[str, object]]] | None:
-    """(error_status, [(oid, value), ...]) from a GetResponse, or None if malformed."""
+def parse_response(data: bytes, raw: bool = False) -> tuple[int, list[tuple[str, object]]] | None:
+    """(error_status, [(oid, value), ...]) from a GetResponse, or None if malformed.
+
+    `raw=True` yields the undecoded (tag, bytes) instead of a decoded value. The
+    ARP table returns a MAC as a 6-byte OCTET STRING, and the default decode runs
+    OCTET STRING through utf-8/replace - which silently corrupts any byte over
+    0x7f, i.e. most MACs.
+    """
     try:
         _, msg, _ = _parse_tlv(data, 0)                    # outer SEQUENCE
         _, _ver, i = _parse_tlv(msg, 0)
@@ -185,7 +191,8 @@ def parse_response(data: bytes) -> tuple[int, list[tuple[str, object]]] | None:
             _, vb, k = _parse_tlv(vbs, k)
             _, oid_b, m = _parse_tlv(vb, 0)
             vtag, vval, _ = _parse_tlv(vb, m)
-            out.append((decode_oid(oid_b), _decode_value(vtag, vval)))
+            out.append((decode_oid(oid_b),
+                        (vtag, vval) if raw else _decode_value(vtag, vval)))
         error = 0
         for b in err:
             error = (error << 8) | b
@@ -210,7 +217,7 @@ def _response_request_id(data: bytes):
 
 
 def _get(sock, ip: str, port: int, community: str, oid: str, timeout: float,
-         request_id: int, pdu_tag: int = 0xA0):
+         request_id: int, pdu_tag: int = 0xA0, raw: bool = False):
     """One GET/GETNEXT. Returns [(oid, value)] or None (timeout / error). Correlates
     the reply by request-id so a stray/duplicate/out-of-order UDP datagram (connection-
     less) isn't accepted as the answer to a different OID."""
@@ -227,7 +234,7 @@ def _get(sock, ip: str, port: int, community: str, oid: str, timeout: float,
             return None
     except OSError:
         return None
-    parsed = parse_response(data)
+    parsed = parse_response(data, raw=raw)
     if parsed is None or parsed[0] != 0:
         return None
     return parsed[1]
@@ -251,6 +258,96 @@ def _walk(sock, ip: str, port: int, community: str, base: str, timeout: float,
             values.append(val.strip())
         cur = oid
     return values
+
+
+# --- network tables: the reason a read-only community is a pivot ----------------
+# The system group tells you what a box IS. These two tell you what it can SEE.
+# A readable router hands over the ARP cache and the routing table, which is a map
+# of the internal estate - including hosts and whole segments recce has not
+# discovered and may not be able to reach directly.
+_ARP_PHYS = "1.3.6.1.2.1.4.22.1.2"      # ipNetToMediaPhysAddress: .<ifIndex>.<a.b.c.d> -> MAC
+_ROUTE_NEXTHOP = "1.3.6.1.2.1.4.21.1.7"  # ipRouteNextHop:  .<dest> -> next hop
+_ROUTE_MASK = "1.3.6.1.2.1.4.21.1.11"    # ipRouteMask:     .<dest> -> mask
+
+
+def _walk_pairs(sock, ip: str, port: int, community: str, base: str, timeout: float,
+                start_id: int, cap: int = 512, raw: bool = False) -> list[tuple[str, object]]:
+    """GETNEXT walk returning (oid, value) pairs.
+
+    The plain _walk() throws the OID away, which works for a list of user names
+    but not for the network tables: ipNetToMediaPhysAddress encodes the IP in the
+    OID SUFFIX and carries only the MAC as the value, so discarding the OID loses
+    exactly half of each row.
+    """
+    out: list[tuple[str, object]] = []
+    cur = base
+    for n in range(cap):
+        vb = _get(sock, ip, port, community, cur, timeout, start_id + n, 0xA1, raw=raw)
+        if not vb:
+            break
+        oid, val = vb[0]
+        if not (oid == base or oid.startswith(base + ".")):
+            break                                          # left the subtree
+        if val is None:
+            break
+        out.append((oid, val))
+        cur = oid
+    return out
+
+
+def _suffix_arcs(oid: str, base: str) -> list[int]:
+    tail = oid[len(base):].lstrip(".")
+    if not tail:
+        return []
+    try:
+        return [int(a) for a in tail.split(".")]
+    except ValueError:
+        return []
+
+
+def _fmt_mac(value) -> str:
+    """ipNetToMediaPhysAddress is a 6-byte OCTET STRING (tag, raw) pair."""
+    if not (isinstance(value, tuple) and len(value) == 2):
+        return ""
+    tag, blob = value
+    if tag != 0x04 or not isinstance(blob, (bytes, bytearray)) or len(blob) != 6:
+        return ""
+    return ":".join(f"{b:02x}" for b in blob)
+
+
+def read_arp(sock, ip: str, port: int, community: str, timeout: float,
+             start_id: int = 7000, cap: int = 512) -> list[dict]:
+    """The ARP cache: every IP this device has recently talked to, plus its MAC."""
+    rows = []
+    for oid, val in _walk_pairs(sock, ip, port, community, _ARP_PHYS, timeout,
+                                start_id, cap, raw=True):
+        arcs = _suffix_arcs(oid, _ARP_PHYS)
+        if len(arcs) < 5:                       # <ifIndex>.<a>.<b>.<c>.<d>
+            continue
+        neighbour = ".".join(str(a) for a in arcs[-4:])
+        mac = _fmt_mac(val)
+        if mac:
+            rows.append({"ip": neighbour, "mac": mac, "ifindex": arcs[0]})
+    return rows
+
+
+def read_routes(sock, ip: str, port: int, community: str, timeout: float,
+                start_id: int = 8000, cap: int = 512) -> list[dict]:
+    """The routing table: destination -> next hop (+ mask), i.e. reachable segments."""
+    hops = {}
+    for oid, val in _walk_pairs(sock, ip, port, community, _ROUTE_NEXTHOP,
+                                timeout, start_id, cap):
+        arcs = _suffix_arcs(oid, _ROUTE_NEXTHOP)
+        if len(arcs) >= 4 and isinstance(val, str):
+            hops[".".join(str(a) for a in arcs[-4:])] = val
+    masks = {}
+    for oid, val in _walk_pairs(sock, ip, port, community, _ROUTE_MASK,
+                                timeout, start_id + cap, cap):
+        arcs = _suffix_arcs(oid, _ROUTE_MASK)
+        if len(arcs) >= 4 and isinstance(val, str):
+            masks[".".join(str(a) for a in arcs[-4:])] = val
+    return [{"dest": d, "next_hop": h, "mask": masks.get(d, "")}
+            for d, h in sorted(hops.items())]
 
 
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
@@ -280,6 +377,10 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         out["processes"] = _walk(sock, ip, port, community, _HR_SW_RUN, timeout, 4000)[:40]
         out["software"] = _walk(sock, ip, port, community, _HR_SW_INSTALLED, timeout, 5000)[:40]
         out["interfaces"] = _walk(sock, ip, port, community, _IF_DESCR, timeout, 6000)[:20]
+        # Network tables last: they are the largest walks, so a budget/timeout cut
+        # here still leaves the system + user data already collected above.
+        out["arp"] = read_arp(sock, ip, port, community, timeout)[:400]
+        out["routes"] = read_routes(sock, ip, port, community, timeout)[:200]
         return out
     except OSError:
         return None
@@ -402,6 +503,54 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"snmpwalk -v2c -c {pr['community']} {ip} 1.3.6.1.2.1.25.6.3.1.2",
                     "Restrict the SNMP view to the OIDs actually needed.",
                     ["CWE-200"], kind="snmp_inventory"))
+
+            # ARP cache. The severity is driven by what it reveals that recce did
+            # NOT already have: a neighbour list that only repeats known hosts is
+            # disclosure, but one naming unscanned addresses is free discovery of
+            # segments the tester may not be able to reach directly.
+            arp = pr.get("arp") or []
+            if arp:
+                known = {x.ip for x in hosts}
+                fresh = sorted({r["ip"] for r in arp} - known)
+                sample = ", ".join(fresh[:12]) or ", ".join(
+                    r["ip"] for r in arp[:12])
+                out.append(_finding(
+                    "high" if fresh else "medium",
+                    "SNMP exposes the ARP cache (internal host discovery)", tgt,
+                    f"The ARP table returned {len(arp)} neighbour(s) with MAC addresses."
+                    + (f" {len(fresh)} of them are NOT in this engagement's host list: "
+                       f"{sample}{'...' if len(fresh) > 12 else ''}. Each is a live host "
+                       f"this device has recently talked to - discovery for free, "
+                       f"including addresses on segments not directly scanned."
+                       if fresh else
+                       f" All are already known hosts ({sample}). Still a MAC-address "
+                       f"and adjacency disclosure."),
+                    "snmpwalk",
+                    f"snmpwalk -v2c -c {pr['community']} {ip} {_ARP_PHYS}",
+                    "Restrict the SNMP view so the network tables (RFC1213 ip group) "
+                    "are not world-readable; move to SNMPv3.",
+                    ["CWE-200"], kind="snmp_arp"))
+
+            routes = pr.get("routes") or []
+            if routes:
+                gws = sorted({r["next_hop"] for r in routes
+                              if r["next_hop"] not in ("0.0.0.0", "")})
+                nets = ", ".join(
+                    f"{r['dest']}{'/' + r['mask'] if r['mask'] else ''}"
+                    for r in routes[:10])
+                out.append(_finding(
+                    "medium",
+                    "SNMP exposes the routing table (internal network map)", tgt,
+                    f"The routing table returned {len(routes)} route(s) across "
+                    f"{len(gws)} gateway(s): {nets}{'...' if len(routes) > 10 else ''}. "
+                    f"This is the internal topology - which subnets exist, which are "
+                    f"routed from here, and the gateways that reach them. On an "
+                    f"internal it names scope the tester has not yet seen.",
+                    "snmpwalk",
+                    f"snmpwalk -v2c -c {pr['community']} {ip} {_ROUTE_NEXTHOP}",
+                    "Restrict the SNMP view so the ip route group is not readable; "
+                    "move to SNMPv3.",
+                    ["CWE-200"], kind="snmp_routes"))
     return out
 
 
