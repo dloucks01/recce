@@ -375,4 +375,15 @@ def run_spray(hosts: list[Host], creds: list[Credential], out_dir: str, *,
         if k not in seen:
             seen.add(k)
             uniq.append(h)
-    return {"ok": True, "hits": uniq, "commands": ran, "files": files, "safe": safe}
+    # Same enum-only summary build_spray returns — so the CLI can print it
+    # after --run finishes too, and the operator sees which extra accounts
+    # actually got tested (not just those with prior credentials).
+    from .known_users import collect_user_accounts
+    cred_users = {c.username.lower() for c in creds if c.username}
+    enum_accounts = collect_user_accounts(hosts)
+    enum_only = [a["name"] for a in enum_accounts
+                 if a["name"].lower() not in cred_users]
+    return {"ok": True, "hits": uniq, "commands": ran, "files": files, "safe": safe,
+            "enum_only_users": enum_only,
+            "enum_only_sources": sorted({s for a in enum_accounts
+                                         for s in a["sources"]})}

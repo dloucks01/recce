@@ -187,6 +187,17 @@ def cmd_creds(args: argparse.Namespace) -> int:
             print(f"[x] {res['error']}")
             store.close()
             return 1
+        # Same enum-only summary --plan prints — after --run so the operator
+        # sees which extra accounts actually got tested vs which came from
+        # the credential store.
+        enum_only = res.get("enum_only_users") or []
+        if enum_only:
+            sources = res.get("enum_only_sources") or []
+            sample = ", ".join(enum_only[:8])
+            print(f"    [+] {len(enum_only)} additional username(s) from "
+                  f"engagement enum ({', '.join(sources) or 'unknown'}) "
+                  f"included in the spray: {sample}"
+                  + (" …" if len(enum_only) > 8 else ""))
         hits = res["hits"]
         if hits:
             print(f"\n[+] {len(hits)} VALID login(s):")

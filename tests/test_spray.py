@@ -237,6 +237,27 @@ def test_build_spray_reports_the_enum_only_folded_in_users(tmp_path):
     assert set(summary["enum_only_sources"]) == {"bloodhound", "ldap"}
 
 
+def test_run_spray_returns_enum_only_users_for_the_cli_summary(monkeypatch, tmp_path):
+    """The `--run` path prints the same "N additional username(s) from
+    engagement enum" summary that `--plan` does. That summary needs the
+    enum_only_users + enum_only_sources fields on run_spray's return."""
+    monkeypatch.setattr(credenum, "smb_tool", lambda: "nxc")
+    monkeypatch.setattr(credenum, "_run", lambda cmd, timeout=0, **k: ("", None))
+    h = _h("10.0.0.5", 445, "smb")
+    h.accounts = [
+        Account(ip="10.0.0.5", source="bloodhound", kind="user", name="alice"),
+        Account(ip="10.0.0.5", source="ldap", kind="user", name="svc_backup"),
+    ]
+    res = cr.run_spray([h],
+                       [Credential(username="administrator", secret="pw",
+                                   kind="password")],
+                       str(tmp_path))
+    assert res["ok"]
+    # Both enum-only users surface, administrator does NOT (it had a cred)
+    assert set(res["enum_only_users"]) == {"alice", "svc_backup"}
+    assert set(res["enum_only_sources"]) == {"bloodhound", "ldap"}
+
+
 def test_ssh_spray_line_now_targets_the_widened_users_txt(tmp_path):
     """The SSH spray command uses users.txt verbatim — extending users.txt
     means the SSH spray automatically tries every enumerated account with
