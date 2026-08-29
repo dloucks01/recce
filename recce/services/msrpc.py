@@ -75,6 +75,26 @@ _KNOWN: dict[str, tuple[str, str, str]] = {
         ("srvsvc", "MS-SRVS", "Server Service — share enumeration"),
     "99fcfec4-5260-101b-bbcb-00aa0021347a":
         ("IOXIDResolver", "MS-DCOM", "OXID resolver — leaks all host interfaces"),
+    # MS-NRPC / Netlogon: ZeroLogon (CVE-2020-1472) precondition — its presence
+    # in the EPM listing is the fact a downstream Netlogon probe consumes.
+    "12345678-1234-abcd-ef00-01234567cffb":
+        ("netlogon", "MS-NRPC", "Netlogon — DC secure-channel + NetrServerAuthenticate3 (ZeroLogon target)"),
+    # MS-BKRP: on a DC, this interface serves the DPAPI domain backup key —
+    # a credentialed follow-up hint for post-exploitation.
+    "3dde7c30-165d-11d1-ab8f-00805f14db40":
+        ("backupkey", "MS-BKRP", "BackupKey Remote — DPAPI domain backup key (post-auth)"),
+    # MS-EVEN6 / MS-EVEN: remote event log read. Feeds credentialed event
+    # scraping (logon patterns, LSASS clues).
+    "f6beaff7-1e19-4fbb-9f8f-b89e2018337c":
+        ("eventlog6", "MS-EVEN6", "EventLog Remoting (v6) — remote event log read"),
+    "82273fdc-e32a-18c3-3f78-827929dc23ea":
+        ("eventlog", "MS-EVEN", "EventLog Remoting (legacy) — remote event log read"),
+    # MS-RSP: InitiateSystemShutdown — remote-shutdown / reboot vector.
+    "d95afe70-a6d5-4259-822e-2c84da1ddb0d":
+        ("shutdown", "MS-RSP", "Remote Shutdown — InitiateSystemShutdown"),
+    # MS-TSTS: Terminal Services Terminal Server runtime — session enumeration.
+    "484809d6-4239-471b-b5bc-61df8c23ac48":
+        ("tsts", "MS-TSTS", "Terminal Services Runtime — RDP session enumeration"),
 }
 
 # Interfaces that let an attacker make the host authenticate somewhere of their
@@ -84,6 +104,23 @@ _COERCION = {"12345678-1234-abcd-ef00-0123456789ab",
              "c681d488-d850-11d0-8c52-00c04fd90f7e",
              "df1941c5-fe89-4e79-bf10-463657acf44d",
              "4fc742e0-4a10-11cf-8273-00aa004ae673"}
+
+# Interfaces whose mere presence on the wire flags a specific downstream check
+# even though recce doesn't invoke them here. Netlogon exposure is the
+# ZeroLogon (CVE-2020-1472) dispatch precondition; BKRP on a DC is the DPAPI
+# domain backup key vector once creds are held. The finding is informational —
+# recce does NOT probe either interface from this module, so no CVE claim.
+_HIGH_VALUE = {
+    "12345678-1234-abcd-ef00-01234567cffb": (
+        "Netlogon interface reachable on the endpoint mapper — this is the "
+        "MS-NRPC interface targeted by NetrServerAuthenticate3 all-zero-"
+        "challenge checks (see the Netlogon-hardening posture). recce did "
+        "NOT probe it; presence alone does not imply vulnerability."),
+    "3dde7c30-165d-11d1-ab8f-00805f14db40": (
+        "BackupKey Remote (MS-BKRP) interface registered — on a Domain "
+        "Controller this serves the DPAPI domain backup key to authenticated "
+        "domain admins. Follow-up requires valid credentials."),
+}
 
 
 def is_msrpc(port: Port) -> bool:
@@ -156,15 +193,33 @@ def _bind(sock, iface: uuid.UUID, timeout: float,
 
 
 def _request(sock, opnum: int, stub: bytes, timeout: float) -> bytes | None:
+    """Send a request PDU and reassemble multi-fragment responses.
+
+    C706 §12.6.4.9: a response larger than max_xmit_frag (recce advertises
+    5840) is split across PDUs marked with PFC_FIRST_FRAG(0x01)/PFC_LAST_FRAG
+    (0x02) in the pfc_flags byte. Previously we returned only the first frag,
+    silently truncating ept_lookup responses on hosts with more than ~20
+    registered interfaces — coercion interfaces at the tail were being missed.
+    Every response PDU carries an identical 24-byte header (16 CO header + 8
+    for alloc_hint / p_cont_id / cancel_count / reserved); the stub bytes are
+    concatenated across frags to reconstruct the NDR payload.
+    """
     body = struct.pack("<IHH", len(stub), 0, opnum) + stub
     try:
         sock.sendall(_pdu(0, body, call_id=2))
     except OSError:
         return None
-    resp = _recv_pdu(sock, timeout)
-    if not resp or len(resp) < 24 or resp[2] != 2:       # 2 = response
-        return None
-    return resp[24:]                                     # skip the response header
+    payload = b""
+    # Cap total frags to a large but finite number so a peer that never sets
+    # PFC_LAST_FRAG cannot spin us forever.
+    for _ in range(256):
+        resp = _recv_pdu(sock, timeout)
+        if not resp or len(resp) < 24 or resp[2] != 2:   # 2 = response
+            return payload or None
+        payload += resp[24:]                             # skip the response header
+        if resp[3] & 0x02:                               # PFC_LAST_FRAG
+            return payload
+    return payload or None
 
 
 # --- IOXIDResolver ServerAlive2 ------------------------------------------------
@@ -242,6 +297,68 @@ def _uuids_in(blob: bytes) -> list[str]:
     return found
 
 
+def _towers_in(blob: bytes) -> list[dict]:
+    """Extract {uuid, ver_major, ver_minor, tcp_port} tuples from an EPM blob.
+
+    C706 §L.1.2.5 protocol tower: each floor is `<lhs_len u16le><lhs><rhs_len u16le><rhs>`.
+    The interface UUID floor has a fixed shape:
+
+        lhs_len = 0x0013 (19), lhs = 0x0d + <uuid 16B> + <ver_major u16 LE>
+        rhs_len = 0x0002,     rhs = <ver_minor u16 LE>
+
+    The ncacn_ip_tcp floor has:
+
+        lhs_len = 0x0001, lhs = 0x07     (ncacn_ip_tcp protocol id)
+        rhs_len = 0x0002, rhs = <port u16 BE>
+
+    Rather than walking NDR referent pointers (which vary by response shape),
+    this scans for the anchor byte pattern `13 00 0d` that starts an interface
+    floor, decodes the fixed 21-byte header, then scans forward within the
+    same tower (bounded by 96 bytes — a five-floor tower is at most ~80B) for
+    the ncacn_ip_tcp anchor `01 00 07 02 00`. When present, this yields the
+    dynamic RPC port (49152-65535 on modern Windows) so downstream services
+    can follow up on the dynamic port without a second-stage tool.
+    """
+    out: list[dict] = []
+    n = len(blob)
+    i = 0
+    while i + 21 < n:
+        if blob[i] == 0x13 and blob[i + 1] == 0x00 and blob[i + 2] == 0x0d:
+            try:
+                u = str(uuid.UUID(bytes_le=blob[i + 3:i + 19]))
+                ver_maj = struct.unpack_from("<H", blob, i + 19)[0]
+            except (ValueError, struct.error):
+                i += 1
+                continue
+            ver_min = 0
+            if i + 25 <= n and blob[i + 21] == 0x02 and blob[i + 22] == 0x00:
+                try:
+                    ver_min = struct.unpack_from("<H", blob, i + 23)[0]
+                except struct.error:
+                    ver_min = 0
+            tcp_port = 0
+            end = min(n, i + 128)
+            j = i + 25
+            while j + 6 < end:
+                if (blob[j] == 0x01 and blob[j + 1] == 0x00
+                        and blob[j + 2] == 0x07
+                        and blob[j + 3] == 0x02 and blob[j + 4] == 0x00):
+                    tcp_port = struct.unpack_from(">H", blob, j + 5)[0]
+                    break
+                # Stop scanning if we hit the next interface floor — that
+                # marks the start of another tower.
+                if (blob[j] == 0x13 and blob[j + 1] == 0x00
+                        and blob[j + 2] == 0x0d):
+                    break
+                j += 1
+            out.append({"uuid": u, "ver_major": ver_maj,
+                        "ver_minor": ver_min, "tcp_port": tcp_port})
+            i += 21
+        else:
+            i += 1
+    return out
+
+
 def epm_lookup(ip: str, port: int = _DEFAULT_PORT,
                timeout: float = _TIMEOUT) -> list[str]:
     """Dump the endpoint mapper and return the known interface UUIDs it lists."""
@@ -271,6 +388,39 @@ def epm_lookup(ip: str, port: int = _DEFAULT_PORT,
                 pass
 
 
+def epm_lookup_towers(ip: str, port: int = _DEFAULT_PORT,
+                      timeout: float = _TIMEOUT) -> list[dict]:
+    """Same EPM query as `epm_lookup`, but returns tower-parsed endpoints.
+
+    Each entry: {uuid, ver_major, ver_minor, tcp_port}. `tcp_port` is 0 when
+    the tower does not use ncacn_ip_tcp (e.g. named-pipe-only interfaces).
+    Non-zero tcp_port values in 49152-65535 are dynamic RPC ports downstream
+    modules can pivot to without a second-stage tool. All UUIDs are returned,
+    not only known ones, so an operator can spot custom/third-party servers.
+    """
+    sock = None
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+        if not _bind(sock, _EPM, timeout, 3, 0):
+            return []
+        stub = (struct.pack("<I", 0)          # inquiry_type
+                + struct.pack("<I", 0)        # object ref id (null)
+                + struct.pack("<I", 0)        # interface ref id (null)
+                + struct.pack("<I", 0)        # vers_option
+                + b"\x00" * 20                # entry handle
+                + struct.pack("<I", 500))     # max_ents
+        data = _request(sock, 2, stub, timeout)
+        return _towers_in(data) if data else []
+    except OSError:
+        return []
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
     out: dict = {"reachable": False}
     ifaces = server_alive2(ip, port, timeout)
@@ -282,6 +432,19 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         out["reachable"] = True
         out["interfaces"] = endpoints
         out["coercion"] = [u for u in endpoints if u in _COERCION]
+        out["high_value"] = [u for u in endpoints if u in _HIGH_VALUE]
+    # Second EPM read to capture dynamic ports — the two calls speak the same
+    # opnum/stub, but the tower parser needs the full response blob that
+    # `epm_lookup` collapses to UUIDs. Cheap on the wire (one bind + one
+    # request per socket) and only runs when TCP is reachable.
+    towers = epm_lookup_towers(ip, port, timeout)
+    if towers:
+        out["reachable"] = True
+        dyn = [{"uuid": t["uuid"], "port": t["tcp_port"],
+                "ver_major": t["ver_major"], "ver_minor": t["ver_minor"]}
+               for t in towers if t.get("tcp_port")]
+        if dyn:
+            out["endpoints"] = dyn
     if not out["reachable"]:
         # Bind failed both ways but the port may still be open — record that we
         # reached TCP so a firewalled-but-listening host is distinguishable.
@@ -378,6 +541,50 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"impacket-rpcmap ncacn_ip_tcp:{h.ip}",
                     "Restrict 135/tcp and the dynamic RPC range to management hosts.",
                     ["CWE-200"], kind="msrpc_epm"))
+
+            # High-value interfaces (Netlogon / BKRP): recognised, not probed.
+            # A distinct finding so downstream Netlogon / DPAPI checks have a
+            # clean dispatch signal instead of relying on grep over the epm
+            # blob. Severity stays medium — recce did NOT run any post-
+            # discovery probe against them, so no CVE claim is attached.
+            hv = pr.get("high_value") or []
+            if hv:
+                notes = "; ".join(f"{_KNOWN[u][1]}: {_HIGH_VALUE[u]}" for u in hv)
+                out.append(_finding(
+                    "medium",
+                    "MSRPC exposes high-value interfaces (Netlogon / BackupKey)", tgt,
+                    f"The endpoint mapper lists {len(hv)} high-value interface(s) "
+                    f"whose presence flags a specific follow-up check. {notes}",
+                    "impacket-rpcdump",
+                    f"impacket-rpcdump {h.ip}   # then run the appropriate "
+                    f"downstream check per interface",
+                    "Restrict 135/tcp to management networks; on DCs, apply the "
+                    "Netlogon secure-channel enforcement and DPAPI hardening "
+                    "guidance for the relevant advisories.",
+                    ["CWE-200", "CWE-287"], kind="msrpc_high_value_iface"))
+
+            # Dynamic-port map: EPM towers with an ncacn_ip_tcp floor tell us
+            # which UUID lives on which 49152-65535 port. Downstream services
+            # (samr/drsuapi/wmi) never see those ports otherwise because they
+            # sit outside the initial nmap scope.
+            dyn = pr.get("endpoints") or []
+            named_dyn = [d for d in dyn if d["uuid"] in _KNOWN]
+            if named_dyn:
+                bits = ", ".join(f"{_KNOWN[d['uuid']][0]}={d['port']}"
+                                 for d in named_dyn[:10])
+                out.append(_finding(
+                    "low",
+                    "MSRPC endpoint mapper discloses dynamic RPC ports", tgt,
+                    f"The endpoint mapper resolved {len(named_dyn)} known "
+                    f"interface(s) to concrete ncacn_ip_tcp port(s) in the "
+                    f"49152-65535 range: {bits}. These are direct-connect "
+                    f"targets for the corresponding interface (no second EPM "
+                    f"round-trip needed).",
+                    "impacket-rpcdump",
+                    f"impacket-rpcdump {h.ip}",
+                    "Restrict the dynamic RPC range (49152-65535) to "
+                    "management hosts at the network layer.",
+                    ["CWE-200"], kind="msrpc_dynport_map"))
     return out
 
 
