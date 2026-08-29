@@ -12,6 +12,14 @@ Findings:
     (billing-events, user-pii-*, audit-log-prod).
   * kafka_saslgated (info) — reachable but the metadata request was
     denied or dropped, suggesting SASL/mTLS is enforcing.
+  * kafka_version_fingerprint (info) — the ApiVersionsResponse's advertised
+    (api_key, min, max) tuple set pinned the broker to a release line
+    (>=2.7 / >=2.8 / >=3.0 / >=3.7 depending on which KIP-introduced keys
+    are present). Feeds the version-DB pass, not itself a vulnerability.
+  * kafka_sasl_mechanisms_enumerated (medium) — on SASL-gated brokers a
+    KIP-43 SaslHandshake probe returns enabled_mechanisms unconditionally,
+    telling downstream credential-spray which mechanism to use (PLAIN vs
+    SCRAM vs GSSAPI vs OAUTHBEARER).
 
 Airgap-safe: stdlib socket + struct only. Bounded (single request/response).
 """
@@ -29,6 +37,14 @@ _TIMEOUT = 4.0
 # API keys we use
 _API_METADATA = 3
 _API_VERSIONS = 18
+_API_SASL_HANDSHAKE = 17         # KIP-43 SaslHandshakeRequest
+
+# Any-mechanism string we send in SaslHandshakeRequest solely to elicit the
+# UNSUPPORTED_SASL_MECHANISM path — the broker's response then always contains
+# the array of ACTUALLY enabled mechanisms (KIP-43 §"Server response"). Using a
+# nonsense value keeps us from accidentally initiating a real SASL exchange on
+# a listener where that mechanism happens to be configured.
+_SASL_PROBE_MECH = "RECCE-PROBE"
 
 
 def is_kafka(port: Port) -> bool:
@@ -86,6 +102,19 @@ def _build_api_versions_v0() -> bytes:
     first (KIP-511). Sending this handshake keeps the probe working against
     both legacy and modern brokers."""
     return _build_request(_API_VERSIONS, 0, 100, b"")
+
+
+def _build_sasl_handshake_v1(mechanism: str,
+                             correlation_id: int = 2) -> bytes:
+    """SaslHandshakeRequest v1 (KIP-43): a single STRING mechanism (int16 len +
+    UTF-8). Both v0 and v1 have the same body shape; v1 is what modern brokers
+    negotiate and what SaslAuthenticate expects to follow. We send it with a
+    deliberately nonsense mechanism ('RECCE-PROBE'): the broker replies with
+    error_code=UNSUPPORTED_SASL_MECHANISM (33) and, in the same body, the array
+    of ENABLED mechanisms — which is exactly the fact we want to enumerate,
+    without any risk of accidentally opening a real SASL exchange."""
+    return _build_request(_API_SASL_HANDSHAKE, 1, correlation_id,
+                          _string(mechanism))
 
 
 def _read_response(sock: socket.socket, timeout: float) -> bytes | None:
@@ -191,20 +220,134 @@ def _parse_metadata_v1(body: bytes) -> dict | None:
 _parse_metadata_v0 = _parse_metadata_v1
 
 
+def _parse_api_versions(body: bytes) -> dict | None:
+    """Parse an ApiVersionsResponse v0/v1 body (post-size):
+      correlation_id (int32)
+      error_code    (int16)
+      api_versions: [{api_key: int16, min_version: int16, max_version: int16}]
+      (v1 appends throttle_time_ms int32 — we don't need it)
+    Return {"error": int, "apis": {api_key: (min, max)}} or None on parse fail."""
+    if len(body) < 10:
+        return None
+    try:
+        i = 4                                              # correlation_id
+        err = struct.unpack(">h", body[i:i + 2])[0]; i += 2
+        n = struct.unpack(">i", body[i:i + 4])[0]; i += 4
+        if n < 0 or n > 300:                               # sanity cap
+            return None
+        apis: dict[int, tuple[int, int]] = {}
+        for _ in range(n):
+            if i + 6 > len(body):
+                break
+            k, mn, mx = struct.unpack(">hhh", body[i:i + 6]); i += 6
+            apis[k] = (mn, mx)
+        return {"error": err, "apis": apis}
+    except (struct.error, IndexError):
+        return None
+
+
+def _fingerprint(apis: dict) -> str:
+    """Best-effort Kafka release-line label from advertised (api_key, max_version)
+    tuples. Signals (from Kafka KIPs / release notes):
+      * ApiKey 68 present (ConsumerGroupHeartbeat, KIP-848)     -> ">=3.7"
+      * ApiKey 60 present (DescribeCluster, KIP-700)            -> ">=2.8"
+      * ApiKey 50 present (DescribeUserScramCredentials, KIP-554) -> ">=2.7"
+      * max Produce (ApiKey 0) >= 10                            -> ">=3.0"
+      * ApiKey 22 present (InitProducerId)                      -> ">=0.11"
+    Return "" when nothing is conclusive. Deliberately no CVE claims — that
+    mapping belongs to a version-DB layer, not this parser."""
+    if not apis:
+        return ""
+    if 68 in apis:
+        return ">=3.7"
+    if 60 in apis and apis.get(0, (0, 0))[1] >= 10:
+        return ">=3.0"
+    if 60 in apis:
+        return ">=2.8"
+    if 50 in apis:
+        return ">=2.7"
+    if apis.get(0, (0, 0))[1] >= 10:
+        return ">=3.0"
+    if 22 in apis:
+        return ">=0.11"
+    return ""
+
+
+def _parse_sasl_handshake(body: bytes) -> dict | None:
+    """Parse a SaslHandshakeResponse v0/v1 body (post-size):
+      correlation_id (int32)
+      error_code     (int16)   -- 0 = supported, 33 = UNSUPPORTED_SASL_MECHANISM
+      enabled_mechanisms: [STRING]  -- int32 count + [int16 len + UTF-8 bytes]
+    The enabled_mechanisms array is returned whether or not error_code is 0
+    (KIP-43 §"Server response"), so a nonsense probe mechanism reliably yields
+    the real list. Return {"error": int, "mechanisms": [str]} or None."""
+    if len(body) < 10:
+        return None
+    try:
+        i = 4                                              # correlation_id
+        err = struct.unpack(">h", body[i:i + 2])[0]; i += 2
+        n = struct.unpack(">i", body[i:i + 4])[0]; i += 4
+        if n < 0 or n > 64:                                # sanity cap
+            return None
+        mechs: list[str] = []
+        for _ in range(n):
+            m, i = _parse_string_at(body, i)
+            if m:
+                mechs.append(m)
+        return {"error": err, "mechanisms": mechs}
+    except (struct.error, IndexError):
+        return None
+
+
+def _probe_sasl_mechanisms(ip: str, port: int, timeout: float) -> list[str]:
+    """Open a separate short-lived TCP session to <ip:port>, negotiate the
+    ApiVersions handshake, then send one SaslHandshakeRequest v1 with a
+    nonsense mechanism and parse the enabled_mechanisms array from the reply.
+    Returns [] on any transport failure or parse failure.
+
+    Bounded: single TCP connect, two request/response exchanges, one timeout.
+    Uses a fresh connection because a broker that rejected our earlier request
+    (SASL-gated) may have already half-closed the metadata probe's socket."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(_build_api_versions_v0())
+            _read_response(s, timeout)                    # discard: handshake
+            s.sendall(_build_sasl_handshake_v1(_SASL_PROBE_MECH))
+            body = _read_response(s, timeout)
+    except OSError:
+        return []
+    if not body:
+        return []
+    parsed = _parse_sasl_handshake(body)
+    if not parsed:
+        return []
+    return parsed["mechanisms"]
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
-    """Send MetadataRequest v0 and parse the reply. Returns
-    {reachable, brokers, topics, error} — brokers/topics empty if the
-    request was dropped or the parse failed."""
-    out = {"reachable": False, "brokers": [], "topics": [], "error": ""}
+    """Send MetadataRequest v1 and parse the reply. Returns
+    {reachable, brokers, topics, api_versions, fingerprint, sasl_mechanisms,
+    error}. brokers/topics empty if the request was dropped or the parse
+    failed; api_versions/fingerprint populated when the ApiVersions handshake
+    reply parsed; sasl_mechanisms populated on SASL-gated brokers only."""
+    out: dict = {"reachable": False, "brokers": [], "topics": [],
+                 "api_versions": {}, "fingerprint": "",
+                 "sasl_mechanisms": [], "error": ""}
     try:
         with socket.create_connection((ip, port), timeout=timeout) as s:
             s.settimeout(timeout)
             # ApiVersions handshake first — modern Kafka (KIP-511) closes
-            # the connection on any non-ApiVersions first request. Read and
-            # discard the response; success/error doesn't matter for our
-            # purpose (we're not negotiating a specific version).
+            # the connection on any non-ApiVersions first request. We now
+            # PARSE the reply too: its (api_key, min, max) tuple set uniquely
+            # fingerprints the broker's release line (see _fingerprint).
             s.sendall(_build_api_versions_v0())
-            _read_response(s, timeout)
+            apiv_body = _read_response(s, timeout)
+            if apiv_body:
+                apiv = _parse_api_versions(apiv_body)
+                if apiv:
+                    out["api_versions"] = apiv["apis"]
+                    out["fingerprint"] = _fingerprint(apiv["apis"])
             # Now the real query.
             s.sendall(_build_metadata_request_v1())
             body = _read_response(s, timeout)
@@ -213,13 +356,18 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         return out
     if body is None or len(body) < 8:
         # Reachable at TCP but no metadata came back — SASL/mTLS likely required.
+        # Enumerate advertised SASL mechanisms on a fresh connection (KIP-43):
+        # this is the single most useful pre-auth fact against a SASL-gated
+        # broker, since it dictates which mechanism a spray campaign must use.
         out["reachable"] = True
         out["error"] = "no metadata response — SASL/mTLS may be required"
+        out["sasl_mechanisms"] = _probe_sasl_mechanisms(ip, port, timeout)
         return out
     parsed = _parse_metadata_v1(body)
     if parsed is None:
         out["reachable"] = True
         out["error"] = "response parse failed (not Kafka? SASL required?)"
+        out["sasl_mechanisms"] = _probe_sasl_mechanisms(ip, port, timeout)
         return out
     out["reachable"] = True
     out["brokers"] = parsed["brokers"]
@@ -279,6 +427,46 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"kcat -L -b {h.ip}:{p.portid} -X security.protocol=SASL_SSL",
                     "Ensure SASL/mTLS enforcement stays on.",
                     [], kind="kafka_saslgated"))
+            # ApiVersions release-line fingerprint (informational, always emit
+            # when the handshake reply parsed cleanly enough to derive one).
+            fp = pr.get("fingerprint") or ""
+            if fp:
+                napis = len(pr.get("api_versions") or {})
+                out.append(_finding(
+                    "info", f"Kafka broker release fingerprint {fp}", tgt,
+                    f"ApiVersionsResponse advertised {napis} API keys; the set "
+                    f"is consistent with Kafka {fp}. Use this to scope the "
+                    f"version-DB / KEV lookup for this broker.",
+                    f"kcat -L -b {h.ip}:{p.portid}",
+                    "Fingerprint alone is not a vulnerability; feed it to the "
+                    "version-DB pass to enumerate patched vs affected releases.",
+                    ["CWE-200"], kind="kafka_version_fingerprint"))
+            # SaslHandshake enumeration — attempted only on SASL-gated brokers
+            # (probe() gates the second connection there). Non-empty means the
+            # broker told us exactly which mechanisms are enabled, which is the
+            # single most useful pre-auth fact for a credentialed pivot.
+            mechs = pr.get("sasl_mechanisms") or []
+            if mechs:
+                mech_txt = ", ".join(mechs[:8]) + (
+                    "…" if len(mechs) > 8 else "")
+                out.append(_finding(
+                    "medium",
+                    "Kafka SASL mechanisms enumerated (KIP-43 SaslHandshake)",
+                    tgt,
+                    f"SaslHandshakeRequest with a probe mechanism returned the "
+                    f"broker's enabled_mechanisms array: {mech_txt}. Any spray "
+                    f"campaign against this broker must select one of these; "
+                    f"presence of PLAIN typically means reused LDAP/DB "
+                    f"passwords are viable, GSSAPI implies a Kerberos KDC, "
+                    f"OAUTHBEARER implies a JWT issuer (Keycloak / Okta).",
+                    f"kcat -L -b {h.ip}:{p.portid} "
+                    f"-X security.protocol=SASL_SSL "
+                    f"-X sasl.mechanism={mechs[0]}",
+                    "SASL mechanism enumeration is by design in KIP-43; the "
+                    "mitigation is to strip PLAIN unless the listener is "
+                    "TLS-wrapped and to restrict which listeners advertise "
+                    "SASL at all (private-network listeners only).",
+                    ["CWE-200"], kind="kafka_sasl_mechanisms_enumerated"))
     return out
 
 
@@ -311,6 +499,8 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["reachable"] = pr.get("reachable", False)
                 t["topics"] = len(pr.get("topics", []))
                 t["brokers"] = len(pr.get("brokers", []))
+                t["fingerprint"] = pr.get("fingerprint", "")
+                t["sasl_mechanisms"] = pr.get("sasl_mechanisms", [])
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
