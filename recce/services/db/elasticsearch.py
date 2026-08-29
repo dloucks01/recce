@@ -17,6 +17,7 @@ only issues GETs - it never indexes, updates, or deletes.
 """
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import ssl
@@ -43,8 +44,45 @@ def _read_capped(resp) -> bytes:
     return resp.read(_MAX_BODY)
 
 
-def _get(ip: str, port: int, path: str, tls: bool, timeout: float = _TIMEOUT):
-    """GET an ES path. Returns (status, parsed_json_or_text) or None on error."""
+def _auth_headers(creds: dict | None) -> dict:
+    """Build an `Authorization:` header for Elasticsearch from a creds dict.
+
+    Recognises three shapes documented in the ES Reference (`Basic authentication`
+    and `API keys`), in priority order:
+
+      * `{"bearer": "<token>"}`         -> `Authorization: Bearer <token>`
+      * `{"api_key": "<id>:<secret>"}`  -> `Authorization: ApiKey <b64(id:secret)>`
+        (a bare token that already looks base64 is passed through unchanged)
+      * `{"username": "u", "password": "p"}` (also `user`/`pass`)
+                                        -> `Authorization: Basic <b64(u:p)>`
+
+    Returns `{}` when creds are missing / unusable so callers get an unauth GET.
+    """
+    if not isinstance(creds, dict):
+        return {}
+    tok = creds.get("bearer") or creds.get("token")
+    if isinstance(tok, str) and tok:
+        return {"Authorization": f"Bearer {tok}"}
+    ak = creds.get("api_key") or creds.get("apikey")
+    if isinstance(ak, str) and ak:
+        # `id:secret` form -> base64 per the ES ApiKey scheme; bare base64 passes through.
+        val = ak
+        if ":" in ak:
+            val = base64.b64encode(ak.encode("utf-8")).decode("ascii")
+        return {"Authorization": f"ApiKey {val}"}
+    user = creds.get("username") or creds.get("user")
+    pw = creds.get("password") or creds.get("pass") or ""
+    if isinstance(user, str) and user:
+        raw = f"{user}:{pw}".encode("utf-8")
+        return {"Authorization": "Basic " + base64.b64encode(raw).decode("ascii")}
+    return {}
+
+
+def _get(ip: str, port: int, path: str, tls: bool, timeout: float = _TIMEOUT,
+         headers: dict | None = None):
+    """GET an ES path. Returns (status, parsed_json_or_text) or None on error.
+    `headers` merges over the default Accept/User-Agent (typically an
+    `Authorization:` header from `_auth_headers()`)."""
     conn = None
     try:
         if tls:
@@ -52,8 +90,10 @@ def _get(ip: str, port: int, path: str, tls: bool, timeout: float = _TIMEOUT):
                 ip, port, timeout=timeout, context=ssl._create_unverified_context())
         else:
             conn = http.client.HTTPConnection(ip, port, timeout=timeout)
-        conn.request("GET", path, headers={"Accept": "application/json",
-                                           "User-Agent": "recce-es/1.0"})
+        h = {"Accept": "application/json", "User-Agent": "recce-es/1.0"}
+        if headers:
+            h.update(headers)
+        conn.request("GET", path, headers=h)
         resp = conn.getresponse()
         body = _read_capped(resp).decode("utf-8", "replace")
         try:
@@ -72,15 +112,21 @@ def _get(ip: str, port: int, path: str, tls: bool, timeout: float = _TIMEOUT):
 
 # --- live probe -----------------------------------------------------------------
 
-def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
+def probe(ip: str, port: int, timeout: float = _TIMEOUT,
+          headers: dict | None = None) -> dict:
     """Read-only fingerprint of an Elasticsearch endpoint. Tries plaintext HTTP then
     HTTPS. Returns {reachable, unauth, secured, version, cluster, name, tagline,
-    status, indices, docs, tls, error}."""
+    status, indices, docs, tls, anonymous, anonymous_username, anonymous_roles,
+    snapshot_repo_settings, error}.
+
+    `headers` typically carries an `Authorization:` from `_auth_headers()`; if
+    present it is sent on every GET, including the anonymous-authenticate probe
+    (which still fires on 401 without creds to catch anonymous-role clusters)."""
     out: dict = {"reachable": False, "unauth": False}
     root = None
     tls = False
     for use_tls in (False, True):
-        r = _get(ip, port, "/", use_tls, timeout)
+        r = _get(ip, port, "/", use_tls, timeout, headers=headers)
         if r is not None:
             root, tls = r, use_tls
             break
@@ -92,6 +138,12 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     # A secured cluster answers "/" with 401 (or an authentication/security exception).
     if status in (401, 403):
         out["secured"] = True
+        # Anonymous-role clusters answer 401 on / but still grant a role to
+        # unauthenticated requests via xpack.security.authc.anonymous.roles.
+        # /_security/_authenticate returns 200 with username == "_anonymous"
+        # (or authentication_type == "anonymous") for that case even when creds
+        # are absent - the definitive anonymous-vs-secured test.
+        _check_anonymous(ip, port, tls, timeout, out)
         return out
     if isinstance(body, dict):
         # The unauthenticated ES banner: {"name","cluster_name","version":{...},"tagline"}
@@ -106,7 +158,8 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
         if not looks_es:
             return out
         # Index list = the data-exposure proof (only reachable if unauthenticated).
-        cat = _get(ip, port, "/_cat/indices?format=json&bytes=b", tls, timeout)
+        cat = _get(ip, port, "/_cat/indices?format=json&bytes=b", tls, timeout,
+                   headers=headers)
         if cat and cat[0] == 200 and isinstance(cat[1], list):
             out["unauth"] = True
             out["indices"] = [i.get("index", "") for i in cat[1]
@@ -121,20 +174,44 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
             out["docs"] = docs
         elif cat and cat[0] in (401, 403):
             out["secured"] = True
-        health = _get(ip, port, "/_cluster/health", tls, timeout)
+        health = _get(ip, port, "/_cluster/health", tls, timeout, headers=headers)
         if health and health[0] == 200 and isinstance(health[1], dict):
             out["status"] = health[1].get("status", "")
             out["nodes"] = health[1].get("number_of_nodes", "")
         if out.get("unauth"):
-            _deep_es(ip, port, tls, timeout, out)
+            _deep_es(ip, port, tls, timeout, out, headers=headers)
     return out
 
 
-def _deep_es(ip: str, port: int, tls: bool, timeout: float, out: dict) -> None:
+def _check_anonymous(ip: str, port: int, tls: bool, timeout: float,
+                     out: dict) -> None:
+    """Probe /_security/_authenticate WITHOUT credentials. Elasticsearch's built-in
+    security supports xpack.security.authc.anonymous.roles - a cluster that answers
+    401 on / can still grant a de-facto role to anyone. This endpoint returns 200
+    with `{"username": "_anonymous", "authentication_type": "anonymous", "roles":
+    [...]}` on such clusters, which is the definitive tell. Populates
+    out[anonymous|anonymous_username|anonymous_roles]."""
+    who = _get(ip, port, "/_security/_authenticate", tls, timeout, headers=None)
+    if not who or who[0] != 200 or not isinstance(who[1], dict):
+        return
+    body = who[1]
+    user = body.get("username") or ""
+    at = body.get("authentication_type") or ""
+    roles = body.get("roles") if isinstance(body.get("roles"), list) else []
+    if user == "_anonymous" or at == "anonymous":
+        out["anonymous"] = True
+        out["anonymous_username"] = user
+        out["anonymous_roles"] = [str(r) for r in roles][:20]
+
+
+def _deep_es(ip: str, port: int, tls: bool, timeout: float, out: dict,
+             headers: dict | None = None) -> None:
     """Read-only deep enumeration on an unauthenticated cluster: node OS/JVM (targeting
     for path-traversal / scripting RCE) and snapshot repositories (data-exfil / arbitrary
-    read surface). Populates out[os_name|jvm_version|data_paths|snapshot_repos]."""
-    nodes = _get(ip, port, "/_nodes/_local/os,jvm,settings?format=json", tls, timeout)
+    read surface). Populates out[os_name|jvm_version|data_paths|snapshot_repos|
+    snapshot_repo_settings]."""
+    nodes = _get(ip, port, "/_nodes/_local/os,jvm,settings?format=json", tls, timeout,
+                 headers=headers)
     if nodes and nodes[0] == 200 and isinstance(nodes[1], dict):
         nd = nodes[1].get("nodes")
         if isinstance(nd, dict):
@@ -146,9 +223,34 @@ def _deep_es(ip: str, port: int, tls: bool, timeout: float, out: dict) -> None:
                 out["os_name"] = osd.get("pretty_name") or osd.get("name", "")
                 out["jvm_version"] = jvm.get("version", "")
                 break
-    snaps = _get(ip, port, "/_snapshot/_all", tls, timeout)
+    snaps = _get(ip, port, "/_snapshot/_all", tls, timeout, headers=headers)
     if snaps and snaps[0] == 200 and isinstance(snaps[1], dict):
         out["snapshot_repos"] = list(snaps[1].keys())[:20]
+        # /_snapshot/_all already returns each repo's {type, settings} block
+        # inline - no extra round-trip needed. For repository-s3 that yields
+        # bucket + endpoint + region + base_path + client; for -gcs the bucket +
+        # client; for -azure the container + client; for -fs the on-disk
+        # `location` (a.k.a. path.repo entry). These are direct pivots into
+        # cloud object stores / file shares. (Ref: ES Reference "Snapshot and
+        # Restore" -> repository plugin settings.)
+        _INTERESTING = (
+            "bucket", "endpoint", "region", "base_path", "client",
+            "container", "account", "location", "path", "compress",
+            "server_side_encryption", "storage_class", "readonly",
+        )
+        repo_settings: dict = {}
+        for name, spec in list(snaps[1].items())[:20]:
+            if not isinstance(name, str) or not isinstance(spec, dict):
+                continue
+            settings = spec.get("settings") if isinstance(spec.get("settings"),
+                                                          dict) else {}
+            kept = {k: settings[k] for k in _INTERESTING if k in settings}
+            repo_settings[name] = {
+                "type": str(spec.get("type") or ""),
+                "settings": kept,
+            }
+        if repo_settings:
+            out["snapshot_repo_settings"] = repo_settings
 
 
 def es_targets(hosts: list[Host]) -> list[dict]:
@@ -176,6 +278,13 @@ _NARRATIVE = {
         "MVEL scripting sandboxes that were repeatedly bypassed for remote code "
         "execution (e.g. CVE-2015-1427, CVE-2014-3120) and predate the free built-in "
         "security - confirm the running version and upgrade."),
+    "es_anonymous": (
+        "The cluster returns 401 on / but xpack.security.authc.anonymous.roles binds a "
+        "de-facto role to every unauthenticated request. /_security/_authenticate "
+        "answered 200 with username '_anonymous' - the built-in security is enabled "
+        "but a whole role is granted to anyone who can reach the port. Remove the "
+        "anonymous role or set xpack.security.authc.anonymous.authz_exception: true "
+        "so unauthenticated requests are refused instead of silently authorised."),
 }
 
 
@@ -237,6 +346,29 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     deep += (f"\n\nSnapshot repositories readable: {', '.join(repos[:8])} "
                              "(data-exfil / restore-tampering surface; arbitrary read on "
                              "old builds).")
+                # Per-repo config (bucket/endpoint/region/base_path for s3, container
+                # for azure, location for fs, ...) - a direct pivot into cloud object
+                # stores or on-disk share mounts.
+                rs = pr.get("snapshot_repo_settings") or {}
+                if rs:
+                    parts = []
+                    for name, spec in list(rs.items())[:6]:
+                        t = spec.get("type") or "?"
+                        st = spec.get("settings") or {}
+                        pointer = (st.get("bucket") or st.get("container")
+                                   or st.get("location") or st.get("path") or "")
+                        endpoint = st.get("endpoint") or ""
+                        bp = st.get("base_path") or ""
+                        seg = f"{name}[{t}]"
+                        if pointer:
+                            seg += f" -> {pointer}"
+                        if endpoint:
+                            seg += f" @ {endpoint}"
+                        if bp:
+                            seg += f"/{bp}"
+                        parts.append(seg)
+                    deep += ("\n\nSnapshot repo config (pivot into cloud/fs storage): "
+                             + "; ".join(parts) + ".")
                 out.append(_finding(
                     "critical", "Elasticsearch exposed without authentication", tgt,
                     f"recce listed {len(idx)} index/indices with no credential"
@@ -252,6 +384,26 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Enable the built-in security (xpack.security.enabled: true) with "
                     "users/roles, and bind the HTTP listener to a trusted interface.",
                     ["CWE-306", "CWE-284"], kind="es_unauth"))
+            if pr.get("anonymous"):
+                roles = pr.get("anonymous_roles") or []
+                roles_txt = (", roles: " + ", ".join(roles[:6])) if roles else ""
+                out.append(_finding(
+                    "high",
+                    "Elasticsearch anonymous role grants unauthenticated access",
+                    tgt,
+                    "The cluster answered 401 on / (built-in security is enabled) but "
+                    "/_security/_authenticate returned 200 with username "
+                    f"'{pr.get('anonymous_username', '_anonymous')}'"
+                    + roles_txt
+                    + " - xpack.security.authc.anonymous.roles is granting a role to "
+                    "every request that arrives without credentials, so the '401' on "
+                    "/ is misleading and unauthenticated data access is available.",
+                    "curl",
+                    f"curl -s http://{h.ip}:{p.portid}/_security/_authenticate ; "
+                    f"curl -s http://{h.ip}:{p.portid}/_cat/indices",
+                    "Remove xpack.security.authc.anonymous.roles or set "
+                    "xpack.security.authc.anonymous.authz_exception: true.",
+                    ["CWE-284", "CWE-306"], kind="es_anonymous"))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "medium", "Elasticsearch end-of-life / legacy build", tgt,
@@ -300,9 +452,11 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     targets = es_targets(hosts)
     probes: dict = {}
     state: dict = {}
+    hdrs = _auth_headers(creds)
     if active:
         for t, pr in svcprobe.iter_probe(
-                targets, lambda t: probe(t["ip"], t["port"]),
+                targets,
+                lambda t: probe(t["ip"], t["port"], headers=hdrs or None),
                 budget=budget, progress=progress, state=state):
             if pr:
                 probes[(t["ip"], t["port"])] = pr
