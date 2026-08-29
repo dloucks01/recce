@@ -30,6 +30,7 @@ import socket
 import struct
 
 from ..core import proxy
+from ..core.known_hostkeys import record_hostkey
 from ..core.models import Host, Port
 from .svccommon import finding_builder
 from .svcdetect import parse_product_version
@@ -872,8 +873,18 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 probes[(t["ip"], t["port"])] = pr
                 t["banner"] = pr.get("banner", "")
                 t["softversion"] = pr.get("softversion", "")
-                t["hostkey_fp"] = (pr.get("hostkey_capture") or {}
-                                   ).get("fp_sha256", "")
+                hk_cap = pr.get("hostkey_capture") or {}
+                t["hostkey_fp"] = hk_cap.get("fp_sha256", "")
+                # Feed the cross-service correlator so a fingerprint
+                # observed here can be spotted on other IPs (clone / MitM).
+                if hk_cap.get("fp_sha256"):
+                    for h in hosts:
+                        if h.ip == t["ip"]:
+                            record_hostkey(h, t["ip"], t["port"],
+                                           hk_cap["fp_sha256"],
+                                           hk_cap.get("key_type", ""),
+                                           source="ssh")
+                            break
                 # Best-effort auth-methods probe for a small set of names.
                 users = ["root"]
                 if creds and creds.get("user"):
