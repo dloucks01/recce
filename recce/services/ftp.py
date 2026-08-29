@@ -17,6 +17,7 @@ Airgapped, stdlib only (the write proof uses `ftplib`).
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 import socket
 
@@ -26,6 +27,17 @@ from .svccommon import finding_builder
 _DEFAULT_PORT = 21
 _TIMEOUT = 6.0
 _PROBE_MARK = "recce_ftp_probe"
+
+# HELP / SITE HELP verbs whose mere presence is diagnostic:
+#   CPFR/CPTO  -> ProFTPD mod_copy (CVE-2015-3306 / CVE-2019-12815 class)
+#   EXEC       -> wu-ftpd SITE EXEC (arbitrary command exec once authenticated)
+#   CHMOD/INDEX-> wu-ftpd/ProFTPD extensions that fan out to file-permission / path
+#                 abuse once a session exists.
+_DANGEROUS_SITE_VERBS = ("CPFR", "CPTO", "EXEC", "CHMOD", "INDEX")
+
+# 227 Entering Passive Mode (h1,h2,h3,h4,p1,p2)   RFC 959 Sec 4.1.2.
+_PASV_RX = re.compile(r"227[^(]*\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,"
+                      r"\s*(\d{1,3})\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)")
 
 # Banner substring -> (severity, title, detail, cwes, kind). Deliberately narrow:
 # only the well-known, high-confidence FTP backdoors/RCEs.
@@ -49,6 +61,50 @@ _KNOWN_BAD = [
         ["CWE-78"], "ftp_rce",
         "SITE CPFR/CPTO via the public CVE-2015-3306 PoC, or metasploit "
         "proftpd_modcopy_exec")),
+    # ProFTPD mod_copy re-break in the 1.3.6 / 1.3.7 line -- same CPFR/CPTO
+    # unauth-file-copy primitive, different CVE (2019-12815). (?!\d) prevents
+    # a hypothetical '1.3.71' from being mis-classified as vulnerable.
+    (re.compile(r"ProFTPD\s+1\.3\.[67](?!\d)", re.I), (
+        "high", "ProFTPD mod_copy RCE re-break (CVE-2019-12815)",
+        "ProFTPD 1.3.6 / 1.3.7 re-introduced the SITE CPFR/CPTO unauthenticated "
+        "file-copy path via mod_copy (CVE-2019-12815). Copying into a web-served "
+        "path yields immediate RCE where the FTP root overlaps a web root.",
+        ["CWE-78", "CWE-284"], "ftp_rce",
+        "SITE CPFR/CPTO via the public CVE-2019-12815 PoC")),
+    # CrushFTP < 10.7.1 / < 11.1.0 -- unauth VFS escape into server-side template
+    # engine leading to RCE. Regex anchors on the specific vulnerable ranges so a
+    # patched banner ('CrushFTP 10.7.1' / '11.1.0') does NOT match.
+    (re.compile(r"CrushFTP.*?(?<![\d.])(?:10\.[0-6]\.\d|10\.7\.0|11\.0\.\d)(?!\d)",
+                re.I), (
+        "critical", "CrushFTP VFS escape RCE (CVE-2024-4040)",
+        "CrushFTP versions prior to 10.7.1 / 11.1.0 allow an unauthenticated VFS "
+        "escape leading to server-side template injection and remote code execution "
+        "(CVE-2024-4040) -- observed in the wild.",
+        ["CWE-22", "CWE-94"], "ftp_rce",
+        "public CVE-2024-4040 PoC (GET / with a crafted template; then chain "
+        "to RCE). Also test CVE-2023-43177 against the same build.")),
+    # SolarWinds Serv-U <= 15.2.3 (pre hotfix 2) -- memory-corruption RCE in the
+    # SSH sub-service. Anchored to the vulnerable ranges only.
+    (re.compile(r"Serv-U.*?(?<![\d.])(?:1[0-4]\.\d|15\.[01]\.\d|15\.2\.[0-2])(?!\d)",
+                re.I), (
+        "critical", "SolarWinds Serv-U pre-auth RCE (CVE-2021-35211)",
+        "Serv-U versions prior to 15.2.3 hotfix 2 contain a memory-corruption "
+        "vulnerability in the SSH sub-service permitting unauthenticated remote "
+        "code execution (CVE-2021-35211). Older builds are also vulnerable to "
+        "CVE-2024-28995 path traversal.",
+        ["CWE-787"], "ftp_rce",
+        "public CVE-2021-35211 exploit against the SSH sub-service; probe "
+        "CVE-2024-28995 with an encoded '..' in the file download URL.")),
+    # Progress WS_FTP Server -- unauth deserialisation in the Ad Hoc Transfer
+    # module (CVE-2023-40044). Vulnerable prior to 8.7.4 / 8.8.2.
+    (re.compile(r"WS_FTP.*?(?<![\d.])(?:[1-7]\.\d|8\.[0-6]\.\d|8\.7\.[0-3]|8\.8\.[01])"
+                r"(?!\d)", re.I), (
+        "critical", "Progress WS_FTP Server pre-auth RCE (CVE-2023-40044)",
+        "Progress WS_FTP Server versions prior to 8.7.4 / 8.8.2 expose an "
+        "unauthenticated .NET deserialisation flaw in the Ad Hoc Transfer module "
+        "yielding remote code execution (CVE-2023-40044).",
+        ["CWE-502"], "ftp_rce",
+        "public CVE-2023-40044 PoC / metasploit exploit/windows/ftp/ws_ftp_rce")),
 ]
 
 
@@ -119,11 +175,46 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
             sm = re.search(r"215[ -](.*)", _cmd(s, "SYST", timeout))
             if sm:
                 syst = sm.group(1).strip()
+            # HELP + SITE HELP fingerprint the vendor even when the 220 banner has
+            # been stripped, and enumerate dangerous SITE verbs (CPFR/CPTO indicates
+            # ProFTPD mod_copy; EXEC indicates wu-ftpd). Both are read-only.
+            help_body = _cmd(s, "HELP", timeout)
+            site_help_body = _cmd(s, "SITE HELP", timeout)
+            site_verbs = _extract_site_verbs(help_body + " " + site_help_body)
+            # PASV -- the 227 reply encodes the server-chosen data-channel IP; when
+            # the server sits behind NAT the returned IP is often RFC1918, leaking
+            # internal topology. Send it late (some servers require login first;
+            # the 530 that comes back is fine -- we only look for the 227 shape).
+            pasv_ip = _parse_pasv_ip(_cmd(s, "PASV", timeout))
             _cmd(s, "QUIT", timeout)
             return {"ip": ip, "port": port, "banner": banner, "anonymous": anon,
-                    "auth_tls": auth_tls, "syst": syst}
+                    "auth_tls": auth_tls, "syst": syst,
+                    "pasv_ip": pasv_ip, "site_verbs": site_verbs}
     except OSError:
         return None
+
+
+def _parse_pasv_ip(reply: str) -> str:
+    """Extract 'h1.h2.h3.h4' from a '227 Entering Passive Mode (a,b,c,d,p1,p2)'
+    reply. Returns '' when the reply is not a well-formed 227."""
+    m = _PASV_RX.search(reply or "")
+    if not m:
+        return ""
+    try:
+        octets = [int(m.group(i)) for i in (1, 2, 3, 4)]
+    except ValueError:
+        return ""
+    if any(o < 0 or o > 255 for o in octets):
+        return ""
+    return "{}.{}.{}.{}".format(*octets)
+
+
+def _extract_site_verbs(text: str) -> list[str]:
+    """Return the subset of _DANGEROUS_SITE_VERBS mentioned in HELP/SITE HELP output."""
+    if not text:
+        return []
+    up = text.upper()
+    return [v for v in _DANGEROUS_SITE_VERBS if re.search(rf"\b{v}\b", up)]
 
 
 def ftp_targets(hosts: list[Host]) -> list[dict]:
@@ -167,6 +258,23 @@ _NARRATIVE = {
         "This FTP build exposes an unauthenticated remote-code-execution path (e.g. "
         "ProFTPD mod_copy SITE CPFR/CPTO). A remote attacker can copy/execute files "
         "on the server without logging in - verify with the referenced PoC in ROE."),
+    "ftp_pasv_internal_ip": (
+        "The FTP server's 227 PASV reply encodes the data-channel IP in its "
+        "(h1,h2,h3,h4,p1,p2) tuple. When that address differs from the control-"
+        "channel IP AND falls in RFC1918, the server is disclosing its "
+        "behind-NAT / dual-homed address - direct topology intelligence that "
+        "feeds pivot and internal-scan planning."),
+    "ftp_site_copy_exposed": (
+        "The server's HELP / SITE HELP advertises SITE CPFR/CPTO - the ProFTPD "
+        "mod_copy verb pair whose unauthenticated variant is CVE-2015-3306 / "
+        "CVE-2019-12815. Even where anonymous is disabled, any authenticated "
+        "session can copy arbitrary files under the server's UID; combined with "
+        "a web-root overlap this is a direct RCE primitive."),
+    "ftp_extra_commands_disclosed": (
+        "The server's HELP / SITE HELP enumerates dangerous SITE extensions "
+        "(EXEC, CHMOD, INDEX) whose presence maps the server to a specific "
+        "vendor (wu-ftpd / ProFTPD) and points at follow-on primitives an "
+        "authenticated attacker can use for file writes or command execution."),
 }
 
 
@@ -224,6 +332,59 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "ftp-anon -p21 <ip>",
                     "Disable anonymous access unless the content is deliberately public "
                     "and read-only.", ["CWE-306", "CWE-287"], kind="anon_ftp"))
+            # PASV response leaks the server-chosen data-channel IP; when it's
+            # RFC1918 and differs from the control-channel IP, the server is
+            # disclosing internal topology (RFC 959 Sec 4.1.2 / CWE-200).
+            pasv_ip = pr.get("pasv_ip") or ""
+            if pasv_ip and pasv_ip != h.ip:
+                try:
+                    is_private = ipaddress.ip_address(pasv_ip).is_private
+                except ValueError:
+                    is_private = False
+                if is_private:
+                    out.append(_finding(
+                        "medium", "FTP PASV response leaks internal IP", tgt,
+                        f"PASV returned data-channel address {pasv_ip}, distinct "
+                        f"from the control-channel IP {h.ip}. The server is behind "
+                        "NAT or dual-homed and is disclosing its private-network "
+                        "address to any client that issues PASV.",
+                        "ftp",
+                        "ftp <ip> <port>   # after login: 'passive' + 'ls' -- the "
+                        "227 reply carries the leaked IP",
+                        "Rewrite PASV replies at the NAT/edge or bind the server so "
+                        "it returns the routable address (e.g. vsftpd "
+                        "'pasv_address', ProFTPD 'MasqueradeAddress').",
+                        ["CWE-200"], kind="ftp_pasv_internal_ip"))
+            # HELP / SITE HELP dangerous-verb fingerprint. CPFR/CPTO -> mod_copy
+            # (CVE-2015-3306 / CVE-2019-12815 primitive, exposed regardless of what
+            # the 220 banner claims). EXEC/CHMOD/INDEX -> wu-ftpd / ProFTPD
+            # extensions with follow-on file-write / command-exec surface.
+            site_verbs = pr.get("site_verbs") or []
+            if site_verbs:
+                copy_exposed = "CPFR" in site_verbs or "CPTO" in site_verbs
+                out.append(_finding(
+                    "medium",
+                    "FTP SITE mod_copy verbs exposed" if copy_exposed
+                    else "FTP HELP/SITE HELP discloses extra command surface",
+                    tgt,
+                    "HELP / SITE HELP output enumerates dangerous SITE verbs: "
+                    f"{', '.join(site_verbs)}."
+                    + (" CPFR/CPTO indicates the ProFTPD mod_copy module -- an "
+                       "authenticated (and in patched-banner-but-unpatched-code "
+                       "builds, unauthenticated) attacker can copy arbitrary "
+                       "files (CVE-2015-3306 / CVE-2019-12815)." if copy_exposed
+                       else " These verbs point at wu-ftpd / ProFTPD extensions "
+                       "with follow-on file-permission or command-execution "
+                       "primitives once a session is established."),
+                    "ftp",
+                    "ftp <ip> <port>   # then 'quote SITE HELP'; if CPFR listed: "
+                    "'quote SITE CPFR /etc/passwd' + 'quote SITE CPTO /tmp/out'",
+                    "Restrict SITE verbs in the FTP daemon config (ProFTPD: "
+                    "unload mod_copy or gate <Limit SITE_CPFR SITE_CPTO>; "
+                    "wu-ftpd: disable SITE EXEC).",
+                    ["CWE-200", "CWE-78"] if copy_exposed else ["CWE-200"],
+                    kind="ftp_site_copy_exposed" if copy_exposed
+                    else "ftp_extra_commands_disclosed"))
             # Not gated on anonymous: an auth-REQUIRED server with no AUTH TLS is the
             # common cleartext-credential case and must still raise this finding.
             if pr.get("auth_tls") is False:
@@ -379,6 +540,8 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["anonymous"] = pr.get("anonymous", False)
                 t["auth_tls"] = pr.get("auth_tls")
                 t["syst"] = pr.get("syst", "")
+                t["pasv_ip"] = pr.get("pasv_ip", "")
+                t["site_verbs"] = pr.get("site_verbs", [])
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": credfree_runbook(t["ip"], t["port"]),
