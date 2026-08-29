@@ -63,6 +63,16 @@ def _build_read_device_id(unit_id: int = 1, tid: int = 2) -> bytes:
     return struct.pack(">HHHB", tid, 0, length, unit_id) + pdu
 
 
+def _build_report_slave_id(unit_id: int = 1, tid: int = 3) -> bytes:
+    """Function 0x11 Report Server ID (MODBUS App Protocol v1.1b3 §6.14).
+    Serial-legacy but supported by many bridged stacks (Schneider Modicon,
+    Allen-Bradley, older SIMATIC). Response body is vendor-specific but the
+    RunIndicator byte (0x00=OFF, 0xFF=ON) is standardised."""
+    pdu = struct.pack(">B", 0x11)
+    length = len(pdu) + 1
+    return struct.pack(">HHHB", tid, 0, length, unit_id) + pdu
+
+
 def _parse_read_registers_response(data: bytes) -> list[int] | None:
     """Parse the Read Holding Registers response. Returns list of register
     values, or None on any parse failure / exception response."""
@@ -112,11 +122,95 @@ def _parse_device_id_response(data: bytes) -> dict:
     return out
 
 
-def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
-    """Return {reachable, registers, vendor, product, revision}. Reachable=True
-    means we got a valid Modbus response — not just a TCP connect."""
+def _parse_report_slave_id(data: bytes) -> dict:
+    """Parse a Function 0x11 Report Server ID response into {slave_id_hex,
+    run_indicator}. The body is vendor-defined so we surface both a hex dump
+    (bounded) and the standardised RunIndicator byte when present.
+    Layout: MBAP(7) fn(1)=0x11 byte_count(1) server_id(byte_count-1 bytes)
+    run_indicator(1)."""
+    out = {"slave_id_hex": "", "run_indicator": ""}
+    if len(data) < 10:
+        return out
+    if data[7] != 0x11:                       # includes exception (0x91) → skip
+        return out
+    byte_count = data[8]
+    body = data[9:9 + byte_count]
+    if len(body) != byte_count or byte_count < 2:
+        return out
+    server_id = body[:-1]
+    run_byte = body[-1]
+    out["slave_id_hex"] = server_id[:32].hex()
+    if run_byte == 0xFF:
+        out["run_indicator"] = "ON"
+    elif run_byte == 0x00:
+        out["run_indicator"] = "OFF"
+    return out
+
+
+# Bounded unit-ID sweep. Modbus/TCP-to-RTU gateways route by Unit-ID
+# (MODBUS Messaging on TCP/IP v1.0b §3.1.3); a sweep discovers downstream
+# serial slaves. Kept short (16 IDs, 0.4s each) so total added time is
+# bounded to ~6.4s in the worst case and cannot blow the scanner budget.
+# Full 0-247 range is deferred to a future opt-in mode.
+_SWEEP_UNIT_IDS = tuple(range(2, 16))
+_SWEEP_TIMEOUT = 0.4
+
+
+def _sweep_units(ip: str, port: int, skip: set[int],
+                 timeout: float = _SWEEP_TIMEOUT) -> list[int]:
+    """Probe additional unit IDs to discover downstream slaves behind a
+    TCP-to-RTU gateway. Each ID gets its own short-lived connection so a
+    single hang doesn't stall the sweep. Returns responding unit IDs
+    (excluding those in `skip` — already tried by the primary probe)."""
+    found: list[int] = []
+    tid = 100
+    for uid in _SWEEP_UNIT_IDS:
+        if uid in skip:
+            continue
+        tid += 1
+        try:
+            with socket.create_connection((ip, port), timeout=timeout) as s:
+                s.settimeout(timeout)
+                s.sendall(_build_read_holding_registers(unit_id=uid, tid=tid))
+                data = s.recv(4096)
+        except OSError:
+            continue
+        if len(data) < 8:
+            continue
+        # Any well-formed Modbus response (normal OR exception) proves the
+        # unit exists on the bus; a gateway with no downstream slave at that
+        # ID typically returns Gateway Target Device Failed to Respond
+        # (exception 0x0B) — which we treat as "no unit here", not presence.
+        try:
+            _tid, proto, _length, resp_unit = struct.unpack(">HHHB", data[:7])
+        except struct.error:
+            continue
+        if proto != 0 or resp_unit != uid:
+            continue
+        fn = data[7]
+        if fn & 0x80:
+            # Exception. 0x0B = Gateway Target Device Failed to Respond →
+            # unit is absent behind the gateway. Any other exception (e.g.
+            # 0x01 Illegal Function, 0x02 Illegal Data Address) came from a
+            # real slave that just didn't like our request — presence proof.
+            if len(data) >= 9 and data[8] == 0x0B:
+                continue
+            found.append(uid)
+        elif fn == 0x03:
+            found.append(uid)
+    return found
+
+
+def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
+          sweep_units: bool = True) -> dict:
+    """Return {reachable, registers, vendor, product, revision, slave_id_hex,
+    run_indicator, units}. Reachable=True means we got a valid Modbus response
+    — not just a TCP connect. `units` lists responding unit IDs (primary +
+    bounded sweep) when the endpoint is reached; when it contains more than
+    one entry the endpoint is likely a TCP-to-RTU gateway."""
     out = {"reachable": False, "registers": [], "vendor": "", "product": "",
-           "revision": ""}
+           "revision": "", "slave_id_hex": "", "run_indicator": "",
+           "units": []}
     try:
         with socket.create_connection((ip, port), timeout=timeout) as s:
             s.settimeout(timeout)
@@ -136,13 +230,32 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
                     break
             if not out["reachable"]:
                 return out
+            out["units"] = [winning_unit]
             # Now attempt device identification (may return exception, that's fine).
             s.sendall(_build_read_device_id(unit_id=winning_unit))
             data = s.recv(4096)
             devid = _parse_device_id_response(data)
             out.update(devid)
+            # Report Server ID (function 0x11) — vendor-specific body +
+            # RunIndicator byte. Legacy but still answered by Modicon,
+            # Allen-Bradley, and many bridged stacks where 0x2B is absent.
+            try:
+                s.sendall(_build_report_slave_id(unit_id=winning_unit))
+                data = s.recv(4096)
+                out.update(_parse_report_slave_id(data))
+            except OSError:
+                pass
     except OSError:
         pass
+    # Bounded unit-ID sweep — runs only when the primary probe reached the
+    # device, and uses fresh short-lived connections so a hung slave can't
+    # stall the scanner.
+    if out["reachable"] and sweep_units:
+        tried = {1, 0, 255}
+        extras = _sweep_units(ip, port, skip=tried, timeout=min(_SWEEP_TIMEOUT, timeout))
+        for uid in extras:
+            if uid not in out["units"]:
+                out["units"].append(uid)
     return out
 
 
@@ -192,15 +305,43 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "functions (0x05, 0x06, 0x0F, 0x10) from untrusted networks.",
                 ["CWE-306", "CWE-923", "CWE-284"], kind="modbus_reachable"))
             if pr.get("vendor") or pr.get("product"):
+                extra = ""
+                if pr.get("run_indicator"):
+                    extra += f"  run_indicator={pr['run_indicator']}"
+                if pr.get("slave_id_hex"):
+                    extra += f"  slave_id={pr['slave_id_hex']}"
                 out.append(_finding(
                     "info", "Modbus device identification extracted", tgt,
                     f"vendor={pr.get('vendor','?')!r}  product={pr.get('product','?')!r}  "
-                    f"revision={pr.get('revision','?')!r}. This fingerprint helps "
-                    f"cross-reference vendor-specific CVEs and default credentials "
-                    f"for HMI/PLC firmware.",
+                    f"revision={pr.get('revision','?')!r}.{extra} This fingerprint "
+                    f"helps cross-reference vendor-specific CVEs and default "
+                    f"credentials for HMI/PLC firmware.",
                     f"modpoll -m tcp -a 1 {h.ip}",
                     "Informational — pairs with the modbus_reachable finding above.",
                     [], kind="modbus_device_id"))
+            units = pr.get("units") or []
+            if len(units) > 1:
+                # Multiple responding unit IDs on one TCP endpoint → almost
+                # certainly a Modbus/TCP-to-RTU gateway routing to serial
+                # slaves (Modbus Messaging on TCP/IP v1.0b §3.1.3). Each ID
+                # is a distinct downstream device — an attacker who reaches
+                # the gateway reaches every one of them.
+                unit_list = ", ".join(str(u) for u in units)
+                out.append(_finding(
+                    "high",
+                    "Modbus/TCP-to-RTU gateway — downstream units reachable", tgt,
+                    f"{len(units)} distinct Modbus unit IDs answered on this "
+                    f"endpoint: {unit_list}. This host is a gateway/bridge that "
+                    f"exposes downstream serial slaves. Each unit ID is a "
+                    f"separately addressable PLC/RTU behind the gateway, all of "
+                    f"which inherit whatever access the TCP endpoint grants.",
+                    f"for u in {unit_list.replace(',', '')}; do "
+                    f"modpoll -m tcp -a $u -r 1 -c 1 {h.ip}; done",
+                    "Restrict the gateway's unit-ID routing to only the slaves "
+                    "that must be reachable from this network position; front "
+                    "the gateway with a Modbus-aware firewall that filters by "
+                    "unit ID as well as by source IP.",
+                    ["CWE-668", "CWE-778"], kind="modbus_gateway_units"))
     return out
 
 
@@ -210,6 +351,10 @@ def runbook(ip: str, port: int) -> list[dict]:
          "cmd": f"modpoll -m tcp -a 1 -r 1 -c 10 -p {port} {ip}"},
         {"step": "Read device identification (function 0x2B)",
          "cmd": f"mbtget -i {ip} -p {port} -u 1 -d 1"},
+        {"step": "Report Server ID (function 0x11)",
+         "cmd": f"mbtget -i {ip} -p {port} -u 1 -R"},
+        {"step": "Sweep unit IDs 1-16 to enumerate gateway downstream slaves",
+         "cmd": f"for u in $(seq 1 16); do modpoll -0 -1 -m tcp -a $u -r 1 -c 1 -p {port} {ip}; done"},
     ]
 
 
