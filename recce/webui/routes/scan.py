@@ -35,6 +35,16 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
                   "run `enum --all-ports` or scan 502 explicitly.",
         "winrm": "WinRM is 5985/5986 — outside the default top-ports on some profiles; "
                  "try `enum --all-ports` if the sweep missed it.",
+        "netbios": "NetBIOS Name Service is 137/udp — run `enum -U` (UDP sweep) first.",
+        "tftp": "TFTP is 69/udp — run `enum -U` (UDP sweep) first.",
+        "ipp": "IPP/CUPS is 631/tcp — usually caught by the default sweep; try "
+               "`enum` if not already run.",
+        "x11": "X11 is 6000-6009/tcp — outside the default top-ports; try "
+               "`enum --all-ports` or scan explicitly.",
+        "sip": "SIP runs on both 5060/udp and 5060/tcp — a TCP-only sweep will miss "
+               "many PBXes; run `enum -U` too.",
+        "rservices": "The r-services (512/513/514) are outside the default sweep on "
+                     "most profiles; scan explicitly if you suspect legacy Unix.",
     }
 
     @app.get("/api/scan/context")

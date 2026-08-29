@@ -1166,6 +1166,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_t4("ntp",             "NTP 123/udp: monlist amplification + client disclosure (CVE-2013-5211), mode-6 readvar OS/version leak, peer list, Kerberos-breaking clock skew")
     _add_t4("msrpc",           "MSRPC 135/tcp: endpoint mapper dump + IOXIDResolver interface leak, PetitPotam/PrinterBug/DFSCoerce coercion targets")
     _add_t4("winrm",           "WinRM 5985/5986: unauth WSMan Identify (version + product), auth mechanisms advertised, TLS posture on 5986")
+    _add_t4("netbios",         "NetBIOS Name Service 137/udp: node-status — hostname, workgroup/domain, DC role, interface MAC — unauth")
+    _add_t4("tftp",            "TFTP 69/udp: unauth read of canonical vendor filenames (running-config, IOS images, phone provisioning)")
+    _add_t4("ipp",             "IPP / CUPS 631/tcp: unauth CUPS-Get-Printers + CVE-2024-47176 (foomatic RCE chain) reachability")
+    _add_t4("x11",             "X11 6000-6009/tcp: initial handshake — accepted = full screenshot/keylog/input access to the desktop")
+    _add_t4("sip",             "SIP 5060: OPTIONS fingerprint — Server/User-Agent + realm disclosure, methods, PBX identification")
+    _add_t4("rservices",       "Legacy Berkeley r-services 512/513/514: cleartext IP-trust auth — flagged categorically when present")
 
     sk = sub.add_parser("fieldkit-export",
                         help="export the engagement as a seed for the fieldkit "

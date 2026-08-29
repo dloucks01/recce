@@ -1364,6 +1364,8 @@ _UNAUTH_SWEEP = [
     ("vnc", "cmd_vnc"), ("modbus", "cmd_modbus"),
     ("rdp", "cmd_rdp"), ("ipmi", "cmd_ipmi"), ("ntp", "cmd_ntp"),
     ("msrpc", "cmd_msrpc"), ("winrm", "cmd_winrm"),
+    ("netbios", "cmd_netbios"), ("tftp", "cmd_tftp"),
+    ("ipp", "cmd_ipp"), ("sip", "cmd_sip"),
     # Post-sweep: mine whatever landed under evidence/ during the sweep
     # (auto-collected loot from container escapes, credential-exposed
     # configs, .git dumps that path_enum pulled locally, etc.) into

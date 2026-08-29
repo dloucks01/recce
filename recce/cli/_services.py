@@ -21,7 +21,8 @@ __all__ = ['cmd_web', 'cmd_smb', 'cmd_ftp', 'cmd_docker', 'cmd_kubernetes', 'cmd
            # T4 scanner-expansion additions:
            'cmd_zookeeper', 'cmd_kafka', 'cmd_etcd', 'cmd_consul', 'cmd_nomad',
            'cmd_prometheus', 'cmd_docker_registry', 'cmd_vnc', 'cmd_modbus',
-           'cmd_rdp', 'cmd_ipmi', 'cmd_ntp', 'cmd_msrpc', 'cmd_winrm']
+           'cmd_rdp', 'cmd_ipmi', 'cmd_ntp', 'cmd_msrpc', 'cmd_winrm',
+           'cmd_netbios', 'cmd_tftp', 'cmd_ipp', 'cmd_x11', 'cmd_sip', 'cmd_rservices']
 
 
 def cmd_web(args: argparse.Namespace) -> int:
@@ -847,3 +848,70 @@ def cmd_winrm(args: argparse.Namespace) -> int:
         no_targets="[!] No WinRM endpoints in the datastore (5985/5986). "
                    "Run `enum` against the Windows hosts first.",
         fmt=_fmt_simple(lambda t, a: (','.join(t.get('auth') or []) or '?')))
+
+
+def cmd_netbios(args: argparse.Namespace) -> int:
+    """NBNS 137/udp: node-status query — hostname / workgroup / domain / MAC
+    disclosure without authentication."""
+    return _run_service_scan(
+        args, module="netbios", source="netbios", label="NetBIOS",
+        noun="NetBIOS name service(s)",
+        no_targets="[!] No NetBIOS endpoints in the datastore (port 137/udp). "
+                   "Run `enum -U` (UDP sweep) first.",
+        fmt=_fmt_simple(lambda t, a: t.get('hostname') or ('dc' if t.get('is_dc') else '?')),
+        udp=True)
+
+
+def cmd_tftp(args: argparse.Namespace) -> int:
+    """TFTP 69/udp: unauth file read of common vendor config filenames
+    (Cisco running-config, IOS images, phone provisioning bundles)."""
+    return _run_service_scan(
+        args, module="tftp", source="tftp", label="TFTP",
+        noun="TFTP server(s)",
+        no_targets="[!] No TFTP endpoints in the datastore (port 69/udp). "
+                   "Run `enum -U` (UDP sweep) first.",
+        fmt=_fmt_simple(lambda t, a: f"{t.get('readable',0)} readable"),
+        udp=True)
+
+
+def cmd_ipp(args: argparse.Namespace) -> int:
+    """IPP / CUPS 631/tcp: unauth printer enumeration + CVE-2024-47176
+    (foomatic RCE chain) reachability check."""
+    return _run_service_scan(
+        args, module="ipp", source="ipp", label="IPP",
+        noun="IPP/CUPS endpoint(s)",
+        no_targets="[!] No IPP endpoints in the datastore (port 631). Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: ('cups' if t.get('is_cups') else '?') +
+                                     f" {t.get('printers',0)} printers"))
+
+
+def cmd_x11(args: argparse.Namespace) -> int:
+    """X11 6000-6009/tcp: unauthenticated display handshake — screenshot /
+    keylog / input-injection surface when open."""
+    return _run_service_scan(
+        args, module="x11", source="x11", label="X11",
+        noun="X11 display(s)",
+        no_targets="[!] No X11 displays in the datastore (6000-6009). Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: 'OPEN' if t.get('accepted') else 'auth-required'))
+
+
+def cmd_sip(args: argparse.Namespace) -> int:
+    """SIP 5060: OPTIONS fingerprint — Server/User-Agent + realm disclosure,
+    entry point for extension enumeration + toll-fraud audit."""
+    return _run_service_scan(
+        args, module="sip", source="sip", label="SIP",
+        noun="SIP endpoint(s)",
+        no_targets="[!] No SIP endpoints in the datastore (port 5060). "
+                   "Run `enum` (and/or `enum -U`) first — SIP runs on both UDP and TCP.",
+        fmt=_fmt_simple(lambda t, a: t.get('server') or '?'))
+
+
+def cmd_rservices(args: argparse.Namespace) -> int:
+    """Legacy r-services (512/rexec, 513/rlogin, 514/rsh): cleartext IP-trust
+    authentication — flagged categorically when present in 2025."""
+    return _run_service_scan(
+        args, module="rservices", source="rservices", label="r-services",
+        noun="legacy r-service(s)",
+        no_targets="[!] No r-services in the datastore (ports 512/513/514). "
+                   "Run `enum` first.",
+        fmt=_fmt_simple(lambda t, a: t.get('service') or '?'))
