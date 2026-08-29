@@ -242,7 +242,8 @@ def _peer_cert(host_ip: str, port: Port):
         return None, "", verify_error
 
 
-def tls_findings(host_ip: str, port: Port) -> list[Vuln]:
+def tls_findings(host_ip: str, port: Port,
+                 known_names: list[str] | None = None) -> list[Vuln]:
     if not _is_tls(port):
         return []
     findings: list[Vuln] = []
@@ -273,6 +274,34 @@ def tls_findings(host_ip: str, port: Port) -> list[Vuln]:
                 host_ip, port, "tls-cert", "low", "TLS certificate not trusted",
                 ["CWE-295"], verify_error,
                 "Ensure the presented chain is complete and CA-trusted."))
+
+    if isinstance(cert, dict) and known_names:
+        # Certificate SAN coverage against every hostname recce has learned
+        # for this host from OTHER sources (LDAP dnsHostName, PTR, NTLM,
+        # SMB, on-target enum). If none of those names appear in the SAN,
+        # an attacker able to route traffic for that name can present a
+        # substituted certificate without triggering client-side warnings
+        # against THIS server — the operator's own PKI thinks the name
+        # doesn't exist here. Skip when we have no learned names (the
+        # default hostname-mismatch handling above already covers the
+        # IP-in-URL case).
+        from ..core.known_hostnames import cert_covers
+        sans = [v for typ, v in (cert.get("subjectAltName") or [])
+                if typ.lower() == "dns"]
+        if sans:
+            uncovered = [n for n in known_names if not cert_covers(sans, n)]
+            if uncovered:
+                findings.append(_mk(
+                    host_ip, port, "tls-cert", "info",
+                    "TLS certificate does not cover known hostname(s)",
+                    ["CWE-297", "CWE-295"],
+                    f"SAN: {', '.join(sans[:5])}. "
+                    f"Uncovered: {', '.join(uncovered[:5])}",
+                    "Re-issue the certificate with the missing name(s) in the "
+                    "SAN, or move the name(s) to a service that presents a "
+                    "matching cert. An attacker able to route traffic for an "
+                    "uncovered name can present a substituted certificate "
+                    "without detection."))
 
     if isinstance(cert, dict):
         not_after = cert.get("notAfter")
@@ -350,14 +379,15 @@ def _accepts_protocol(host_ip: str, portid: int, version) -> bool:
 
 # --- orchestration --------------------------------------------------------------
 
-def probe_port(host_ip: str, port: Port) -> list[Vuln]:
+def probe_port(host_ip: str, port: Port,
+               known_names: list[str] | None = None) -> list[Vuln]:
     if not port.is_open:
         return []
     findings: list[Vuln] = []
     if _is_http(port):
         findings.extend(http_findings(host_ip, port))
     if _is_tls(port):
-        findings.extend(tls_findings(host_ip, port))
+        findings.extend(tls_findings(host_ip, port, known_names=known_names))
     return findings
 
 
@@ -367,10 +397,12 @@ def probe_host(host: Host) -> int:
     Returns the number of new findings added. Deduped against existing vulns by
     Vuln.key so re-runs are idempotent.
     """
+    from ..core.known_hostnames import hostnames_for
+    known_names = hostnames_for(host, only_fqdn=True)
     existing = {v.key for v in host.vulns}
     added = 0
     for port in host.open_ports:
-        for vuln in probe_port(host.ip, port):
+        for vuln in probe_port(host.ip, port, known_names=known_names):
             if vuln.key in existing:
                 continue
             existing.add(vuln.key)

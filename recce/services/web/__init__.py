@@ -125,7 +125,9 @@ from .discover import *  # noqa: F401,F403
 def scan_endpoint(ip: str, port: Port, active: bool = True,
                   auth: dict | None = None, creds: bool = False,
                   host_hint: str = "", upload_shell: bool = False,
-                  smuggle: bool = False) -> tuple[dict, list[Vuln]]:
+                  smuggle: bool = False,
+                  known_names: list[str] | None = None,
+                  ) -> tuple[dict, list[Vuln]]:
     """Deep, non-intrusive scan of one web endpoint. Returns (profile, [Vuln]).
     `auth` (Cookie/Authorization headers) runs the scan as an authenticated user;
     `creds` opts into a tiny, lockout-aware default-credential probe. `upload_shell`
@@ -154,7 +156,7 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     # Security headers + TLS (reuse the existing stdlib probes).
     findings.extend(probes.http_findings(ip, port))
     if probes._is_tls(port):
-        findings.extend(probes.tls_findings(ip, port))
+        findings.extend(probes.tls_findings(ip, port, known_names=known_names))
     # JWT weaknesses read from the root response. Passively we flag the algorithm;
     # actively we forge an alg:none token and replay it to prove acceptance.
     if root:
@@ -384,6 +386,8 @@ def scan_host(host: Host, active: bool = True, auth: dict | None = None,
               smuggle: bool = False) -> list[dict]:
     """Scan every web endpoint on a host, appending deduped Vulns. Returns the web
     endpoint profiles (for the Web sheet)."""
+    from ...core.known_hostnames import hostnames_for
+    known_names = hostnames_for(host, only_fqdn=True)
     existing = {v.key for v in host.vulns}
     profiles: list[dict] = []
     for port in host.open_ports:
@@ -391,7 +395,8 @@ def scan_host(host: Host, active: bool = True, auth: dict | None = None,
             continue
         profile, findings = scan_endpoint(host.ip, port, active=active, auth=auth, creds=creds,
                                           host_hint=host.hostname or "",
-                                          upload_shell=upload_shell, smuggle=smuggle)
+                                          upload_shell=upload_shell, smuggle=smuggle,
+                                          known_names=known_names)
         for v in findings:
             if v.key in existing:
                 continue
