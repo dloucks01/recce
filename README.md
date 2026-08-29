@@ -53,7 +53,7 @@ Open `eng/enumeration.xlsx` and work the Checklist tab. Full walkthrough in [QUI
 | [CHEATSHEET.html](CHEATSHEET.html) | Printable one-page field reference |
 | [docs/](docs/README.md) | Full reference: commands, phases, services, design |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Symptom, cause, fix — per phase |
-| [INTEGRATION.md](INTEGRATION.md) | Fieldkit round-trip (enumerate here, exploit there, fold back) |
+| [INTEGRATION.md](INTEGRATION.md) | Fieldkit round-trip (recce ranks, fieldkit proves past the trigger, findings fold back) |
 
 ## Layout
 

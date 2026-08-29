@@ -18,14 +18,14 @@ The writer is **pure stdlib** (`.docx` = zip of XML) -- no python-docx needed, r
 
 ## fieldkit integration (`fieldkit-export` / `fieldkit-import`)
 
-Round-trips with [**fieldkit**](https://github.com/dloucks01/fieldkit) -- enumeration seeds exploitation, proven findings flow back:
+Round-trips with [**fieldkit**](https://github.com/dloucks01/fieldkit) -- recce ranks and hands off a prioritized work-queue; fieldkit executes past the trigger and proves compromise; proven findings flow back:
 
 ```bash
 recce fieldkit-export -o eng                     # -> eng/fieldkit/ : attack plan fieldkit consumes
 recce fieldkit-import recce_findings.json -o eng  # proven findings -> Vulnerabilities sheet + report
 ```
 
-`fieldkit-export` writes a severity-ranked `FIELDKIT.md` plan plus machine feeds (`recce-bridge.json`, `ports.gnmap`, `smb-null.txt`) naming the exact fieldkit generator per host. `fieldkit-import` folds proven findings back as **confirmed** vulnerabilities (source `fieldkit`), marks hosts *access-gained* -- idempotent. Both stdlib-only / airgap-safe. Full guide: **[INTEGRATION.md](../../INTEGRATION.md)**.
+`fieldkit-export` writes a severity-ranked `FIELDKIT.md` plan plus machine feeds (`recce-bridge.json` -- the rich per-host confirmed-findings feed fieldkit ingests as its exploitability axis; `ports.gnmap`, `smb-null.txt`) naming the exact fieldkit generator per host. `fieldkit-import` folds proven findings back as **confirmed** vulnerabilities (source `fieldkit`), marks hosts *access-gained* -- idempotent. Both stdlib-only / airgap-safe. Full guide: **[INTEGRATION.md](../../INTEGRATION.md)**.
 
 ## Output (`<output-dir>/`)
 
