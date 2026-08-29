@@ -74,6 +74,61 @@ PORT_NAMES: dict[int, tuple[str, str]] = {
     9300: ("elasticsearch", "Elasticsearch (transport)"),
     5432: ("postgresql", "PostgreSQL"),
     1521: ("oracle-tns", "Oracle TNS listener"),
+    # Storage / block / backup:
+    3260: ("iscsi", "iSCSI target portal (RFC 7143)"),
+    10809: ("nbd", "Network Block Device"),
+    10000: ("ndmp", "Network Data Management Protocol (backup)"),
+    # OT / ICS:
+    47808: ("bacnet", "BACnet/IP building automation (ASHRAE 135)"),
+    4840: ("opcua", "OPC UA Binary"),
+    4843: ("opcua-tls", "OPC UA over TLS (opc.tcps)"),
+    20000: ("dnp3", "DNP3 SCADA outstation (IEEE 1815)"),
+    2404: ("iec-104", "IEC 60870-5-104 SCADA"),
+    44818: ("ethernetip", "ODVA EtherNet/IP / CIP"),
+    2221: ("cip-security", "CIP Security (DTLS/TLS)"),
+    # IoT / messaging:
+    1883: ("mqtt", "MQTT broker (plaintext, OASIS 3.1.1/v5)"),
+    8883: ("secure-mqtt", "MQTT broker (TLS)"),
+    1884: ("mqtt", "MQTT broker (Mosquitto WSS convention)"),
+    5683: ("coap", "CoAP endpoint (RFC 7252, plaintext UDP)"),
+    5684: ("coaps", "CoAP over DTLS (RFC 7252 §9)"),
+    # Media / streaming:
+    554: ("rtsp", "Real-Time Streaming Protocol"),
+    8554: ("rtsp-alt", "RTSP (alt)"),
+    322: ("rtsps", "RTSP over TLS (legacy)"),
+    # Monitoring / management:
+    5666: ("nrpe", "Nagios NRPE agent"),
+    10050: ("zabbix-agent", "Zabbix agent — passive-check listener (ZBXD)"),
+    10051: ("zabbix-trapper", "Zabbix server/proxy trapper — active checks & auto-registration"),
+    8200: ("vault", "HashiCorp Vault API"),
+    8201: ("vault-cluster", "Vault cluster/replication"),
+    # Virtualization / vSphere:
+    902: ("vmware-auth", "VMware host agent (hostd / NFC)"),
+    5480: ("vmware-vami", "vCenter Server Appliance VAMI"),
+    9443: ("vsphere-client", "vSphere Client / Analytics Service"),
+    # Printing:
+    515: ("lpd", "Line Printer Daemon (RFC 1179)"),
+    # Routing:
+    179: ("bgp", "Border Gateway Protocol (RFC 4271)"),
+    # Service discovery / SIP-adjacent:
+    427: ("slp", "Service Location Protocol"),
+    3478: ("stun", "STUN / TURN (unencrypted)"),
+    5349: ("turns", "STUN/TURN over TLS"),
+    5350: ("nat-pmp-alt", "NAT-PMP / STUN alt"),
+    # Remote access / display proxies:
+    4822: ("guacd", "Apache Guacamole proxy daemon"),
+    # Chat / directory-adjacent:
+    5222: ("xmpp-client", "XMPP client-to-server"),
+    5223: ("xmpps", "XMPP legacy implicit TLS"),
+    5269: ("xmpp-server", "XMPP server-to-server"),
+    # Games / SLP:
+    25565: ("minecraft", "Minecraft Java Edition server (SLP)"),
+    25575: ("minecraft-rcon", "Minecraft Source-RCON (default)"),
+    # Legacy directory:
+    714: ("ypserv", "NIS ypserv (Sun Yellow Pages)"),
+    715: ("ypbind", "NIS ypbind"),
+    717: ("ypserv", "NIS ypserv (Sun Yellow Pages, TCP)"),
+    834: ("ypserv", "NIS ypserv (Sun)"),
 }
 
 # Dynamic MSRPC range (Windows ephemeral high ports) - anything here with no name
@@ -102,6 +157,56 @@ _SIGNATURES: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"^RTSP/\d"), "rtsp", "RTSP"),
     (re.compile(r"^AMQP\x00"), "amqp", "AMQP / RabbitMQ"),
     (re.compile(r"^\x00\x00\x00.\xffSMB|\xfeSMB"), "smb", "SMB"),
+    # Telnet negotiation (IAC WILL/WONT/DO/DONT/SB) — matches any telnetd greeting.
+    (re.compile(r"^\xff[\xfa\xfb\xfc\xfd\xfe]"), "telnet", "Telnet (IAC negotiation)"),
+    # iSCSI Login Response opcode 0x23.
+    (re.compile(r"^\x23[\x00-\xff]\x00[\x00-\xff]"), "iscsi", "iSCSI target portal"),
+    # OPC UA Binary uacp headers.
+    (re.compile(r"^ACKF"), "opcua", "OPC UA Binary (uacp ACK)"),
+    (re.compile(r"^ERRF"), "opcua", "OPC UA Binary (uacp ERR)"),
+    # DNP3 sync bytes.
+    (re.compile(r"^\x05\x64"), "dnp3", "DNP3 SCADA (IEEE 1815)"),
+    # IEC 60870-5-104 U-format start sequence.
+    (re.compile(r"^\x68\x04[\x07\x0b\x13\x23\x43\x83]\x00\x00\x00"), "iec-104",
+     "IEC 60870-5-104 SCADA"),
+    # ODVA EtherNet/IP encapsulation replies.
+    (re.compile(r"^\x63\x00.{2}", re.DOTALL), "ethernetip",
+     "ODVA EtherNet/IP (List Identity reply)"),
+    (re.compile(r"^\x65\x00\x04\x00", re.DOTALL), "ethernetip",
+     "ODVA EtherNet/IP (RegisterSession reply)"),
+    # MQTT CONNACK (0x20 rl=0x02 flags rc); PUBLISH signature deliberately omitted
+    # since 0x30 is ASCII '0' and would match too many text banners.
+    (re.compile(r"^\x20\x02[\x00\x01][\x00-\x05]"), "mqtt", "MQTT (CONNACK)"),
+    # NRPE v2 response header (packet_version=2, packet_type=response=2).
+    (re.compile(r"^\x00\x02\x00\x02"), "nrpe", "Nagios NRPE"),
+    # Zabbix ZBXD (v1 plaintext / v3 compressed).
+    (re.compile(r"^ZBXD[\x01\x03]"), "zabbix", "Zabbix agent/server (ZBXD)"),
+    # Jenkins JNLP agent listener greeting.
+    (re.compile(r"^Unknown protocol: PROTOCOL_|^Protocol:.*not understood|"
+                r"Supported protocols:.*PROTOCOL_JNLP|Jenkins-Agent-Protocols", re.I),
+     "jnlp-agent", "Jenkins JNLP agent listener"),
+    # LPD ASCII responses.
+    (re.compile(r"^\x00$|^no entries\b|^Printer:\s|^Rank\s+Owner\s+Job\b",
+                re.I | re.M), "lpd", "Line Printer Daemon (RFC 1179)"),
+    # NBD magic (fixed-newstyle and oldstyle).
+    (re.compile(r"^NBDMAGICIHAVEOPT"), "nbd", "NBD (fixed-newstyle)"),
+    (re.compile(r"^NBDMAGIC\x00\x00\x42\x02\x81\x86\x12\x53"), "nbd", "NBD (oldstyle)"),
+    # BGP marker (16 bytes of 0xFF, length, type in 1..5).
+    (re.compile(r"^\xff{16}..[\x01-\x05]"), "bgp", "BGP (marker)"),
+    # Apache Guacamole guacd args frame (VERSION_x_y_z).
+    (re.compile(r"^\d+\.args,\d+\.VERSION_\d+_\d+_\d+,"), "guacamole",
+     "Apache Guacamole proxy daemon"),
+    # XMPP stream open.
+    (re.compile(r"<stream:stream[^>]*xmlns(?::stream)?=[\"']http://etherx\.jabber\.org/streams[\"']"
+                r"|xmlns=[\"']jabber:(?:client|server)[\"']", re.I),
+     "xmpp", "XMPP stream"),
+    # Minecraft Java Edition SLP status response JSON prelude.
+    (re.compile(r'\{"version"\s*:\s*\{[^}]*"protocol"'), "minecraft",
+     "Minecraft Java Edition SLP"),
+    # VMware vSphere SDK banner cues.
+    (re.compile(r"Server:\s*VMware/", re.I), "vsphere-sdk", "VMware vSphere SDK"),
+    (re.compile(r"ID_VC_Welcome|ID_EESX_Welcome"), "vsphere-sdk",
+     "VMware vSphere SDK"),
 ]
 
 
@@ -131,8 +236,16 @@ _PRODUCT_RE: list[re.Pattern] = [
     # MySQL/MariaDB handshake carries the version first: "5.5.5-10.3.34-MariaDB"
     re.compile(r"(?P<ver>\d+\.\d+\.\d+)-(?P<prod>MariaDB|MySQL)", re.I),
     re.compile(r"(?P<prod>MySQL|MariaDB|Percona)[\s/v]*(?P<ver>\d+\.\d+\.\d+)", re.I),
-    # POP3/IMAP greeters
-    re.compile(r"(?P<prod>Dovecot|Courier|Cyrus)(?:[\s/v]+(?P<ver>\d[\w.]*))?", re.I),
+    # POP3/IMAP/mail greeters (broader vendor set feeds the CVE mapper).
+    re.compile(r"(?P<prod>Dovecot|Courier|Cyrus IMAP|Cyrus|qpopper|MDaemon|Zimbra|"
+               r"Microsoft Exchange|IMail|hMailServer)"
+               r"(?:[\s/v]+(?P<ver>\d[\w.]*))?", re.I),
+    # XMPP servers (stream errors + XEP-0092 replies).
+    re.compile(r"(?P<prod>Prosody|ejabberd|Openfire|OpenFire|Tigase)"
+               r"[\s/v]*(?P<ver>\d[\w.]*)", re.I),
+    # Apache Guacamole guacd — product tag on its own; version normalisation for
+    # the VERSION_x_y_z token is left to callers holding the full args frame.
+    re.compile(r"(?P<prod>Apache Guacamole|guacd)(?:[\s/v_]+(?P<ver>\d[\w.]*))?", re.I),
     # HTTP Server header (non-web-classified ports still get product for CVEs)
     re.compile(r"Server:\s*(?P<prod>Apache|nginx|Microsoft-IIS|lighttpd|Jetty|"
                r"Caddy|openresty|Tomcat|Werkzeug|gunicorn|Boa|GoAhead|mini_httpd)"
@@ -165,10 +278,17 @@ _READ = 512
 # appropriate nudge so we actually get bytes back. Everything else we just read
 # (FTP/SMTP/SSH/POP/IMAP/VNC announce themselves on connect).
 _HTTP_NUDGE = b"HEAD / HTTP/1.0\r\n\r\n"
+# Telnet IAC AYT — many telnetds respond with '[Yes]' or a fresh IAC stream.
+_TELNET_AYT = b"\xff\xf6"
+# MQTT v3.1.1 minimal CONNECT (client-id blank, keepalive 30s).
+_MQTT_CONNECT_NUDGE = (bytes([0x10, 0x0c, 0x00, 0x04]) + b"MQTT"
+                       + bytes([0x04, 0x02, 0x00, 0x1e, 0x00, 0x00]))
 _NUDGE = {
     80: _HTTP_NUDGE, 8080: _HTTP_NUDGE, 8000: _HTTP_NUDGE, 8888: _HTTP_NUDGE,
     5000: _HTTP_NUDGE, 3000: _HTTP_NUDGE,
     6379: b"PING\r\n", 11211: b"version\r\n",
+    23: _TELNET_AYT, 2323: _TELNET_AYT, 5555: _TELNET_AYT,
+    1883: _MQTT_CONNECT_NUDGE, 8883: _MQTT_CONNECT_NUDGE, 1884: _MQTT_CONNECT_NUDGE,
 }
 # RDP: an X.224 Connection Request. Cheap, and the response starts 0x03 0x00.
 _RDP_CR = bytes.fromhex("0300000b06e00000000000")

@@ -35,7 +35,8 @@ _NAME = {
 
 # port number -> per-service script (fallback when the service name is unknown).
 _PORT = {
-    21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 465: "smtp", 587: "smtp",
+    21: "ftp", 22: "ssh", 830: "ssh", 2222: "ssh",  # netconf-ssh + common alt SSH port
+    23: "telnet", 25: "smtp", 465: "smtp", 587: "smtp",
     53: "dns", 79: "finger",
     80: "http", 81: "http", 443: "http", 8000: "http", 8008: "http", 8080: "http",
     8081: "http", 8443: "http", 8888: "http",

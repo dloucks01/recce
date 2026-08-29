@@ -54,6 +54,22 @@ _MODULE_PATH = {
     "rdp": "recce.services.rdp", "vnc": "recce.services.vnc",
     "docker_registry": "recce.services.docker_registry",
     "api": "recce.services.api", "web": "recce.services.web",
+    # T5+ scanner-expansion additions (SSH/mail/OT/monitoring/storage/etc.):
+    "ssh": "recce.services.ssh", "telnet": "recce.services.telnet",
+    "imap": "recce.services.imap", "pop3": "recce.services.pop3",
+    "webdav": "recce.services.webdav", "iscsi": "recce.services.iscsi",
+    "bacnet": "recce.services.bacnet", "s7": "recce.services.s7",
+    "opcua": "recce.services.opcua", "dnp3": "recce.services.dnp3",
+    "iec104": "recce.services.iec104", "enip": "recce.services.enip",
+    "mqtt": "recce.services.mqtt", "rtsp": "recce.services.rtsp",
+    "nrpe": "recce.services.nrpe", "zabbix": "recce.services.zabbix",
+    "vault": "recce.services.vault", "vsphere": "recce.services.vsphere",
+    "jenkins-jnlp": "recce.services.jenkins_jnlp",
+    "cups_lpd": "recce.services.cups_lpd", "nbd_ndmp": "recce.services.nbd_ndmp",
+    "slp": "recce.services.slp", "bgp": "recce.services.bgp",
+    "stun": "recce.services.stun_turn", "xmpp": "recce.services.xmpp",
+    "guacamole": "recce.services.guacamole", "minecraft": "recce.services.minecraft",
+    "nisyp": "recce.services.nisyp", "coap": "recce.services.coap",
 }
 
 def _match_one_host(hosts, selector):

@@ -59,7 +59,7 @@ name_to_svc() {
 # --- port number -> script (fallback when the service name is unknown) --------
 port_to_svc() {
   case "$1" in
-    21) echo ftp;; 22) echo ssh;; 23) echo telnet;;
+    21) echo ftp;; 22|830|2222) echo ssh;; 23) echo telnet;;
     25|465|587) echo smtp;; 53) echo dns;; 79) echo finger;;
     80|81|8000|8008|8080|8081|8443|8888|443) echo http;;
     88) echo kerberos;;
