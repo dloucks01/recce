@@ -37,6 +37,37 @@ def header_index(rows, *must_have):
 
 
 class TargetsTest(unittest.TestCase):
+    def test_ipv6_subnet_rejection_is_v6_aware(self):
+        """A /64 is the STANDARD IPv6 subnet, so it is the first thing a v6 user
+        hits. It cannot be enumerated (1.8e19 addresses) and the guard is correct -
+        but it used to answer with IPv4 advice ("split into /16 or narrower"), which
+        is both wrong for v6 and larger than what was rejected."""
+        from recce.core.targets import _expand_token
+        with self.assertRaises(ValueError) as cm:
+            _expand_token("2001:db8::/64")
+        msg = str(cm.exception)
+        self.assertIn("/64", msg)
+        self.assertIn("neighbour discovery", msg)   # names the real workflow
+        self.assertNotIn("/16", msg)                # not the old IPv4 advice
+
+        # v6 prefixes small enough to enumerate still work.
+        self.assertEqual(len(_expand_token("2001:db8::/120")), 255)
+        # and the IPv4 path keeps its own (now corrected) message
+        with self.assertRaises(ValueError) as cm4:
+            _expand_token("10.0.0.0/8")
+        self.assertIn("/24", str(cm4.exception))
+
+    def test_serve_accepts_proxy(self):
+        """webui/routes/manage.py tells the operator to run
+        `recce serve --proxy socks5h://host:port`. serve does not take _add_common,
+        so the flag did not exist and that instruction exited 2."""
+        from recce.cli.parser import build_arg_parser
+        p = build_arg_parser()
+        sub = next(a for a in p._actions if hasattr(a, "_name_parser_map"))
+        ns = sub._name_parser_map["serve"].parse_args(
+            ["--proxy", "socks5h://127.0.0.1:1080", "-o", "/tmp/x"])
+        self.assertEqual(ns.proxy, "socks5h://127.0.0.1:1080")
+
     def test_cidr_and_range(self):
         hosts, sm, _ = load_targets(["10.0.0.0/30", "192.168.1.5-8"])
         self.assertEqual(hosts, ["10.0.0.1", "10.0.0.2", "192.168.1.5",
@@ -2741,6 +2772,45 @@ class KubernetesTest(unittest.TestCase):
                     ports=[Port(portid=10250, state="open"),
                            Port(portid=2379, state="open"),
                            Port(portid=6443, state="open")])
+
+    def test_kubelet_exec_route_is_reachable(self):
+        """The /run exec finding used to be unreachable dead code.
+
+        Its `if r == "kubelet" and pr.get("anon_exec_route")` test sat INSIDE the
+        `elif r == "apiserver"` branch, so `r` would have had to be both. It is now
+        checked independently of the role chain, because the exec route surfaces
+        even on a TLS'd kubelet that refuses /pods, as long as
+        authorization-mode=AlwaysAllow routes /run.
+        """
+        from recce.services import kubernetes as k8s
+        host = Host(ip="10.0.0.90", os_family="Linux",
+                    ports=[Port(portid=10250, state="open")])
+        # anon_exec_route WITHOUT anon_pods - the TLS'd-but-AlwaysAllow case.
+        pr = {("10.0.0.90", 10250): {"role": "kubelet", "anon_exec_route": True,
+                                     "exec_sample": ("kube-system", "etcd-cp", "etcd")}}
+        fs = k8s.findings([host], pr)
+        kinds = [f.get("kind") for f in fs]
+        self.assertIn("kubelet_exec", kinds)
+        body = " ".join(f["title"] + f.get("detail", "") for f in fs)
+        self.assertIn("kube-system", body)      # exec_sample reached the output
+
+        # Both conditions on one host must emit BOTH findings, not one.
+        pr2 = {("10.0.0.90", 10250): {"role": "kubelet", "anon_pods": True,
+                                      "anon_exec_route": True}}
+        kinds2 = [f.get("kind") for f in k8s.findings([host], pr2)]
+        self.assertIn("kubelet_exec", kinds2)
+        self.assertIn("kubelet_anon", kinds2)
+
+    def test_apiserver_403_still_fires_after_exec_move(self):
+        """The 403 branch was an `elif` chained to that dead test, so it ran
+        unconditionally by accident. Moving the dead test out promoted it to `if`;
+        this pins that it kept the behaviour it already had."""
+        from recce.services import kubernetes as k8s
+        host = Host(ip="10.0.0.90", ports=[Port(portid=6443, state="open")])
+        pr = {("10.0.0.90", 6443): {"role": "apiserver", "anon_status": 403,
+                                    "version": "v1.28"}}
+        self.assertIn("api_anon_open",
+                      [f.get("kind") for f in k8s.findings([host], pr)])
 
     def test_findings_all_surfaces(self):
         from recce.services import kubernetes as k8s

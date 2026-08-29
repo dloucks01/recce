@@ -49,9 +49,21 @@ def _expand_token(token: str) -> list[str]:
     if "/" in token:
         net = ipaddress.ip_network(token, strict=False)
         if net.num_addresses > _MAX_EXPAND:
+            # IPv6 needs its own message. A /64 is the STANDARD subnet size, so this
+            # is the first thing a v6 user hits - and telling them to "split into /16
+            # or narrower" is IPv4 advice that reads as nonsense (a /16 is larger).
+            # Sweeping a /64 is not a limit to raise: it is 1.8e19 addresses.
+            if net.version == 6:
+                raise ValueError(
+                    f"{token} is a /{net.prefixlen} - {net.num_addresses} addresses. An "
+                    "IPv6 subnet cannot be swept by enumeration (a /64 alone is 1.8e19 "
+                    "hosts). Give explicit addresses, a @file of them, or a /"
+                    f"{128 - _MAX_EXPAND.bit_length() + 1} or narrower prefix; to "
+                    "DISCOVER v6 hosts on a link use neighbour discovery, e.g. "
+                    "`nmap -6 --script targets-ipv6-multicast-echo -e <iface>`.")
             raise ValueError(
                 f"{token} expands to {net.num_addresses} addresses (max {_MAX_EXPAND}); "
-                "split it into smaller subnets (e.g. /16 or narrower)")
+                "split it into smaller subnets (e.g. /24 or narrower)")
         if net.num_addresses <= 2:
             return [str(h) for h in net]  # /31, /32
         return [str(h) for h in net.hosts()]

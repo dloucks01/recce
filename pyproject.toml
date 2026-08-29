@@ -89,9 +89,23 @@ select = ["F"]                 # pyflakes-equivalent only; not an style reformat
 # F403/F405 = "star import used" / "may be undefined, from star imports".
 # The cli and services/web packages are built on `from .helpers import *` and
 # `from .http import *` on purpose (the wildcard is what lets the private _*
-# helpers resolve across the split modules), so these fire ~636 times by design.
-# Everything else in F stays on - notably F821 (undefined name), which is what
-# caught `sweep --vulns` calling an unimported cmd_vulns.
+# helpers resolve across the split modules), so these fire ~592 times by design.
+#
+# KNOW WHAT THIS COSTS. Pyflakes cannot report F821 (undefined name) in a module
+# that contains `import *` - it downgrades every unresolved name to F405, which
+# the line below ignores. So in the 20 star-importing modules this gate does NOT
+# catch undefined names. `sweep --vulns` calling an unimported cmd_vulns was
+# caught only because _phases.py happens not to star-import; the same bug in
+# cli/_services.py or services/web/checks.py would pass clean.
+#
+# Live proof that the blind spot is not theoretical: services/web/loot.py uses
+# Port and Vuln, which are in neither http.py's nor crawl.py's __all__. Eight
+# functions there fail typing.get_type_hints() today. Nothing crashes only
+# because `from __future__ import annotations` keeps them lazy strings - the
+# first runtime use of Port in that module is an invisible NameError.
+#
+# The real fix is to convert the wildcards to explicit imports (every module
+# already curates __all__, so it is mechanical) and then un-ignore F405.
 ignore = ["F403", "F405"]
 
 [tool.ruff.lint.per-file-ignores]

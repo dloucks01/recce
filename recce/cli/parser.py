@@ -1218,6 +1218,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sv.add_argument("--host", default="0.0.0.0",
                     help="bind address (default 0.0.0.0 = reachable across the LAN)")
     sv.add_argument("--port", type=int, default=8008, help="port (default 8008)")
+    # The workbench's own Pivot panel tells the operator to run
+    # `recce serve --proxy socks5h://host:port` (webui/routes/manage.py), and the
+    # proxy config is process-global - but `serve` does not take _add_common, so
+    # this flag did not exist and that instruction exited 2 on "unrecognized
+    # arguments". _setup_proxy() reads args.proxy via getattr, so defining it here
+    # is all that was missing: serve re-execs under proxychains like any other run.
+    sv.add_argument("--proxy", metavar="URL",
+                    help="pivot: run the workbench (and every scan it launches) "
+                         "through a proxy, e.g. socks5h://127.0.0.1:1080")
     sv.set_defaults(func=_h("serve"))
 
     nx = sub.add_parser("next", help="the ranked next-best-actions for an engagement")

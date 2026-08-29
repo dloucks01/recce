@@ -378,6 +378,27 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 continue
             tgt = f"{h.ip}:{p.portid}"
             r = pr.get("role")
+            # Kubelet anon-exec route. Checked on its own rather than inside the
+            # r-dispatch chain below: it surfaces even when the kubelet is TLS'd and
+            # /pods is refused, as long as authorization-mode=AlwaysAllow routes
+            # /run. Both this and kubelet_anon can be true on the same host.
+            if r == "kubelet" and pr.get("anon_exec_route"):
+                ns, pod, cont = pr.get("exec_sample") or ("<ns>", "<pod>", "<container>")
+                out.append(_finding(
+                    "critical",
+                    "Kubelet /run exec route reachable without auth", tgt,
+                    f"POST /run/{ns}/{pod}/{cont} is routed by the kubelet — "
+                    f"that endpoint executes an arbitrary command inside the "
+                    f"target container and returns stdout. Anonymous access "
+                    f"means RCE inside every pod on this node.",
+                    "curl",
+                    f"curl -sk -X POST https://<ip>:{p.portid}/run/{ns}/{pod}/{cont}"
+                    f" -d 'cmd=id'",
+                    "Set --anonymous-auth=false AND --authorization-mode=Webhook "
+                    "on the kubelet. Restrict the kubelet port to control-plane "
+                    "traffic only.",
+                    ["CWE-306", "CWE-77", "CWE-284"], kind="kubelet_exec"))
+
             if r == "kubelet" and pr.get("anon_pods"):
                 out.append(_finding(
                     "critical", "Kubelet allows anonymous access (exec RCE into pods)",
@@ -464,25 +485,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             "every namespace; deny hostPath, hostPID, privileged in "
                             "PodSecurity policy.",
                             ["CWE-269", "CWE-284"], kind="k8s_escape_pods"))
-                # Kubelet anon-exec route (surfaces even when kubelet is TLS'd
-                # but authorization-mode=AlwaysAllow).
-                if r == "kubelet" and pr.get("anon_exec_route"):
-                    ns, pod, cont = pr.get("exec_sample") or ("<ns>", "<pod>", "<container>")
-                    out.append(_finding(
-                        "critical",
-                        "Kubelet /run exec route reachable without auth", tgt,
-                        f"POST /run/{ns}/{pod}/{cont} is routed by the kubelet — "
-                        f"that endpoint executes an arbitrary command inside the "
-                        f"target container and returns stdout. Anonymous access "
-                        f"means RCE inside every pod on this node.",
-                        "curl",
-                        f"curl -sk -X POST https://<ip>:{p.portid}/run/{ns}/{pod}/{cont}"
-                        f" -d 'cmd=id'",
-                        "Set --anonymous-auth=false AND --authorization-mode=Webhook "
-                        "on the kubelet. Restrict the kubelet port to control-plane "
-                        "traffic only.",
-                        ["CWE-306", "CWE-77", "CWE-284"], kind="kubelet_exec"))
-                elif pr.get("anon_status") == 403:
+                # NOTE: this used to be `elif`, chained to a `r == "kubelet"` test
+                # that sat inside this `elif r == "apiserver"` branch and could
+                # therefore never be true. The dead test is gone (moved to the
+                # kubelet branch above); promoting this to `if` keeps the behaviour
+                # it already had, since the condition it chained from was constant.
+                if pr.get("anon_status") == 403:
                     out.append(_finding(
                         "low", "Kubernetes API accepts anonymous requests", tgt,
                         "The kube-apiserver processes unauthenticated requests "
