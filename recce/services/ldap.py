@@ -454,8 +454,15 @@ _UAC_TRUSTED_TO_AUTH = 0x1000000        # constrained delegation w/ protocol tra
 _USER_ATTRS = ["sAMAccountName", "userPrincipalName", "userAccountControl",
                "servicePrincipalName", "memberOf", "adminCount", "description",
                "msDS-AllowedToDelegateTo"]
+# LAPS attrs (legacy Microsoft LAPS + Windows LAPS) and RBCD attr - requested on
+# every computer object; a returned value on LAPS means the bound principal can
+# READ the local-admin password (critical); msDS-AllowedToActOnBehalfOfOtherIdentity
+# means resource-based constrained delegation is configured on that computer.
+_LAPS_ATTRS = ("ms-Mcs-AdmPwd", "msLAPS-Password", "msLAPS-EncryptedPassword")
+_RBCD_ATTR = "msDS-AllowedToActOnBehalfOfOtherIdentity"
 _COMPUTER_ATTRS = ["sAMAccountName", "dNSHostName", "operatingSystem",
-                   "userAccountControl", "msDS-AllowedToDelegateTo"]
+                   "userAccountControl", "msDS-AllowedToDelegateTo",
+                   *_LAPS_ATTRS, _RBCD_ATTR]
 _DOMAIN_ATTRS = ["ms-DS-MachineAccountQuota", "minPwdLength", "lockoutThreshold",
                  "maxPwdAge"]
 # Description/comment fields that look like they hold a secret.
@@ -761,6 +768,45 @@ def _computer_account(attrs: dict, domain: str, dc_ip: str) -> "object | None":
                    attrs={"delegation": kind, "uac": str(uac)})
 
 
+# Legacy / non-Kerberos SASL mechanisms - each is a downgrade / relay / cleartext
+# credential surface on a modern directory. GSSAPI + GSS-SPNEGO are the normal AD
+# pair; everything below indicates a mis-hardened or non-AD directory.
+_WEAK_SASL = ("ANONYMOUS", "DIGEST-MD5", "CRAM-MD5", "PLAIN", "LOGIN", "EXTERNAL")
+
+
+def _weak_sasl_mechs(sasl: list) -> list:
+    """Subset of `sasl` matching _WEAK_SASL (case-insensitive), preserving order."""
+    up = {m.upper() for m in _WEAK_SASL}
+    seen: list = []
+    for m in sasl or []:
+        if isinstance(m, str) and m.upper() in up and m not in seen:
+            seen.append(m)
+    return seen
+
+
+def _laps_readable(computers: list) -> list[tuple[str, str, str]]:
+    """(computerName, attrName, sample) per computer with a readable LAPS password
+    among ms-Mcs-AdmPwd / msLAPS-Password / msLAPS-EncryptedPassword. A single hit
+    is a critical local-admin credential fanout."""
+    out: list[tuple[str, str, str]] = []
+    for c in computers or []:
+        name = _first(c, "sAMAccountName") or _first(c, "dNSHostName") or "?"
+        for attr in _LAPS_ATTRS:
+            v = _first(c, attr)
+            if v:
+                # Truncate the value hard - never echo the plaintext into a finding.
+                out.append((name, attr, (v[:6] + "...") if len(v) > 8 else "***"))
+                break
+    return out
+
+
+def _rbcd_targets(computers: list) -> list[str]:
+    """Computer names carrying a non-empty msDS-AllowedToActOnBehalfOfOtherIdentity
+    (RBCD SD set) - each is one Rubeus s4u away from SYSTEM for whoever is in the SD."""
+    return [(_first(c, "sAMAccountName") or _first(c, "dNSHostName") or "?")
+            for c in (computers or []) if c.get(_RBCD_ATTR)]
+
+
 def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict, list]:
     """Fold an authenticated-enum result onto a DC host: (re)build its LDAP accounts and
     return (summary_for_target, module_findings). Refreshes source='ldap' accounts so a
@@ -834,10 +880,50 @@ def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict
             "Remove secrets from description/info attributes; rotate the exposed passwords.",
             ["CWE-522", "CWE-200"], kind="ldap_pw_desc"))
 
+    laps = _laps_readable(computers)
+    if laps:
+        names = ", ".join(n for n, _a, _s in laps[:12])
+        # Any of the three LAPS attrs came back with a value - the bound principal
+        # holds Read Property on the LAPS password. That is a bulk local-admin
+        # harvest across the domain from a single low-priv credential.
+        fs.append(_finding(
+            "critical", "LAPS local-admin passwords readable via LDAP", tgt,
+            f"The bound principal can read a LAPS password on {len(laps)} computer(s) "
+            f"(e.g. {names}). Any single value is a local-admin credential; the whole "
+            "set is a domain-wide local-admin harvest that fans out to SMB/WinRM/RDP.",
+            "ldapsearch / netexec",
+            f"nxc ldap {dc_ip} -u <user> -p <pass> -M laps   "
+            "# or: ldapsearch ... '(objectClass=computer)' msLAPS-Password ms-Mcs-AdmPwd",
+            "Tighten the LAPS extended-right ACL to a break-glass group only; audit reads; "
+            "rotate every exposed local-admin password.",
+            ["CWE-522", "CWE-284"], kind="ldap_laps_readable"))
+
+    rbcd = _rbcd_targets(computers)
+    if rbcd:
+        names = ", ".join(rbcd[:12])
+        # msDS-AllowedToActOnBehalfOfOtherIdentity is a security-descriptor blob;
+        # its mere presence means resource-based constrained delegation is enabled
+        # towards this computer, and the trustees inside the SD can Rubeus-s4u to
+        # SYSTEM on it. Full SD parsing (trustee SIDs) is out of scope for this
+        # finding; the presence signal is what operators triage.
+        fs.append(_finding(
+            "high", "Resource-based constrained delegation configured", tgt,
+            f"{len(rbcd)} computer(s) carry a non-empty msDS-AllowedToActOnBehalfOf"
+            f"OtherIdentity (RBCD) attribute (e.g. {names}). Any principal listed in "
+            "that security descriptor can request Kerberos service tickets AS ANY USER "
+            "against these hosts (Rubeus s4u) - one step from SYSTEM on each.",
+            "ldapsearch / rbcd.py",
+            f"ldapsearch -x -H ldap://{dc_ip} -D {shlex.quote('<user>@' + domain)} -w '<pass>' -b '<base>' "
+            "'(msDS-AllowedToActOnBehalfOfOtherIdentity=*)' sAMAccountName",
+            "Review and remove unnecessary RBCD SD entries; restrict who can write "
+            "msDS-AllowedToActOnBehalfOfOtherIdentity on computer objects.",
+            ["CWE-284", "CWE-269"], kind="ldap_rbcd"))
+
     summary = {"auth_ok": True, "auth_users": len(users),
                "auth_computers": len(computers), "kerberoastable": len(kerb),
                "asrep": len(asrep), "unconstrained_deleg": len(uncon),
-               "maq": maq, "lockout": lockout}
+               "maq": maq, "lockout": lockout,
+               "laps_readable": len(laps), "rbcd_configured": len(rbcd)}
     return summary, fs
 
 
@@ -887,6 +973,26 @@ _NARRATIVE = {
         "fields are readable by every authenticated user, so a single low-privileged "
         "credential harvests them - a recurring source of valid, often privileged, "
         "passwords. Remove secrets from directory attributes and rotate anything exposed."),
+    "ldap_laps_readable": (
+        "The bound principal can read a LAPS local-admin password on one or more "
+        "computers via ms-Mcs-AdmPwd (legacy Microsoft LAPS) or msLAPS-Password / "
+        "msLAPS-EncryptedPassword (Windows LAPS). A readable value is a valid local "
+        "Administrator credential on that host - a direct SMB/WinRM/RDP foothold - and "
+        "the misgranted extended-right ACL typically fans out across the whole domain. "
+        "Restrict the LAPS Read Property ACL to a break-glass group only."),
+    "ldap_rbcd": (
+        "One or more computers have a non-empty msDS-AllowedToActOnBehalfOfOtherIdentity "
+        "security descriptor - resource-based constrained delegation is configured. Any "
+        "principal listed in that SD can request Kerberos service tickets AS ANY USER "
+        "against these hosts (Rubeus s4u), including Domain Admins, giving them SYSTEM. "
+        "Review and prune RBCD entries; restrict write access to that attribute."),
+    "ldap_weak_sasl_mech": (
+        "The directory advertises legacy or downgrade-friendly SASL mechanisms "
+        "(ANONYMOUS, DIGEST-MD5, CRAM-MD5, PLAIN, LOGIN, or bare EXTERNAL). ANONYMOUS "
+        "(RFC 4505) accepts a trace token in place of credentials; DIGEST-MD5 and "
+        "CRAM-MD5 are broken hashing/response schemes; PLAIN/LOGIN send the password "
+        "in the clear inside the SASL blob. On a Windows DC only GSSAPI / GSS-SPNEGO "
+        "should remain enabled. Disable the legacy mechanisms."),
 }
 
 
@@ -1004,6 +1110,23 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Require LDAPS/StartTLS; enforce LDAP signing and channel binding "
                     "(LdapEnforceChannelBinding).",
                     ["CWE-319", "CWE-522"], kind="ldap_cleartext"))
+            weak = _weak_sasl_mechs(pr.get("sasl") or [])
+            if weak and (h.ip, "ldap_weak_sasl_mech") not in emitted_host_level:
+                emitted_host_level.add((h.ip, "ldap_weak_sasl_mech"))
+                out.append(_finding(
+                    "medium", "Legacy / weak SASL mechanisms offered", tgt,
+                    "Directory advertises legacy SASL mechanism(s): "
+                    + ", ".join(weak)
+                    + ". ANONYMOUS (RFC 4505) accepts a trace token in place of "
+                    "credentials; DIGEST-MD5/CRAM-MD5 are broken hashing schemes; "
+                    "PLAIN/LOGIN cross the wire in the clear inside the SASL blob. "
+                    + (f"Directory: {summary}." if summary else ""),
+                    "ldapsearch",
+                    f"ldapsearch -x -H ldap{'s' if pr.get('tls') else ''}://{h.ip}:{p.portid} "
+                    "-s base -b '' supportedSASLMechanisms",
+                    "Disable ANONYMOUS/DIGEST-MD5/CRAM-MD5/PLAIN/LOGIN; keep only "
+                    "GSSAPI + GSS-SPNEGO (and EXTERNAL bound to a client cert) on a DC.",
+                    ["CWE-327", "CWE-287"], kind="ldap_weak_sasl_mech"))
             if (pr.get("rootdse_ok") and summary
                     and (h.ip, "ldap_rootdse") not in emitted_host_level):
                 emitted_host_level.add((h.ip, "ldap_rootdse"))
