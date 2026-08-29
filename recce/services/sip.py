@@ -11,6 +11,7 @@ RFC 3261.
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 import socket
 
@@ -22,6 +23,83 @@ _TIMEOUT = 3.0
 
 _SERVER_RE = re.compile(rb"^(?:Server|User-Agent):\s*(.+)$", re.I | re.M)
 _REALM_RE = re.compile(rb'realm="([^"]+)"', re.I)
+# RFC 3261 §22.4 / RFC 8760 auth-param syntax: token = quoted-string OR token.
+# One regex covers both forms so nonce="..." and algorithm=MD5 both parse.
+_AUTH_PARAM_RE = re.compile(
+    rb'(?P<k>[A-Za-z][A-Za-z0-9_-]*)\s*=\s*(?:"(?P<qv>[^"]*)"|(?P<tv>[^\s,]+))', re.I)
+# Via received=/rport= (RFC 3581 + RFC 3261 §18.2.1). rport may be a bare
+# token (echoing the port) or a number.
+_VIA_RECEIVED_RE = re.compile(rb";\s*received=([^;\s,]+)", re.I)
+_VIA_RPORT_RE = re.compile(rb";\s*rport=(\d+)", re.I)
+# Contact: <sip:user@host:port> OR sip:user@host — pull the host token.
+_CONTACT_HOST_RE = re.compile(
+    rb"^Contact:\s*(?:[^<]*<)?sips?:(?:[^@>]*@)?([^:;>\s]+)", re.I | re.M)
+# Vendor tokens we normalise into a stable (vendor, product_version) tuple so a
+# CVE consumer can key on them. Order matters: longer/more-specific patterns
+# first so "FPBX" hits before we fall through to "Asterisk".
+_VENDOR_PATTERNS = (
+    # (vendor slug, compiled regex — group(1) = version)
+    ("freepbx", re.compile(r"\bFPBX[-\s]*([\w.]+)", re.I)),
+    ("cisco-cucm", re.compile(r"\bCisco[-\s_]*CUCM\s*([\w.]+)", re.I)),
+    ("asterisk", re.compile(r"\bAsterisk(?:\s*PBX)?\s*([\w.]+)", re.I)),
+    ("kamailio", re.compile(r"\bKamailio[^\d]*(\d[\w.]*)", re.I)),
+    ("opensips", re.compile(r"\bOpenSIPS[^\d]*(\d[\w.]*)", re.I)),
+    ("freeswitch", re.compile(r"\bFreeSWITCH[^\d]*(\d[\w.]*)", re.I)),
+    ("3cx", re.compile(r"\b3CX(?:PhoneSystem)?\s*([\w.]+)", re.I)),
+    ("yate", re.compile(r"\bYATE(?:/|\s+)([\w.]+)", re.I)),
+)
+
+
+def _parse_digest_challenge(reply: bytes) -> dict:
+    """Extract the full Digest challenge from WWW-Authenticate / Proxy-Authenticate.
+
+    Returns fields per RFC 3261 §22.4 and RFC 8760: realm, nonce, opaque, qop,
+    algorithm (upper-cased). Absent params are omitted so callers can `.get()`
+    without wading through empty strings.
+    """
+    line = None
+    for hdr in (b"WWW-Authenticate", b"Proxy-Authenticate"):
+        m = re.search(rb"^" + hdr + rb":\s*(.+)$", reply, re.I | re.M)
+        if m:
+            line = m.group(1)
+            break
+    if not line:
+        return {}
+    out: dict = {}
+    for pm in _AUTH_PARAM_RE.finditer(line):
+        k = pm.group("k").decode("ascii", "replace").lower()
+        v = (pm.group("qv") if pm.group("qv") is not None
+             else pm.group("tv")).decode("ascii", "replace")
+        if k in ("realm", "nonce", "opaque", "qop", "algorithm",
+                 "stale", "domain"):
+            out[k] = v
+    if "algorithm" in out:
+        # RFC 8760 lists MD5 / SHA-256 / SHA-512-256 (uppercased); normalise so
+        # a "sha-256" reply is comparable to an "SHA-256" advertisement.
+        out["algorithm"] = out["algorithm"].upper()
+    return out
+
+
+def _normalise_vendor(server: str) -> tuple[str, str]:
+    """Split a Server / User-Agent free-form string into (vendor_slug, version).
+
+    Returns ("", "") when nothing recognisable matched — the caller MUST NOT
+    fabricate a match, because a CVE consumer keys on these tuples.
+    """
+    if not server:
+        return "", ""
+    for slug, rx in _VENDOR_PATTERNS:
+        m = rx.search(server)
+        if m:
+            return slug, m.group(1)
+    return "", ""
+
+
+def _is_private_ip(s: str) -> bool:
+    try:
+        return ipaddress.ip_address(s).is_private
+    except ValueError:
+        return False
 
 
 def is_sip(port: Port) -> bool:
@@ -100,13 +178,48 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         m = _SERVER_RE.search(data)
         if m:
             out["server"] = m.group(1).decode("ascii", "replace").strip()
+            # (vendor slug, product_version) tuple for the CVE consumer.
+            # Empty strings when the free-form banner isn't recognised —
+            # the consumer MUST NOT invent a match from thin air.
+            vendor, prodver = _normalise_vendor(out["server"])
+            if vendor:
+                out["vendor"] = vendor
+                out["product_version"] = prodver
         m = _REALM_RE.search(data)
         if m:
             out["realm"] = m.group(1).decode("ascii", "replace").strip()
+        # Full Digest challenge (RFC 3261 §22.4 + RFC 8760): realm/nonce/qop/
+        # algorithm/opaque. Enables sipcrack/hashcat feed + MD5-only weak-crypto.
+        digest = _parse_digest_challenge(data)
+        if digest:
+            out["digest"] = digest
+            # Prefer the parsed realm (handles single-quoted or spaced values
+            # that the strict WWW-Authenticate regex may have skipped).
+            if digest.get("realm") and not out.get("realm"):
+                out["realm"] = digest["realm"]
         # Allow header (advertised methods) is a good fingerprint of PBX config
         allow = re.search(rb"^Allow:\s*(.+)$", data, re.I | re.M)
         if allow:
             out["methods"] = allow.group(1).decode("ascii", "replace").strip()
+        # Via received= / rport= (RFC 3581 + RFC 3261 §18.2.1): the server
+        # rewrote the top Via with the source IP+port it observed. When that
+        # differs from what we sent + is routable, it discloses NAT topology.
+        via = re.search(rb"^Via:\s*(.+)$", data, re.I | re.M)
+        if via:
+            vm = _VIA_RECEIVED_RE.search(via.group(1))
+            if vm:
+                out["via_received"] = vm.group(1).decode("ascii", "replace")
+            rm = _VIA_RPORT_RE.search(via.group(1))
+            if rm:
+                out["via_rport"] = int(rm.group(1))
+        # Contact URI host = the PBX's own address. Often the internal
+        # RFC1918 IP even when reached over a public/edge address.
+        cm = _CONTACT_HOST_RE.search(data)
+        if cm:
+            host_tok = cm.group(1).decode("ascii", "replace")
+            out["contact_host"] = host_tok
+            if _is_private_ip(host_tok):
+                out["contact_internal_ip"] = host_tok
         break
     # Extension enumeration piggybacks on the same probe when the server is
     # reachable — bounded to the default 20 extensions so a single scan does
@@ -291,6 +404,71 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Require authentication on REGISTER even for extensions "
                     "that historically accepted anonymous registrations.",
                     ["CWE-200", "CWE-306"], kind="sip_ext_enum"))
+
+            # Internal-IP disclosure via Via received= or Contact URI. Only
+            # fire when the leaked address is a) RFC1918/private and b) DIFFERENT
+            # from the address recce reached out to — otherwise it's just the
+            # host echoing its own routable address, no leak (mirrors the
+            # ftp_pasv_internal_ip pattern).
+            leaked = pr.get("contact_internal_ip") or ""
+            src_leak = ""
+            recv = pr.get("via_received") or ""
+            if recv and _is_private_ip(recv) and recv != h.ip:
+                src_leak = f"Via received={recv}"
+            if leaked and leaked != h.ip:
+                if src_leak:
+                    src_leak += f"; Contact host {leaked}"
+                else:
+                    src_leak = f"Contact host {leaked}"
+            if src_leak:
+                out.append(_finding(
+                    "medium", "SIP response discloses internal IP address", tgt,
+                    f"SIP response from {tgt} leaked a private-network address "
+                    f"({src_leak}) that differs from the reached IP. Per RFC 3581 "
+                    "the server echoes the observed source in Via received=; per "
+                    "RFC 3261 §20.10 Contact carries the PBX's own address — a "
+                    "NAT'd or dual-homed PBX exposes its internal-subnet address "
+                    "here, which downstream pivots can target.",
+                    "sngrep / sipsak",
+                    f"sipsak -vv -s sip:{h.ip}:{p.portid}   # inspect Via / Contact "
+                    "on the OPTIONS reply",
+                    "Rewrite Contact / Via on the SBC or edge NAT; on Kamailio use "
+                    "nathelper (fix_contact / fix_nated_contact), on Asterisk set "
+                    "externaddr / localnet so the PBX advertises its routable "
+                    "address instead of the internal one.",
+                    ["CWE-200"], kind="sip_internal_ip_disclosure"))
+
+            # Digest algorithm advertisement (RFC 3261 §22.4 + RFC 8760). The
+            # base spec only requires MD5; RFC 8760 (2020) added SHA-256 and
+            # SHA-512-256 with an explicit "algorithms MUST be listed in order
+            # of preference" and MD5 SHOULD NOT be the sole option. A server
+            # that either omits algorithm= (defaults to MD5 per RFC 2617) or
+            # names MD5 exclusively is running the weak variant.
+            digest = pr.get("digest") or {}
+            if digest.get("nonce"):
+                algo = (digest.get("algorithm") or "MD5").upper()
+                if algo in ("MD5", "MD5-SESS"):
+                    out.append(_finding(
+                        "low",
+                        "SIP Digest authentication offers MD5 only (no RFC 8760 SHA-256)",
+                        tgt,
+                        f"WWW-Authenticate on {tgt} advertises algorithm={algo} "
+                        f"(realm=\"{digest.get('realm', '')}\", qop="
+                        f"{digest.get('qop', '(none)')}). RFC 8760 (2020) adds "
+                        "SHA-256 / SHA-512-256 Digest for SIP; MD5-only servers "
+                        "are the weak-hash variant, feed sipcrack/hashcat mode "
+                        "11400 directly, and cannot upgrade responders that "
+                        "would otherwise negotiate SHA-256.",
+                        "sipcrack / hashcat",
+                        f"# feed challenge to hashcat mode 11400:\n"
+                        f"echo '$sip$***{digest.get('realm', '')}***"
+                        f"{digest.get('nonce', '')}***MD5***<user>***<uri>***"
+                        f"{digest.get('qop', '')}***<response>' | hashcat -m 11400 - wordlist",
+                        "Enable RFC 8760 SHA-256 / SHA-512-256 Digest challenges "
+                        "(Kamailio auth_db config, Asterisk res_pjsip auth "
+                        "algorithms) and remove MD5 from the offered set once "
+                        "endpoints support the upgrade.",
+                        ["CWE-327", "CWE-916"], kind="sip_digest_md5_only"))
     return out
 
 
