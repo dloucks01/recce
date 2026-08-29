@@ -42,6 +42,15 @@ CATEGORIES: dict[str, tuple[str, int, str]] = {
     # here so `recce creds --potfile` recognises them as loot too.
     "kerberoast":  ("kerberoast.hash",  13100, "Kerberos TGS-REP (kerberoast)"),
     "asrep":       ("asrep.hash",       18200, "Kerberos AS-REP (AS-REP roast)"),
+    # SASL / challenge-response mechanisms captured off the wire. The server-
+    # side challenge alone is not a crackable hash — the operator supplies the
+    # matching client response later (from an on-path capture) and hashcat
+    # combines the two. Files carry the fully-formatted line with a placeholder
+    # so the tester's edit is one field, not a hand-built format.
+    "pop3-apop":   ("pop3-apop.hash",   20,    "POP3 APOP md5(challenge.password) [md5($salt.$pass)]"),
+    "imap-cram":   ("imap-cram.hash",   10200, "IMAP/POP3 CRAM-MD5 HMAC-MD5 challenge/response"),
+    "imap-digest": ("imap-digest.hash", 11500, "IMAP/POP3 DIGEST-MD5 challenge/response"),
+    "iscsi-chap":  ("iscsi-chap.hash",  4800,  "iSCSI CHAP md5(id . secret . challenge)"),
 }
 
 
@@ -167,7 +176,68 @@ def collect_from_probe(probe: dict, service: str) -> list[tuple[str, str]]:
         if isinstance(legacy, dict) and legacy.get("hashcat_line") and not out:
             out.append(("ipmi", legacy["hashcat_line"]))
         return out
+    if service == "pop3":
+        return _collect_pop3(probe if isinstance(probe, dict) else {})
+    if service == "imap":
+        return _collect_imap(probe if isinstance(probe, dict) else {})
+    if service == "iscsi":
+        return _collect_iscsi(probe if isinstance(probe, dict) else {})
     return collect_from_db_probe(probe, service)
+
+
+# --- SASL / CHAP challenge collectors ---------------------------------------
+# These services capture only the SERVER challenge on the wire (recce never
+# sends a real credential to complete auth). The client response half has to
+# come from an on-path capture the operator runs separately; the file recce
+# writes carries a placeholder for that half so the finished hashcat line is
+# one field edit away, not a hand-built format.
+
+# The placeholder is stable so the potfile matcher / diff tooling can spot
+# "still needs a client response" lines without a regex per format.
+_CLIENT_HALF = "<CLIENT-RESPONSE>"
+
+
+def _collect_pop3(probe: dict) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    ts = (probe.get("apop_timestamp") or "").strip()
+    if ts:
+        # md5($salt.$pass) — mode 20 wants "hash:salt".
+        out.append(("pop3-apop", f"{_CLIENT_HALF}:{ts}"))
+    # POP3 exposes the SASL challenges through a nested dict, unlike IMAP.
+    sasl = probe.get("sasl_challenges") or {}
+    if isinstance(sasl, dict):
+        cram = (sasl.get("cram_md5") or "").strip()
+        if cram:
+            out.append(("imap-cram", f"$cram_md5${cram}${_CLIENT_HALF}"))
+        digest = (sasl.get("digest_md5") or "").strip()
+        if digest:
+            out.append(("imap-digest", f"{digest}:{_CLIENT_HALF}"))
+    return out
+
+
+def _collect_imap(probe: dict) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    cram = (probe.get("cram_md5_challenge") or "").strip()
+    if cram:
+        out.append(("imap-cram", f"$cram_md5${cram}${_CLIENT_HALF}"))
+    digest = (probe.get("digest_md5_challenge") or "").strip()
+    if digest:
+        out.append(("imap-digest", f"{digest}:{_CLIENT_HALF}"))
+    return out
+
+
+def _collect_iscsi(probe: dict) -> list[tuple[str, str]]:
+    chap = probe.get("chap") or {}
+    if not isinstance(chap, dict):
+        return []
+    chap_i = str(chap.get("id") or "").strip()
+    chap_c = str(chap.get("challenge") or "").strip()
+    if not (chap_i and chap_c):
+        return []
+    # hashcat -m 4800 format: `chap_r:chap_c:chap_i`. Server-only capture, so
+    # the response half is the placeholder until the operator drops in the
+    # captured initiator CHAP_R.
+    return [("iscsi-chap", f"{_CLIENT_HALF}:{chap_c}:{chap_i}")]
 
 
 def creds_to_hashcat_lines(creds: list[Credential]) -> list[str]:

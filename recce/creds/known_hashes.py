@@ -39,18 +39,13 @@ _KRB_TGS = re.compile(r"^\$krb5tgs\$(\d+)\$\*([^$]+)\$([^$]+)\$")
 _KRB_ASREP = re.compile(r"^\$krb5asrep\$(?:(\d+)\$)?([^@$\s]+)@(\S+?)[:$]")
 
 
-# category -> (filename, hashcat mode). Mirrors hashloot.CATEGORIES but
-# without the description column (this module never writes, only reads).
+# Mirrors hashloot.CATEGORIES; imported so a new category registered there
+# is picked up by this reader without touching two tables. The description
+# column is stripped on the way in — this module never writes, only reads.
+from . import hashloot as _hashloot
+
 _LOOT_FILES: dict[str, tuple[str, int]] = {
-    "kerberoast":     ("kerberoast.hash", 13100),
-    "asrep":          ("asrep.hash",      18200),
-    "mssql":          ("mssql.hash",       1731),
-    "mysql":          ("mysql.hash",        300),
-    "mongo-scram":    ("mongo-scram.hash",24100),
-    "mongo-scram256": ("mongo-scram256.hash", 24200),
-    "ipmi":           ("ipmi.hash",        7300),
-    "ipmi-sha256":    ("ipmi-sha256.hash", 7302),
-    "vnc":            ("vnc.hash",        11600),
+    cat: (spec[0], spec[1]) for cat, spec in _hashloot.CATEGORIES.items()
 }
 
 
