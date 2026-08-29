@@ -539,6 +539,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cd.add_argument("-p", "--password", dest="password", help="add a credential: password")
     cd.add_argument("-H", "--hash", help="add a credential: NT hash (for pass-the-hash)")
     cd.add_argument("-d", "--domain", help="add a credential: AD domain (blank = local)")
+    # Closes the crack loop: recce formats hashes for hashcat in a dozen places
+    # (NT -m 1000, kerberoast -m 13100, AS-REP -m 18200, mssql -m 1731, ...) but
+    # had no path back, so cracked passwords had to be re-keyed by hand before
+    # they could be sprayed.
+    cd.add_argument("--potfile", metavar="FILE",
+                    help="fold cracked plaintexts back in from a hashcat/john potfile "
+                         "(hash:plaintext). Matches against the NT hashes recce holds "
+                         "and the roasted Kerberos hashes in loot/, adds each as a "
+                         "password credential, then spray with --plan/--run")
     cd.add_argument("--plan", action="store_true",
                     help="build the spray plan (write users/passwords/hashes files "
                          "+ print the netexec/impacket commands)")

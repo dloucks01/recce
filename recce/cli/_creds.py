@@ -108,6 +108,31 @@ def cmd_creds(args: argparse.Namespace) -> int:
               + (f" ({len(to_add) - n} already stacked)" if n < len(to_add) else "") + ".")
         added = True
 
+    # POTFILE: fold cracked plaintexts back in. Runs before the stack is read so
+    # a --potfile --plan in one invocation sprays what was just cracked.
+    if getattr(args, "potfile", None):
+        try:
+            with open(args.potfile, encoding="utf-8", errors="replace") as fh:
+                pot = fh.read()
+        except OSError as e:
+            print(f"[x] Could not read --potfile {args.potfile!r}: {e}")
+            store.close()
+            return 1
+        cracked = cr.parse_potfile(pot, store.all_credentials(),
+                                   os.path.join(args.output_dir, "loot"))
+        if not cracked:
+            print(f"[!] No cracked hashes in {args.potfile} matched anything recce holds.")
+            print("    recce matches on the NT hashes it captured and the roasted "
+                  "Kerberos hashes in loot/ - crack those and the plaintexts land here.")
+        else:
+            n = sum(1 for c in cracked if store.add_credential(c))
+            print(f"[+] Folded in {n} cracked password(s)"
+                  + (f" ({len(cracked) - n} already stacked)" if n < len(cracked) else "")
+                  + f" from {os.path.basename(args.potfile)}.")
+            for c in cracked:
+                print(f"      {c.label}")
+            added = True
+
     hosts = _selected_hosts(store.all_hosts(), args)
     stored = store.all_credentials()
     stacked = cr.stack(hosts, stored)

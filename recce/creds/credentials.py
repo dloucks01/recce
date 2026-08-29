@@ -104,6 +104,99 @@ def _target_expr(ips: list[str]) -> str:
     return " ".join(ips)
 
 
+# --- crack -> spray: fold cracked plaintexts back in --------------------------
+# recce formats hashes for hashcat in a dozen places (NT -m 1000, kerberoast
+# -m 13100, AS-REP -m 18200, mssql -m 1731, mongodb -m 24100, ...) and then had
+# no way to take the results back. That left the operator to re-key cracked
+# passwords by hand, which on a real internal is where the next spray round
+# comes from.
+
+# A krb5tgs/krb5asrep hash embeds the account, so a cracked Kerberos hash names
+# its own user without needing the store. Same expressions the AD parsers use.
+_POT_TGS_USER = re.compile(r"^\$krb5tgs\$\d+\$\*([^$]+)\$([^$]+)\$")
+_POT_ASREP_USER = re.compile(r"^\$krb5asrep\$(?:\d+\$)?([^@$\s]+)@(\S+?)[:$]")
+_HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+def _known_hashes(creds: list[Credential], loot_dir: str = "") -> dict[str, tuple[str, str]]:
+    """Map every hash recce holds -> (username, domain).
+
+    Two sources, because recce stores them in two places: NT hashes live in the
+    credential store, while roasted Kerberos hashes are written to loot/*.hash
+    (cli/_service_helpers.py) and never became Credentials.
+    """
+    known: dict[str, tuple[str, str]] = {}
+    for c in creds:
+        if c.kind == "nthash" and c.secret:
+            known[c.secret.strip().lower()] = (c.username, c.domain)
+    if not loot_dir or not os.path.isdir(loot_dir):
+        return known
+    for fname in ("kerberoast.hash", "asrep.hash"):
+        path = os.path.join(loot_dir, fname)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    m = _POT_TGS_USER.match(line) or _POT_ASREP_USER.match(line)
+                    if m:
+                        # TGS: (user, realm); AS-REP: (user, realm) - same order.
+                        known[line] = (m.group(1), m.group(2))
+        except OSError:
+            continue
+    return known
+
+
+def parse_potfile(text: str, creds: list[Credential],
+                  loot_dir: str = "") -> list[Credential]:
+    """Turn `hash:plaintext` lines into password Credentials for the accounts they belong to.
+
+    Matching is done by looking the hash up in what recce already captured rather
+    than splitting the line, because a krb5tgs hash is full of colons and so is a
+    NetNTLMv2 one - `rsplit(":", 1)` silently mangles both, and a password may
+    legitimately contain a colon too. Anchoring on a known hash removes the
+    ambiguity entirely; hashes recce never saw are skipped rather than guessed at.
+    """
+    known = _known_hashes(creds, loot_dir)
+    if not known:
+        return []
+    # Longest-first so a hash that prefixes another can't win the wrong match.
+    ordered = sorted(known, key=len, reverse=True)
+    seen: set[tuple[str, str, str]] = set()
+    out: list[Credential] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        hit = None
+        for h in ordered:
+            # hashcat lowercases hex digests in the potfile; Kerberos blobs keep case.
+            if line.startswith(h + ":"):
+                hit = h
+            elif _HEX32.match(h) and line[:32].lower() == h and line[32:33] == ":":
+                hit = h
+            if hit:
+                plain = line[len(hit) + 1:]
+                break
+        if not hit or not plain:
+            continue
+        user, domain = known[hit]
+        if not user:
+            continue
+        key = (user.lower(), domain.lower(), plain)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(Credential(
+            username=user, secret=plain, kind="password", domain=domain,
+            source="cracked",
+            notes=f"cracked from {'kerberos' if hit.startswith('$krb5') else 'NT'} hash"))
+    return out
+
+
 def write_files(creds: list[Credential], out_dir: str) -> dict[str, str]:
     """Write users.txt / passwords.txt / nthashes.txt for the stacked set."""
     os.makedirs(out_dir, exist_ok=True)

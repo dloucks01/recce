@@ -90,3 +90,82 @@ def test_credenum_all_creds_sprays_then_enums_with_the_working_cred(monkeypatch,
         rc = cli.main(["credenum", "--all-creds", "-o", eng])
     assert rc == 0
     assert seen.get("10.0.0.5", {}).get("username") == "svc"     # enumed with the discovered cred
+
+
+# --- crack -> spray: potfile import -------------------------------------------
+# recce emitted hashcat-ready hashes in a dozen places and had no way back, so
+# cracked passwords had to be re-keyed by hand before they could be sprayed.
+
+_TGS = ("$krb5tgs$23$*svc_sql$CORP.LOCAL$MSSQLSvc/db.corp.local:1433*"
+        "$aabbccdd$eeff0011")
+_ASREP = "$krb5asrep$23$noauth@CORP.LOCAL:aabbccdd$eeff0011"
+
+
+def _loot(tmp_path):
+    d = tmp_path / "loot"
+    d.mkdir()
+    (d / "kerberoast.hash").write_text(_TGS + "\n", encoding="utf-8")
+    (d / "asrep.hash").write_text(_ASREP + "\n", encoding="utf-8")
+    return str(d)
+
+
+def test_potfile_matches_nt_hash_case_insensitively(tmp_path):
+    """recce stores NT hashes uppercase; hashcat writes its potfile lowercase."""
+    creds = [Credential(username="alice", secret="8846F7EAEE8FB117AD06BDD830B7586C",
+                        kind="nthash", domain="CORP")]
+    got = cr.parse_potfile("8846f7eaee8fb117ad06bdd830b7586c:password", creds)
+    assert len(got) == 1
+    assert (got[0].username, got[0].secret, got[0].kind) == ("alice", "password", "password")
+    assert got[0].domain == "CORP" and got[0].source == "cracked"
+
+
+def test_potfile_handles_hashes_and_passwords_containing_colons(tmp_path):
+    """A krb5tgs hash is full of colons and a password may contain them too, so
+    splitting the line (rsplit(":", 1)) mangles both. Matching anchors on a hash
+    recce already holds instead."""
+    got = cr.parse_potfile(f"{_TGS}:Summer2024!\n{_ASREP}:Pa:ss:word\n",
+                           [], _loot(tmp_path))
+    by_user = {c.username: c.secret for c in got}
+    assert by_user["svc_sql"] == "Summer2024!"      # SPN colon did not split the hash
+    assert by_user["noauth"] == "Pa:ss:word"        # colons in the PASSWORD survived
+    assert all(c.domain == "CORP.LOCAL" for c in got)
+
+
+def test_potfile_skips_hashes_recce_never_captured(tmp_path):
+    """A shared potfile carries other engagements' hashes; guessing at them would
+    invent credentials for accounts recce never saw."""
+    creds = [Credential(username="alice", secret="8846F7EAEE8FB117AD06BDD830B7586C",
+                        kind="nthash")]
+    got = cr.parse_potfile(
+        "ffffffffffffffffffffffffffffffff:notours\n"
+        "8846f7eaee8fb117ad06bdd830b7586c:password\n", creds)
+    assert [c.secret for c in got] == ["password"]
+
+
+def test_potfile_ignores_comments_blanks_and_dedups(tmp_path):
+    creds = [Credential(username="alice", secret="8846F7EAEE8FB117AD06BDD830B7586C",
+                        kind="nthash")]
+    got = cr.parse_potfile(
+        "# hashcat potfile\n\n"
+        "8846f7eaee8fb117ad06bdd830b7586c:password\n"
+        "8846f7eaee8fb117ad06bdd830b7586c:password\n", creds)
+    assert len(got) == 1
+
+
+def test_cracked_passwords_reach_the_spray_files(tmp_path):
+    """The point of the loop: a cracked plaintext must end up in passwords.txt,
+    which is the file the netexec spray commands consume."""
+    creds = [Credential(username="alice", secret="8846F7EAEE8FB117AD06BDD830B7586C",
+                        kind="nthash", domain="CORP")]
+    cracked = cr.parse_potfile(f"8846f7eaee8fb117ad06bdd830b7586c:password\n"
+                               f"{_TGS}:Summer2024!\n", creds, _loot(tmp_path))
+    files = cr.write_files(creds + cracked, str(tmp_path / "creds"))
+    assert "passwords.txt" in files
+    body = open(files["passwords.txt"], encoding="utf-8").read()
+    assert "password" in body and "Summer2024!" in body
+    users = open(files["users.txt"], encoding="utf-8").read()
+    assert "svc_sql" in users          # the roasted account is now sprayable too
+
+
+def test_potfile_without_any_known_hashes_returns_nothing(tmp_path):
+    assert cr.parse_potfile("abc:def", [], "") == []
