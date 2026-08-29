@@ -573,6 +573,70 @@ class LdapTest(unittest.TestCase):
         assert "S-1-5-21-100-200-300-1104" in found
         assert _sids_in_sd(b"") == [] and _sids_in_sd(b"\x00" * 20) == []
 
+    def test_synthesis_finding_coerce_to_esc8_chain(self):
+        """When any host in the engagement exposes MSRPC coercion AND any host
+        carries an ADCS ESC8 vuln, the standard "coerce DC$ -> relay to Web
+        Enrollment -> DC cert issued" chain is reachable. That belongs in the
+        engagement-level quick-wins even though it crosses two subsystems."""
+        from recce import ad
+        from recce.core.models import Host, Domain, Vuln
+        coerce_h = Host(ip="10.0.10.5")
+        coerce_h.vulns = [Vuln(ip="10.0.10.5", port=135, protocol="tcp",
+            script_id="msrpc:MSRPC exposes authentication-coerc",
+            title="MSRPC exposes authentication-coercion interfaces",
+            severity="high", state="finding")]
+        ca_h = Host(ip="10.0.10.20", roles=["Domain Controller"])
+        ca_h.vulns = [Vuln(ip="10.0.10.20", port=80, protocol="tcp",
+            script_id="adcs-esc8",
+            title="ADCS ESC8: Web/NDES enrolment enabled",
+            severity="critical", state="finding")]
+        ca_h.domains = [Domain(name="CORP.LOCAL")]
+        rows = ad.quick_wins([coerce_h, ca_h])
+        chain = next((r for r in rows
+                      if "Coerce -> ADCS ESC8" in r["category"]), None)
+        assert chain is not None, "chain not synthesised"
+        assert "10.0.10.5" in chain["target"] and "10.0.10.20" in chain["target"]
+        assert "ntlmrelayx" in chain["why"] or "certipy relay" in chain["why"].lower()
+
+    def test_synthesis_stays_silent_when_only_one_leg_is_present(self):
+        """A coercion-capable host on its own must NOT emit the chain row, and
+        neither should an ESC8 CA on its own — the finding value is the pair."""
+        from recce import ad
+        from recce.core.models import Host, Domain, Vuln
+        # coerce alone (with a domain-carrying DC that has NO ESC8)
+        coerce_h = Host(ip="10.0.10.5")
+        coerce_h.vulns = [Vuln(ip="10.0.10.5", port=135, protocol="tcp",
+            script_id="msrpc:coerce", title="MSRPC coercion", severity="high",
+            state="finding")]
+        dc_only = Host(ip="10.0.10.20", roles=["Domain Controller"])
+        dc_only.domains = [Domain(name="CORP.LOCAL")]
+        rows = ad.quick_wins([coerce_h, dc_only])
+        assert not any("Coerce -> ADCS ESC8" in r["category"] for r in rows)
+
+    def test_synthesis_finding_rbcd_to_s4u_chain(self):
+        """RBCD victim + attacker-controllable principal (either MAQ>0 or an
+        already-known kerberoastable account) = full compromise of the victim
+        via S4U2Self -> S4U2Proxy."""
+        from recce import ad
+        from recce.core.models import Host, Domain
+        dc = Host(ip="10.0.10.20", roles=["Domain Controller"])
+        dom = Domain(name="CORP.LOCAL")
+        dom.rbcd_victims = [{"name": "FILESRV01", "kind": "computer",
+                             "trusted_from": ["S-1-5-21-1-2-3-1104"], "attr_len": 116}]
+        dom.machine_account_quota = 10
+        dc.domains = [dom]
+        chain = next((r for r in ad.quick_wins([dc])
+                      if "RBCD -> S4U2Proxy" in r["category"]), None)
+        assert chain is not None
+        assert "FILESRV01" in chain["target"]
+        assert "machine-account quota" in chain["detail"]
+
+        # MAQ=0 AND no roastable accounts => the chain does NOT stand on its own
+        dom.machine_account_quota = 0
+        dc.domains = [dom]
+        assert not any("RBCD -> S4U2Proxy" in r["category"]
+                       for r in ad.quick_wins([dc]))
+
     def test_adcs_esc_map_includes_esc16(self):
         """ESC16 is the CA-global variant of the security-extension bypass -
         reachable through ANY enrollable template, not just the ESC9 one."""

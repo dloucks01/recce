@@ -294,6 +294,13 @@ def quick_wins(hosts: list[Host]) -> list[dict]:
                     "principal (or can add a computer account and get RBCD "
                     "written), S4U2Self -> S4U2Proxy yields a TGS as arbitrary "
                     "user - domain admin included. Full compromise of this host.")
+            # Synthesis: chain-reachable findings that cross services.
+            # These are engagement-level rows, not per-object — quick_wins is
+            # the right place because it is what the report + coverage tabs
+            # pull from and the operator is looking for "what can I chain
+            # RIGHT NOW", not the raw per-host list.
+            for row in _chain_reachable_rows(hosts, dom, key):
+                rows.append(row)
             for trust in getattr(dom, "trusts", None) or []:
                 add("Trust relationship",
                     f"{key} → {trust.get('name', '?')}",
@@ -303,6 +310,101 @@ def quick_wins(hosts: list[Host]) -> list[dict]:
                     "the trusted domain authenticate to this one — lateral "
                     "movement route across forests.")
     return rows
+
+
+def _chain_reachable_rows(hosts: list[Host], dom: "Domain", dom_key: str) -> list[dict]:
+    """Engagement-level "the chain is reachable" synthesis rows.
+
+    Two chains recce can currently prove-reachable end-to-end from the data it
+    already holds:
+
+      Coerce -> ADCS ESC8. If ANY host in the engagement exposes an MSRPC
+      coercion interface (PetitPotam / PrinterBug / DFSCoerce — kind
+      msrpc_coercion) AND ANY host carries an ADCS ESC8 vuln (Web/NDES
+      Enrollment reachable), a coerced NTLM authentication from a DC$ can be
+      relayed to the CA's HTTP endpoint and a domain-controller certificate
+      issued. Domain-wide compromise.
+
+      RBCD -> S4U2Proxy. An object with msDS-AllowedToActOnBehalfOfOther
+      Identity populated already trusts SOME principal to impersonate any
+      user against it. When ms-DS-MachineAccountQuota > 0 (any authenticated
+      user can add a computer account) that trust becomes attacker-controlled;
+      even without MAQ, an already-known kerberoastable account with RC4
+      etypes is a candidate. Both mean full compromise of the RBCD victim.
+
+    Emitted as quick_wins rows so they land in the report + coverage tabs the
+    tester actually reads. The evidence lives on the individual host findings;
+    these rows only claim the CHAIN is reachable.
+    """
+    out: list[dict] = []
+
+    def _has_vuln_kind(host: Host, kind_substrs: tuple[str, ...]) -> bool:
+        for v in getattr(host, "vulns", None) or []:
+            probe = f"{v.script_id or ''} {v.title or ''}".lower()
+            if any(s in probe for s in kind_substrs):
+                return True
+        return False
+
+    # Match against BOTH script_id and title, because the finding's `kind`
+    # (msrpc_coercion) is only on the raw finding dict — Vuln.script_id ends
+    # up as "msrpc:<title[:40]>" (see svccommon.findings_to_vulns), so the
+    # discovery signal in the stored vuln is the title wording.
+    coerce_hosts = [h for h in hosts
+                    if _has_vuln_kind(h, ("msrpc_coercion",
+                                          "authentication-coercion",
+                                          "petitpotam", "printerbug", "dfscoerce"))]
+    esc8_hosts = [h for h in hosts
+                  if _has_vuln_kind(h, ("adcs-esc8", "adcs esc8", "web/ndes"))]
+    if coerce_hosts and esc8_hosts:
+        c_labels = ", ".join(h.ip for h in coerce_hosts[:4])
+        e_labels = ", ".join(h.ip for h in esc8_hosts[:4])
+        out.append({
+            "category": "CHAIN reachable: Coerce -> ADCS ESC8",
+            "target": f"coerce({c_labels}) -> relay -> ESC8({e_labels})",
+            "detail": (f"{len(coerce_hosts)} coercion source(s) + {len(esc8_hosts)} "
+                       "ESC8-capable CA endpoint(s) present in the same engagement. "
+                       "The relay+enroll chain does NOT require a credential."),
+            "why": ("Coerce a DC$ authentication with PetitPotam / PrinterBug / "
+                    "DFSCoerce, relay it via ntlmrelayx to the CA's Web Enrollment "
+                    "endpoint, request a DomainController template certificate as "
+                    "the DC, then use Certipy auth to lift the machine's TGT / "
+                    "hash — domain-wide compromise. `certipy relay -target <ca> "
+                    "-template DomainController &` and coerce the DC in a "
+                    "separate window."),
+            "key": f"qw:chain-coerce-esc8:{dom_key}",
+        })
+
+    # RBCD S4U2Proxy reachability. Attacker-controlled principal comes from
+    # either ms-DS-MachineAccountQuota > 0 (add computer, own the SPN) or an
+    # already-owned kerberoastable account we could crack.
+    victims = getattr(dom, "rbcd_victims", None) or []
+    if victims:
+        maq = 0
+        try:
+            maq = int(getattr(dom, "machine_account_quota", 0) or 0)
+        except (TypeError, ValueError):
+            maq = 0
+        roastable = kerberoastable(hosts)
+        # `dc_ips` isn't guaranteed present in every path; fall back to hostname.
+        if maq > 0 or roastable:
+            v_labels = ", ".join(v.get("name", "?") for v in victims[:4])
+            source = ("machine-account quota > 0 (any authenticated user can add "
+                      "a computer)" if maq > 0
+                      else f"{len(roastable)} kerberoastable account(s) already listed")
+            out.append({
+                "category": "CHAIN reachable: RBCD -> S4U2Proxy",
+                "target": f"{dom_key}: {len(victims)} victim(s) ({v_labels})",
+                "detail": (f"RBCD is already configured on {len(victims)} object(s) "
+                           f"in {dom_key}. Attacker-controllable principal source: "
+                           f"{source}."),
+                "why": ("Populate/replace msDS-AllowedToActOnBehalf... on the "
+                        "victim with an SD naming a principal you control, then "
+                        "S4U2Self -> S4U2Proxy to obtain a service ticket for "
+                        "the victim AS Administrator. impacket-getST + "
+                        "impacket-secretsdump against the victim."),
+                "key": f"qw:chain-rbcd-s4u:{dom_key}",
+            })
+    return out
 
 
 def privileged_accounts(hosts: list[Host]) -> list[Account]:
