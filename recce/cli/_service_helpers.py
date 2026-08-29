@@ -640,7 +640,7 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
         loot_dir = os.path.join(args.output_dir, "loot")
         by_cat: dict[str, list[str]] = {}
         for _tgt_key, pr in (analysis.get("probes") or {}).items():
-            for category, line in hashloot.collect_from_db_probe(pr, source):
+            for category, line in hashloot.collect_from_probe(pr, source):
                 by_cat.setdefault(category, []).append(line)
         for category, lines in by_cat.items():
             n = hashloot.write_hashcat_file(loot_dir, category, lines)

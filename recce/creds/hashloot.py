@@ -142,6 +142,22 @@ def collect_from_db_probe(probe: dict, service: str) -> list[tuple[str, str]]:
     return out
 
 
+def collect_from_probe(probe: dict, service: str) -> list[tuple[str, str]]:
+    """Category + line collector for every service that produces a hash.
+
+    Superset of collect_from_db_probe — includes IPMI (probe["rakp"] populated
+    by services/ipmi.rakp_hash) alongside the DB engines. Extending in-place
+    kept the existing DB call sites unchanged; this is the unified entry point
+    for anything new.
+    """
+    if service == "ipmi":
+        rakp = probe.get("rakp") if isinstance(probe, dict) else None
+        if isinstance(rakp, dict) and rakp.get("hashcat_line"):
+            return [("ipmi", rakp["hashcat_line"])]
+        return []
+    return collect_from_db_probe(probe, service)
+
+
 def creds_to_hashcat_lines(creds: list[Credential]) -> list[str]:
     """NT hashes from the credential store, formatted as `user:hash` for mode
     1000. Complements the existing `nthashes.txt` (bare hash lines) with a
