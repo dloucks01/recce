@@ -964,12 +964,55 @@ def _record_device(hosts: list[Host], ip: str, pr: dict) -> None:
     else:
         return
     from ..core.known_devices import record_device
+    from ..core.known_vendors import record_vendor
     for h in hosts:
         if h.ip == ip:
             model = vendor or "mqtt-broker"
             record_device(h, source, vendor=vendor, model=model,
                           firmware=firmware, device_type=device_type)
+            # $SYS/broker/version names the vendor verbatim → high
+            # confidence. A retained-topic-only hit (no $SYS) reduces
+            # to medium since the vendor there is the *client* family
+            # (Shelly/Tasmota), not the broker itself.
+            if vendor:
+                conf = "high" if source == "mqtt:sys-version" else "medium"
+                # pr carries the port via the caller; land the vendor on
+                # the first open MQTT port on this host.
+                for p in h.open_ports:
+                    if is_mqtt(p):
+                        record_vendor(h, p.portid, vendor,
+                                      source=source, confidence=conf)
+                        break
             break
+
+
+def _record_topics(hosts: list[Host], ip: str, pr: dict) -> None:
+    """Feed retained + live topics observed on this broker into
+    core.known_topics — one row per (broker, topic), source-tagged so
+    the reader shows whether the sighting came from a $SYS scrape, a
+    retained-message replay, or live traffic in the SUBSCRIBE window."""
+    if not pr or not pr.get("reachable"):
+        return
+    from ..core.known_topics import record_topic
+    target = None
+    for h in hosts:
+        if h.ip == ip:
+            target = h
+            break
+    if target is None:
+        return
+    for entry in pr.get("retained") or []:
+        record_topic(target, entry.get("topic", ""), retained=True,
+                     payload_size=int(entry.get("size") or 0),
+                     source="mqtt:retained")
+    for entry in pr.get("live") or []:
+        record_topic(target, entry.get("topic", ""), retained=False,
+                     payload_size=int(entry.get("size") or 0),
+                     source="mqtt:live")
+    for topic, val in (pr.get("sys") or {}).items():
+        record_topic(target, topic, retained=True,
+                     payload_size=len(val or ""),
+                     source="mqtt:$sys")
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
@@ -995,6 +1038,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["retained"] = len(pr.get("retained") or [])
                 t["publish_ok"] = pr.get("publish_ok", False)
                 _record_device(hosts, t["ip"], pr)
+                _record_topics(hosts, t["ip"], pr)
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
