@@ -912,6 +912,71 @@ def findings_to_vulns(fs: list[dict]) -> dict:
     return svccommon.findings_to_vulns(fs, "rtsp", _DEFAULT_PORT)
 
 
+def _resolution_from_sdp(sdp: dict) -> str:
+    """Extract WxH from an SDP dict if it is there.
+
+    RFC 4566 has no dedicated resolution attribute, but IP cameras use
+    two conventions the reader can pick up without parsing SPS:
+      * `a=x-dimensions:W,H` — Axis / QuickTime style
+      * `a=framesize:PT W-H` (or `WxH`) — inside fmtp lines on Hikvision
+        and Dahua firmware
+    """
+    for f in sdp.get("fmtp") or []:
+        m = re.search(r"framesize\s*[:=]\s*\d+\s+(\d+)[x-](\d+)", f, re.I)
+        if m:
+            return f"{m.group(1)}x{m.group(2)}"
+        m = re.search(r"x-dimensions\s*[:=]\s*(\d+)\s*,\s*(\d+)", f, re.I)
+        if m:
+            return f"{m.group(1)}x{m.group(2)}"
+    info = sdp.get("info", "") or ""
+    m = re.search(r"\b(\d{3,4})\s*[xX]\s*(\d{3,4})\b", info)
+    if m:
+        return f"{m.group(1)}x{m.group(2)}"
+    return ""
+
+
+def _record_streams(hosts: list[Host], ip: str, port: int, pr: dict,
+                    tls: bool = False) -> None:
+    """Feed the RTSP probe result into core.known_streams — the root
+    DESCRIBE and every well-known vendor path that answered 200/401 is
+    a discoverable stream URL."""
+    if not pr or not pr.get("reachable"):
+        return
+    from ..core.known_streams import record_stream
+    scheme = "rtsps" if (tls or pr.get("tls")) else "rtsp"
+    sdp = pr.get("sdp") or {}
+    codecs = [c.get("codec", "") for c in (sdp.get("codecs") or []) if c.get("codec")]
+    codec = codecs[0] if codecs else ""
+    resolution = _resolution_from_sdp(sdp) if sdp else ""
+    target_host = None
+    for h in hosts:
+        if h.ip == ip:
+            target_host = h
+            break
+    if target_host is None:
+        return
+    # Root DESCRIBE — recorded when unauth 200 (SDP served) OR when we
+    # got a 401 challenge (auth-required stream we still know exists).
+    if pr.get("unauth_stream"):
+        record_stream(target_host, _url(ip, port, "/", scheme=scheme),
+                      codec=codec, resolution=resolution,
+                      auth_required=False, source="rtsp:describe-root")
+    elif pr.get("auth"):
+        record_stream(target_host, _url(ip, port, "/", scheme=scheme),
+                      codec=codec, resolution=resolution,
+                      auth_required=True, source="rtsp:describe-root")
+    for entry in pr.get("paths") or []:
+        st = entry.get("status")
+        if st not in (200, 401):
+            continue
+        purl = _url(ip, port, entry.get("path", "/"), scheme=scheme)
+        record_stream(target_host, purl,
+                      codec=codec if st == 200 else "",
+                      resolution=resolution if st == 200 else "",
+                      auth_required=(st == 401),
+                      source=f"rtsp:path-enum:{entry.get('vendor', '')}")
+
+
 def _record_device(hosts: list[Host], ip: str, pr: dict) -> None:
     """Feed the RTSP fingerprint into core.known_devices — the Server header
     names the IP-camera product line, cve_hits (matched off that header)
@@ -968,6 +1033,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             t["server"] = pr.get("server", "")
             t["unauth_stream"] = pr.get("unauth_stream", False)
             _record_device(hosts, t["ip"], pr)
+            _record_streams(hosts, t["ip"], t["port"], pr, tls=t.get("tls", False))
             if do_default_creds and pr.get("reachable") and pr.get("auth") \
                     and (pr["auth"].get("digest") or pr["auth"].get("basic")) \
                     and not pr.get("unauth_stream"):
