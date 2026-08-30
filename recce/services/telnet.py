@@ -1062,6 +1062,30 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["banner"] = pr.get("banner", "")
                 t["vendor"] = pr.get("vendor", "")
                 t["environ_leak"] = pr.get("environ_leak") or {}
+                # RFC 854 telnet has no transport crypto at all — a probe
+                # that identifies a telnet server IS a cleartext-auth
+                # exposure. Skip when the connection was tunneled over TLS
+                # (telnets/992) since the wire is protected there.
+                if pr.get("looks_like_telnet") and not pr.get("tls"):
+                    from ..core.cleartext_creds import record_cleartext_auth
+                    for _h in hosts:
+                        if _h.ip == t["ip"]:
+                            record_cleartext_auth(_h, t["port"], "telnet",
+                                                  "password",
+                                                  source="telnet:probe")
+                            break
+                # Feed the cross-service vendor correlator. A concrete
+                # _VENDOR_TABLE match (banner regex) is medium confidence;
+                # "unknown" is dropped by the reader.
+                v = pr.get("vendor") or ""
+                if v and v != "unknown":
+                    from ..core.known_vendors import record_vendor
+                    for h in hosts:
+                        if h.ip == t["ip"]:
+                            record_vendor(h, t["port"], v,
+                                          source="telnet:banner",
+                                          confidence="medium")
+                            break
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": credfree_runbook(t["ip"], t["port"]),
