@@ -542,6 +542,16 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["syst"] = pr.get("syst", "")
                 t["pasv_ip"] = pr.get("pasv_ip", "")
                 t["site_verbs"] = pr.get("site_verbs", [])
+                # RFC 959 has no transport crypto — any reachable FTP
+                # endpoint is a cleartext-auth exposure; AUTH TLS being
+                # advertised does not remove the plain-socket USER/PASS
+                # path. Feed the cross-service reader.
+                from ..core.cleartext_creds import record_cleartext_auth
+                for _h in hosts:
+                    if _h.ip == t["ip"]:
+                        record_cleartext_auth(_h, t["port"], "ftp",
+                                              "password", source="ftp:probe")
+                        break
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": credfree_runbook(t["ip"], t["port"]),
