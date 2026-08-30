@@ -50,6 +50,7 @@ import struct
 import zlib
 
 from ..core import proxy
+from ..core.known_monitoring_agents import record_monitoring_agent
 from ..core.models import Host, Port
 
 
@@ -760,6 +761,21 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["plaintext"] = pr.get("plaintext", False)
                 t["anon_dh_tls"] = pr.get("anon_dh_tls", False)
                 t["version"] = pr.get("version", "")
+                # Feed the cross-service monitoring-agent correlator. If
+                # the daemon answered our _NRPE_CHECK, allowed_hosts admits
+                # the scanner (not gated). Real TLS with a server cert is
+                # gated; plaintext or anon-DH is not.
+                if pr.get("reachable"):
+                    gated = bool(pr.get("tls")
+                                 and not pr.get("plaintext")
+                                 and not pr.get("anon_dh_tls"))
+                    for h in hosts:
+                        if h.ip == t["ip"]:
+                            record_monitoring_agent(
+                                h, t["port"], "nrpe",
+                                version=pr.get("version", ""),
+                                gated=gated, source="nrpe")
+                            break
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

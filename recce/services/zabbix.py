@@ -29,6 +29,7 @@ import struct
 import zlib
 
 from ..core import proxy
+from ..core.known_monitoring_agents import record_monitoring_agent
 from ..core.models import Host, Port
 
 
@@ -532,6 +533,25 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 else:
                     t["autoreg"] = pr.get("autoreg_accepted", False)
                     t["tls_required"] = pr.get("tls_required", False)
+                # Feed the cross-service monitoring-agent correlator so a
+                # compromised agent surfaces as a pivot signal for the
+                # whole fleet the same server monitors.
+                if pr.get("reachable"):
+                    kind = ("zabbix-trapper" if t["role"] == "trapper"
+                            else "zabbix-agent")
+                    # Agent responding at all from the scanner IP = the
+                    # Server= allow-list is bypassed (not gated). Trapper
+                    # is gated iff TLS PSK/cert is enforced.
+                    gated = bool(pr.get("tls_required", False))
+                    for h in hosts:
+                        if h.ip == t["ip"]:
+                            record_monitoring_agent(
+                                h, t["port"], kind,
+                                version=pr.get("version", ""),
+                                gated=gated,
+                                server_hints=list(pr.get("server_ips") or []),
+                                source="zabbix")
+                            break
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
