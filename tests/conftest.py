@@ -65,6 +65,9 @@ _COMPOSE_CANARIES = {
     "databases":  ("172.20.0.53", 11211),
     "messaging":  ("172.20.0.54", 1883),
     "media":      ("172.20.0.58", 8554),
+    # Phase 9b `ot` profile: opcua-sim is the OT-batch canary (TCP —
+    # BACnet on .60 is UDP so it can't be a connect-canary).
+    "ot":         ("172.20.0.65", 4840),
 }
 
 _VAGRANT_CANARIES = {
@@ -88,7 +91,7 @@ def pytest_configure(config):
         "markers",
         "needs_compose(profile): skip unless the named test_env/ compose "
         "profile is reachable (default 172.20.0.0/24; override with "
-        "RECCE_TEST_NET). Profiles: base, core, mail, databases, messaging, media.")
+        "RECCE_TEST_NET). Profiles: base, core, mail, databases, messaging, media, ot.")
     config.addinivalue_line(
         "markers",
         "needs_vagrant(vm): skip unless the named Vagrant VM is reachable "

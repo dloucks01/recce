@@ -652,5 +652,127 @@ services:
     profiles: [media, core]
     restart: unless-stopped
 
+  # ══════════════════════════════════════════════════════════════════════════
+  # Phase 9b — OT/ICS protocol simulators. Six new targets on `--profile ot`
+  # cover the 6 industrial protocols that had no reachable target in the
+  # base env (bacnet, dnp3, enip, iec-104, opcua, s7). `modbus-target` (.48)
+  # is already covered by an off-the-shelf image.
+  #
+  # Every simulator is minimal — enough wire behaviour to make recce's probe
+  # return a valid detection, not a full-fidelity implementation. Rebuild
+  # sources live in test_env/simulators/<slug>/. Bring the batch up with
+  # `docker compose --profile ot up --wait` (first run does five builds).
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # ── T5: BACnet/IP simulator — 47808/udp Who-Is / I-Am + Device object
+  # + one Analog-Value + one File object (bacpypes 0.18.7). ────────────
+  bacnet-sim:
+    build: ./simulators/bacnet
+    hostname: bacnet-sim
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.60
+    # BACnet is UDP-only — probe with a Who-Is from inside the container.
+    healthcheck:
+      test: ["CMD-SHELL",
+             "python -c \"import socket,sys; s=socket.socket(2,2); s.settimeout(1); s.sendto(bytes.fromhex('810a000801001008'), ('127.0.0.1',47808)); s.recvfrom(4096)\""]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    profiles: [ot]
+    restart: unless-stopped
+
+  # ── T5: DNP3 outstation simulator — 20000/tcp REQUEST_LINK_STATUS +
+  # FC1 Class 0 (hand-rolled, stdlib only). ────────────────────────────
+  dnp3-sim:
+    build: ./simulators/dnp3
+    hostname: dnp3-sim
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.61
+    healthcheck:
+      test: ["CMD-SHELL",
+             "python -c \"import socket; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1',20000)); s.close()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    profiles: [ot]
+    restart: unless-stopped
+
+  # ── T5: EtherNet/IP simulator — 44818/tcp List Identity / List Services
+  # / RegisterSession (hand-rolled, stdlib only — cpppo is GPLv3). ─────
+  enip-sim:
+    build: ./simulators/enip
+    hostname: enip-sim
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.62
+    healthcheck:
+      test: ["CMD-SHELL",
+             "python -c \"import socket; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1',44818)); s.close()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    profiles: [ot]
+    restart: unless-stopped
+
+  # ── T5: IEC 60870-5-104 simulator — 2404/tcp APCI + TESTFR / STARTDT /
+  # General Interrogation (hand-rolled, stdlib only). ──────────────────
+  iec104-sim:
+    build: ./simulators/iec104
+    hostname: iec104-sim
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.63
+    healthcheck:
+      test: ["CMD-SHELL",
+             "python -c \"import socket; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1',2404)); s.close()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    profiles: [ot]
+    restart: unless-stopped
+
+  # ── T5: Siemens S7 simulator — 102/tcp COTP + S7COMM SetupCommunication
+  # + SZL 0x0011/0x001C via python-snap7 + libsnap7 1.4.2. First build
+  # compiles libsnap7 from source (needs network + a few minutes). ─────
+  s7-sim:
+    build: ./simulators/s7
+    hostname: s7-sim
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.64
+    healthcheck:
+      test: ["CMD-SHELL",
+             "python -c \"import socket; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1',102)); s.close()\""]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    profiles: [ot]
+    restart: unless-stopped
+
+  # ── T5: OPC UA simulator — Microsoft's OPC-PLC (Apache-2.0), a fully
+  # conformant server exposing anonymous SecurityPolicy=None so recce's
+  # HELLO/ACK + OpenSecureChannel + GetEndpoints path completes. Placed
+  # in both `ot` (OT-batch) and `core` (always-useful) profiles. ───────
+  opcua-sim:
+    image: mcr.microsoft.com/iotedge/opc-plc:latest
+    hostname: opcua-sim
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.65
+    command:
+      - "--pn=4840"
+      - "--autoaccept"
+      - "--unsecuretransport"
+      - "--ph=opcua-sim"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ': < /dev/tcp/127.0.0.1/4840'"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    profiles: [ot, core]
+    restart: unless-stopped
+
 volumes:
   nfs-share:

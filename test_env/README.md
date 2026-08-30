@@ -25,11 +25,17 @@ The 29 base services (`.10`–`.49`) start on every `docker compose up`.
 Nine new T5 targets (`.50`–`.58`) are opt-in via compose profiles so a
 laptop bring-up stays fast:
 
-    docker compose --profile core up --wait          # +dovecot dns ntp memcached mqtt vault rtsp
+    docker compose --profile core up --wait          # +dovecot dns ntp memcached mqtt vault rtsp opcua-sim
     docker compose --profile messaging up --wait     # +mqtt coap xmpp
     docker compose --profile mail up --wait          # +dovecot
     docker compose --profile databases up --wait     # +memcached
     docker compose --profile media up --wait         # +rtsp
+    docker compose --profile ot up --wait            # +bacnet dnp3 enip iec104 s7 opcua sims (Phase 9b)
+
+`--profile ot` brings up the OT/ICS batch (`.60`–`.65`). First bring-up
+of `ot` is slow — five simulator images build from source, and the S7
+simulator additionally compiles libsnap7 from the upstream Sourceforge
+tarball (needs network at build time). Subsequent starts are fast.
 
 The `--wait` flag blocks until each service's healthcheck reports
 healthy — deterministic for CI. Multiple profiles compose:
@@ -69,6 +75,12 @@ healthy — deterministic for CI. Multiple profiles compose:
 | **.56** | coap-target | :5683/udp (aiocoap file-server) | *T5, profile `messaging`.* recce `coap` — /.well-known/core discovery. |
 | **.57** | xmpp-target | :5222 c2s · :5269 s2s · :5223 legacy TLS | *T5, profile `messaging`.* recce `xmpp` module. |
 | **.58** | rtsp-target | :554 · :8554 (mediamtx) | *T5, profile `core, media`.* recce `rtsp` — OPTIONS/DESCRIBE (vendor-quirk tests remain integration-only per Phase 9 plan). |
+| **.60** | bacnet-sim | BACnet/IP :47808/udp | *T5, profile `ot`.* bacpypes device — Who-Is / I-Am + Analog-Value + File object for recce `bacnet` probe. |
+| **.61** | dnp3-sim | DNP3 :20000/tcp | *T5, profile `ot`.* Hand-rolled outstation — REQUEST_LINK_STATUS + FC1 Class 0 for recce `dnp3` probe. |
+| **.62** | enip-sim | EtherNet/IP :44818/tcp | *T5, profile `ot`.* Hand-rolled encapsulation responder — List Identity / Services / RegisterSession for recce `enip` probe. |
+| **.63** | iec104-sim | IEC-104 :2404/tcp | *T5, profile `ot`.* Hand-rolled APCI + STARTDT + General Interrogation for recce `iec104` probe. |
+| **.64** | s7-sim | Siemens S7 :102/tcp | *T5, profile `ot`.* `python-snap7` server (COTP + S7COMM SetupCommunication + SZL) for recce `s7` probe. |
+| **.65** | opcua-sim | OPC UA :4840/tcp | *T5, profile `ot, core`.* Microsoft `mcr.microsoft.com/iotedge/opc-plc` — anonymous SecurityPolicy=None for recce `opcua` probe. |
 
 **Bold rows** are the T1/T2/T3/T5 expansions I added; the un-bolded rows are the base test env.
 **Italic notes** in the T5 rows call out which compose profile each service belongs to.
