@@ -978,6 +978,32 @@ proof_html = make_proof_html_wrapper("iscsi> ")
 findings_to_vulns = make_findings_to_vulns_wrapper("iscsi", _DEFAULT_PORT)
 
 
+def _record_luns(hosts: list[Host], ip: str, pr: dict) -> None:
+    """Feed the iSCSI probe result into core.known_luns — LUN 0 with vendor/
+    product/revision when SCSI INQUIRY (SPC-4 §6.6) succeeded against the
+    first discovered TargetName."""
+    if not pr or not pr.get("is_iscsi"):
+        return
+    inq = pr.get("inquiry") or {}
+    if not (inq.get("vendor") or inq.get("product")):
+        return
+    targets = pr.get("targets") or []
+    if not targets:
+        return
+    iqn = (targets[0].get("iqn") or "").strip()
+    if not iqn:
+        return
+    from ..core.known_luns import record_lun
+    for h in hosts:
+        if h.ip == ip:
+            record_lun(h, iqn, "0", portal_ip=ip,
+                       vendor=inq.get("vendor", ""),
+                       product=inq.get("product", ""),
+                       revision=inq.get("revision", ""),
+                       source="iscsi:inquiry")
+            break
+
+
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None,
             do_inquiry: bool = True) -> dict:
@@ -997,6 +1023,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["unauth_discovery"] = pr.get("discovery_no_auth", False)
                 t["unauth_normal"] = bool(pr.get("normal_login", {}).get("full_feature"))
                 t["target_count"] = len(pr.get("targets", []))
+                _record_luns(hosts, t["ip"], pr)
     fs = findings(hosts, probes, scope_ips=scope_ips)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
