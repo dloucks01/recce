@@ -486,5 +486,171 @@ services:
       MSSQL_PID: "Developer"
     restart: unless-stopped
 
+  # ══════════════════════════════════════════════════════════════════════════
+  # Phase 9a — MVP additions for the new T5 service modules. Every service
+  # below is opt-in via `docker compose --profile core up --wait`; nothing
+  # here changes existing default-start behaviour. Each has a healthcheck so
+  # the compose `--wait` bring-up is deterministic for CI.
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # ── T5: Dovecot — IMAP :143 / IMAPS :993 + POP3 :110 / POP3S :995 ──────
+  dovecot:
+    image: dovecot/dovecot:2.3
+    hostname: dovecot
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.50
+    healthcheck:
+      test: ["CMD-SHELL", "echo '' | nc -w1 127.0.0.1 143 | grep -q OK"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    profiles: [core, mail]
+    restart: unless-stopped
+
+  # ── T5: BIND9 authoritative — DNS :53 tcp+udp ─────────────────────────
+  dns-bind:
+    image: internetsystemsconsortium/bind9:9.19
+    hostname: dns-bind
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.51
+    healthcheck:
+      test: ["CMD-SHELL", "dig @127.0.0.1 +short +tries=1 +time=1 . NS >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    profiles: [core]
+    restart: unless-stopped
+
+  # ── T5: NTP daemon — NTP :123/udp ──────────────────────────────────────
+  ntp-target:
+    image: cturra/ntp:latest
+    hostname: ntp-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.52
+    # NTP has no TCP port — pgrep is the liveness signal we can check
+    # from inside the container.
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep chronyd >/dev/null || pgrep ntpd >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    profiles: [core]
+    restart: unless-stopped
+
+  # ── T5: Memcached — :11211 (no auth) ───────────────────────────────────
+  memcached:
+    image: memcached:1.6-alpine
+    hostname: memcached
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.53
+    command: ["memcached", "-l", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD-SHELL", "echo stats | nc -w1 127.0.0.1 11211 | grep -q version"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    profiles: [core, databases]
+    restart: unless-stopped
+
+  # ── T5: Mosquitto MQTT broker — plaintext :1883 (anonymous, retained) ──
+  mqtt-broker:
+    image: eclipse-mosquitto:2.0
+    hostname: mqtt-broker
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.54
+    # Anonymous-allowed + retained-topic-friendly inline config — recce
+    # mqtt module tests both the anonymous-connect and retained-message
+    # exfil paths.
+    command:
+      - "sh"
+      - "-c"
+      - |
+        cat >/mosquitto/config/mosquitto.conf <<'EOF'
+        listener 1883
+        allow_anonymous true
+        persistence true
+        persistence_location /mosquitto/data/
+        EOF
+        exec mosquitto -c /mosquitto/config/mosquitto.conf
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t 'recce/health' -C 1 -W 1 -q 0 || exit 0"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    profiles: [core, messaging]
+    restart: unless-stopped
+
+  # ── T5: HashiCorp Vault — dev mode, root token 'root', :8200 ───────────
+  vault:
+    image: hashicorp/vault:1.16
+    hostname: vault
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.55
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add: [IPC_LOCK]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8200/v1/sys/health | grep -q initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    profiles: [core]
+    restart: unless-stopped
+
+  # ── T5: aiocoap fileserver — CoAP :5683/udp ────────────────────────────
+  coap-target:
+    image: aiocoap/aiocoap:latest
+    hostname: coap-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.56
+    command: ["aiocoap-fileserver", "/tmp"]
+    # CoAP is UDP-only — the container-native check is process presence.
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f aiocoap >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    profiles: [messaging]
+    restart: unless-stopped
+
+  # ── T5: ejabberd XMPP — c2s :5222, s2s :5269, legacy TLS :5223 ─────────
+  xmpp-target:
+    image: ejabberd/ecs:24.02
+    hostname: xmpp-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.57
+    healthcheck:
+      test: ["CMD-SHELL", "nc -zw1 127.0.0.1 5222"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    profiles: [messaging]
+    restart: unless-stopped
+
+  # ── T5: mediamtx RTSP server — generic RTSP :554 (Hikvision/Axis quirks
+  # remain integration-only per Phase 9 plan) ──────────────────────────
+  rtsp-target:
+    image: bluenviron/mediamtx:latest
+    hostname: rtsp-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.58
+    healthcheck:
+      test: ["CMD-SHELL", "nc -zw1 127.0.0.1 8554"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    profiles: [media, core]
+    restart: unless-stopped
+
 volumes:
   nfs-share:

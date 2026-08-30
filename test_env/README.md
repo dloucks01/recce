@@ -19,6 +19,22 @@ Once up:
 
 Open <http://localhost:8443>.
 
+## Compose profiles (Phase 9a)
+
+The 29 base services (`.10`–`.49`) start on every `docker compose up`.
+Nine new T5 targets (`.50`–`.58`) are opt-in via compose profiles so a
+laptop bring-up stays fast:
+
+    docker compose --profile core up --wait          # +dovecot dns ntp memcached mqtt vault rtsp
+    docker compose --profile messaging up --wait     # +mqtt coap xmpp
+    docker compose --profile mail up --wait          # +dovecot
+    docker compose --profile databases up --wait     # +memcached
+    docker compose --profile media up --wait         # +rtsp
+
+The `--wait` flag blocks until each service's healthcheck reports
+healthy — deterministic for CI. Multiple profiles compose:
+`docker compose --profile core --profile messaging up --wait`.
+
 ## Network layout
 
 | IP | Container | Service(s) | Notes |
@@ -44,8 +60,18 @@ Open <http://localhost:8443>.
 | **.28** | couch-target | CouchDB :5984 | Admin party — `admin:admin`. |
 | **.29** | cassandra-tgt | Cassandra :9042 · gossip :7000 | `AllowAllAuthenticator`, no CQL creds. |
 | **.30** | ad-dc | KDC :88 · LDAP :389/636 · SMB :445 · DNS :53 · GC :3268 | Samba as AD DC. Domain **CORP.LOCAL**. Admin `Administrator:Passw0rd!`. |
+| **.50** | dovecot | IMAP :143 / IMAPS :993 · POP3 :110 / POP3S :995 | *T5, profile `core, mail`.* recce `imap` + `pop3` module targets. |
+| **.51** | dns-bind | DNS :53 tcp+udp | *T5, profile `core`.* recce `dns` target. |
+| **.52** | ntp-target | NTP :123/udp | *T5, profile `core`.* recce `ntp` (mode-6 readvar / peers / monlist / skew). |
+| **.53** | memcached | :11211 | *T5, profile `core, databases`.* recce db/memcached probe. |
+| **.54** | mqtt-broker | :1883 (anonymous, retained) | *T5, profile `core, messaging`.* recce `mqtt` module — CONNACK + retained-topic exfil. |
+| **.55** | vault | :8200 (dev mode, root token `root`) | *T5, profile `core`.* recce `vault` — /sys/health + auth mounts. |
+| **.56** | coap-target | :5683/udp (aiocoap file-server) | *T5, profile `messaging`.* recce `coap` — /.well-known/core discovery. |
+| **.57** | xmpp-target | :5222 c2s · :5269 s2s · :5223 legacy TLS | *T5, profile `messaging`.* recce `xmpp` module. |
+| **.58** | rtsp-target | :554 · :8554 (mediamtx) | *T5, profile `core, media`.* recce `rtsp` — OPTIONS/DESCRIBE (vendor-quirk tests remain integration-only per Phase 9 plan). |
 
-**Bold rows** are the T1/T2/T3 expansion I added; the un-bolded rows are the base test env.
+**Bold rows** are the T1/T2/T3/T5 expansions I added; the un-bolded rows are the base test env.
+**Italic notes** in the T5 rows call out which compose profile each service belongs to.
 
 ## Sample importer files
 
