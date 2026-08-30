@@ -41,6 +41,21 @@ The `--wait` flag blocks until each service's healthcheck reports
 healthy — deterministic for CI. Multiple profiles compose:
 `docker compose --profile core --profile messaging up --wait`.
 
+## Vagrant plane (Phase 9c)
+
+Three targets that need a full OS live in `test_env/vagrant/` and are
+brought up separately:
+
+    cd test_env/vagrant
+    vagrant up ad-dc         # Windows Server 2022 AD DC (172.20.1.10)
+    vagrant up bmc           # IPMI BMC via virtualBMC   (172.20.1.20)
+    vagrant up kernelnet     # LIO iSCSI + NFSv4 + NBD   (172.20.1.30)
+
+Sits on **172.20.1.0/24** (separate from the docker plane's
+172.20.0.0/24). Full footprint: ~7 GB RAM, ~60 GB disk. See
+`test_env/vagrant/README.md` for account credentials + provisioning
+detail.
+
 ## Network layout
 
 | IP | Container | Service(s) | Notes |

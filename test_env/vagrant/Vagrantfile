@@ -1,0 +1,98 @@
+# Recce test environment — Vagrant plane (Phase 9c)
+#
+# Three VMs that need a full OS and can't be reduced to a Docker container:
+#
+#   ad-dc      172.20.1.10  Windows Server 2022  — real KDC/DPAPI/WinRM/SMB
+#   bmc        172.20.1.20  Ubuntu 22.04         — virtualBMC (IPMI 623/udp)
+#   kernelnet  172.20.1.30  Ubuntu 22.04         — LIO iSCSI + NFSv4 (krb5p) + NBD
+#
+# Boxes are free/public on Vagrant Cloud — no paid subscription needed. First
+# `vagrant up` pulls ~4 GB. Full plane sits at ~7 GB RAM / ~60 GB disk when
+# running. Bring up VMs individually with `vagrant up ad-dc` etc.
+#
+# The private_network is on 172.20.1.0/24 (separate from the docker plane at
+# 172.20.0.0/24) so the two never route to each other by accident. Recce
+# runs on the host and can reach both.
+#
+# Env-gate markers in tests/conftest.py probe these VMs via TCP canaries:
+#   ad-dc:445, bmc:623 (UDP — nc-based fallback), kernelnet:3260.
+# Tests that need one of them use `@pytest.mark.needs_vagrant("<vm>")` and
+# SKIP cleanly when the VM isn't up.
+
+Vagrant.configure("2") do |config|
+
+  # ─── 1. Windows Server 2022 AD DC ──────────────────────────────────────
+  # Domain: CORP.LOCAL   Admin: Administrator / Passw0rd!
+  # After first boot, `provision-ad.ps1` promotes it to a DC and seeds a
+  # handful of test users + a kerberoastable service account.
+  config.vm.define "ad-dc" do |ad|
+    ad.vm.box     = "gusztavvargadr/windows-server-2022-standard"
+    ad.vm.box_version = ">= 2202.0.2404"
+    ad.vm.hostname = "dc01"
+    ad.vm.communicator = "winrm"
+    ad.winrm.username = "vagrant"
+    ad.winrm.password = "vagrant"
+    ad.winrm.timeout  = 3600   # dcpromo takes a while
+
+    ad.vm.network "private_network", ip: "172.20.1.10"
+
+    ad.vm.provider "virtualbox" do |v|
+      v.name   = "recce-ad-dc"
+      v.memory = 4096
+      v.cpus   = 2
+      # Windows Server needs a bit of graphics memory to complete first-boot
+      # OOBE cleanly, else the initial WinRM negotiation fails.
+      v.customize ["modifyvm", :id, "--vram", "16"]
+    end
+    ad.vm.provider "libvirt" do |v|
+      v.memory = 4096
+      v.cpus   = 2
+    end
+
+    ad.vm.provision "shell", path: "provision-ad.ps1", privileged: true,
+                    reboot: true
+  end
+
+  # ─── 2. IPMI BMC simulator (virtualBMC) ────────────────────────────────
+  # `virtualbmc` speaks IPMI 2.0 over 623/udp on behalf of a fake QEMU node.
+  # Recce's ipmi module gets a real Get Channel Auth Capabilities / RAKP1
+  # exchange to bite on. Default creds: ADMIN / ADMIN.
+  config.vm.define "bmc" do |bmc|
+    bmc.vm.box = "generic/ubuntu2204"
+    bmc.vm.hostname = "bmc"
+    bmc.vm.network "private_network", ip: "172.20.1.20"
+
+    bmc.vm.provider "virtualbox" do |v|
+      v.name   = "recce-bmc"
+      v.memory = 1024
+      v.cpus   = 1
+    end
+    bmc.vm.provider "libvirt" do |v|
+      v.memory = 1024
+      v.cpus   = 1
+    end
+
+    bmc.vm.provision "shell", path: "provision-bmc.sh", privileged: true
+  end
+
+  # ─── 3. Kernel-privileged Ubuntu: iSCSI + NFSv4 + NBD ─────────────────
+  # Real LIO/targetcli iSCSI target (needs configfs), real nfs-kernel-server
+  # with an export, and nbd-server hosting a small block file.
+  config.vm.define "kernelnet" do |k|
+    k.vm.box = "generic/ubuntu2204"
+    k.vm.hostname = "kernelnet"
+    k.vm.network "private_network", ip: "172.20.1.30"
+
+    k.vm.provider "virtualbox" do |v|
+      v.name   = "recce-kernelnet"
+      v.memory = 2048
+      v.cpus   = 2
+    end
+    k.vm.provider "libvirt" do |v|
+      v.memory = 2048
+      v.cpus   = 2
+    end
+
+    k.vm.provision "shell", path: "provision-iscsi.sh", privileged: true
+  end
+end
