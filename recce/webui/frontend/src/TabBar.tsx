@@ -1,6 +1,6 @@
 import { Fragment, useState, useEffect, useRef } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "exploit" | "credentials" | "playbook" | "assets";
+export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "exploit" | "surface" | "credentials" | "playbook" | "assets";
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
@@ -13,6 +13,10 @@ const TAB_LABELS: Record<TabId, string> = {
   timeline: "Timeline",
   report: "Report",
   exploit: "Exploit",
+  // Phase C — proven-exploitable findings + tester "next move" surface.
+  // Default-visible: this IS the tab a pentester should land on for
+  // "what should I do next given what recce has found".
+  surface: "Surface",
   credentials: "Creds",
   playbook: "Playbook",
   // Power-user surface (Phase 7b): unions of everything recce learned across
@@ -33,16 +37,19 @@ const TAB_LABELS: Record<TabId, string> = {
 //
 // Testers can still drag-and-drop within the visible set to reorder.
 const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                           "exploit", "sessions", "credentials", "report",
+                           "surface", "exploit", "sessions", "credentials", "report",
                            "playbook", "timeline", "assets"];
 // The DEFAULT visible set. Everything after "report" is optional.
+// `surface` (Phase C — proven-exploitable + next-move surface) sits between
+// findings/hosts and the ATTACK group so a fresh tester lands one click
+// from "what should I do next".
 const DEFAULT_VISIBLE: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                                   "exploit", "sessions", "credentials", "report"];
+                                   "surface", "exploit", "sessions", "credentials", "report"];
 
 // Visual group boundaries — a divider is inserted BEFORE these tab ids
 // when they appear in the visible set. Purely presentational — no
 // impact on ordering, drag, or state.
-const GROUP_BOUNDARIES: Set<TabId> = new Set(["scan", "exploit", "report"]);
+const GROUP_BOUNDARIES: Set<TabId> = new Set(["scan", "surface", "report"]);
 
 interface TabBarProps {
   active: TabId;

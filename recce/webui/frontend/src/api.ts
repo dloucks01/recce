@@ -698,3 +698,35 @@ export type HashlootCategory = {
 export type HashlootCategories = { items: HashlootCategory[]; total: number };
 export const getHashlootCategories = () =>
   getJSON<HashlootCategories>("/api/hashloot/categories");
+
+// --- Phase C — ExploitSurface tab ("what should I do next") ------------------
+// Each finding carries the "your next move" exploit_note (populated by
+// service modules) plus a T0..T4 depth_tier. The endpoint filters +
+// ranks server-side and groups by attack-chain heuristic. The same
+// finding can belong to multiple groups.
+export type ExploitFinding = {
+  key: string;
+  ip: string;
+  port: number | null;
+  protocol: string;
+  service: string;
+  title: string;
+  severity: string;
+  depth_tier: string;
+  tier_label: string;
+  exploit_note: string;
+  kev: boolean;
+  cwes: string[];
+  cves: string[];
+  epss: number;
+  script_id: string;
+  host_hint: string;
+};
+export type ExploitSurfaceResponse = {
+  items: ExploitFinding[];
+  total: number;
+  groups: Record<string, string[]>;    // group name -> ordered finding keys
+  truncated: boolean;
+};
+export const getExploitSurface = () =>
+  getJSON<ExploitSurfaceResponse>("/api/exploit-surface");

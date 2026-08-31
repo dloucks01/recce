@@ -459,6 +459,113 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
         items = [{"target": ln} for ln in lines]
         return {"items": items, "total": len(items)}
 
+    # ---- /api/exploit-surface — Phase C tester "what's my next move" surface -----
+    # Every recce Vuln at critical/high may carry:
+    #   * exploit_note  — 1-3 sentences of tester-facing "your next move"
+    #   * depth_tier    — T0..T4 rubric slug (see recce.core.depth)
+    # This endpoint filters + ranks the annotated set + groups them by attack
+    # chain so the WebUI ExploitSurface tab can render "here's what to run
+    # next" without any post-processing on the client.
+    @app.get("/api/exploit-surface")
+    def exploit_surface():
+        from ...core import depth as _depth
+        from ...core import tracking
+        from ...core.store import Store
+        from .._common import _SEV_ORDER
+
+        # Attack-chain groups. A finding can belong to more than one group
+        # (an SMB Log4Shell relay is both AD chain + Web n-day, etc.).
+        SRC_GROUPS = {
+            "AD chain": {"smb", "ldap", "kerberos", "winrm", "msrpc"},
+            "Web n-day": {"http", "web", "webdav", "api"},
+            "Storage exposure": {"nfs", "iscsi", "nbd_ndmp", "mongodb", "redis",
+                                 "elasticsearch", "memcached", "couchdb"},
+            "OT/ICS": {"modbus", "s7", "bacnet", "opcua", "dnp3", "iec104",
+                       "enip", "coap"},
+            "Cloud + container": {"docker", "docker_registry", "kubernetes",
+                                  "vault", "vcenter", "vsphere", "cloud_metadata",
+                                  "consul", "nomad", "etcd"},
+            "Mail": {"smtp", "imap", "pop3"},
+        }
+        # Web n-day extra gate: only tier >= t1 (T1 verify or better).
+        WEB_MIN_RANK = _depth.rank(_depth.T1_VERIFY)
+        # Kind (script_id) substring markers for the "default creds / spray" bucket.
+        SPRAY_MARKERS = ("default_creds", "blank_login", "weak_creds", "anon", "unauth")
+
+        sev_order = _SEV_ORDER
+        with Store(db_path) as st:
+            hosts = st.all_hosts()
+
+        items: list[dict] = []
+        for h in hosts:
+            if not h.is_up:
+                continue
+            host_hint = h.hostname or ""
+            for v in h.vulns:
+                note = (getattr(v, "exploit_note", "") or "").strip()
+                tier = (getattr(v, "depth_tier", "") or "").strip()
+                if not note and not tier:
+                    continue
+                items.append({
+                    "key": tracking.vuln_row_key(v),
+                    "ip": h.ip,
+                    "port": v.port,
+                    "protocol": v.protocol or "tcp",
+                    "service": v.source or "",
+                    "title": v.title or v.script_id or "finding",
+                    "severity": v.severity or "info",
+                    "depth_tier": tier,
+                    "tier_label": _depth.label(tier) if tier else "",
+                    "exploit_note": note,
+                    "kev": bool(getattr(v, "kev", False)),
+                    "cwes": list(getattr(v, "cwes", []) or []),
+                    "cves": list(getattr(v, "ids", []) or []),
+                    "epss": round((getattr(v, "epss", 0.0) or 0.0) * 100),
+                    "script_id": v.script_id or "",
+                    "host_hint": host_hint,
+                })
+
+        # Rank: depth_tier DESC, severity DESC, kev DESC, epss DESC.
+        # Sort ASC on the negated rank so higher tier / more severe / kev / epss
+        # bubble up first.
+        items.sort(key=lambda it: (
+            -_depth.rank(it["depth_tier"]),
+            sev_order.get(it["severity"], 9),
+            0 if it["kev"] else 1,
+            -it["epss"],
+        ))
+
+        MAX_ITEMS = 500
+        truncated = len(items) > MAX_ITEMS
+        items = items[:MAX_ITEMS]
+
+        # Groups: name -> list of finding keys (order preserved from the ranked list).
+        groups: dict[str, list[str]] = {}
+        for name in list(SRC_GROUPS) + ["Default creds / spray", "KEV top-10"]:
+            groups[name] = []
+        for it in items:
+            svc = (it["service"] or "").lower()
+            script = (it["script_id"] or "").lower()
+            tier_rank = _depth.rank(it["depth_tier"])
+            for gname, srcs in SRC_GROUPS.items():
+                if svc in srcs:
+                    if gname == "Web n-day" and tier_rank < WEB_MIN_RANK:
+                        continue
+                    groups[gname].append(it["key"])
+            if any(m in script for m in SPRAY_MARKERS):
+                groups["Default creds / spray"].append(it["key"])
+        # KEV top-10 is its own ranking (epss DESC, severity DESC), capped at 10.
+        kev_ranked = sorted(
+            [it for it in items if it["kev"]],
+            key=lambda it: (-it["epss"], sev_order.get(it["severity"], 9)),
+        )[:10]
+        groups["KEV top-10"] = [it["key"] for it in kev_ranked]
+        # Drop empty buckets so the UI can skip rendering unused tabs.
+        groups = {k: v for k, v in groups.items() if v}
+
+        return {"items": items, "total": len(items), "groups": groups,
+                "truncated": truncated}
+
     @app.get("/api/hashloot/categories")
     def hashloot_categories():
         """The hashcat category table — one row per loot file recce knows
