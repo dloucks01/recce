@@ -546,6 +546,43 @@ def weak_sa_sweep(ip: str, port: int = _DEFAULT_PORT,
     return None
 
 
+def blank_login_probe(ip: str, port: int = _DEFAULT_PORT,
+                      user: str = "sa", password: str = "",
+                      timeout: float = 4.0) -> dict:
+    """T2 SAFE proof-of-exploit for a blank/default MSSQL login.
+
+    After the credential has authenticated once (LOGINACK), open a fresh
+    connection and read the server's PRELOGIN ProductVersion — the exact
+    banner the server itself emits — so the finding carries *server-side*
+    evidence that (a) the exploit primitive works and (b) the target is
+    the SQL Server we authenticated to. This deliberately does NOT run
+    xp_cmdshell, sp_configure, or any state-changing statement: those are
+    the T3 pass. Read-only, single round-trip per stage, bounded timeout;
+    the number of auth attempts stays at ONE so we don't nudge any
+    external lockout policy that might be layered on top.
+
+    Returns {ok, version, detail}. ok=True when the credential
+    authenticated AND a PRELOGIN version banner was recovered.
+    """
+    ok, detail = sqlauth_login(ip, port, user, password, timeout=timeout)
+    if not ok:
+        return {"ok": False, "version": "",
+                "detail": detail or "auth failed"}
+    pl = prelogin(ip, port, timeout=timeout) or {}
+    ver = pl.get("version") or ""
+    pw_show = password if password else "(blank)"
+    if ver:
+        return {"ok": True, "version": ver,
+                "detail": (f"LOGINACK confirmed with '{user}'/{pw_show}; "
+                           f"server ProductVersion {ver}")}
+    # LOGINACK held but the follow-up PRELOGIN gave us no version — the
+    # exploit is proven but we lack the corroborating banner; report the
+    # weaker state so the caller keeps this at T1.
+    return {"ok": False, "version": "",
+            "detail": (f"LOGINACK confirmed with '{user}'/{pw_show}; "
+                       "PRELOGIN version parse failed")}
+
+
 def ntlm_info(ip: str, port: int = _DEFAULT_PORT, timeout: float = 4.0) -> dict:
     """Native pre-auth NTLM info leak: drive a TDS integrated-auth login with an NTLM
     Type-1 and parse the server's Type-2 challenge for its NetBIOS/DNS domain + host
@@ -1011,14 +1048,25 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     depth_tier="t2"))
 
             esp = scripts.get("ms-sql-empty-password", "")
-            blank = (any("empty password" in (v.title or "").lower() and v.port == t.portid
-                         for v in h.vulns)
+            # A native `blank_login_probe` hit (from analyze()) is the
+            # strongest signal — recce PROVED the exploit primitive itself
+            # over TDS + read the server's own ProductVersion banner. That
+            # promotes the finding out of nmap-signal land: depth_tier=t2.
+            bv = (probes.get(tgt) or {}).get("blank_verified") or {}
+            bv_ok = bool(bv.get("ok"))
+            blank = (bv_ok
+                     or any("empty password" in (v.title or "").lower() and v.port == t.portid
+                            for v in h.vulns)
                      or "login success" in esp.lower())
             if blank:
+                detail = ("An account (typically 'sa') authenticates with an "
+                          "empty password - full control of the instance.")
+                if bv_ok:
+                    detail += (" Native TDS proof: "
+                               + bv.get("detail", "LOGINACK confirmed"))
                 out.append(_finding(
                     "critical", "MSSQL login with a blank password (sysadmin -> RCE)",
-                    tgt, "An account (typically 'sa') authenticates with an empty "
-                    "password - full control of the instance.", "impacket-mssqlclient",
+                    tgt, detail, "impacket-mssqlclient",
                     _fill("impacket-mssqlclient sa@<ip> -p <port>   # blank password; then "
                           "enable_xp_cmdshell; xp_cmdshell whoami", ctx),
                     "Set a strong sa password (or disable sa); enforce a password policy.",
@@ -1028,7 +1076,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "EXEC sp_configure 'show advanced options',1; RECONFIGURE; "
                         "EXEC sp_configure 'xp_cmdshell',1; RECONFIGURE; "
                         "EXEC xp_cmdshell 'whoami'."),
-                    depth_tier="t1"))
+                    depth_tier="t2" if bv_ok else "t1"))
 
             # xp_cmdshell already enabled -> RCE as the service account.
             xpc = scripts.get("ms-sql-xp-cmdshell", "")
@@ -2561,6 +2609,16 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 u, pw = weak
                 probes[key]["weak_default"] = {"user": u, "password": pw}
                 t["weak_default"] = {"user": u, "password": pw}
+                # T2 SAFE proof-of-exploit for the blank-sa case: prove the
+                # session actually holds by reading the server's PRELOGIN
+                # ProductVersion banner over a fresh connection. Read-only,
+                # never runs xp_cmdshell / sp_configure / any state-changing
+                # statement — the T1 `blank_login` finding gets promoted to
+                # T2 only when this succeeds; otherwise it stays at T1.
+                if pw == "" and u.lower() == "sa":
+                    bv = blank_login_probe(t["ip"], t["port"], u, pw)
+                    if bv.get("ok"):
+                        probes[key]["blank_verified"] = bv
         return None
 
     for _t, _r in svcprobe.iter_probe(targets, _one, budget=budget,

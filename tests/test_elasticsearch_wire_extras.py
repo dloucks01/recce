@@ -303,5 +303,147 @@ class SnapshotRepoSettings(unittest.TestCase):
         self.assertIn("/mnt/nfs/es-snaps", d)
 
 
+# ======= T2 safe proof: anonymous role actually reads /_cat/indices =========
+
+
+class AnonymousReadProofT2(unittest.TestCase):
+    """T2 promotion of es_anonymous: after /_security/_authenticate proves the
+    request runs as _anonymous, a follow-up unauthenticated /_cat/indices GET
+    that returns 200 with the index array proves the granted role reads live
+    cluster data. depth_tier flips t1 -> t2 and the captured index names +
+    doc count are folded into the finding detail."""
+
+    def setUp(self):
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _j(self, obj, status=200):
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(obj).encode())
+
+            def do_GET(self):
+                if self.path == "/":
+                    self.send_response(401)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"security_exception"}')
+                elif self.path == "/_security/_authenticate":
+                    self._j({"username": "_anonymous",
+                             "authentication_type": "anonymous",
+                             "roles": ["anonymous_read"]})
+                elif self.path.startswith("/_cat/indices"):
+                    # T2 payoff: the anon role actually reads the index list.
+                    # Wire shape per ES Reference "cat indices API".
+                    self._j([
+                        {"index": "customer_pii", "docs.count": "1234"},
+                        {"index": "app_logs", "docs.count": "98765"},
+                        {"index": ".kibana_1", "docs.count": "12"},
+                    ])
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+        self.srv, self.port = _http_server(H)
+
+    def tearDown(self):
+        self.srv.shutdown()
+
+    def test_probe_captures_read_evidence(self):
+        pr = es.probe("127.0.0.1", self.port)
+        self.assertTrue(pr.get("anonymous"))
+        self.assertTrue(pr.get("anonymous_read_ok"))
+        self.assertIn("customer_pii", pr.get("anonymous_indices") or [])
+        self.assertIn("app_logs", pr.get("anonymous_indices") or [])
+        self.assertEqual(pr.get("anonymous_docs"), 1234 + 98765 + 12)
+
+    def test_finding_promoted_to_t2(self):
+        pr = es.probe("127.0.0.1", self.port)
+        fs = es.findings([_host(self.port)], {("127.0.0.1", self.port): pr})
+        anon = [f for f in fs if f["kind"] == "es_anonymous"][0]
+        self.assertEqual(anon["severity"], "high")
+        self.assertEqual(anon.get("depth_tier"), "t2")
+        d = anon["detail"]
+        self.assertIn("T2 proof", d)
+        self.assertIn("customer_pii", d)
+        self.assertIn("app_logs", d)
+        # Dotted system indices are hidden from the sample name list.
+        self.assertNotIn(".kibana_1", d)
+
+
+class AnonymousReadDeniedStaysT1(unittest.TestCase):
+    """A defensive cluster where /_security/_authenticate still leaks the
+    _anonymous username (misconfig present) but /_cat/indices is refused
+    (401/403 -- the anonymous role does not grant that action). The T1 finding
+    must still emit; the T2 upgrade must NOT trigger."""
+
+    def setUp(self):
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _j(self, obj, status=200):
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(obj).encode())
+
+            def do_GET(self):
+                if self.path == "/":
+                    self.send_response(401)
+                    self.end_headers()
+                elif self.path == "/_security/_authenticate":
+                    self._j({"username": "_anonymous",
+                             "authentication_type": "anonymous",
+                             "roles": ["anonymous_ping"]})
+                elif self.path.startswith("/_cat/indices"):
+                    # anonymous role lacks 'monitor' cluster privilege.
+                    self.send_response(403)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"security_exception"}')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+        self.srv, self.port = _http_server(H)
+
+    def tearDown(self):
+        self.srv.shutdown()
+
+    def test_no_read_evidence_captured(self):
+        pr = es.probe("127.0.0.1", self.port)
+        self.assertTrue(pr.get("anonymous"))
+        self.assertFalse(pr.get("anonymous_read_ok"))
+        self.assertNotIn("anonymous_indices", pr)
+
+    def test_finding_stays_t1(self):
+        pr = es.probe("127.0.0.1", self.port)
+        fs = es.findings([_host(self.port)], {("127.0.0.1", self.port): pr})
+        anon = [f for f in fs if f["kind"] == "es_anonymous"][0]
+        self.assertEqual(anon.get("depth_tier"), "t1")
+        self.assertNotIn("T2 proof", anon["detail"])
+
+
+class AnonymousReadUnreachableCleanTimeout(unittest.TestCase):
+    """When the target is unreachable, _probe_anonymous_read() must return
+    silently without raising and without upgrading the tier — so a network blip
+    mid-probe does not corrupt an es_anonymous finding."""
+
+    def test_helper_swallows_unreachable_target(self):
+        out: dict = {}
+        # 127.0.0.1:1 is the classic 'nothing listens' probe port (RFC 6335
+        # reserves 0 but many systems refuse to bind it; port 1 is unassigned
+        # in the IANA registry for practical purposes). ConnectionRefused
+        # returns quickly; give the timeout a small floor so a slow refuse
+        # still bounds cleanly.
+        es._probe_anonymous_read("127.0.0.1", 1, tls=False, timeout=2.0,
+                                 out=out)
+        self.assertNotIn("anonymous_read_ok", out)
+        self.assertNotIn("anonymous_indices", out)
+
+
 if __name__ == "__main__":
     unittest.main()

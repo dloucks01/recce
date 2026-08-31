@@ -23,10 +23,16 @@ The exchange is intentionally kept out of the crypto path: SenderCertificate
 and ReceiverCertificateThumbprint are null ByteStrings, so no key material
 is required.
 
-Deferred (need session establishment with client/server nonces):
-  * anonymous CreateSession + ActivateSession + Browse
-  * ServerStatus Read
-  * UserName bruteforce (also needs RSA-OAEP against serverCertificate)
+T2 SAFE probe (promotes opcua_anonymous_allowed T1 -> T2):
+  * When an endpoint advertises tokenType=Anonymous we open a Session with
+    CreateSession + ActivateSession(AnonymousIdentityToken) and then Read
+    ServerStatus_CurrentTime (ns=0;i=2258). A successful Read is proof
+    the anonymous Session actually holds — the tier upgrades to T2 and the
+    server-reported current time lands in the finding evidence. Read-only,
+    single node, no writes, no browse recursion.
+
+Deferred (out of scope for this pass):
+  * UserName bruteforce (needs RSA-OAEP against serverCertificate)
 
 Airgap-safe: stdlib socket + struct only. Bounded timeouts on every recv.
 """
@@ -78,6 +84,25 @@ _ID_FIND_SERVERS_REQ = 422
 _ID_FIND_SERVERS_ON_NETWORK_REQ = 12208
 _ID_REGISTER_SERVER_REQ = 437
 _ID_CLOSE_SECURE_CHANNEL_REQ = 452
+_ID_CREATE_SESSION_REQ = 461
+_ID_ACTIVATE_SESSION_REQ = 467
+_ID_READ_REQ = 631
+
+# Extension-object TypeId used for AnonymousIdentityToken (Part 6 §5.4.4).
+_ID_ANONYMOUS_IDENTITY_TOKEN_ENC = 321
+
+# Well-known variable NodeIds under ns=0.
+_NODE_SERVER_STATUS_CURRENT_TIME = 2258
+
+# Attribute IDs (Part 4 §5.9). Value=13.
+_ATTR_VALUE = 13
+
+# BuiltIn Variant type IDs (Part 6 §5.2.2.16). DateTime = 13.
+_VARIANT_DATETIME = 13
+
+# FILETIME (100ns since 1601-01-01) -> Unix (seconds since 1970-01-01):
+# offset = 11644473600 seconds = 116444736000000000 * 100ns.
+_FILETIME_UNIX_EPOCH_OFFSET = 116444736000000000
 
 
 def is_opcua(port: Port) -> bool:
@@ -143,9 +168,12 @@ def _pack_null_extension_object() -> bytes:
 
 
 def _pack_request_header(request_handle: int = 1,
-                         timeout_ms: int = 5000) -> bytes:
-    # authenticationToken: NodeId (TwoByte 0 = anonymous / initial)
-    hdr = b"\x00\x00"
+                         timeout_ms: int = 5000,
+                         auth_token: bytes | None = None) -> bytes:
+    # authenticationToken: NodeId. Default TwoByte 0 = anonymous / initial;
+    # callers with a live Session pass the raw NodeId bytes captured from
+    # CreateSessionResponse.
+    hdr = auth_token if auth_token is not None else b"\x00\x00"
     hdr += _pack_datetime_null()          # timestamp
     hdr += _u32(request_handle)
     hdr += _u32(0)                        # returnDiagnostics
@@ -252,6 +280,75 @@ def _register_server_payload(request_handle: int) -> bytes:
     body += _pack_string("opc.tcp://recce:4840/")
     body += _pack_string(None)                      # semaphoreFilePath
     body += b"\x01"                                 # isOnline: true
+    return body
+
+
+def _create_session_payload(request_handle: int, endpoint_url: str) -> bytes:
+    """CreateSessionRequest (Part 4 §5.6.2). SecurityMode=None means the
+    ClientNonce / ClientCertificate are unused, so we send 32 zero bytes for
+    the nonce (some servers reject a null nonce even under None) and a null
+    ClientCertificate."""
+    body = _pack_nodeid_fourbyte(_ID_CREATE_SESSION_REQ)
+    body += _pack_request_header(request_handle=request_handle)
+    # ClientDescription (ApplicationDescription for a Client)
+    body += _pack_string("urn:recce:opcua:probe")   # applicationUri
+    body += _pack_string("urn:recce:probe")         # productUri
+    body += b"\x02" + _pack_string("recce-probe")   # LocalizedText text-only
+    body += _u32(1)                                  # applicationType: Client
+    body += _pack_string(None)                       # gatewayServerUri
+    body += _pack_string(None)                       # discoveryProfileUri
+    body += _i32(-1)                                 # discoveryUrls (null)
+    body += _pack_string(None)                       # serverUri
+    body += _pack_string(endpoint_url)               # endpointUrl
+    body += _pack_string("recce-probe-session")      # sessionName
+    body += _pack_bytestring(bytes(32))              # clientNonce (32 zero bytes)
+    body += _pack_bytestring(None)                   # clientCertificate
+    body += struct.pack("<d", 60000.0)               # requestedSessionTimeout
+    body += _u32(0)                                  # maxResponseMessageSize (server default)
+    return body
+
+
+def _activate_session_payload(request_handle: int, auth_token: bytes,
+                              policy_id: str) -> bytes:
+    """ActivateSessionRequest carrying AnonymousIdentityToken. Under
+    SecurityPolicy=None the ClientSignature and UserTokenSignature fields
+    are both empty SignatureData (null algorithm + null signature)."""
+    body = _pack_nodeid_fourbyte(_ID_ACTIVATE_SESSION_REQ)
+    body += _pack_request_header(request_handle=request_handle,
+                                 auth_token=auth_token)
+    # ClientSignature (SignatureData)
+    body += _pack_string(None)                       # algorithm
+    body += _pack_bytestring(None)                   # signature
+    body += _i32(-1)                                 # clientSoftwareCertificates
+    body += _i32(-1)                                 # localeIds
+    # UserIdentityToken: ExtensionObject wrapping AnonymousIdentityToken.
+    # The token body is a UA-encoded structure: just policyId (String).
+    anon_body = _pack_string(policy_id or "anonymous")
+    body += _pack_nodeid_fourbyte(_ID_ANONYMOUS_IDENTITY_TOKEN_ENC)  # TypeId
+    body += b"\x01"                                  # encoding = ByteString body
+    body += _pack_bytestring(anon_body)              # body
+    # UserTokenSignature (SignatureData) — null under SecurityPolicy=None.
+    body += _pack_string(None)
+    body += _pack_bytestring(None)
+    return body
+
+
+def _read_current_time_payload(request_handle: int, auth_token: bytes) -> bytes:
+    """ReadRequest for ns=0;i=2258 (ServerStatus_CurrentTime) attribute Value.
+    A single read of a well-known variable — no browse, no writes."""
+    body = _pack_nodeid_fourbyte(_ID_READ_REQ)
+    body += _pack_request_header(request_handle=request_handle,
+                                 auth_token=auth_token)
+    body += struct.pack("<d", 0.0)                   # maxAge
+    body += _u32(3)                                  # timestampsToReturn: Neither
+    body += _u32(1)                                  # NodesToRead count
+    # ReadValueId:
+    body += _pack_nodeid_fourbyte(_NODE_SERVER_STATUS_CURRENT_TIME)
+    body += _u32(_ATTR_VALUE)                        # attributeId
+    body += _pack_string(None)                       # indexRange
+    # DataEncoding (QualifiedName): namespaceIndex u16 + name String (null).
+    body += _u16(0)
+    body += _pack_string(None)
     return body
 
 
@@ -494,6 +591,84 @@ def _parse_register_server_response(body: bytes) -> dict:
     return {"header": header}
 
 
+def _read_nodeid_raw(c: _Cursor) -> bytes:
+    """Consume a NodeId (including the optional NamespaceUri / ServerIndex
+    trailer that `nodeid()` would otherwise leave unconsumed) and return the
+    raw encoded bytes — used to capture the AuthenticationToken so we can
+    echo it back into subsequent request headers verbatim."""
+    start = c.off
+    if c.off >= len(c.buf):
+        raise IndexError("uacp cursor overrun")
+    enc_byte = c.buf[c.off]
+    c.nodeid()
+    if enc_byte & 0x80:                       # has NamespaceUri
+        c.string()
+    if enc_byte & 0x40:                       # has ServerIndex
+        c.u32()
+    return bytes(c.buf[start:c.off])
+
+
+def _parse_create_session_response(body: bytes) -> dict:
+    """Return {service_result, session_id_raw, authentication_token} — we do
+    not need to parse the trailing fields (ServerNonce, ServerCertificate,
+    ServerEndpoints, ...) for the T2 probe."""
+    c = _Cursor(body)
+    header = _parse_response_header(c)
+    if header["service_result"] != 0:
+        return {"service_result": header["service_result"]}
+    session_id = _read_nodeid_raw(c)
+    auth_token = _read_nodeid_raw(c)
+    return {"service_result": 0,
+            "session_id_raw": session_id,
+            "authentication_token": auth_token}
+
+
+def _parse_activate_session_response(body: bytes) -> dict:
+    c = _Cursor(body)
+    header = _parse_response_header(c)
+    return {"service_result": header["service_result"]}
+
+
+def _filetime_to_iso(ft: int) -> str:
+    """FILETIME (Windows 100-ns since 1601-01-01 UTC) -> ISO-8601 UTC.
+    Returns "" for a null/invalid value; never raises."""
+    if ft <= 0:
+        return ""
+    unix = (ft - _FILETIME_UNIX_EPOCH_OFFSET) / 10000000.0
+    # Clamp to a sane range so a hostile / garbage value cannot blow up
+    # time.gmtime on 32-bit builds (year > 9999 raises).
+    if unix < 0 or unix > 253402300799:       # 9999-12-31 23:59:59 UTC
+        return ""
+    import time
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(unix))
+    except (ValueError, OSError):
+        return ""
+
+
+def _parse_read_current_time_response(body: bytes) -> dict:
+    """Extract ServerStatus_CurrentTime from a single-node ReadResponse.
+    Returns {ok, service_result, current_time}."""
+    c = _Cursor(body)
+    header = _parse_response_header(c)
+    if header["service_result"] != 0:
+        return {"ok": False, "service_result": header["service_result"],
+                "current_time": ""}
+    n = c.i32()
+    if n < 1:
+        return {"ok": False, "service_result": 0, "current_time": ""}
+    # DataValue
+    mask = c.u8()
+    current = ""
+    if mask & 0x01:                           # Value present -> Variant
+        var_mask = c.u8()
+        var_type = var_mask & 0x3F
+        if not (var_mask & 0x80) and var_type == _VARIANT_DATETIME:
+            ft = c.i64()
+            current = _filetime_to_iso(ft)
+    return {"ok": True, "service_result": 0, "current_time": current}
+
+
 def _parse_open_secure_channel_response(body: bytes) -> dict:
     """OPN reply: SecureChannelId + security header + sequence header +
     NodeId + ResponseHeader + ServerProtocolVersion + SecurityToken +
@@ -621,6 +796,74 @@ def _send_service(sock: socket.socket, channel: dict, request_id: int,
     if mt != _MT_MSG:
         return None
     return frame[8:]
+
+
+def _try_anonymous_session(sock: socket.socket, channel: dict,
+                           endpoint_url: str, policy_id: str,
+                           request_id_base: int = 10) -> dict | None:
+    """T2 SAFE probe. On an already-open SecureChannel, run CreateSession +
+    ActivateSession(AnonymousIdentityToken) + Read(ServerStatus_CurrentTime).
+    Returns a dict describing what actually happened, or None if the very
+    first request could not be delivered (channel dead)."""
+    rid = request_id_base
+    # 1) CreateSession
+    resp = _send_service(sock, channel, rid,
+                         _create_session_payload(rid, endpoint_url))
+    if resp is None:
+        return None
+    inner = _service_body_after_headers(resp)
+    if inner is None:
+        return None
+    try:
+        cs = _parse_create_session_response(inner)
+    except (IndexError, struct.error, ValueError):
+        return {"session_opened": False, "activated": False, "read_ok": False,
+                "current_time": "", "service_result": None}
+    if cs.get("service_result") != 0 or "authentication_token" not in cs:
+        return {"session_opened": False, "activated": False, "read_ok": False,
+                "current_time": "",
+                "service_result": cs.get("service_result")}
+    auth = cs["authentication_token"]
+
+    # 2) ActivateSession with AnonymousIdentityToken
+    rid += 1
+    resp = _send_service(sock, channel, rid,
+                         _activate_session_payload(rid, auth, policy_id))
+    if resp is None:
+        return {"session_opened": True, "activated": False, "read_ok": False,
+                "current_time": "", "service_result": None}
+    inner = _service_body_after_headers(resp)
+    if inner is None:
+        return {"session_opened": True, "activated": False, "read_ok": False,
+                "current_time": "", "service_result": None}
+    try:
+        act = _parse_activate_session_response(inner)
+    except (IndexError, struct.error, ValueError):
+        return {"session_opened": True, "activated": False, "read_ok": False,
+                "current_time": "", "service_result": None}
+    if act["service_result"] != 0:
+        return {"session_opened": True, "activated": False, "read_ok": False,
+                "current_time": "", "service_result": act["service_result"]}
+
+    # 3) Read ns=0;i=2258 ServerStatus_CurrentTime (Value attribute)
+    rid += 1
+    resp = _send_service(sock, channel, rid,
+                         _read_current_time_payload(rid, auth))
+    result = {"session_opened": True, "activated": True, "read_ok": False,
+              "current_time": "", "service_result": 0}
+    if resp is None:
+        return result
+    inner = _service_body_after_headers(resp)
+    if inner is None:
+        return result
+    try:
+        rr = _parse_read_current_time_response(inner)
+    except (IndexError, struct.error, ValueError):
+        return result
+    result["read_ok"] = rr.get("ok", False)
+    result["current_time"] = rr.get("current_time", "")
+    result["service_result"] = rr.get("service_result", 0)
+    return result
 
 
 def _service_body_after_headers(msg_body: bytes) -> bytes | None:
@@ -843,16 +1086,30 @@ def parse_certificate(der: bytes) -> dict:
 # --- top-level probe -----------------------------------------------------------
 
 
+def _pick_anonymous_endpoint(endpoints: list[dict]) -> tuple[dict, str] | None:
+    """Return (endpoint, policy_id) for the first endpoint that advertises an
+    Anonymous UserTokenPolicy — used to target the T2 session probe."""
+    for ep in endpoints:
+        for tok in ep.get("user_identity_tokens") or []:
+            if tok.get("token_type") == 0:                # Anonymous
+                return ep, (tok.get("policy_id") or "anonymous")
+    return None
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
           *, do_find_servers: bool = True, do_find_on_network: bool = True,
-          do_register_server: bool = True, do_err_banner: bool = True) -> dict:
+          do_register_server: bool = True, do_err_banner: bool = True,
+          do_anonymous_session: bool = True) -> dict:
     """Full passive/discovery probe. Returns:
       {reachable, hello_ack, endpoints, find_servers, on_network,
-       register_server, err_banner}
-    reachable=True iff HELLO/ACK completed (uacp confirmed)."""
+       register_server, err_banner, anonymous_session}
+    reachable=True iff HELLO/ACK completed (uacp confirmed).
+    anonymous_session is populated (T2 SAFE) only when the endpoint list
+    advertises an Anonymous UserTokenPolicy AND do_anonymous_session is True;
+    it stays None otherwise so the T1 finding path is unchanged."""
     out: dict = {"reachable": False, "hello_ack": None, "endpoints": [],
                  "find_servers": [], "on_network": [], "register_server": None,
-                 "err_banner": None}
+                 "err_banner": None, "anonymous_session": None}
     scaled = proxy.scaled(timeout)
 
     # First connection: HELLO/ACK + OPN + GetEndpoints (+ FindServers,
@@ -918,6 +1175,21 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
                             }
                         except (IndexError, struct.error, ValueError):
                             pass
+
+            # T2 SAFE: anonymous CreateSession + ActivateSession + Read.
+            # Only attempted when at least one endpoint advertises an
+            # Anonymous UserTokenPolicy — otherwise the T1 posture finding
+            # never fires and there is nothing to promote.
+            if do_anonymous_session:
+                pick = _pick_anonymous_endpoint(out["endpoints"])
+                if pick is not None:
+                    ep, policy_id = pick
+                    ep_url = ep.get("endpoint_url") or "opc.tcp://recce/"
+                    try:
+                        out["anonymous_session"] = _try_anonymous_session(
+                            s, channel, ep_url, policy_id)
+                    except (OSError, IndexError, struct.error, ValueError):
+                        out["anonymous_session"] = None
     except OSError:
         return out
 
@@ -1029,14 +1301,38 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             if anon_eps:
                 # Deduplicate on endpoint URL.
                 urls = sorted({e.get("endpoint_url", "") for e in anon_eps})
-                out.append(_finding(
-                    "critical",
-                    "OPC UA endpoint allows Anonymous user identity", tgt,
+                detail = (
                     f"{len(urls)} endpoint(s) advertise a UserTokenPolicy with "
                     f"tokenType=Anonymous — an unauthenticated Session can "
                     f"Browse and Read the OT information model (and Call/Write "
                     f"where per-node ACLs allow). Endpoints: "
-                    + ", ".join(urls[:4]) + (" …" if len(urls) > 4 else ""),
+                    + ", ".join(urls[:4]) + (" …" if len(urls) > 4 else ""))
+                tier = "t1"
+                # T2 SAFE proof: a completed CreateSession + ActivateSession +
+                # Read(ServerStatus_CurrentTime) upgrades tier to t2 and
+                # appends the observed current-time as evidence.
+                sess = pr.get("anonymous_session") or {}
+                if sess.get("read_ok"):
+                    tier = "t2"
+                    ct = sess.get("current_time") or ""
+                    detail += (
+                        " T2 PROOF: opened anonymous Session, activated with "
+                        "AnonymousIdentityToken, and Read(ns=0;i=2258 "
+                        "ServerStatus_CurrentTime) returned "
+                        + (f"{ct}" if ct else "a valid DateTime")
+                        + " — the anonymous Session actually holds and can "
+                        "read the address space.")
+                elif sess.get("activated"):
+                    tier = "t2"
+                    detail += (
+                        " T2 PROOF: opened anonymous Session and activated "
+                        "with AnonymousIdentityToken (ActivateSession=Good) "
+                        "— the anonymous Session is live even though the "
+                        "post-activation Read did not decode cleanly.")
+                out.append(_finding(
+                    "critical",
+                    "OPC UA endpoint allows Anonymous user identity", tgt,
+                    detail,
                     f"opcua-client connect --anonymous opc.tcp://{h.ip}:{p.portid}",
                     "Remove the Anonymous UserTokenPolicy from every endpoint. "
                     "Require UserName + strong password, or X.509 certificate "
@@ -1050,7 +1346,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "--anonymous opc.tcp://<ip>:4840/ 'ns=0;i=2258' "
                         "(ServerStatus) — dumps SDK build, start-time, "
                         "current-time — proves anon session works."),
-                    depth_tier="t1"))
+                    depth_tier=tier))
 
             if mode_none_eps:
                 urls = sorted({e.get("endpoint_url", "") for e in mode_none_eps})

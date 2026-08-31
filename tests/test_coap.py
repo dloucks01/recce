@@ -137,6 +137,20 @@ class _FakeCoAP:
             self._srv.sendto(reply, addr)
             return
 
+        # /.well-known/* extras (edhoc, rd, rd-lookup/*, certauth).
+        wk_extras = self.plan.get("wellknown_extras") or {}
+        if path in wk_extras:
+            entry = wk_extras[path]
+            code = entry.get("code", 0x45)
+            ct = entry.get("ct")
+            body = entry.get("body", b"")
+            opts = []
+            if ct is not None:
+                opts.append((coap._OPT_CONTENT_FORMAT, coap._uint_option(ct)))
+            reply = _build_reply(2, code, msg["mid"], msg["token"], opts, body)
+            self._srv.sendto(reply, addr)
+            return
+
         # /.well-known/core.
         if path == "/.well-known/core":
             if self.plan.get("authgate_wellknown"):
@@ -420,6 +434,117 @@ class WriteTest(unittest.TestCase):
         self.assertTrue(r["attempted"])
         self.assertFalse(r["writable"])
         self.assertEqual(r["code"], "4.05")
+
+
+class WellKnownExtrasTest(unittest.TestCase):
+    """T2 promotion probe for coap_resource_inventory: read-only GETs on
+    RFC 9528 /.well-known/edhoc, RFC 9176 /.well-known/rd, and friends."""
+
+    def test_edhoc_and_rd_detected(self):
+        # EDHOC endpoints typically 4.05 Method Not Allowed to a GET (POST-only
+        # per RFC 9528); the *presence* of a non-4.04 reply proves it's wired.
+        # RD (RFC 9176) commonly 4.05 too. Both count as T2 evidence.
+        srv = _FakeCoAP({"wellknown_extras": {
+            "/.well-known/edhoc": {"code": 0x85, "ct": None, "body": b""},
+            "/.well-known/rd": {"code": 0x85, "ct": None, "body": b""},
+        }})
+        try:
+            out = coap.probe_wellknown_extras(srv.host, srv.port, timeout=1.0)
+        finally:
+            srv.close()
+        self.assertIn("/.well-known/edhoc", out)
+        self.assertIn("/.well-known/rd", out)
+        self.assertEqual(out["/.well-known/edhoc"]["code"], "4.05")
+        self.assertNotIn("/.well-known/rd-lookup/ep", out)
+
+    def test_rd_lookup_returning_2xx_captured(self):
+        # An unauth 2.05 to /.well-known/rd-lookup/ep leaks the RD registry.
+        srv = _FakeCoAP({"wellknown_extras": {
+            "/.well-known/rd-lookup/ep": {
+                "code": 0x45, "ct": 40,
+                "body": b'</rd/1>;ep="node-A",</rd/2>;ep="node-B"'},
+        }})
+        try:
+            out = coap.probe_wellknown_extras(srv.host, srv.port, timeout=1.0)
+        finally:
+            srv.close()
+        self.assertIn("/.well-known/rd-lookup/ep", out)
+        entry = out["/.well-known/rd-lookup/ep"]
+        self.assertEqual(entry["code"], "2.05")
+        self.assertEqual(entry["ct"], 40)
+        self.assertIn(b"node-A", entry["snippet"])
+        self.assertGreater(entry["size"], 0)
+
+    def test_absent_endpoints_stay_quiet(self):
+        # Patched server: every wellknown extra returns 4.04. The probe must
+        # emit nothing and the tier stays T1 at the caller.
+        srv = _FakeCoAP({})   # default fallback = 4.04
+        try:
+            out = coap.probe_wellknown_extras(srv.host, srv.port, timeout=1.0)
+        finally:
+            srv.close()
+        self.assertEqual(out, {})
+
+    def test_unreachable_times_out_cleanly(self):
+        # No server: recvfrom must time out and return empty dict without
+        # raising.
+        out = coap.probe_wellknown_extras("127.0.0.1", 1, timeout=0.3)
+        self.assertEqual(out, {})
+
+
+class ResourceInventoryTierPromotionTest(unittest.TestCase):
+    """Full findings-layer test: depth_tier upgrades to t2 when we have real
+    read proof (bulk-read OR wellknown-extras); stays t1 otherwise."""
+
+    def _pr_base(self):
+        return {
+            "reachable": True,
+            "resources": [
+                {"path": "/sensors/temp", "rt": "core.s", "if": "", "ct": "0",
+                 "sz": "", "obs": False},
+            ],
+            "readable": [], "writable": [], "observe": [],
+            "wellknown_extras": {},
+            "proxy": {}, "amp_ratio": 0.0,
+            "authgated": False, "oscore": False,
+            "wellknown_code": "2.05", "empty_ping": {},
+            "dtls": {}, "product": "", "version_str": "",
+        }
+
+    def _inv(self, fs):
+        return next(f for f in fs if f["kind"] == "coap_resource_inventory")
+
+    def test_bulk_read_promotes_to_t2(self):
+        pr = self._pr_base()
+        pr["readable"] = [{"path": "/sensors/temp", "code": "2.05",
+                           "code_num": 0x45, "ct": 0, "size": 4,
+                           "snippet": b"22.4"}]
+        fs = coap.findings(_hosts(), {("10.0.0.1", 5683): pr})
+        inv = self._inv(fs)
+        self.assertEqual(inv["depth_tier"], "t2")
+        self.assertIn("T2 proof", inv["detail"])
+        self.assertIn("/sensors/temp", inv["detail"])
+
+    def test_wellknown_extras_promote_to_t2(self):
+        pr = self._pr_base()
+        pr["wellknown_extras"] = {
+            "/.well-known/edhoc": {"code": "4.05", "ct": None, "size": 0,
+                                   "snippet": b""},
+        }
+        fs = coap.findings(_hosts(), {("10.0.0.1", 5683): pr})
+        inv = self._inv(fs)
+        self.assertEqual(inv["depth_tier"], "t2")
+        self.assertIn("EDHOC", inv["detail"])
+        self.assertIn("/.well-known/edhoc", inv["detail"])
+
+    def test_no_proof_stays_t1(self):
+        # Patched target: /.well-known/core listed resources but recce could
+        # not read them and no extras were found — tier stays T1.
+        pr = self._pr_base()
+        fs = coap.findings(_hosts(), {("10.0.0.1", 5683): pr})
+        inv = self._inv(fs)
+        self.assertEqual(inv["depth_tier"], "t1")
+        self.assertNotIn("T2 proof", inv["detail"])
 
 
 class ProxyRelayTest(unittest.TestCase):

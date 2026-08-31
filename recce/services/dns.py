@@ -529,11 +529,112 @@ def dns_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# T2 helpers: safe proof-of-exploit for dns_axfr.
+#
+# AXFR itself is the exploit primitive — it is a read-only DNS request that
+# succeeds only when the server allows the transfer, so parsing real hostname/IP
+# records back out IS proof the primitive worked (no writes, no state change,
+# just the standard AXFR handshake). The T2 promotion turns those parsed
+# records into a deduped pivot list the operator can feed to downstream
+# scanners immediately, and version-gates a small BIND CVE table against the
+# co-disclosed version.bind fingerprint so no unverified CVE ever ships.
+# --------------------------------------------------------------------------- #
+
+# Curated BIND CVE table, keyed by (fixed_9_11_series, fixed_9_16_series).
+# Every entry has to be version-gated (never emit a CVE without a version match),
+# which is why the table only lists CVEs with published "fixed in" versions.
+# Sources: ISC Knowledge Base security advisories (KB pages).
+#   CVE-2020-8617  — TSIG buffer-overread crash, fixed in 9.11.19 / 9.16.3
+#   CVE-2020-8623  — TCP-buffer assertion crash, fixed in 9.11.22 / 9.16.6
+#   CVE-2020-8625  — GSSAPI/SPNEGO stack overflow, fixed in 9.11.28 / 9.16.12
+_BIND_CVE_TABLE: tuple[tuple[str, str, tuple[int, int], tuple[int, int]], ...] = (
+    ("CVE-2020-8617", "TSIG buffer over-read crashes named",
+     (11, 19), (16, 3)),
+    ("CVE-2020-8623", "TCP-buffer assertion crashes named",
+     (11, 22), (16, 6)),
+    ("CVE-2020-8625", "GSSAPI/SPNEGO stack buffer overflow",
+     (11, 28), (16, 12)),
+)
+
+# BIND version strings look like "9.11.5-P4-5.1+deb10u5-Debian" or "9.16.1"
+# or "BIND 9.16.6". We only match the numeric 9.MINOR.PATCH prefix and ignore
+# vendor tags — safer than trying to decode every distro suffix.
+_BIND_VERSION_RE = re.compile(r"\b9\.(\d+)\.(\d+)\b")
+
+
+def _parse_bind_version(version_str: str) -> tuple[int, int] | None:
+    """Extract (minor, patch) from a BIND version.bind string.
+
+    Returns None when the string is empty or does not look like a 9.x.y BIND
+    version — the CVE gate then never fires (fail-closed). Vendor suffixes
+    like '-P4-5.1+deb10u5-Debian' are ignored on purpose because ISC does not
+    publish a canonical mapping from distro rebuild tags to upstream patch
+    levels, and mis-parsing them would risk emitting a CVE that has actually
+    been backported."""
+    if not version_str:
+        return None
+    m = _BIND_VERSION_RE.search(version_str)
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def _bind_cves(version_str: str) -> list[dict]:
+    """Match a parsed BIND version against the curated CVE table.
+
+    Returns [{cve, description}, ...] for vulns whose fix has NOT landed in the
+    parsed 9.MINOR.PATCH. Empty list on unknown / patched / newer-than-table
+    versions — the CVE reference is version-gated, never shipped by default."""
+    parsed = _parse_bind_version(version_str)
+    if not parsed:
+        return []
+    minor, patch = parsed
+    hits: list[dict] = []
+    for cve, desc, fx11, fx16 in _BIND_CVE_TABLE:
+        # Only compare inside the version's own release train (9.11 vs 9.16 etc.);
+        # ISC ships fixes to each maintenance branch independently.
+        if minor == 11 and (minor, patch) < fx11:
+            hits.append({"cve": cve, "description": desc})
+        elif minor == 16 and (minor, patch) < fx16:
+            hits.append({"cve": cve, "description": desc})
+        elif minor < 11:
+            # Pre-9.11 is EOL and never patched — anything before the 9.11 fix
+            # applies verbatim.
+            hits.append({"cve": cve, "description": desc})
+    return hits
+
+
+def _axfr_pivot_targets(zdata: dict) -> list[tuple[str, str]]:
+    """Turn a bucketed AXFR record set into a deduped (hostname, ip) list.
+
+    IPv4 first (A), then IPv6 (AAAA); apex-stripped, lowercased. This is the
+    T2 evidence surface — the operator gets a ready-made list of internal
+    hosts (with resolvable IPs) to feed to SMB/LDAP/kerb/HTTP scanners without
+    round-tripping through a resolver."""
+    seen: set[tuple[str, str]] = set()
+    pivots: list[tuple[str, str]] = []
+    for owner, ip in (zdata.get("a") or []):
+        key = ((owner or "").strip(".").lower(), ip)
+        if key[0] and key not in seen:
+            seen.add(key)
+            pivots.append(key)
+    for owner, ip in (zdata.get("aaaa") or []):
+        key = ((owner or "").strip(".").lower(), ip)
+        if key[0] and key not in seen:
+            seen.add(key)
+            pivots.append(key)
+    return pivots
+
+
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
-             exploit_note="", depth_tier=""):
-    return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "dig", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind,
-            "exploit_note": exploit_note, "depth_tier": depth_tier}
+             exploit_note="", depth_tier="", output=""):
+    f = {"severity": sev, "title": title, "target": target, "detail": detail,
+         "tool": "dig", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind,
+         "exploit_note": exploit_note, "depth_tier": depth_tier}
+    if output:
+        f["output"] = output
+    return f
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -559,22 +660,55 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                                    + ", ".join(sample_names)
                                    + (" ..." if len(zdata.get("names") or []) > 8 else "")
                                    + ".")
+                # T2 promotion: AXFR is itself a safe read-only exploit primitive,
+                # so any parsed A/AAAA record proves it worked. Surface deduped
+                # (hostname, ip) pivots and upgrade depth_tier=t2. If the AXFR
+                # went through but no A/AAAA came back in the first message,
+                # stay at t1 (we have the primitive but no concrete pivot yet).
+                pivots = _axfr_pivot_targets(zdata)
+                pivot_note = ""
+                pivot_output = ""
+                depth_tier = "t1"
+                if pivots:
+                    depth_tier = "t2"
+                    head = pivots[:6]
+                    pivot_note = (
+                        " Pivot targets extracted from the AXFR body "
+                        "(hostname=ip): "
+                        + ", ".join(f"{hn}={ip}" for hn, ip in head)
+                        + (f" (+{len(pivots) - len(head)} more)"
+                           if len(pivots) > len(head) else "")
+                        + ". Feed straight to downstream SMB/LDAP/kerb/HTTP scans.")
+                    pivot_output = "\n".join(f"{hn}\t{ip}" for hn, ip in pivots)
+                # Version-gated BIND CVE annotation — only fires when the server
+                # co-disclosed a version.bind string that parses AND falls under
+                # a curated fixed-in threshold. Never ships an unverified CVE.
+                cve_hits = _bind_cves(pr.get("version") or "")
+                cve_note = ""
+                cwes = ["CWE-200", "CWE-284"]
+                if cve_hits:
+                    cve_note = (
+                        " Server version.bind='" + (pr.get("version") or "")
+                        + "' also matches known BIND CVEs: "
+                        + ", ".join(f"{c['cve']} ({c['description']})"
+                                    for c in cve_hits)
+                        + ".")
                 out.append(_finding(
                     "high", f"DNS zone transfer allowed ({z})", tgt,
                     f"AXFR of '{z}' succeeded from an unauthenticated client "
                     f"({pr.get('records', {}).get(z, '?')} records) - the full internal "
                     "zone (every host/service name + IP) is exposed as an instant map."
-                    + sample_note,
+                    + sample_note + pivot_note + cve_note,
                     f"dig AXFR {z} @{h.ip}",
                     "Restrict zone transfers to authorized secondaries "
                     "(allow-transfer / xfer-out ACLs); disable AXFR to the world.",
-                    ["CWE-200", "CWE-284"], kind="dns_axfr",
+                    cwes, kind="dns_axfr",
                     exploit_note=(
                         "dig AXFR <zone> @<ip> +tcp; ingest hostnames/IPs into "
                         "scope, then run: crackmapexec smb <new_ips> --gen-relay-list "
                         "relay.txt; kerbrute userenum -d <zone> users.txt --dc <ip>."
                     ),
-                    depth_tier="t1"))
+                    depth_tier=depth_tier, output=pivot_output))
             # SRV/MX/NS discovery per zone. The AD anchor set (_ldap._tcp +
             # _kerberos._tcp under a zone) authoritatively identifies an
             # AD-integrated domain — high-value recon intel (points every

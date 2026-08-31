@@ -38,6 +38,7 @@ from ..core.models import Host, Port
 
 _LPD_PORT = 515
 _IPP_PORT = 631
+_PJL_PORT = 9100
 _TIMEOUT = 4.0
 
 # LPD opcodes we USE (never op 02 - that spools paper).
@@ -566,6 +567,130 @@ def cups_vulnerable(version: str, server_header: str = "") -> tuple[bool, str]:
     return True, f"upstream {version} < 2.4.9 and no distro-fix marker"
 
 
+# --- T2 promotion probes ----------------------------------------------------
+
+# PJL banner on 9100/tcp. This is the version-gate for CVE-2010-4107: the LPD
+# fingerprint tells us "HP JetDirect", the PJL INFO ID reply gives model +
+# firmware date so the operator can correlate against HP's patch matrix. UEL
+# wrapping (\x1B%-12345X) guarantees we exit any residual print job state
+# rather than adding data to a queue.
+_PJL_INFO_PAYLOAD = (b"\x1B%-12345X@PJL INFO ID\r\n@PJL INFO CONFIG\r\n"
+                     b"\x1B%-12345X\r\n")
+
+_PJL_MODEL_RE = re.compile(
+    r'@PJL\s+INFO\s+ID\s*\r?\n\s*"?(?P<model>[^\r\n"]+?)"?\s*\r?\n', re.I)
+_PJL_FIRMWARE_RE = re.compile(
+    r"(?:FIRMWARE(?:\s+DATECODE)?|FW\s+VERSION)\s*[:=]?\s*(?P<fw>\S+)", re.I)
+
+
+def probe_pjl_info(ip: str, port: int = _PJL_PORT,
+                   timeout: float = _TIMEOUT) -> dict:
+    """Send @PJL INFO ID on JetDirect 9100/tcp — read-only firmware fingerprint.
+
+    Returns {reachable, raw, model, firmware}. This is a T2-safe probe: PJL
+    INFO is a query op, never a job submission, and we bracket with UEL so a
+    partially-parsed reply cannot end up spooled as text on the device.
+    """
+    from ..core import proxy
+    to = proxy.scaled(timeout)
+    out: dict = {"reachable": False, "raw": "", "model": "", "firmware": ""}
+    try:
+        with socket.create_connection((ip, port), timeout=to) as s:
+            s.settimeout(to)
+            s.sendall(_PJL_INFO_PAYLOAD)
+            buf = b""
+            while len(buf) < 8192:
+                try:
+                    chunk = s.recv(4096)
+                except (socket.timeout, OSError):
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+    except OSError:
+        return out
+    if not buf:
+        return out
+    try:
+        text = buf.decode("utf-8", "replace")
+    except UnicodeDecodeError:
+        text = buf.decode("latin-1", "replace")
+    out["reachable"] = True
+    out["raw"] = text[:2048]
+    m = _PJL_MODEL_RE.search(text)
+    if m:
+        out["model"] = m.group("model").strip()
+    m = _PJL_FIRMWARE_RE.search(text)
+    if m:
+        out["firmware"] = m.group("fw").strip()
+    return out
+
+
+# CUPS access_log / error_log parse. This is what upgrades cups_admin_open
+# from "endpoint returns 200" (T1) to "we pulled real user + IP + printer
+# tuples out of the log body" (T2). Read-only.
+_ACCESS_LOG_RE = re.compile(
+    r"^(?P<host>\S+)\s+-\s+(?P<user>\S+)\s+\[(?P<date>[^\]]+)\]\s+"
+    r"\"(?P<method>\S+)\s+(?P<path>\S+)\s+HTTP/\S+\"\s+(?P<status>\d+)",
+    re.M)
+_IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
+_ERRORLOG_IP_RE = re.compile(r"from\s+((?:\d{1,3}\.){3}\d{1,3})")
+
+
+def parse_cups_log(text: str) -> dict:
+    """Extract users / source IPs / printer paths from CUPS log body.
+
+    Covers both access_log (combined-style rows) and error_log (`from IP`
+    trailers). Returns {users, ips, printers, entries}.
+    """
+    users: set = set()
+    ips: set = set()
+    printers: set = set()
+    entries = 0
+    for m in _ACCESS_LOG_RE.finditer(text):
+        entries += 1
+        u = m.group("user")
+        if u and u != "-":
+            users.add(u)
+        host = m.group("host")
+        if _IPV4_RE.match(host):
+            ips.add(host)
+        path = m.group("path")
+        if path.startswith(("/printers/", "/classes/")):
+            printers.add(path.split("?", 1)[0])
+    for m in _ERRORLOG_IP_RE.finditer(text):
+        ips.add(m.group(1))
+    return {"users": sorted(users), "ips": sorted(ips),
+            "printers": sorted(printers), "entries": entries}
+
+
+def fetch_admin_log(ip: str, port: int, path: str,
+                    timeout: float = _TIMEOUT, tls: bool = False,
+                    max_bytes: int = 65536) -> bytes:
+    """Read-only fetch of an unauth CUPS /admin/log/* body, size-capped."""
+    from ..core import proxy
+    to = proxy.scaled(timeout)
+    conn = None
+    try:
+        if tls:
+            ctx = ssl._create_unverified_context()   # noqa: S323
+            conn = http.client.HTTPSConnection(ip, port, timeout=to, context=ctx)
+        else:
+            conn = http.client.HTTPConnection(ip, port, timeout=to)
+        conn.request("GET", path,
+                     headers={"User-Agent": "recce-cups-lpd/1.0"})
+        r = conn.getresponse()
+        if r.status != 200:
+            return b""
+        return r.read(max_bytes)
+    except (OSError, http.client.HTTPException, socket.timeout):
+        return b""
+    finally:
+        if conn is not None:
+            try: conn.close()
+            except OSError: pass
+
+
 # --- targets / findings emission -------------------------------------------
 
 def lpd_targets(hosts: list[Host]) -> list[dict]:
@@ -579,11 +704,12 @@ def lpd_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
-             exploit_note="", depth_tier=""):
+             exploit_note="", depth_tier="", output=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem,
             "cwes": list(cwes), "kind": kind,
-            "exploit_note": exploit_note, "depth_tier": depth_tier}
+            "exploit_note": exploit_note, "depth_tier": depth_tier,
+            "output": output}
 
 
 _LPRNG_CVES = ["CVE-2000-0917", "CVE-2001-0670"]
@@ -595,13 +721,15 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
              browsed_probes: dict | None = None,
              admin_probes: dict | None = None,
              version_gate: dict | None = None,
-             uri_harvest: dict | None = None) -> list[dict]:
+             uri_harvest: dict | None = None,
+             pjl_probes: dict | None = None) -> list[dict]:
     lpd_probes = lpd_probes or {}
     jobs_probes = jobs_probes or {}
     browsed_probes = browsed_probes or {}
     admin_probes = admin_probes or {}
     version_gate = version_gate or {}
     uri_harvest = uri_harvest or {}
+    pjl_probes = pjl_probes or {}
     out: list[dict] = []
 
     printer_ports = {}                # ip -> set(portid) for correlation
@@ -625,6 +753,13 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                 files_l = pr.get("filenames") or []
 
                 if owners or hosts_l or files_l:
+                    # T2: real user + hostname + filename tuples are the loot
+                    # — an unauth query returned identity fields that the
+                    # spray / lateral layers directly consume.
+                    leak_output = (
+                        f"RFC 1179 op 03/04 -> {jobs_total} job(s); "
+                        f"owners={owners[:8]} hosts={hosts_l[:8]} "
+                        f"files={files_l[:8]}")
                     out.append(_finding(
                         "high",
                         "LPD queue leaks usernames, source hostnames and print job filenames",
@@ -635,7 +770,9 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         f"Filenames: {', '.join(files_l[:8]) or '-'}. "
                         f"Feed the owners into known_users, the hosts into "
                         f"known_hostnames, and treat the filenames as "
-                        f"recon-grade artifact disclosures.",
+                        f"recon-grade artifact disclosures. T2 proof: those "
+                        f"tuples were returned by a single unauthenticated "
+                        f"query — no writes, no job submission.",
                         "lpq",
                         f"lpq -P lp -h {h.ip}   # or: echo -e '\\x04lp\\n' "
                         f"| nc {h.ip} {p.portid}",
@@ -646,7 +783,7 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         exploit_note=(
                             f"lpq -P lp -h {h.ip} ; then feed owners into "
                             "known_users, hosts into known_hostnames"),
-                        depth_tier="t1"))
+                        depth_tier="t2", output=leak_output))
                 else:
                     out.append(_finding(
                         "medium",
@@ -688,6 +825,30 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                             "lprng_format_string) but destructive."),
                         depth_tier="t1"))
                 elif fam == "hp-jetdirect":
+                    pj = pjl_probes.get(h.ip) or {}
+                    has_pjl = bool(pj.get("reachable"))
+                    model = pj.get("model", "")
+                    firmware = pj.get("firmware", "")
+                    # T2 when the version-gate probe (PJL INFO ID on 9100/tcp)
+                    # actually returned a model / firmware string. Detection
+                    # alone stays T1; the CVE citation is unchanged either
+                    # way (still gated on firmware date, still not exploit).
+                    if has_pjl:
+                        tier = "t2"
+                        jd_output = (f"@PJL INFO ID {h.ip}:9100 -> "
+                                     f"model={model!r} firmware={firmware!r}")
+                        proof = (
+                            f" T2 proof: PJL INFO ID on {h.ip}:{_PJL_PORT} "
+                            f"returned model={model!r} firmware={firmware!r} "
+                            f"— that is the version-gate for CVE-2010-4107. "
+                            f"Correlate the firmware datecode against HP's "
+                            f"patch matrix before citing exploitability. No "
+                            f"job was submitted; PJL INFO is a read-only "
+                            f"query and the request was UEL-bracketed.")
+                    else:
+                        tier = "t1"
+                        jd_output = ""
+                        proof = ""
                     out.append(_finding(
                         "high",
                         "HP JetDirect LPD/PJL command injection (CVE-2010-4107) - vendor firmware review",
@@ -697,7 +858,7 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         "control-file path (CVE-2010-4107). Detection is a "
                         "flag, not a confirmation - the CVE gate is the "
                         "device's firmware date, which recce cannot read "
-                        "over 515.",
+                        "over 515." + proof,
                         "review",
                         f"nmap -p9100 --script pjl-ready-message {h.ip}   # "
                         f"read the PJL banner for a firmware date",
@@ -709,7 +870,7 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                             f"nmap -p9100 --script pjl-ready-message {h.ip} "
                             f" ; # or: printf '@PJL INFO ID\\r\\n' | nc "
                             f"{h.ip} 9100"),
-                        depth_tier="t1"))
+                        depth_tier=tier, output=jd_output))
                 elif fam == "windows":
                     out.append(_finding(
                         "high",
@@ -761,6 +922,13 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                     users = jr.get("users") or []
                     files = jr.get("filenames") or []
                     hostsj = jr.get("hosts") or []
+                    # T2: op 0x000A pulled real user/host/filename tuples —
+                    # the same identity fields the spray + lateral layers
+                    # consume. Read-only Get-Jobs, no mutation.
+                    jobs_output = (
+                        f"IPP op 0x000A -> {len(jr['jobs'])} job(s); "
+                        f"users={users[:8]} hosts={hostsj[:8]} "
+                        f"files={files[:8]}")
                     out.append(_finding(
                         "high",
                         "IPP Get-Jobs leaks originating user/host and document names",
@@ -771,7 +939,9 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         f"{', '.join(hostsj[:8]) or '-'}. Documents: "
                         f"{', '.join(files[:8]) or '-'}. These are exactly "
                         f"the identity fields the password-spray and lateral-"
-                        f"movement layers consume.",
+                        f"movement layers consume. T2 proof: values were "
+                        f"returned by a single read-only Get-Jobs request; "
+                        f"no jobs were submitted or modified.",
                         "ipptool",
                         f"ipptool -tv ipp://{h.ip}:{p.portid}/printers/lp "
                         f"get-jobs.test",
@@ -783,7 +953,7 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         exploit_note=(
                             f"ipptool -tv ipp://{h.ip}:{p.portid}/printers/lp "
                             "get-jobs.test"),
-                        depth_tier="t1"))
+                        depth_tier="t2", output=jobs_output))
 
                 # cups-browsed 631/udp exposure signal.
                 br = browsed_probes.get(h.ip)
@@ -866,6 +1036,30 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                 if ar:
                     if ar.get("readable"):
                         paths = ", ".join(ar["readable"])
+                        parsed = ar.get("log_parsed") or {}
+                        # T2 when the log body actually parsed into rows —
+                        # we HOLD the user + source-IP + printer tuples the
+                        # exposure implies. Read-only; no writes.
+                        if parsed.get("entries"):
+                            tier = "t2"
+                            u = parsed.get("users") or []
+                            ips_ = parsed.get("ips") or []
+                            pn = parsed.get("printers") or []
+                            proof = (
+                                f" T2 proof: pulled {parsed['entries']} log "
+                                f"row(s) from {ar['readable'][0]}. Users: "
+                                f"{', '.join(u[:8]) or '-'}. Source IPs: "
+                                f"{', '.join(ips_[:8]) or '-'}. Printers: "
+                                f"{', '.join(pn[:8]) or '-'}. Passive read.")
+                            adm_output = (
+                                f"GET {ar['readable'][0]} -> "
+                                f"{parsed['entries']} entries; "
+                                f"users={u[:8]} ips={ips_[:8]} "
+                                f"printers={pn[:8]}")
+                        else:
+                            tier = "t1"
+                            proof = ""
+                            adm_output = ""
                         out.append(_finding(
                             "high",
                             "CUPS /admin log endpoints readable unauthenticated",
@@ -874,7 +1068,8 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                             f"authentication. cupsd's /admin/log/error_log "
                             f"and access_log carry every job's user, source "
                             f"IP, and filename - a passive read of the "
-                            f"tester's own history plus everyone else's.",
+                            f"tester's own history plus everyone else's."
+                            + proof,
                             "curl",
                             f"curl -sS http://{h.ip}:{p.portid}"
                             f"{ar['readable'][0]}",
@@ -886,7 +1081,7 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                                 f"curl -sS http://{h.ip}:{p.portid}"
                                 "/admin/log/error_log | tail -200  # user "
                                 "+ IP + filename history"),
-                            depth_tier="t1"))
+                            depth_tier=tier, output=adm_output))
                     elif ar.get("auth_required"):
                         out.append(_finding(
                             "medium",
@@ -1003,7 +1198,15 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     admin_probes: dict = {}
     version_gate: dict = {}
     uri_harvest: dict = {}
+    pjl_probes: dict = {}
     state: dict = {}
+
+    # Set of hosts with 9100/tcp open — needed for the JetDirect T2 probe.
+    port9100_hosts: set = set()
+    for h in hosts:
+        for p in h.open_ports:
+            if p.portid == _PJL_PORT and p.protocol == "tcp":
+                port9100_hosts.add(h.ip)
 
     known_hostnames: set = set()
     known_domains: set = set()
@@ -1023,6 +1226,18 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                     if "." in hn:
                         known_domains.add(hn.split(".", 1)[1].lower())
 
+        # T2 PJL fingerprint on 9100/tcp for hosts whose LPD banner said
+        # "hp-jetdirect" AND that also expose 9100/tcp. Version-gate for
+        # CVE-2010-4107; strictly read-only.
+        for (ip, _), pr in lpd_probes.items():
+            if pr.get("family") == "hp-jetdirect" and ip in port9100_hosts \
+                    and ip not in pjl_probes:
+                try:
+                    pj = probe_pjl_info(ip)
+                except OSError:
+                    pj = {}
+                pjl_probes[ip] = pj
+
         # cups-browsed probe: at most once per unique host.
         for ip in {ip for ip, _ in ipp_hosts}:
             try:
@@ -1037,6 +1252,22 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 ar = probe_admin_endpoints(ip, prt)
             except OSError:
                 ar = {}
+            # T2 body-pull for the first readable log endpoint. Bounded to
+            # 64 KiB — one GET, no auth attempt, no state change. Feeds
+            # known_users from any usernames that appear in access_log rows.
+            if ar and ar.get("readable"):
+                log_path = ar["readable"][0]
+                try:
+                    body = fetch_admin_log(ip, prt, log_path)
+                except OSError:
+                    body = b""
+                if body:
+                    parsed = parse_cups_log(
+                        body.decode("latin-1", "replace"))
+                    ar["log_body_sample"] = body[:2048].decode(
+                        "latin-1", "replace")
+                    ar["log_parsed"] = parsed
+                    known_users.update(parsed.get("users") or [])
             admin_probes[(ip, prt)] = ar
 
             # Reuse services.ipp for Get-Printers and its version parse.
@@ -1079,7 +1310,8 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
 
     fs = findings(hosts, lpd_probes=lpd_probes, jobs_probes=jobs_probes,
                   browsed_probes=browsed_probes, admin_probes=admin_probes,
-                  version_gate=version_gate, uri_harvest=uri_harvest)
+                  version_gate=version_gate, uri_harvest=uri_harvest,
+                  pjl_probes=pjl_probes)
 
     runbooks = []
     for t in targets_lpd:
@@ -1102,6 +1334,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             "cups_admin": {f"{k[0]}:{k[1]}": v for k, v in admin_probes.items()},
             "cups_version_gate": {f"{k[0]}:{k[1]}": v for k, v in version_gate.items()},
             "ipp_uri_harvest": {f"{k[0]}:{k[1]}": v for k, v in uri_harvest.items()},
+            "pjl_9100": pjl_probes,
         },
         "known": {
             "users": sorted(known_users),

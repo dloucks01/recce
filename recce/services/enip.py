@@ -381,12 +381,19 @@ def _parse_ethlink_object(body: bytes) -> dict:
 def _cve_fingerprint(identity: dict) -> list[dict]:
     """Vendor + product-code + revision matches against advisories we can
     actually distinguish on the wire. Conservative — never speculates
-    beyond what the Identity Object positively confirms."""
+    beyond what the Identity Object positively confirms.
+
+    Each match carries a ``confirmed`` flag that is True only when the
+    observed firmware revision falls inside the vulnerable band published
+    by the advisory (T2 fingerprint). When False, the CVE stays flagged
+    as a fingerprint hint but the caller should downgrade to a generic
+    weakness rather than a positively-identified vulnerable release."""
     out: list[dict] = []
     if not identity:
         return out
     vid = identity.get("vendor_id", 0)
     rev_major = identity.get("revision_major", 0)
+    rev_minor = identity.get("revision_minor", 0)
     name = (identity.get("product_name") or "").lower()
     if vid == 0x0001:
         # Rockwell CompactLogix / ControlLogix / MicroLogix families —
@@ -395,21 +402,35 @@ def _cve_fingerprint(identity: dict) -> list[dict]:
         # aware controllers.
         if ("compactlogix" in name or "controllogix" in name
                 or "1756" in name or "1769" in name):
+            # Per ICSA-21-056-03, Logix 5580 mitigation ships in firmware
+            # v33.011 (and equivalents on other L-series). Anything older is
+            # positively in the vulnerable band; ordering compare against
+            # (33, 11) is safe because (major, minor) tuples are lex-ordered.
+            rev = (rev_major, rev_minor)
+            confirmed = bool(rev_major) and rev < (33, 11)
             out.append({
                 "cve": "CVE-2021-22681",
                 "family": "Rockwell Logix 5000",
                 "note": "Weak CIP session key derivation — fingerprint by "
                         "product name; confirm firmware band against ICSA-"
                         "21-056-03 before treating as exploitable.",
+                "confirmed": confirmed,
+                "band": (f"vulnerable if firmware < 33.011 "
+                         f"(observed {rev_major}.{rev_minor})"),
             })
         # MicroLogix 1400 — long history of unauthenticated PCCC-write
-        # advisories (ICSA-17-138-03 etc.).
+        # advisories (ICSA-17-138-03 etc.). PCCC is inherent to the platform,
+        # no firmware fix — presence is confirmation.
         if "micrologix" in name:
             out.append({
                 "cve": "CWE-306",
                 "family": "Rockwell MicroLogix",
                 "note": "MicroLogix product line exposes PCCC (class 0x67); "
                         "correlate revision against ICSA-17-138-03 family.",
+                "confirmed": True,
+                "band": ("MicroLogix family — PCCC command set is "
+                         "unauthenticated by protocol design (no firmware "
+                         "fix)"),
             })
     if vid == 0x005A and rev_major and rev_major < 3:
         out.append({
@@ -418,6 +439,9 @@ def _cve_fingerprint(identity: dict) -> list[dict]:
             "note": "Schneider CIP controllers pre-firmware-v3 shipped with "
                     "insecure protocol defaults; correlate against Schneider "
                     "SEVD-2018-107-01.",
+            "confirmed": True,
+            "band": (f"Schneider firmware < 3.x per SEVD-2018-107-01 "
+                     f"(observed {rev_major}.{rev_minor})"),
         })
     return out
 
@@ -510,6 +534,10 @@ def probe(ip: str, port: int = _DEFAULT_PORT,
         "conn_mgr_supported": False,
         "reset_service_capable": False,
         "cip_security_off": False,
+        # T2 promotion: names of CIP classes that answered a GetAttributes
+        # request under the unauthenticated session — each successful reply
+        # is proof-of-primitive that explicit messaging is unauthenticated.
+        "unauth_queries_ok": [],
         "cve_matches": [], "error": "",
     }
     try:
@@ -614,6 +642,24 @@ def probe(ip: str, port: int = _DEFAULT_PORT,
             if r and r["status"] not in (_CIP_STATUS_PATH_DEST_UNKNOWN,
                                          _CIP_STATUS_SERVICE_NOT_SUPPORTED):
                 out["conn_mgr_supported"] = True
+
+            # T2 evidence for enip_unauth_session: enumerate the follow-on
+            # queries that actually answered on the unauth session. Any
+            # succeeding class IS the proof-of-primitive.
+            unauth_ok: list[str] = []
+            if out.get("identity_detailed"):
+                unauth_ok.append("Identity (0x01)")
+            if out.get("tcpip"):
+                unauth_ok.append("TCP/IP (0xF5)")
+            if out.get("ethlink"):
+                unauth_ok.append("EthernetLink (0xF6)")
+            if out.get("pccc_supported"):
+                unauth_ok.append("PCCC (0x67)")
+            if out.get("file_object_supported"):
+                unauth_ok.append("File (0x37)")
+            if out.get("conn_mgr_supported"):
+                unauth_ok.append("ConnectionManager (0x06)")
+            out["unauth_queries_ok"] = unauth_ok
 
             # Best-effort teardown.
             try:
@@ -750,6 +796,29 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
 
             # Unauthenticated session — cornerstone finding.
             if pr.get("session_registered"):
+                unauth_ok = pr.get("unauth_queries_ok") or []
+                # T2 evidence: at least one follow-on GetAttributes query
+                # actually answered under the unauth session handle. The
+                # RegisterSession handshake alone is T1 capability; a
+                # class returning data on that handle is proof-of-primitive.
+                proof_tier = "t2" if unauth_ok else "t1"
+                proof_line = ""
+                if unauth_ok:
+                    id_state = ""
+                    idd = pr.get("identity_detailed") or {}
+                    if idd:
+                        id_state = (
+                            f" (Identity: vendor=0x{idd.get('vendor_id',0):04x} "
+                            f"product={idd.get('product_name','?')!r} "
+                            f"rev={idd.get('revision','?')} "
+                            f"state=0x{idd.get('device_state',0):02x})")
+                    proof_line = (
+                        f" T2 PROOF: {len(unauth_ok)} CIP class(es) answered "
+                        f"under this unauth session — "
+                        f"{', '.join(unauth_ok)}.{id_state} "
+                        f"The session handle IS a working explicit-messaging "
+                        f"channel; every listed class was read with no "
+                        f"credentials.")
                 out.append(_finding(
                     "high",
                     "Unauthenticated CIP session accepted "
@@ -759,7 +828,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "subsequent SendRRData / UnconnectedSend / ForwardOpen "
                     "request in this scan was accepted on that handle. "
                     "Any tester on this segment has explicit-messaging "
-                    "access to the controller.",
+                    f"access to the controller.{proof_line}",
                     f"python -m cpppo.server.enip.client --address {h.ip}",
                     "Enable CIP Security (Vol 8) so plaintext RegisterSession "
                     "on 44818/tcp is refused and clients are forced through "
@@ -772,7 +841,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "python -m cpppo.server.enip.client --address <ip> "
                         "--print --route-path 1/0 (backplane walk); if session "
                         "accepts explicit messaging, enumerate all classes."),
-                    depth_tier="t1"))
+                    depth_tier=proof_tier))
 
             # CIP Security disabled — plaintext accepted.
             if pr.get("cip_security_off"):
@@ -1003,12 +1072,25 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
 
             # CVE fingerprints from Identity Object.
             for m in pr.get("cve_matches") or []:
+                # T2 = firmware revision actually lands inside the advisory's
+                # vulnerable band (see _cve_fingerprint). Uncertain matches
+                # stay T1 with a generic CWE reference so the tester knows to
+                # verify manually before assigning the CVE.
+                confirmed = bool(m.get("confirmed"))
+                band = m.get("band") or ""
+                proof_tier = "t2" if confirmed else "t1"
+                sev = "high" if confirmed else "medium"
+                band_line = (f" T2 PROOF: firmware band satisfied — {band}."
+                             if confirmed else
+                             f" T1 fingerprint only — band check inconclusive"
+                             f" ({band}); verify manually before assigning "
+                             f"the CVE.")
                 out.append(_finding(
-                    "high",
+                    sev,
                     f"EtherNet/IP fingerprint matches advisory ({m['cve']})",
                     tgt,
                     f"Identity fingerprint identifies {m['family']}. "
-                    f"{m['note']}",
+                    f"{m['note']}{band_line}",
                     "# correlate against the advisory:\n"
                     "# https://www.cisa.gov/news-events/ics-advisories",
                     f"Apply the vendor firmware release addressing "
@@ -1019,7 +1101,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "PoC to prove weak session-key derivation; for "
                         "MicroLogix ICSA-17-138-03: pull the PCCC password hash "
                         "and crack it."),
-                    depth_tier="t1"))
+                    depth_tier=proof_tier))
     return out
 
 

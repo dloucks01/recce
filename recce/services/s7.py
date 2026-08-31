@@ -293,6 +293,19 @@ def _parse_read_var_ok(param: bytes, data: bytes) -> bool:
     return data[0] == 0xFF
 
 
+def _parse_read_var_value(param: bytes, data: bytes) -> int | None:
+    """Return the first payload byte read on a successful FC 0x04 response, or
+    None if the read did not succeed / the item body is short. The item body
+    layout is: return_code(1) transport_size(1) length(2 bits) value(...).
+    Recce only ever asks for 1 byte, so data[4] carries the actual memory
+    value the CPU exposed — the T2 proof-of-exploit for PUT/GET."""
+    if not _parse_read_var_ok(param, data):
+        return None
+    if len(data) < 5:
+        return None
+    return data[4]
+
+
 def _parse_block_list(param: bytes, data: bytes) -> dict:
     """UserData block-list response. Each 4-byte record: block_type_ascii(2),
     block_count(2 BE). Block type letters: 'OB', 'DB', 'FB', 'FC', 'SDB',
@@ -382,7 +395,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         "order_code": "", "fw_version": "", "hw_version": "",
         "component": {}, "protection_level": 0, "password_set": False,
         "put_get_enabled": False, "put_get_seen": False,
-        "read_var_ok": False, "blocks": {},
+        "read_var_ok": False, "read_var_value": None, "blocks": {},
         "legacy_password_readout": None, "cve_matches": [], "error": "",
     }
     enum = _enumerate_tsap(ip, port, timeout)
@@ -462,6 +475,11 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         if r and r.get("rosctr") == _ROSCTR_ACKDATA:
             out["read_var_ok"] = _parse_read_var_ok(
                 r.get("param", b""), r.get("data", b""))
+            if out["read_var_ok"]:
+                # Capture the actual byte value returned so the T2 proof shows
+                # what the CPU exposed, not just that it exposed something.
+                out["read_var_value"] = _parse_read_var_value(
+                    r.get("param", b""), r.get("data", b""))
     finally:
         try:
             sock.close()
@@ -544,11 +562,14 @@ def s7_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
-             exploit_note="", depth_tier=""):
-    return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "snap7 / plcscan", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind,
-            "exploit_note": exploit_note, "depth_tier": depth_tier}
+             exploit_note="", depth_tier="", output=""):
+    f = {"severity": sev, "title": title, "target": target, "detail": detail,
+         "tool": "snap7 / plcscan", "command": cmd, "remediation": rem,
+         "cwes": cwes, "kind": kind,
+         "exploit_note": exploit_note, "depth_tier": depth_tier}
+    if output:
+        f["output"] = output
+    return f
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -684,16 +705,38 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     ["CWE-200"], kind="s7_component_identification"))
 
             if pr.get("put_get_enabled"):
-                out.append(_finding(
-                    "critical",
-                    "S7 PUT/GET communication enabled — unauthenticated memory "
-                    "read/write", tgt,
+                # T2 promotion: when the FC 0x04 probe against M0.0 succeeded,
+                # PUT/GET is not just enabled — it is provably exploitable, and
+                # we hold a concrete byte the CPU returned to an unauth client.
+                pg_tier = "t1"
+                pg_output = ""
+                pg_detail = (
                     "SZL 0x0131 confirms PUT/GET is enabled. Any client that "
                     "can reach 102/tcp can now READ and WRITE process image / "
                     "data blocks (M/I/Q/DB) with no authentication using "
                     "S7COMM functions 0x04 (Read Var) and 0x05 (Write Var). "
                     "On S7-300/400 this is the default; on S7-1200/1500 it "
-                    "requires explicit opt-in and should be off.",
+                    "requires explicit opt-in and should be off.")
+                if pr.get("read_var_ok"):
+                    pg_tier = "t2"
+                    val = pr.get("read_var_value")
+                    val_hex = f"0x{val:02x}" if isinstance(val, int) else "?"
+                    pg_output = (
+                        f"FC 0x04 Read Var against M0.0 returned "
+                        f"return_code=0xFF (success), value={val_hex}. This "
+                        f"is a live 1-byte read of CPU merker memory by an "
+                        f"unauthenticated client — the T2 proof that PUT/GET "
+                        f"is not merely advertised but exploitable.")
+                    pg_detail = pg_detail + (
+                        " CHAINED: recce's read-var probe against M0.0 "
+                        f"succeeded (byte={val_hex}), proving the exposure "
+                        "is not just a flag — it lets an unauthenticated "
+                        "client read live CPU memory.")
+                out.append(_finding(
+                    "critical",
+                    "S7 PUT/GET communication enabled — unauthenticated memory "
+                    "read/write", tgt,
+                    pg_detail,
                     f"snap7-client -h {h.ip} -c getvar -a M -s 0 -n 1",
                     "S7-1200/1500: disable PUT/GET in TIA Portal → CPU "
                     "properties → Protection & Security. S7-300/400: enable "
@@ -705,7 +748,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "enumerate DBs: snap7-client -c listblocks; snap7-client "
                         "-c getvar -a DB -d 1 -s 0 -n 16 — dump plant "
                         "recipes/setpoints without auth."),
-                    depth_tier="t1"))
+                    depth_tier=pg_tier, output=pg_output))
 
             if pr.get("read_var_ok"):
                 out.append(_finding(

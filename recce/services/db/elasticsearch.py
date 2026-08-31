@@ -190,7 +190,10 @@ def _check_anonymous(ip: str, port: int, tls: bool, timeout: float,
     401 on / can still grant a de-facto role to anyone. This endpoint returns 200
     with `{"username": "_anonymous", "authentication_type": "anonymous", "roles":
     [...]}` on such clusters, which is the definitive tell. Populates
-    out[anonymous|anonymous_username|anonymous_roles]."""
+    out[anonymous|anonymous_username|anonymous_roles].
+
+    On a positive tell this immediately follows with a safe, read-only T2 proof
+    (_probe_anonymous_read) to confirm the granted role actually reads data."""
     who = _get(ip, port, "/_security/_authenticate", tls, timeout, headers=None)
     if not who or who[0] != 200 or not isinstance(who[1], dict):
         return
@@ -202,6 +205,43 @@ def _check_anonymous(ip: str, port: int, tls: bool, timeout: float,
         out["anonymous"] = True
         out["anonymous_username"] = user
         out["anonymous_roles"] = [str(r) for r in roles][:20]
+        _probe_anonymous_read(ip, port, tls, timeout, out)
+
+
+def _probe_anonymous_read(ip: str, port: int, tls: bool, timeout: float,
+                          out: dict) -> None:
+    """T2 SAFE proof-of-exploit for es_anonymous: after /_security/_authenticate
+    reports the request is running as `_anonymous`, GET /_cat/indices with NO
+    credentials. A 200 with an index array proves the granted anonymous role
+    actually reads cluster metadata - the misconfig is not just theoretical, it
+    grants live data access. Read-only (no _search / no doc dump); the raw index
+    names + total doc count are the captured evidence.
+
+    Populates out[anonymous_read_ok|anonymous_indices|anonymous_docs]. Silent on
+    failure (401/403/timeout) so the T1 anonymous finding still emits."""
+    cat = _get(ip, port, "/_cat/indices?format=json&bytes=b", tls, timeout,
+               headers=None)
+    if not cat or cat[0] != 200 or not isinstance(cat[1], list):
+        return
+    idx = [i.get("index", "") for i in cat[1]
+           if isinstance(i, dict) and i.get("index")]
+    if not idx:
+        # 200 with an empty list still proves the read primitive worked - the
+        # cluster just has no indices yet. Record the ok flag anyway.
+        out["anonymous_read_ok"] = True
+        out["anonymous_indices"] = []
+        out["anonymous_docs"] = 0
+        return
+    docs = 0
+    for i in cat[1]:
+        if isinstance(i, dict):
+            try:
+                docs += int(i.get("docs.count") or 0)
+            except (ValueError, TypeError):
+                pass
+    out["anonymous_read_ok"] = True
+    out["anonymous_indices"] = idx[:20]
+    out["anonymous_docs"] = docs
 
 
 def _deep_es(ip: str, port: int, tls: bool, timeout: float, out: dict,
@@ -393,6 +433,23 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             if pr.get("anonymous"):
                 roles = pr.get("anonymous_roles") or []
                 roles_txt = (", roles: " + ", ".join(roles[:6])) if roles else ""
+                # T2 SAFE proof: if the anonymous role actually returned an
+                # index list on _cat/indices (no auth), the misconfig is proven
+                # live. Fold the captured evidence into the finding detail.
+                anon_read = pr.get("anonymous_read_ok")
+                anon_idx = pr.get("anonymous_indices") or []
+                anon_docs = pr.get("anonymous_docs", 0)
+                proof = ""
+                if anon_read:
+                    names = ", ".join(i for i in anon_idx[:10]
+                                      if not i.startswith("."))
+                    proof = (
+                        "\n\nT2 proof: /_cat/indices returned 200 as _anonymous "
+                        f"({len(anon_idx)} index/indices"
+                        + (f", {anon_docs} document(s) total" if anon_docs else "")
+                        + (f": {names}" if names else "")
+                        + ") - the granted role reads live cluster data.")
+                tier = "t2" if anon_read else "t1"
                 out.append(_finding(
                     "high",
                     "Elasticsearch anonymous role grants unauthenticated access",
@@ -403,7 +460,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     + roles_txt
                     + " - xpack.security.authc.anonymous.roles is granting a role to "
                     "every request that arrives without credentials, so the '401' on "
-                    "/ is misleading and unauthenticated data access is available.",
+                    "/ is misleading and unauthenticated data access is available."
+                    + proof,
                     "curl",
                     f"curl -s http://{h.ip}:{p.portid}/_security/_authenticate ; "
                     f"curl -s http://{h.ip}:{p.portid}/_cat/indices",
@@ -414,7 +472,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "curl -s http://<ip>:<port>/_security/_authenticate ; "
                         "curl -s http://<ip>:<port>/_cat/indices ; "
                         "curl -s 'http://<ip>:<port>/*/_search?size=5&pretty'"),
-                    depth_tier="t1"))
+                    depth_tier=tier))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "medium", "Elasticsearch end-of-life / legacy build", tgt,

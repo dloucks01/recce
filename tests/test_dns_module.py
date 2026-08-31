@@ -215,6 +215,169 @@ def test_parse_rrs_short_buffer_does_not_raise():
     assert rrs == []
 
 
+# --------------------------------------------------------------------------- #
+# T2 promotion: dns_axfr
+# AXFR is itself the safe read-only proof-of-exploit. When it succeeds AND
+# recce parsed real A/AAAA records out of the answer, the finding upgrades
+# to depth_tier=t2 with a pivot list captured in `output`. When the AXFR
+# probe returned no parseable records, the finding stays at t1.
+# --------------------------------------------------------------------------- #
+def test_axfr_finding_upgrades_to_t2_when_a_records_parsed():
+    """AXFR body carried real A records → finding is depth_tier=t2 and
+    pivot list is stapled to `output` and summarized in `detail`."""
+    h = Host(ip="10.0.0.9", ports=[Port(portid=53, service="domain", state="open")])
+    probes = {("10.0.0.9", 53): {
+        "axfr_zones": ["contoso.local"],
+        "records": {"contoso.local": 3},
+        "version": "",
+        "axfr_data": {"contoso.local": {
+            "names": ["dc01.contoso.local", "mail.contoso.local"],
+            "a": [("dc01.contoso.local", "10.0.0.5"),
+                  ("mail.contoso.local", "10.0.0.6"),
+                  ("dc01.contoso.local", "10.0.0.5")],   # dup collapses
+            "aaaa": [("ns1.contoso.local", "2001:db8::1")],
+            "cname": [], "ns": [], "ptr": [], "mx": [], "srv": [],
+        }},
+    }}
+    fs = dns.findings([h], probes)
+    axfr_f = [f for f in fs if f.get("kind") == "dns_axfr"]
+    assert axfr_f, "AXFR finding must fire"
+    f = axfr_f[0]
+    assert f["depth_tier"] == "t2"
+    # Pivot list captured in the finding's evidence field.
+    assert "dc01.contoso.local\t10.0.0.5" in f["output"]
+    assert "mail.contoso.local\t10.0.0.6" in f["output"]
+    assert "ns1.contoso.local\t2001:db8::1" in f["output"]
+    # Dedup — the duplicate (dc01, 10.0.0.5) appears exactly once.
+    assert f["output"].count("dc01.contoso.local\t10.0.0.5") == 1
+    # Human-readable pivot summary folded into detail.
+    assert "Pivot targets" in f["detail"]
+    assert "dc01.contoso.local=10.0.0.5" in f["detail"]
+
+
+def test_axfr_finding_stays_t1_when_no_ip_records_parsed():
+    """AXFR succeeded (header ok) but the parsed body carried names only /
+    no A or AAAA — no pivot proof, stays at t1."""
+    h = Host(ip="10.0.0.9", ports=[Port(portid=53, service="domain", state="open")])
+    probes = {("10.0.0.9", 53): {
+        "axfr_zones": ["contoso.local"],
+        "records": {"contoso.local": 1},
+        "version": "",
+        "axfr_data": {"contoso.local": {
+            "names": ["dc01.contoso.local"],
+            "a": [], "aaaa": [], "cname": [], "ns": [],
+            "ptr": [], "mx": [], "srv": [],
+        }},
+    }}
+    fs = dns.findings([h], probes)
+    axfr_f = [f for f in fs if f.get("kind") == "dns_axfr"]
+    assert axfr_f and axfr_f[0]["depth_tier"] == "t1"
+    # Still no pivot output when nothing pivotable was captured.
+    assert "output" not in axfr_f[0] or not axfr_f[0]["output"]
+
+
+def test_axfr_pivot_targets_dedup_and_order():
+    """Helper: A records come first, AAAA appended after; duplicates collapse."""
+    data = {
+        "a": [("A.example.", "10.0.0.1"), ("b.example.", "10.0.0.2"),
+              ("A.example.", "10.0.0.1")],
+        "aaaa": [("b.example.", "2001:db8::2")],
+    }
+    pivots = dns._axfr_pivot_targets(data)
+    assert pivots == [("a.example", "10.0.0.1"), ("b.example", "10.0.0.2"),
+                      ("b.example", "2001:db8::2")]
+
+
+def test_axfr_pivot_targets_empty_on_no_data():
+    assert dns._axfr_pivot_targets({}) == []
+    assert dns._axfr_pivot_targets({"a": [], "aaaa": []}) == []
+
+
+# --------------------------------------------------------------------------- #
+# BIND version-gated CVE annotation. version-gate, never ship unverified.
+# --------------------------------------------------------------------------- #
+def test_bind_cves_matches_vulnerable_9_11():
+    """BIND 9.11.5 is older than the fixes for all three curated CVEs — every
+    one fires. Version string mirrors what version.bind returns on Debian."""
+    hits = dns._bind_cves("9.11.5-P4-5.1+deb10u5-Debian")
+    ids = {h["cve"] for h in hits}
+    assert {"CVE-2020-8617", "CVE-2020-8623", "CVE-2020-8625"} <= ids
+
+
+def test_bind_cves_silent_on_patched_9_16():
+    """9.16.20 is past every 9.16 fix in the table — no CVE emitted."""
+    assert dns._bind_cves("9.16.20") == []
+
+
+def test_bind_cves_silent_on_unparseable():
+    """Fingerprint that doesn't look like a BIND version parses to None —
+    fail-closed, never ship an unverified CVE."""
+    assert dns._bind_cves("") == []
+    assert dns._bind_cves("dnsmasq-2.85") == []
+    assert dns._bind_cves("MikroTik") == []
+
+
+def test_parse_bind_version_extracts_minor_patch():
+    assert dns._parse_bind_version("BIND 9.16.6") == (16, 6)
+    assert dns._parse_bind_version("9.11.5-P4") == (11, 5)
+    assert dns._parse_bind_version("nope") is None
+
+
+def test_axfr_finding_annotates_bind_cve_when_version_vulnerable():
+    """AXFR + a co-disclosed vulnerable version.bind → CVE list stapled to
+    the finding text; still one finding, still dns_axfr kind."""
+    h = Host(ip="10.0.0.9", ports=[Port(portid=53, service="domain", state="open")])
+    probes = {("10.0.0.9", 53): {
+        "axfr_zones": ["contoso.local"],
+        "records": {"contoso.local": 1},
+        "version": "9.11.5-P4-5.1+deb10u5-Debian",
+        "axfr_data": {"contoso.local": {
+            "names": ["dc01.contoso.local"],
+            "a": [("dc01.contoso.local", "10.0.0.5")],
+            "aaaa": [], "cname": [], "ns": [], "ptr": [], "mx": [], "srv": [],
+        }},
+    }}
+    fs = dns.findings([h], probes)
+    axfr_f = [f for f in fs if f.get("kind") == "dns_axfr"]
+    assert axfr_f
+    detail = axfr_f[0]["detail"]
+    assert "CVE-2020-8617" in detail
+    assert "9.11.5" in detail
+
+
+def test_axfr_finding_no_cve_annotation_when_version_patched():
+    h = Host(ip="10.0.0.9", ports=[Port(portid=53, service="domain", state="open")])
+    probes = {("10.0.0.9", 53): {
+        "axfr_zones": ["contoso.local"],
+        "records": {"contoso.local": 1},
+        "version": "9.16.20",
+        "axfr_data": {"contoso.local": {
+            "names": ["dc01.contoso.local"],
+            "a": [("dc01.contoso.local", "10.0.0.5")],
+            "aaaa": [], "cname": [], "ns": [], "ptr": [], "mx": [], "srv": [],
+        }},
+    }}
+    fs = dns.findings([h], probes)
+    axfr_f = [f for f in fs if f.get("kind") == "dns_axfr"]
+    assert axfr_f
+    detail = axfr_f[0]["detail"]
+    assert "CVE-" not in detail
+    # T2 upgrade still fires purely on the parsed A record.
+    assert axfr_f[0]["depth_tier"] == "t2"
+
+
+def test_axfr_probe_times_out_cleanly_when_target_unreachable():
+    """Unreachable target: axfr() returns ok=False without raising. Ensures
+    T1 finding path still functions cleanly when the T2 probe cannot connect."""
+    # RFC 5737 TEST-NET-1 address — routable-format, guaranteed non-responsive.
+    r = dns.axfr("192.0.2.1", 53, "contoso.local", timeout=0.5)
+    assert r["ok"] is False
+    assert r["records"] == 0
+    assert r["rcode"] is None
+    assert r["data"] == {"names": [], "a": [], "aaaa": [], "cname": [],
+                         "ns": [], "ptr": [], "mx": [], "srv": []}
+
+
 def test_srv_mx_ns_empty_on_refused():
     """Server that REFUSES every query returns empty srv/mx/ns dicts, and does
     not raise."""

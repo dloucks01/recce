@@ -207,6 +207,63 @@ def _build_register_server_response(service_result: int = 0) -> bytes:
     return _msg_wrapper(_nodeid_fourbyte(440), svc)
 
 
+# --- T2 anon-session fixtures (CreateSession / ActivateSession / Read) --------
+
+# FILETIME (100-ns since 1601-01-01 UTC) for a known instant so a decoded
+# value in a probe result is verifiable. 2026-08-30T12:00:00Z:
+#   unix = 1_788_091_200
+#   filetime = (unix + 11_644_473_600) * 10_000_000 = 134_325_648_000_000_000
+_FILETIME_2026_08_30 = 134_325_648_000_000_000
+
+
+def _build_create_session_response(session_id: int = 1000,
+                                   auth_token_id: int = 42) -> bytes:
+    """CreateSessionResponse (NodeId 464). SessionId and AuthenticationToken
+    are FourByte NodeIds — the module captures the AuthenticationToken raw
+    bytes and echoes them into subsequent request headers."""
+    svc = _resp_header()
+    svc += _nodeid_fourbyte(session_id)            # SessionId
+    svc += _nodeid_fourbyte(auth_token_id)         # AuthenticationToken
+    svc += struct.pack("<d", 60000.0)              # RevisedSessionTimeout
+    svc += _ua_bytestring(bytes(32))               # ServerNonce
+    svc += _ua_bytestring(None)                    # ServerCertificate
+    svc += _le_u32(0)                              # ServerEndpoints count
+    svc += _le_u32(0)                              # ServerSoftwareCertificates
+    svc += _ua_string(None)                        # ServerSignature.algorithm
+    svc += _ua_bytestring(None)                    # ServerSignature.signature
+    svc += _le_u32(0)                              # MaxRequestMessageSize
+    return _msg_wrapper(_nodeid_fourbyte(464), svc)
+
+
+def _build_create_session_response_error(status: int) -> bytes:
+    """Server refused CreateSession — ResponseHeader.serviceResult != Good."""
+    svc = _resp_header(service_result=status)
+    return _msg_wrapper(_nodeid_fourbyte(464), svc)
+
+
+def _build_activate_session_response(service_result: int = 0) -> bytes:
+    """ActivateSessionResponse (NodeId 470)."""
+    svc = _resp_header(service_result=service_result)
+    svc += _ua_bytestring(None)                    # ServerNonce
+    svc += _le_u32(0)                              # Results array count
+    svc += _le_u32(0)                              # DiagnosticInfos count
+    return _msg_wrapper(_nodeid_fourbyte(470), svc)
+
+
+def _build_read_response_current_time(filetime: int) -> bytes:
+    """ReadResponse (NodeId 634) carrying a single DataValue whose Variant is
+    a DateTime (builtin type 13)."""
+    svc = _resp_header()
+    svc += _le_u32(1)                              # Results count
+    # DataValue: mask=0x01 (Value present only)
+    svc += b"\x01"
+    # Variant: type=13 (DateTime), no array/dim bits
+    svc += b"\x0d"
+    svc += struct.pack("<q", filetime)             # DateTime int64 LE
+    svc += _le_u32(0)                              # DiagnosticInfos count
+    return _msg_wrapper(_nodeid_fourbyte(634), svc)
+
+
 # --- fake TCP server -----------------------------------------------------------
 
 
@@ -480,6 +537,186 @@ class ProbeTest(unittest.TestCase):
     def test_probe_on_dead_port(self):
         pr = opcua.probe("127.0.0.1", 1, timeout=0.5)
         self.assertFalse(pr["reachable"])
+
+
+class AnonymousSessionT2Test(unittest.TestCase):
+    """T2 SAFE promotion of opcua_anonymous_allowed:
+      CreateSession + ActivateSession(AnonymousIdentityToken) +
+      Read(ns=0;i=2258 ServerStatus_CurrentTime).
+    A successful Read upgrades the existing critical finding from T1 to T2
+    and appends the observed current-time to its detail as evidence."""
+
+    def _anon_ep_bytes(self):
+        return _endpoint(
+            url="opc.tcp://recce:4840/",
+            security_mode=1,
+            policy_uri="http://opcfoundation.org/UA/SecurityPolicy#None",
+            tokens=[(0, "anonymous")],
+        )
+
+    def _base_replies(self, ep_bytes):
+        return [
+            _ACK_FRAME,
+            _build_opn_response(),
+            _build_get_endpoints_response([ep_bytes]),
+            _build_find_servers_response([]),
+            _build_find_servers_on_network_response([]),
+            _build_register_server_response(service_result=0x80440000),
+        ]
+
+    def test_anonymous_session_promotes_finding_to_t2(self):
+        ep_bytes = self._anon_ep_bytes()
+        replies = self._base_replies(ep_bytes) + [
+            _build_create_session_response(session_id=1000, auth_token_id=42),
+            _build_activate_session_response(service_result=0),
+            _build_read_response_current_time(_FILETIME_2026_08_30),
+        ]
+        srv = _OpcuaFakeServer([replies, []])
+        try:
+            pr = opcua.probe(srv.host, srv.port, timeout=2.0)
+        finally:
+            srv.close()
+
+        self.assertTrue(pr["reachable"])
+        sess = pr.get("anonymous_session")
+        self.assertIsNotNone(sess)
+        self.assertTrue(sess["session_opened"])
+        self.assertTrue(sess["activated"])
+        self.assertTrue(sess["read_ok"])
+        self.assertEqual(sess["current_time"], "2026-08-30T12:00:00Z")
+
+        host = Host(ip=srv.host,
+                    ports=[Port(portid=srv.port, service="opcua")])
+        fs = opcua.findings([host], {(srv.host, srv.port): pr})
+        anon = [f for f in fs if f["kind"] == "opcua_anonymous_allowed"]
+        self.assertEqual(len(anon), 1)
+        self.assertEqual(anon[0]["depth_tier"], "t2")
+        self.assertEqual(anon[0]["severity"], "critical")
+        self.assertIn("T2 PROOF", anon[0]["detail"])
+        self.assertIn("2026-08-30T12:00:00Z", anon[0]["detail"])
+
+    def test_activate_succeeds_but_read_fails_still_promotes(self):
+        """CreateSession + ActivateSession succeed but the Read reply never
+        arrives — we still have proof the anon Session is live (Activate=Good)
+        so the tier upgrades to T2."""
+        ep_bytes = self._anon_ep_bytes()
+        replies = self._base_replies(ep_bytes) + [
+            _build_create_session_response(),
+            _build_activate_session_response(service_result=0),
+            # no ReadResponse — connection will close after this
+        ]
+        srv = _OpcuaFakeServer([replies, []])
+        try:
+            pr = opcua.probe(srv.host, srv.port, timeout=2.0)
+        finally:
+            srv.close()
+
+        sess = pr.get("anonymous_session")
+        self.assertIsNotNone(sess)
+        self.assertTrue(sess["activated"])
+        self.assertFalse(sess["read_ok"])
+
+        host = Host(ip=srv.host,
+                    ports=[Port(portid=srv.port, service="opcua")])
+        fs = opcua.findings([host], {(srv.host, srv.port): pr})
+        anon = [f for f in fs if f["kind"] == "opcua_anonymous_allowed"][0]
+        self.assertEqual(anon["depth_tier"], "t2")
+        self.assertIn("T2 PROOF", anon["detail"])
+
+    def test_create_session_rejected_stays_t1(self):
+        """Server advertises Anonymous but rejects CreateSession — the T1
+        posture finding still emits and stays at T1."""
+        ep_bytes = self._anon_ep_bytes()
+        replies = self._base_replies(ep_bytes) + [
+            _build_create_session_response_error(0x801F0000),  # BadIdentityTokenRejected-ish
+        ]
+        srv = _OpcuaFakeServer([replies, []])
+        try:
+            pr = opcua.probe(srv.host, srv.port, timeout=2.0)
+        finally:
+            srv.close()
+
+        sess = pr.get("anonymous_session")
+        self.assertIsNotNone(sess)
+        self.assertFalse(sess.get("session_opened"))
+        self.assertFalse(sess.get("read_ok"))
+
+        host = Host(ip=srv.host,
+                    ports=[Port(portid=srv.port, service="opcua")])
+        fs = opcua.findings([host], {(srv.host, srv.port): pr})
+        anon = [f for f in fs if f["kind"] == "opcua_anonymous_allowed"][0]
+        self.assertEqual(anon["depth_tier"], "t1")
+        self.assertNotIn("T2 PROOF", anon["detail"])
+
+    def test_no_anonymous_endpoint_skips_session_probe(self):
+        """When no endpoint advertises Anonymous, the T2 probe is not even
+        attempted — anonymous_session stays None and no anon finding fires."""
+        ep_bytes = _endpoint(
+            url="opc.tcp://recce:4840/",
+            security_mode=2,
+            policy_uri="http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256",
+            tokens=[(1, "username_basic256sha256")],
+        )
+        replies = self._base_replies(ep_bytes)
+        srv = _OpcuaFakeServer([replies, []])
+        try:
+            pr = opcua.probe(srv.host, srv.port, timeout=2.0)
+        finally:
+            srv.close()
+
+        self.assertIsNone(pr.get("anonymous_session"))
+        host = Host(ip=srv.host,
+                    ports=[Port(portid=srv.port, service="opcua")])
+        fs = opcua.findings([host], {(srv.host, srv.port): pr})
+        self.assertFalse(any(f["kind"] == "opcua_anonymous_allowed" for f in fs))
+
+    def test_session_probe_on_dead_port_times_out_clean(self):
+        """Unreachable target — probe returns cleanly with reachable=False
+        and no anonymous_session dict."""
+        pr = opcua.probe("127.0.0.1", 1, timeout=0.3,
+                         do_anonymous_session=True)
+        self.assertFalse(pr["reachable"])
+        self.assertIsNone(pr.get("anonymous_session"))
+
+
+class DecoderT2Test(unittest.TestCase):
+    """Unit tests for the T2 decoder helpers, driven off wire-derived bytes."""
+
+    def test_filetime_to_iso_known_value(self):
+        self.assertEqual(opcua._filetime_to_iso(_FILETIME_2026_08_30),
+                         "2026-08-30T12:00:00Z")
+
+    def test_filetime_to_iso_zero_returns_empty(self):
+        self.assertEqual(opcua._filetime_to_iso(0), "")
+
+    def test_filetime_to_iso_out_of_range_returns_empty(self):
+        # A value far past year 9999 — must not raise.
+        self.assertEqual(opcua._filetime_to_iso(10 ** 19), "")
+
+    def test_read_nodeid_raw_roundtrips_fourbyte(self):
+        # FourByte NodeId ns=0, id=42 -> 01 00 2A 00
+        buf = bytes.fromhex("01002a00") + b"trailer"
+        c = opcua._Cursor(buf)
+        raw = opcua._read_nodeid_raw(c)
+        self.assertEqual(raw, bytes.fromhex("01002a00"))
+        self.assertEqual(c.off, 4)
+
+    def test_parse_create_session_response_captures_auth_token(self):
+        frame = _build_create_session_response(session_id=1000,
+                                               auth_token_id=42)
+        inner = opcua._service_body_after_headers(frame[8:])
+        self.assertIsNotNone(inner)
+        cs = opcua._parse_create_session_response(inner)
+        self.assertEqual(cs["service_result"], 0)
+        # AuthenticationToken FourByte NodeId ns=0, id=42 -> 01 00 2A 00
+        self.assertEqual(cs["authentication_token"], bytes.fromhex("01002a00"))
+
+    def test_parse_read_response_current_time(self):
+        frame = _build_read_response_current_time(_FILETIME_2026_08_30)
+        inner = opcua._service_body_after_headers(frame[8:])
+        rr = opcua._parse_read_current_time_response(inner)
+        self.assertTrue(rr["ok"])
+        self.assertEqual(rr["current_time"], "2026-08-30T12:00:00Z")
 
 
 # --- fixture data --------------------------------------------------------------

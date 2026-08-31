@@ -362,6 +362,120 @@ class BbmdTest(unittest.TestCase):
         self.assertFalse(r["accepted"])
 
 
+class BdtPeerChainProbeTest(unittest.TestCase):
+    """T2 chain probe for bacnet_bbmd_topology_disclosure: each disclosed
+    BDT peer is unicast a Who-Is and I-Am reply confirms it's live."""
+
+    def test_is_scannable_peer_ip_rejects_reserved(self):
+        self.assertTrue(bacnet._is_scannable_peer_ip("10.0.0.1"))
+        self.assertTrue(bacnet._is_scannable_peer_ip("192.168.5.20"))
+        self.assertFalse(bacnet._is_scannable_peer_ip("0.0.0.0"))
+        self.assertFalse(bacnet._is_scannable_peer_ip("224.0.0.1"))
+        self.assertFalse(bacnet._is_scannable_peer_ip("239.255.255.250"))
+        self.assertFalse(bacnet._is_scannable_peer_ip("255.255.255.255"))
+        self.assertFalse(bacnet._is_scannable_peer_ip(""))
+        self.assertFalse(bacnet._is_scannable_peer_ip("not.an.ip.addr"))
+
+    def test_bdt_peers_probe_finds_live_peer(self):
+        # Peer BBMD: answers Who-Is with the canned I-Am.
+        def responder(req):
+            if _detect_request(req) == "who-is":
+                return _I_AM_BYTES
+            return None
+        peer = _BacnetServer(responder)
+        try:
+            entries = [{"ip": peer.host, "port": peer.port,
+                        "mask": "255.255.255.255"}]
+            live = bacnet._bdt_peers_probe(entries, "127.0.0.99", 47808,
+                                           timeout=1.5)
+        finally:
+            peer.close()
+        self.assertEqual(len(live), 1)
+        self.assertEqual(live[0]["ip"], peer.host)
+        self.assertEqual(live[0]["device_instance"], 260)
+
+    def test_bdt_peers_probe_quiet_when_peer_unreachable(self):
+        # Bind and immediately close a socket to grab a free port that
+        # subsequent packets to it will silently drop (or ICMP-unreach).
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("127.0.0.1", 0))
+        dead_port = s.getsockname()[1]
+        s.close()
+        entries = [{"ip": "127.0.0.1", "port": dead_port,
+                    "mask": "255.255.255.255"}]
+        live = bacnet._bdt_peers_probe(entries, "127.0.0.99", 47808,
+                                       timeout=0.4)
+        # Nothing answered — probe stays quiet, list is empty.
+        self.assertEqual(live, [])
+
+    def test_bdt_peers_probe_skips_reserved_and_self(self):
+        # Include a broadcast, a multicast, and a self-reference — none
+        # should be probed. Only the real one counts.
+        def responder(req):
+            if _detect_request(req) == "who-is":
+                return _I_AM_BYTES
+            return None
+        peer = _BacnetServer(responder)
+        try:
+            entries = [
+                {"ip": "0.0.0.0", "port": 47808, "mask": "0.0.0.0"},
+                {"ip": "255.255.255.255", "port": 47808, "mask": "0.0.0.0"},
+                {"ip": peer.host, "port": peer.port, "mask": "255.255.255.255"},
+                {"ip": peer.host, "port": peer.port,  # self-ref path
+                 "mask": "255.255.255.255"},
+            ]
+            # self is the peer's own address+port — self-ref should be skipped.
+            live = bacnet._bdt_peers_probe(entries, peer.host, peer.port,
+                                           timeout=1.0)
+        finally:
+            peer.close()
+        # 0.0.0.0 / 255.x get filtered; both peer entries are self, so no
+        # unicast is actually sent and live is empty.
+        self.assertEqual(live, [])
+
+    def test_findings_upgrade_to_t2_when_bdt_peer_live(self):
+        pr = {
+            "reachable": True, "device_instance": 3, "identity": {},
+            "object_list": [], "fdt": [], "foreign_reg": None,
+            "amplification": None, "write_dryrun": None, "dcc": None,
+            "reinit": None, "atomic_files": [],
+            "bdt": [{"ip": "10.9.8.7", "port": 47808,
+                     "mask": "255.255.255.255"}],
+            "bdt_peers_live": [{"ip": "10.9.8.7", "port": 47808,
+                                "device_instance": 4242, "vendor_id": 66}],
+        }
+        host = Host(ip="10.0.0.1", ports=[
+            Port(portid=47808, protocol="udp", state="open", service="bacnet")])
+        fs = bacnet.findings([host], {("10.0.0.1", 47808): pr})
+        topo = [f for f in fs
+                if f["kind"] == "bacnet_bbmd_topology_disclosure"]
+        self.assertEqual(len(topo), 1)
+        self.assertEqual(topo[0]["depth_tier"], "t2")
+        # Evidence must mention the live peer with its device instance.
+        self.assertIn("10.9.8.7", topo[0]["detail"])
+        self.assertIn("4242", topo[0]["detail"])
+        self.assertIn("Who-Is", topo[0]["detail"])
+
+    def test_findings_stay_t1_when_no_bdt_peer_alive(self):
+        pr = {
+            "reachable": True, "device_instance": 3, "identity": {},
+            "object_list": [], "fdt": [], "foreign_reg": None,
+            "amplification": None, "write_dryrun": None, "dcc": None,
+            "reinit": None, "atomic_files": [],
+            "bdt": [{"ip": "10.9.8.7", "port": 47808,
+                     "mask": "255.255.255.255"}],
+            "bdt_peers_live": [],
+        }
+        host = Host(ip="10.0.0.1", ports=[
+            Port(portid=47808, protocol="udp", state="open", service="bacnet")])
+        fs = bacnet.findings([host], {("10.0.0.1", 47808): pr})
+        topo = [f for f in fs
+                if f["kind"] == "bacnet_bbmd_topology_disclosure"]
+        self.assertEqual(len(topo), 1)
+        self.assertEqual(topo[0]["depth_tier"], "t1")
+        self.assertNotIn("Who-Is", topo[0]["detail"])
+
+
 class AmplificationTest(unittest.TestCase):
     def test_who_is_amplification_counts_multiple_replies(self):
         # Server sends TWO I-Am replies to one Who-Is.

@@ -499,5 +499,180 @@ class FindingsTest(unittest.TestCase):
         self.assertIn("10.0.0.5", v)
 
 
+class UnauthSessionT2PromotionTest(unittest.TestCase):
+    """T2 promotion: unauth_queries_ok tracks which follow-on CIP queries
+    succeeded under the unauthenticated RegisterSession handle. Any
+    successful class read on that handle IS proof-of-primitive; the
+    enip_unauth_session finding upgrades to t2 and gains a T2 PROOF line.
+    Empty follow-on set leaves the finding at t1 (session capability only)."""
+
+    def _base_probe(self, unauth_ok):
+        return {
+            "reachable": True,
+            "list_identity": {
+                "vendor_id": 0x0001, "device_type": 0x000C,
+                "product_code": 0xBE, "revision": "32.11",
+                "revision_major": 32, "revision_minor": 11,
+                "serial_number": 0xDEAD, "product_name": "1756-EN2T/A",
+                "device_state": 3, "status_word": 0x0030,
+            },
+            "list_services": [], "list_services_names": [],
+            "cip_encapsulation": True, "list_interfaces": [],
+            "session": 0xCAFEBABE, "session_registered": True,
+            "cip_security_off": True,
+            "identity_detailed": ({"vendor_id": 0x0001,
+                                    "product_name": "1756-EN2T/A",
+                                    "revision": "32.11", "device_state": 3}
+                                   if "Identity" in " ".join(unauth_ok)
+                                   else None),
+            "tcpip": None, "ethlink": None,
+            "pccc_supported": "PCCC" in " ".join(unauth_ok),
+            "file_object_supported": False, "conn_mgr_supported": False,
+            "reset_service_capable": "Identity" in " ".join(unauth_ok),
+            "unauth_queries_ok": unauth_ok,
+            "cve_matches": [],
+        }
+
+    def test_probe_populates_unauth_queries_ok_from_full_flow(self):
+        # The full-session script from ProbeEndToEndTest succeeds on Identity,
+        # TCP/IP, EthLink, PCCC (attr-error 0x14 still means class present),
+        # File Object, and Connection Manager.
+        srv = _ENIPServer(script=ProbeEndToEndTest()._full_session_script())
+        try:
+            pr = enip.probe(srv.host, srv.port, timeout=3)
+        finally:
+            srv.close()
+        classes = pr["unauth_queries_ok"]
+        self.assertIn("Identity (0x01)", classes)
+        self.assertIn("TCP/IP (0xF5)", classes)
+        self.assertIn("EthernetLink (0xF6)", classes)
+        self.assertIn("PCCC (0x67)", classes)
+        self.assertIn("File (0x37)", classes)
+        self.assertIn("ConnectionManager (0x06)", classes)
+
+    def test_unauth_session_t2_when_follow_on_queries_answer(self):
+        h = Host(ip="10.0.0.5",
+                 ports=[Port(portid=44818, service="ethernetip")])
+        pr = self._base_probe(["Identity (0x01)", "PCCC (0x67)"])
+        fs = enip.findings([h], {("10.0.0.5", 44818): pr})
+        session_findings = [f for f in fs if f["kind"] == "enip_unauth_session"]
+        self.assertEqual(len(session_findings), 1)
+        self.assertEqual(session_findings[0]["depth_tier"], "t2")
+        self.assertIn("T2 PROOF", session_findings[0]["detail"])
+        self.assertIn("Identity (0x01)", session_findings[0]["detail"])
+        self.assertIn("PCCC (0x67)", session_findings[0]["detail"])
+
+    def test_unauth_session_stays_t1_when_no_follow_on_queries_succeed(self):
+        h = Host(ip="10.0.0.5",
+                 ports=[Port(portid=44818, service="ethernetip")])
+        pr = self._base_probe([])
+        fs = enip.findings([h], {("10.0.0.5", 44818): pr})
+        session_findings = [f for f in fs if f["kind"] == "enip_unauth_session"]
+        self.assertEqual(len(session_findings), 1)
+        self.assertEqual(session_findings[0]["depth_tier"], "t1")
+        self.assertNotIn("T2 PROOF", session_findings[0]["detail"])
+
+    def test_probe_of_dead_target_leaves_unauth_queries_ok_empty(self):
+        pr = enip.probe("127.0.0.1", 1, timeout=1)
+        self.assertEqual(pr["unauth_queries_ok"], [])
+
+
+class KnownCveT2PromotionTest(unittest.TestCase):
+    """T2 promotion: _cve_fingerprint tags each match with confirmed=True/False
+    based on the advisory's mitigated firmware band. Confirmed matches emit
+    enip_known_cve at t2 with severity high; unconfirmed matches stay at
+    t1 with severity medium and a note that the tester must verify."""
+
+    def test_rockwell_logix_below_33_11_is_confirmed_t2(self):
+        matches = enip._cve_fingerprint(
+            {"vendor_id": 0x0001, "revision_major": 32, "revision_minor": 11,
+             "product_name": "1756-L83E ControlLogix"})
+        self.assertEqual(len(matches), 1)
+        self.assertTrue(matches[0]["confirmed"])
+        self.assertIn("< 33.011", matches[0]["band"])
+
+    def test_rockwell_logix_at_or_above_33_11_is_unconfirmed(self):
+        matches = enip._cve_fingerprint(
+            {"vendor_id": 0x0001, "revision_major": 33, "revision_minor": 11,
+             "product_name": "1756-L83E ControlLogix"})
+        self.assertEqual(len(matches), 1)
+        self.assertFalse(matches[0]["confirmed"])
+        matches2 = enip._cve_fingerprint(
+            {"vendor_id": 0x0001, "revision_major": 34, "revision_minor": 0,
+             "product_name": "1769-L18ER CompactLogix"})
+        self.assertFalse(matches2[0]["confirmed"])
+
+    def test_micrologix_pccc_is_always_confirmed(self):
+        matches = enip._cve_fingerprint(
+            {"vendor_id": 0x0001, "revision_major": 21, "revision_minor": 6,
+             "product_name": "MicroLogix 1400"})
+        # PCCC is inherent to the platform — no firmware band gate.
+        self.assertTrue(any(m["cve"] == "CWE-306" and m["confirmed"]
+                            for m in matches))
+
+    def test_finding_promotes_to_t2_when_cve_confirmed(self):
+        h = Host(ip="10.0.0.5",
+                 ports=[Port(portid=44818, service="ethernetip")])
+        pr = {
+            "reachable": True,
+            "list_identity": {"vendor_id": 0x0001, "revision_major": 32,
+                              "revision_minor": 11,
+                              "product_name": "1756-L83E ControlLogix"},
+            "list_services": [], "list_services_names": [],
+            "cip_encapsulation": True, "list_interfaces": [],
+            "session": 0, "session_registered": False,
+            "cip_security_off": False,
+            "identity_detailed": None, "tcpip": None, "ethlink": None,
+            "pccc_supported": False, "file_object_supported": False,
+            "conn_mgr_supported": False, "reset_service_capable": False,
+            "unauth_queries_ok": [],
+            "cve_matches": [{
+                "cve": "CVE-2021-22681",
+                "family": "Rockwell Logix 5000",
+                "note": "Weak CIP session key derivation.",
+                "confirmed": True,
+                "band": "vulnerable if firmware < 33.011 (observed 32.11)",
+            }],
+        }
+        fs = enip.findings([h], {("10.0.0.5", 44818): pr})
+        cve_findings = [f for f in fs if f["kind"] == "enip_known_cve"]
+        self.assertEqual(len(cve_findings), 1)
+        self.assertEqual(cve_findings[0]["depth_tier"], "t2")
+        self.assertEqual(cve_findings[0]["severity"], "high")
+        self.assertIn("T2 PROOF", cve_findings[0]["detail"])
+        self.assertIn("< 33.011", cve_findings[0]["detail"])
+
+    def test_finding_stays_t1_when_cve_band_unconfirmed(self):
+        h = Host(ip="10.0.0.5",
+                 ports=[Port(portid=44818, service="ethernetip")])
+        pr = {
+            "reachable": True,
+            "list_identity": {"vendor_id": 0x0001, "revision_major": 34,
+                              "revision_minor": 0,
+                              "product_name": "1756-L83E ControlLogix"},
+            "list_services": [], "list_services_names": [],
+            "cip_encapsulation": True, "list_interfaces": [],
+            "session": 0, "session_registered": False,
+            "cip_security_off": False,
+            "identity_detailed": None, "tcpip": None, "ethlink": None,
+            "pccc_supported": False, "file_object_supported": False,
+            "conn_mgr_supported": False, "reset_service_capable": False,
+            "unauth_queries_ok": [],
+            "cve_matches": [{
+                "cve": "CVE-2021-22681",
+                "family": "Rockwell Logix 5000",
+                "note": "Weak CIP session key derivation.",
+                "confirmed": False,
+                "band": "vulnerable if firmware < 33.011 (observed 34.0)",
+            }],
+        }
+        fs = enip.findings([h], {("10.0.0.5", 44818): pr})
+        cve_findings = [f for f in fs if f["kind"] == "enip_known_cve"]
+        self.assertEqual(len(cve_findings), 1)
+        self.assertEqual(cve_findings[0]["depth_tier"], "t1")
+        self.assertEqual(cve_findings[0]["severity"], "medium")
+        self.assertIn("band check inconclusive", cve_findings[0]["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

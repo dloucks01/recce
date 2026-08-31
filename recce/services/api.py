@@ -22,6 +22,83 @@ from . import probes
 _MAX_ENDPOINT_PROBES = 40                # bounded, read-only GETs against enumerated paths
 _ID_PARAM = re.compile(r"\{[^}]*(id|uuid|guid|key|no|num)[^}]*\}", re.I)
 
+# T2 promotion (api-endpoints-unauth): mine an unauth-200 body for genuine PII /
+# secret material. A hit proves the caller actually READ sensitive data from a
+# spec-declared-secured endpoint, not just landed on a 200 stub — that's a
+# controlled proof-of-read (safe: single GET already made, no extra traffic).
+# Regexes are conservative: each fires only on shapes tightly tied to real data.
+_PII_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}")
+# JWT: three base64url segments separated by dots. Common enough on real APIs.
+_PII_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+# AWS access-key id (AKIA/ASIA) — 20-char uppercase-alphanum after the prefix.
+_PII_AWSKEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
+# PEM headers — private-key material, not just any base64 blob.
+_PII_PEM_RE = re.compile(
+    r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED |)PRIVATE KEY-----")
+# US Social Security Number shape (loose — avoids 000-/666- and 000 groups).
+_PII_SSN_RE = re.compile(r"\b(?!000|666)[0-8]\d{2}-(?!00)\d{2}-(?!0000)\d{4}\b")
+# JSON key names that reliably mark a record as sensitive when present in a body.
+_PII_KEYWORD_RE = re.compile(
+    r'"(password|passwd|pwd|api[_-]?key|secret|access[_-]?token|'
+    r'refresh[_-]?token|ssn|social[_-]?security|credit[_-]?card|cardnumber|'
+    r'private[_-]?key|session[_-]?id)"\s*:\s*"[^"]+"',
+    re.I)
+# Credit-card shape (13-19 digits, optional dashes/spaces). Rough but useful.
+_PII_CC_RE = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
+
+
+def _mine_pii(body: str) -> list[str]:
+    """Scan `body` for PII / secret shapes. Returns short evidence strings
+    (kind + redacted sample) — one per distinct hit category. T2 SAFE PROOF:
+    the body was already fetched during the T1 probe; this is pure post-hoc
+    analysis, no additional network traffic."""
+    if not body:
+        return []
+    ev: list[str] = []
+    b = body[:65536]                           # cap; T1 already bounded fetch
+
+    emails = sorted(set(_PII_EMAIL_RE.findall(b)))
+    if emails:
+        sample = ", ".join(emails[:3]) + ("…" if len(emails) > 3 else "")
+        ev.append(f"emails={len(emails)} ({sample})")
+
+    jwts = _PII_JWT_RE.findall(b)
+    if jwts:
+        # Redact the middle+signature — leak only the header prefix so the
+        # tester sees a JWT was captured without publishing it verbatim.
+        head = jwts[0].split(".", 1)[0][:24]
+        ev.append(f"jwt-tokens={len(jwts)} (header {head}…)")
+
+    aws = sorted(set(_PII_AWSKEY_RE.findall(b)))
+    if aws:
+        # Mask all but the first 4 chars of each key id.
+        redacted = ", ".join(k[:4] + "…" for k in aws[:3])
+        ev.append(f"aws-access-key-ids={len(aws)} ({redacted})")
+
+    if _PII_PEM_RE.search(b):
+        ev.append("private-key-pem=1 (PEM header captured)")
+
+    ssns = _PII_SSN_RE.findall(b)
+    if ssns:
+        ev.append(f"ssns={len(ssns)} (last-4 {ssns[0][-4:]})")
+
+    kws = _PII_KEYWORD_RE.findall(b)
+    if kws:
+        seen = sorted({k.lower() for k in kws})[:5]
+        ev.append(f"sensitive-json-keys={len(kws)} ({', '.join(seen)})")
+
+    # CC is noisy — count only, and only if we already saw at least one other hit
+    # (to keep false positives off legitimate numeric bodies).
+    if ev:
+        ccs = _PII_CC_RE.findall(b)
+        # Very loose regex: only report if 3+ matches (raises the bar past
+        # incidental numeric noise like ids or timestamps).
+        if len(ccs) >= 3:
+            ev.append(f"credit-card-shape-matches={len(ccs)}")
+
+    return ev
+
 # Common locations for a machine-readable API spec.
 _SPEC_PATHS = ["/swagger.json", "/openapi.json", "/v2/api-docs", "/v3/api-docs",
                "/api-docs", "/swagger/v1/swagger.json", "/api/swagger.json",
@@ -141,7 +218,9 @@ def _enumerate(ip: str, port, spec: dict) -> tuple[list, list, int]:
         st, body = r[0], r[2]
         # A secured endpoint that answers 200 with NO credential = broken auth.
         if st == 200 and e["secured"] and spec["has_security"] and len(body) > 8:
-            unauth.append((e["path"], url))
+            # Keep the body so the T2 mining step can prove data-read without
+            # re-fetching (it was already returned by this one bounded GET).
+            unauth.append((e["path"], url, body))
         # IDOR/BOLA: an object-by-id endpoint that serves different objects for
         # different ids (no ownership check) with no credential.
         if st == 200 and _ID_PARAM.search(e["path"]) and len(body) > 20:
@@ -160,19 +239,38 @@ def _spec_findings(ip: str, port, base: str, tgt: str, spec: dict) -> list[dict]
     out: list[dict] = []
     unauth, idor, _n = _enumerate(ip, port, spec)
     if unauth:
-        sample = ", ".join(p for p, _u in unauth[:6])
-        out.append({"target": tgt, "severity": "high",
-                    "title": "API endpoints reachable without authentication (broken auth)",
-                    "detail": f"{len(unauth)} spec-declared-secured endpoint(s) returned 200 "
-                              f"with NO credential: {sample}"
-                              + (" …" if len(unauth) > 6 else "") + ".",
-                    "narrative": "The spec marks these endpoints as requiring auth, but they "
-                                 "answer unauthenticated - broken authentication / missing "
-                                 "access control on the object/function.",
-                    "command": f"curl -s {base}{unauth[0][1]}",
-                    "remediation": "Enforce authentication + per-object authorization on every "
-                                   "endpoint the spec marks secured.",
-                    "cwes": ["CWE-306", "CWE-284"]})
+        sample = ", ".join(p for p, _u, _b in unauth[:6])
+        # T2 SAFE PROOF: mine bodies from the unauth-200 endpoints for PII /
+        # secret material. Any hit proves the caller READ sensitive data, not
+        # just landed on an empty stub — that's a controlled proof-of-read
+        # and lifts this finding from T1 (deterministic reachability signal)
+        # to T2 (captured data). No extra traffic — bodies were already
+        # fetched by _enumerate under the _MAX_ENDPOINT_PROBES cap.
+        pii_hits: list[str] = []
+        for path, _u, body in unauth:
+            hits = _mine_pii(body)
+            if hits:
+                pii_hits.append(f"{path}: {'; '.join(hits)}")
+            if len(pii_hits) >= 6:             # cap the evidence blob
+                break
+        detail = (f"{len(unauth)} spec-declared-secured endpoint(s) returned 200 "
+                  f"with NO credential: {sample}"
+                  + (" …" if len(unauth) > 6 else "") + ".")
+        f = {"target": tgt, "severity": "high",
+             "title": "API endpoints reachable without authentication (broken auth)",
+             "detail": detail,
+             "narrative": "The spec marks these endpoints as requiring auth, but they "
+                          "answer unauthenticated - broken authentication / missing "
+                          "access control on the object/function.",
+             "command": f"curl -s {base}{unauth[0][1]}",
+             "remediation": "Enforce authentication + per-object authorization on every "
+                            "endpoint the spec marks secured.",
+             "cwes": ["CWE-306", "CWE-284"]}
+        if pii_hits:
+            f["depth_tier"] = "t2"
+            f["detail"] = (detail + " Proof-of-read captured: "
+                           + " | ".join(pii_hits) + ".")
+        out.append(f)
     for path, u1, u2 in idor[:3]:
         out.append({"target": tgt, "severity": "high",
                     "title": f"Potential IDOR / BOLA on {path}",

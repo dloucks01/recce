@@ -132,5 +132,159 @@ class BackupUncCoercion(unittest.TestCase):
         self.assertIn("impacket-mssqlclient", err)
 
 
+class BlankLoginProbeT2(unittest.TestCase):
+    """T2 safe proof-of-exploit for the blank/default MSSQL login.
+
+    The probe: sqlauth_login (LOGINACK) + a fresh PRELOGIN read of the
+    server's own ProductVersion banner. Non-destructive, single auth
+    attempt, bounded timeout — corroborating banner as evidence."""
+
+    def test_probe_ok_returns_version_and_ok(self):
+        # Vulnerable target: LOGINACK returns True, PRELOGIN parses a
+        # server version → probe returns ok=True with the exact banner in
+        # `version` and both facts in `detail` for the report.
+        from unittest.mock import patch
+        with patch.object(mssql, "sqlauth_login",
+                          return_value=(True, "LOGINACK")), \
+             patch.object(mssql, "prelogin",
+                          return_value={"version": "15.0.4360.2",
+                                        "encryption": "on"}):
+            r = mssql.blank_login_probe("10.0.0.1", 1433, "sa", "")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["version"], "15.0.4360.2")
+        self.assertIn("15.0.4360.2", r["detail"])
+        self.assertIn("(blank)", r["detail"])           # empty pw rendered
+
+    def test_probe_auth_fail_stays_negative(self):
+        # Patched target: sa/blank rejected — probe returns ok=False and
+        # never surfaces a version, so the caller keeps tier=T1 (or emits
+        # nothing at all). detail carries the LOGINACK-failure text.
+        from unittest.mock import patch
+        with patch.object(mssql, "sqlauth_login",
+                          return_value=(False, "Login failed for user 'sa'.")), \
+             patch.object(mssql, "prelogin") as pl:
+            r = mssql.blank_login_probe("10.0.0.1", 1433, "sa", "")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["version"], "")
+        self.assertIn("Login failed", r["detail"])
+        # PRELOGIN not called when auth already failed — one round-trip
+        # for a proven-negative target, no extra noise on the wire.
+        pl.assert_not_called()
+
+    def test_probe_timeout_clean_negative(self):
+        # Unreachable target: sqlauth_login itself returns
+        # (False, 'connect error: ...') when the socket can't be opened.
+        # The probe must propagate that cleanly — no exception escapes.
+        from unittest.mock import patch
+        with patch.object(mssql, "sqlauth_login",
+                          return_value=(False, "connect error: timed out")):
+            r = mssql.blank_login_probe("10.99.99.99", 1433, "sa", "",
+                                        timeout=0.1)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["version"], "")
+        self.assertIn("connect error", r["detail"])
+
+    def test_probe_auth_ok_but_no_version_stays_t1(self):
+        # LOGINACK held but PRELOGIN gave us nothing — the exploit was
+        # proven but the corroborating banner is missing. Keep ok=False
+        # so the finding stays at T1: T2 requires *server-side* evidence.
+        from unittest.mock import patch
+        with patch.object(mssql, "sqlauth_login",
+                          return_value=(True, "LOGINACK")), \
+             patch.object(mssql, "prelogin", return_value={}):
+            r = mssql.blank_login_probe("10.0.0.1", 1433, "sa", "")
+        self.assertFalse(r["ok"])
+        self.assertIn("PRELOGIN version parse failed", r["detail"])
+
+    def test_probe_passes_arguments_through(self):
+        # user/port/timeout must reach the underlying sqlauth_login +
+        # prelogin calls verbatim; otherwise the probe would silently
+        # test a different endpoint than what the caller asked for.
+        from unittest.mock import patch
+        with patch.object(mssql, "sqlauth_login",
+                          return_value=(True, "LOGINACK")) as sla, \
+             patch.object(mssql, "prelogin",
+                          return_value={"version": "16.0.1"}) as pl:
+            mssql.blank_login_probe("192.0.2.5", 14330, "sa", "",
+                                    timeout=2.5)
+        sla.assert_called_once_with("192.0.2.5", 14330, "sa", "",
+                                    timeout=2.5)
+        pl.assert_called_once_with("192.0.2.5", 14330, timeout=2.5)
+
+
+class BlankLoginFindingsWiring(unittest.TestCase):
+    """findings() promotes blank_login to T2 when the probe result is in
+    probes[tgt]['blank_verified'] with ok=True; otherwise T1 as before."""
+
+    def _mssql_host_with_blank_script(self):
+        # Real 'Login Success' output — the T1 nmap-signal path.
+        from recce.core.models import Script
+        p = Port(portid=1433, protocol="tcp", state="open", service="ms-sql-s")
+        p.scripts.append(Script(id="ms-sql-empty-password",
+                                output=("[DBSERVER01\\SQLEXPRESS]\n"
+                                        "  sa:<empty password> => Login Success")))
+        return Host(ip="10.0.0.9", ports=[p])
+
+    def test_blank_verified_upgrades_to_t2(self):
+        h = self._mssql_host_with_blank_script()
+        probes = {"10.0.0.9:1433": {
+            "prelogin": {}, "ntlm": {},
+            "blank_verified": {"ok": True, "version": "15.0.4360.2",
+                               "detail": "LOGINACK confirmed with 'sa'/(blank); "
+                                         "server ProductVersion 15.0.4360.2"},
+        }}
+        fs = mssql.findings([h], probes)
+        blank = [f for f in fs if f["kind"] == "blank_login"]
+        self.assertEqual(len(blank), 1)
+        f = blank[0]
+        self.assertEqual(f.get("depth_tier"), "t2")
+        # Evidence text — the actual server-side banner — must land in detail.
+        self.assertIn("15.0.4360.2", f["detail"])
+        self.assertIn("Native TDS proof", f["detail"])
+
+    def test_no_probe_stays_t1(self):
+        # nmap-signal blank + probe never ran (e.g. active=False, or the
+        # weak_sa_sweep gate didn't fire) → the finding still emits but
+        # stays at T1 with no PRELOGIN banner attached.
+        h = self._mssql_host_with_blank_script()
+        probes = {"10.0.0.9:1433": {"prelogin": {}, "ntlm": {}}}
+        fs = mssql.findings([h], probes)
+        blank = [f for f in fs if f["kind"] == "blank_login"]
+        self.assertEqual(len(blank), 1)
+        self.assertEqual(blank[0].get("depth_tier"), "t1")
+        self.assertNotIn("Native TDS proof", blank[0]["detail"])
+
+    def test_probe_ok_false_stays_t1(self):
+        # blank_verified present but ok=False (LOGINACK held, PRELOGIN
+        # version parse failed) → do not promote to T2.
+        h = self._mssql_host_with_blank_script()
+        probes = {"10.0.0.9:1433": {
+            "prelogin": {}, "ntlm": {},
+            "blank_verified": {"ok": False, "version": "",
+                               "detail": "LOGINACK confirmed; version parse failed"},
+        }}
+        fs = mssql.findings([h], probes)
+        blank = [f for f in fs if f["kind"] == "blank_login"]
+        self.assertEqual(len(blank), 1)
+        self.assertEqual(blank[0].get("depth_tier"), "t1")
+
+    def test_blank_verified_alone_can_emit_finding(self):
+        # Native probe hit (ok=True) with NO nmap script signal at all
+        # still emits the blank_login finding at T2 — the T1 signal was
+        # historically nmap-only, the promotion untethers it from NSE.
+        p = Port(portid=1433, protocol="tcp", state="open", service="ms-sql-s")
+        h = Host(ip="10.0.0.9", ports=[p])
+        probes = {"10.0.0.9:1433": {
+            "prelogin": {}, "ntlm": {},
+            "blank_verified": {"ok": True, "version": "15.0.4360.2",
+                               "detail": "LOGINACK confirmed with 'sa'/(blank); "
+                                         "server ProductVersion 15.0.4360.2"},
+        }}
+        fs = mssql.findings([h], probes)
+        blank = [f for f in fs if f["kind"] == "blank_login"]
+        self.assertEqual(len(blank), 1)
+        self.assertEqual(blank[0].get("depth_tier"), "t2")
+
+
 if __name__ == "__main__":
     unittest.main()

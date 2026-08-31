@@ -118,6 +118,18 @@ _RT_STACK_HINTS = {
 _ACTUATOR_HINTS = ("actuator", "switch", "relay", "light", "valve",
                    "oic.r.switch", "oic.a.", "core.a", "core.p")
 
+# Extra /.well-known/* resources beyond /core. Read-only GET probes: their
+# presence proves additional exposed subsystems (EDHOC key exchange, resource
+# directory registration) without touching state. RFC 9528 (EDHOC) / RFC 9176
+# (Resource Directory) / RFC 9202 (certauth).
+_WELLKNOWN_EXTRA_PATHS = (
+    "/.well-known/edhoc",
+    "/.well-known/rd",
+    "/.well-known/rd-lookup/ep",
+    "/.well-known/rd-lookup/res",
+    "/.well-known/certauth",
+)
+
 
 def is_coap(port: Port) -> bool:
     svc = (port.service or "").lower()
@@ -504,6 +516,38 @@ def resource_sweep(ip: str, port: int, resources: list[dict],
     return out
 
 
+# --- Capability: extra /.well-known/* discovery (T2 safe read-only) -------
+
+def probe_wellknown_extras(ip: str, port: int,
+                           timeout: float = _TIMEOUT) -> dict:
+    """GET each additional /.well-known/* path from `_WELLKNOWN_EXTRA_PATHS`.
+
+    Safe by construction: only GET, never POST/PUT (RD registration hijack
+    would be destructive and is deferred to a future exploit-gated pass).
+    A response with any code other than 4.04 Not Found = the endpoint exists;
+    that alone is exploit-relevant evidence (EDHOC key exchange reachable,
+    Resource Directory registration reachable).
+
+    Returns {path: {code, ct, size, snippet}} for every path that responded
+    with anything other than 4.04.
+    """
+    out: dict[str, dict] = {}
+    for path in _WELLKNOWN_EXTRA_PATHS:
+        r = get_resource(ip, port, path, timeout=timeout, max_blocks=2)
+        if not r["reachable"]:
+            continue
+        code_str = r["code_str"] or ""
+        if code_str == "4.04":
+            continue
+        out[path] = {
+            "code": code_str,
+            "ct": r["content_format"],
+            "size": len(r["payload"]),
+            "snippet": bytes(r["payload"][:128]),
+        }
+    return out
+
+
 # --- Capability: PUT/POST permission test ---------------------------------
 
 def _build_put(path: str, token: bytes, mid: int, payload: bytes,
@@ -838,6 +882,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         "empty_ping": {},
         "resources": [],
         "readable": [],
+        "wellknown_extras": {},
         "writable": [],
         "observe": [],
         "dtls": {},
@@ -884,6 +929,15 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
 
     if not out["reachable"]:
         return out
+
+    if active:
+        # T2 promotion for coap_resource_inventory: probe extra /.well-known
+        # subsystems (RFC 9528 EDHOC, RFC 9176 Resource Directory). Read-only.
+        try:
+            out["wellknown_extras"] = probe_wellknown_extras(
+                ip, port, timeout=timeout)
+        except OSError:
+            out["wellknown_extras"] = {}
 
     if active and out["resources"]:
         out["readable"] = resource_sweep(ip, port, out["resources"],
@@ -1032,6 +1086,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
 
             # Plaintext path (5683).
             resources = pr.get("resources") or []
+            readable = pr.get("readable") or []
+            wk_extras = pr.get("wellknown_extras") or {}
             if resources:
                 sample = ", ".join(r["path"] for r in resources[:8])
                 actuators = [r for r in resources
@@ -1039,6 +1095,27 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                                     or h in (r.get("path") or "").lower()
                                     for h in _ACTUATOR_HINTS)]
                 sev = "critical" if actuators else "high"
+                # T2 proof: we actually bulk-read the advertised resources or
+                # discovered additional /.well-known/* subsystems.
+                t2_proof = bool(readable) or bool(wk_extras)
+                depth_tier = "t2" if t2_proof else "t1"
+                extra_bits: list[str] = []
+                if readable:
+                    read_paths = ", ".join(
+                        f"{e['path']}({e.get('size', 0)}B)"
+                        for e in readable[:5])
+                    extra_bits.append(
+                        f" T2 proof: recce read {len(readable)} of {len(resources)} "
+                        f"advertised resource(s) without credentials — sample: "
+                        f"{read_paths}.")
+                if wk_extras:
+                    extras_list = ", ".join(
+                        f"{path}={info.get('code', '?')}"
+                        for path, info in list(wk_extras.items())[:4])
+                    extra_bits.append(
+                        f" Extra /.well-known/* subsystems reachable "
+                        f"(RFC 9528 EDHOC / RFC 9176 Resource Directory / "
+                        f"RFC 9202 certauth): {extras_list}.")
                 out.append(_finding(
                     sev,
                     "CoAP endpoint exposes resource inventory via /.well-known/core",
@@ -1050,7 +1127,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                        if actuators else "")
                     + ". The inventory reveals every sensor, actuator, and config "
                     "endpoint the device serves — the RFC 6690 equivalent of an "
-                    "unauthenticated MQTT wildcard subscribe.",
+                    "unauthenticated MQTT wildcard subscribe."
+                    + "".join(extra_bits),
                     f"coap-client -m get coap://{h.ip}:{p.portid}/.well-known/core",
                     "Require authentication on /.well-known/core (OSCORE / DTLS-PSK) "
                     "or restrict the device to a management VLAN. Do not publish "
@@ -1058,8 +1136,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     ["CWE-200", "CWE-306"], kind="coap_resource_inventory",
                     exploit_note=(
                         f"coap-client -m get coap://{h.ip}:{p.portid}/.well-known/core; "
-                        f"for path in <list>; do coap-client -m get coap://{h.ip}:{p.portid}$path; done."),
-                    depth_tier="t1"))
+                        f"for path in <list>; do coap-client -m get coap://{h.ip}:{p.portid}$path; done. "
+                        f"Also check RFC 9528/9176 extras: for wk in edhoc rd "
+                        f"rd-lookup/ep rd-lookup/res certauth; do "
+                        f"coap-client -m get coap://{h.ip}:{p.portid}/.well-known/$wk; done."),
+                    depth_tier=depth_tier))
 
             # Anonymous write to an actuator (critical).
             for wr in (pr.get("writable") or []):

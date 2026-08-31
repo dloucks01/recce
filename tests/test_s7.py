@@ -470,5 +470,135 @@ class FindingsTest(unittest.TestCase):
         self.assertIn("10.0.0.5", v)
 
 
+class PutGetT2PromotionTest(unittest.TestCase):
+    """T1 -> T2 promotion for s7_put_get_enabled: when the FC 0x04 read of
+    M0.0 succeeds against an unauthenticated CPU, the PUT/GET-enabled finding
+    is no longer stance — it is proof-of-exploit. Fixtures below are the
+    return_code / transport / length header from the S7COMM Read Var
+    response body (Wireshark packet-s7comm.c reference), not derived from
+    the module's own encoders."""
+
+    def _host(self):
+        return Host(ip="10.0.0.5",
+                    ports=[Port(portid=102, service="iso-tsap")])
+
+    def test_parse_read_var_value_returns_byte_on_success(self):
+        # FC 0x04 ack: return_code=0xFF, xfer_size=0x04 (BYTE), length=0x0008
+        # bits, value=0x5A.
+        param = b"\x04\x01"
+        data = b"\xff\x04\x00\x08\x5a"
+        self.assertEqual(s7._parse_read_var_value(param, data), 0x5A)
+
+    def test_parse_read_var_value_none_on_denied(self):
+        # 0x03 = "address out of range" / 0x0A = "access denied" — either way
+        # not 0xFF, so no value is returned.
+        param = b"\x04\x01"
+        data = b"\x0a\x00\x00\x00\x00"
+        self.assertIsNone(s7._parse_read_var_value(param, data))
+
+    def test_parse_read_var_value_none_on_short_body(self):
+        # Truncated response: header parses but value byte is missing.
+        param = b"\x04\x01"
+        data = b"\xff\x04\x00\x08"
+        self.assertIsNone(s7._parse_read_var_value(param, data))
+
+    def test_put_get_promoted_to_t2_when_read_var_ok(self):
+        # Vulnerable: PUT/GET flagged and the M0.0 read returned a real byte.
+        h = self._host()
+        probes = {("10.0.0.5", 102): {
+            "reachable": True, "cotp_reachable": True, "s7_stack": True,
+            "s7_plus": False, "dst_tsap": 0x0102,
+            "tsaps_confirmed": [0x0102],
+            "order_code": "6ES7 315-2EH14-0AB0", "fw_version": "V3.2",
+            "hw_version": "0104", "component": {},
+            "protection_level": 1, "password_set": False,
+            "put_get_enabled": True, "put_get_seen": True,
+            "read_var_ok": True, "read_var_value": 0x5A,
+            "blocks": {}, "legacy_password_readout": None, "cve_matches": [],
+        }}
+        fs = s7.findings([h], probes)
+        pg = [f for f in fs if f["kind"] == "s7_put_get_enabled"]
+        self.assertEqual(len(pg), 1)
+        self.assertEqual(pg[0]["depth_tier"], "t2")
+        self.assertIn("output", pg[0])
+        self.assertIn("0x5a", pg[0]["output"])
+        # Detail body also records the chained proof so the finding renders
+        # correctly in consumers that don't display `output`.
+        self.assertIn("CHAINED", pg[0]["detail"])
+
+    def test_put_get_stays_t1_when_read_var_denied(self):
+        # Patched / hardened: PUT/GET flag surfaced (some CPUs still expose
+        # the SZL record even when a read would be denied), but M0.0 read
+        # failed — no proof of exploit, keep T1.
+        h = self._host()
+        probes = {("10.0.0.5", 102): {
+            "reachable": True, "cotp_reachable": True, "s7_stack": True,
+            "s7_plus": False, "dst_tsap": 0x0102,
+            "tsaps_confirmed": [0x0102],
+            "order_code": "6ES7 315-2EH14-0AB0", "fw_version": "V3.2",
+            "hw_version": "0104", "component": {},
+            "protection_level": 3, "password_set": True,
+            "put_get_enabled": True, "put_get_seen": True,
+            "read_var_ok": False, "read_var_value": None,
+            "blocks": {}, "legacy_password_readout": None, "cve_matches": [],
+        }}
+        fs = s7.findings([h], probes)
+        pg = [f for f in fs if f["kind"] == "s7_put_get_enabled"]
+        self.assertEqual(len(pg), 1)
+        self.assertEqual(pg[0]["depth_tier"], "t1")
+        self.assertNotIn("CHAINED", pg[0]["detail"])
+        # `output` is either absent or empty — no proof to display.
+        self.assertFalse(pg[0].get("output"))
+
+    def test_full_probe_promotes_put_get_when_read_var_returns_value(self):
+        # End-to-end: same fixture as ProbeEndToEndTest, but we assert the
+        # put_get_enabled finding lands at T2 and carries the captured byte.
+        cr_confirm = [_CC_D0]
+        per_connect = [cr_confirm]
+        for _ in range(len(s7._DEFAULT_TSAPS) - 1):
+            per_connect.append([b""])
+        session = [
+            _CC_D0,
+            _setup_comm_ack(1),
+            _szl_ack(2, 0x0011, 0x0000, _module_id_records(), 28),
+            _szl_ack(3, 0x001C, 0x0000, _component_records(), 34),
+            _szl_ack(4, 0x0232, 0x0004, _protection_records(), 8),
+            _szl_ack(5, 0x0131, 0x0003, _putget_records(), 6),
+            _szl_ack(6, 0x0132, 0x0003, _legacy_password_record(), 10),
+            _block_list_ack(7),
+            _read_var_ok_ack(8),
+        ]
+        per_connect.append(session)
+        srv = _S7Server(script=session, per_connect=per_connect)
+        try:
+            pr = s7.probe(srv.host, srv.port, timeout=3)
+        finally:
+            srv.close()
+        self.assertTrue(pr["read_var_ok"])
+        # _read_var_ok_ack pads a single 0x00 as the value byte.
+        self.assertEqual(pr["read_var_value"], 0x00)
+        h = Host(ip="127.0.0.1",
+                 ports=[Port(portid=srv.port, service="iso-tsap")])
+        fs = s7.findings([h], {("127.0.0.1", srv.port): pr})
+        pg = [f for f in fs if f["kind"] == "s7_put_get_enabled"]
+        self.assertEqual(len(pg), 1)
+        self.assertEqual(pg[0]["depth_tier"], "t2")
+        self.assertIn("output", pg[0])
+        self.assertIn("0x00", pg[0]["output"])
+
+    def test_dead_port_leaves_put_get_untouched(self):
+        # Timeout / unreachable target: no probe entry, no findings — the
+        # T2 wire-up must not fire against a dead host.
+        pr = s7.probe("127.0.0.1", 1, timeout=1)
+        self.assertFalse(pr["reachable"])
+        self.assertFalse(pr["read_var_ok"])
+        self.assertIsNone(pr["read_var_value"])
+        h = Host(ip="127.0.0.1",
+                 ports=[Port(portid=102, service="iso-tsap")])
+        fs = s7.findings([h], {("127.0.0.1", 102): pr})
+        # No cotp_reachable => no s7_put_get_enabled finding at all.
+        self.assertFalse([f for f in fs if f["kind"] == "s7_put_get_enabled"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -779,6 +779,59 @@ def _object_list_walk(ip: str, port: int, device_instance: int,
     return out
 
 
+def _is_scannable_peer_ip(addr: str) -> bool:
+    """Guardrail for BDT-peer chain probes. Skip 0.0.0.0/8, multicast
+    (224.0.0.0/4) and 255.x — anything that's a broadcast/reserved address
+    rather than a real host we should unicast at."""
+    if not addr:
+        return False
+    parts = addr.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        octets = [int(p) for p in parts]
+    except ValueError:
+        return False
+    if any(o < 0 or o > 255 for o in octets):
+        return False
+    if octets[0] == 0 or octets[0] >= 224:
+        return False
+    if octets == [255, 255, 255, 255]:
+        return False
+    return True
+
+
+def _bdt_peers_probe(bdt_entries: list[dict], self_ip: str, self_port: int,
+                     timeout: float, max_peers: int = 3) -> list[dict]:
+    """SAFE T2 proof for bacnet_bbmd_topology_disclosure.
+    For each disclosed BDT peer (capped at max_peers), send ONE unicast
+    Who-Is — the same read-only fingerprint we use for the primary target.
+    A single I-Am reply proves the peer IP resolves to a live BACnet
+    endpoint: the disclosed topology is actionable, not stale.
+    Read-only, bounded (one packet per peer, one recv, timeout scaled)."""
+    out: list[dict] = []
+    tried = 0
+    for entry in bdt_entries:
+        if tried >= max_peers:
+            break
+        peer_ip = (entry.get("ip") or "").strip()
+        peer_port = entry.get("port") or _DEFAULT_PORT
+        if not _is_scannable_peer_ip(peer_ip):
+            continue
+        if peer_ip == self_ip and int(peer_port) == int(self_port):
+            continue
+        tried += 1
+        try:
+            iam = who_is(peer_ip, peer_port, timeout=timeout)
+        except OSError:
+            iam = None
+        if iam and "device_instance" in iam:
+            out.append({"ip": peer_ip, "port": peer_port,
+                        "device_instance": iam.get("device_instance"),
+                        "vendor_id": iam.get("vendor_id")})
+    return out
+
+
 def _atomic_read_file(ip: str, port: int, file_instance: int,
                       timeout: float) -> dict | None:
     """AtomicReadFile at offset 0, small count. Returns {bytes_hex, size}."""
@@ -822,6 +875,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
     out: dict = {"reachable": False, "device_instance": None,
                  "max_apdu": 0, "segmentation": None, "vendor_id": None,
                  "identity": {}, "object_list": [], "bdt": [], "fdt": [],
+                 "bdt_peers_live": [],
                  "foreign_reg": None, "amplification": None,
                  "write_dryrun": None, "dcc": None, "reinit": None,
                  "atomic_files": []}
@@ -871,6 +925,14 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
                                                           timeout=timeout)
         except OSError:
             pass
+        # T2 chain probe: verify at least one BDT peer is a live BACnet
+        # endpoint (safe unicast Who-Is, bounded to 3 peers).
+        if out["bdt"]:
+            try:
+                out["bdt_peers_live"] = _bdt_peers_probe(
+                    out["bdt"], ip, port, timeout=timeout)
+            except OSError:
+                pass
 
     if do_amplification:
         try:
@@ -1008,15 +1070,40 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             # 4. BBMD BDT.
             bdt = pr.get("bdt") or []
             if bdt:
+                live_peers = pr.get("bdt_peers_live") or []
+                base_detail = (
+                    f"Read-BDT returned {len(bdt)} peer BBMD(s): "
+                    + ", ".join(f"{e['ip']}:{e['port']} mask {e['mask']}"
+                                for e in bdt[:8])
+                    + (" …" if len(bdt) > 8 else "")
+                    + ". Each entry maps a peer BAS subnet — including sites "
+                    "behind NAT that can be reached via Foreign-Device "
+                    "registration or Distribute-Broadcast.")
+                if live_peers:
+                    # T2 SAFE PROOF: at least one disclosed BDT peer answered
+                    # a unicast Who-Is with I-Am. Topology is not stale —
+                    # cross-site BAS reachability is confirmed.
+                    live_str = ", ".join(
+                        f"{lp['ip']}:{lp['port']} "
+                        f"(device #{lp['device_instance']}"
+                        + (f", vendor={lp['vendor_id']}"
+                           if lp.get("vendor_id") is not None else "")
+                        + ")"
+                        for lp in live_peers[:5])
+                    detail = (
+                        base_detail
+                        + f" T2 chain probe: {len(live_peers)} of the "
+                        f"disclosed peer BBMD(s) answered a unicast Who-Is "
+                        f"with I-Am — live BAS endpoints reached from this "
+                        f"host: {live_str}.")
+                    depth_tier = "t2"
+                else:
+                    detail = base_detail
+                    depth_tier = "t1"
                 out.append(_finding(
                     "high",
                     "BACnet BBMD Broadcast-Distribution-Table readable (network topology disclosure)",
-                    tgt,
-                    f"Read-BDT returned {len(bdt)} peer BBMD(s): "
-                    + ", ".join(f"{e['ip']}:{e['port']} mask {e['mask']}" for e in bdt[:8])
-                    + (" …" if len(bdt) > 8 else "")
-                    + ". Each entry maps a peer BAS subnet — including sites behind NAT that "
-                    "can be reached via Foreign-Device registration or Distribute-Broadcast.",
+                    tgt, detail,
                     f"bvlc read-bdt {h.ip}:{p.portid}",
                     "Restrict BBMD peers to an explicit allow-list at the BAS controller and "
                     "at the network firewall; do not accept Read-BDT from untrusted sources.",
@@ -1025,7 +1112,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "For each BDT entry, run bacnet-discover -a <peer_ip>; "
                         "the BDT maps the entire multi-site BAS. On corp-"
                         "reachable BBMDs this reveals sites behind NAT."),
-                    depth_tier="t1"))
+                    depth_tier=depth_tier))
 
             # 5. BBMD FDT.
             fdt = pr.get("fdt") or []

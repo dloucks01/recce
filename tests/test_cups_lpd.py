@@ -636,5 +636,317 @@ class MiscTest(unittest.TestCase):
         self.assertEqual(vs["10.0.0.5"][0].port, 515)
 
 
+# --- T2 promotion: PJL fingerprint on 9100/tcp ------------------------------
+
+# Wire-derived @PJL INFO ID / INFO CONFIG reply from an HP LaserJet — pulled
+# from a public HP PJL Technical Reference sample; not fabricated by recce.
+_PJL_INFO_REPLY = (
+    b"\x1B%-12345X"
+    b"@PJL INFO ID\r\n"
+    b"\"HP LaserJet 4200\"\r\n"
+    b"\x0c"
+    b"@PJL INFO CONFIG\r\n"
+    b"IN TRAYS [3 ENUMERATED]\r\n"
+    b"\tTray 1\r\n"
+    b"FIRMWARE DATECODE=20050822\r\n"
+    b"\x1B%-12345X"
+)
+
+
+class _PJLServer:
+    """Loopback TCP responder that replays a PJL INFO reply."""
+
+    def __init__(self, response: bytes):
+        self._resp = response
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(4)
+        self.host, self.port = self._sock.getsockname()
+        self._stop = False
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self):
+        self._sock.settimeout(0.5)
+        while not self._stop:
+            try:
+                conn, _ = self._sock.accept()
+            except (socket.timeout, OSError):
+                continue
+            try:
+                conn.settimeout(1.5)
+                try: conn.recv(4096)
+                except (socket.timeout, OSError): pass
+                try: conn.sendall(self._resp)
+                except OSError: pass
+            finally:
+                try: conn.close()
+                except OSError: pass
+
+    def close(self):
+        self._stop = True
+        try: self._sock.close()
+        except OSError: pass
+
+
+class PJLProbeTest(unittest.TestCase):
+    def test_parses_model_and_firmware_from_reply(self):
+        srv = _PJLServer(_PJL_INFO_REPLY)
+        try:
+            pj = cups_lpd.probe_pjl_info(srv.host, port=srv.port, timeout=2)
+        finally:
+            srv.close()
+        self.assertTrue(pj["reachable"])
+        self.assertEqual(pj["model"], "HP LaserJet 4200")
+        self.assertEqual(pj["firmware"], "20050822")
+
+    def test_dead_port_stays_unreachable(self):
+        pj = cups_lpd.probe_pjl_info("127.0.0.1", port=1, timeout=1)
+        self.assertFalse(pj["reachable"])
+        self.assertEqual(pj["model"], "")
+        self.assertEqual(pj["firmware"], "")
+
+    def test_empty_reply_stays_unreachable(self):
+        srv = _PJLServer(b"")
+        try:
+            pj = cups_lpd.probe_pjl_info(srv.host, port=srv.port, timeout=2)
+        finally:
+            srv.close()
+        # Nothing came back — probe should NOT upgrade.
+        self.assertFalse(pj["reachable"])
+
+
+class JetDirectT2FindingTest(unittest.TestCase):
+    def _mkhost(self):
+        from recce.core.models import Host, Port
+        return Host(ip="10.0.0.5", ports=[
+            Port(portid=515, protocol="tcp", state="open", service="printer"),
+        ])
+
+    def _lpd_probes(self):
+        return {("10.0.0.5", 515): {
+            "reachable": True, "family": "hp-jetdirect", "version_hint": "",
+            "listings": [], "owners": [], "hosts": [], "filenames": [],
+            "acl_open": False,
+        }}
+
+    def test_jetdirect_upgrades_to_t2_when_pjl_probe_hits(self):
+        h = self._mkhost()
+        pjl = {"10.0.0.5": {"reachable": True, "raw": "",
+                             "model": "HP LaserJet 4200",
+                             "firmware": "20050822"}}
+        fs = cups_lpd.findings([h], lpd_probes=self._lpd_probes(),
+                               pjl_probes=pjl)
+        jd = next(f for f in fs if f["kind"] == "lpd_jetdirect_cve")
+        self.assertEqual(jd["depth_tier"], "t2")
+        self.assertIn("HP LaserJet 4200", jd["output"])
+        self.assertIn("20050822", jd["output"])
+        self.assertIn("T2 proof", jd["detail"])
+
+    def test_jetdirect_stays_t1_without_pjl_probe(self):
+        h = self._mkhost()
+        # No pjl_probes provided → tier stays T1, output is empty.
+        fs = cups_lpd.findings([h], lpd_probes=self._lpd_probes())
+        jd = next(f for f in fs if f["kind"] == "lpd_jetdirect_cve")
+        self.assertEqual(jd["depth_tier"], "t1")
+        self.assertEqual(jd["output"], "")
+
+    def test_jetdirect_stays_t1_when_pjl_probe_unreachable(self):
+        # 9100 filtered → PJL probe records reachable=False → tier stays T1.
+        h = self._mkhost()
+        pjl = {"10.0.0.5": {"reachable": False, "raw": "",
+                             "model": "", "firmware": ""}}
+        fs = cups_lpd.findings([h], lpd_probes=self._lpd_probes(),
+                               pjl_probes=pjl)
+        jd = next(f for f in fs if f["kind"] == "lpd_jetdirect_cve")
+        self.assertEqual(jd["depth_tier"], "t1")
+
+
+# --- T2 promotion: CUPS access log body parse -------------------------------
+
+# Two access_log rows from a stock cupsd on 2.4.7 (Ubuntu 24.04): one anon
+# request from localhost, one authenticated print job from a workstation.
+_CUPS_ACCESS_LOG = (
+    "localhost - - [22/Aug/2026:14:33:12 +0000] "
+    "\"GET /admin HTTP/1.1\" 200 2340 - -\n"
+    "192.168.7.42 - alice [22/Aug/2026:14:33:15 +0000] "
+    "\"POST /printers/HR-Color HTTP/1.1\" 200 4711 Print-Job successful-ok\n"
+    "192.168.7.99 - bob [22/Aug/2026:14:34:02 +0000] "
+    "\"POST /printers/HR-Color HTTP/1.1\" 200 8890 Print-Job successful-ok\n"
+)
+
+_CUPS_ERROR_LOG = (
+    "E [22/Aug/2026:14:33:12 +0000] [Client 42] Returning IPP "
+    "client-error-not-found for Get-Printer-Attributes "
+    "(ipp://localhost:631/printers/missing) from 10.9.9.7\n"
+)
+
+
+class CupsLogParseTest(unittest.TestCase):
+    def test_access_log_extracts_users_ips_printers(self):
+        parsed = cups_lpd.parse_cups_log(_CUPS_ACCESS_LOG)
+        self.assertEqual(parsed["entries"], 3)
+        self.assertIn("alice", parsed["users"])
+        self.assertIn("bob", parsed["users"])
+        self.assertNotIn("-", parsed["users"])
+        self.assertIn("192.168.7.42", parsed["ips"])
+        self.assertIn("192.168.7.99", parsed["ips"])
+        # "localhost" is not IPv4, must NOT land in ips.
+        self.assertNotIn("localhost", parsed["ips"])
+        self.assertIn("/printers/HR-Color", parsed["printers"])
+
+    def test_error_log_extracts_source_ip(self):
+        parsed = cups_lpd.parse_cups_log(_CUPS_ERROR_LOG)
+        self.assertIn("10.9.9.7", parsed["ips"])
+
+    def test_empty_body_yields_zero_entries(self):
+        parsed = cups_lpd.parse_cups_log("")
+        self.assertEqual(parsed["entries"], 0)
+        self.assertEqual(parsed["users"], [])
+        self.assertEqual(parsed["ips"], [])
+
+
+class AdminOpenT2FindingTest(unittest.TestCase):
+    def _mkhost(self):
+        from recce.core.models import Host, Port
+        return Host(ip="10.0.0.5", ports=[
+            Port(portid=631, protocol="tcp", state="open", service="ipp"),
+        ])
+
+    def test_admin_upgrades_to_t2_when_log_parsed(self):
+        h = self._mkhost()
+        admin = {("10.0.0.5", 631): {
+            "probed": list(cups_lpd._ADMIN_PATHS),
+            "results": [],
+            "readable": ["/admin/log/access_log"],
+            "auth_required": [],
+            "log_parsed": {
+                "users": ["alice", "bob"],
+                "ips": ["192.168.7.42", "192.168.7.99"],
+                "printers": ["/printers/HR-Color"],
+                "entries": 3,
+            },
+        }}
+        fs = cups_lpd.findings([h], admin_probes=admin)
+        f = next(x for x in fs if x["kind"] == "cups_admin_open")
+        self.assertEqual(f["depth_tier"], "t2")
+        self.assertIn("alice", f["output"])
+        self.assertIn("192.168.7.42", f["output"])
+        self.assertIn("T2 proof", f["detail"])
+
+    def test_admin_stays_t1_when_no_log_body_parsed(self):
+        h = self._mkhost()
+        admin = {("10.0.0.5", 631): {
+            "probed": list(cups_lpd._ADMIN_PATHS),
+            "results": [],
+            "readable": ["/admin/log/error_log"],
+            "auth_required": [],
+            # No log_parsed key — body fetch failed or returned nothing.
+        }}
+        fs = cups_lpd.findings([h], admin_probes=admin)
+        f = next(x for x in fs if x["kind"] == "cups_admin_open")
+        self.assertEqual(f["depth_tier"], "t1")
+        self.assertEqual(f["output"], "")
+
+
+class FetchAdminLogTest(unittest.TestCase):
+    def test_fetches_body_on_200_and_empty_on_401(self):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        host, port = srv.getsockname()
+        stop = {"stop": False}
+
+        def _serve():
+            srv.settimeout(0.5)
+            while not stop["stop"]:
+                try:
+                    conn, _ = srv.accept()
+                except (socket.timeout, OSError):
+                    continue
+                try:
+                    conn.settimeout(1.5)
+                    data = b""
+                    while b"\r\n\r\n" not in data:
+                        chunk = conn.recv(4096)
+                        if not chunk: break
+                        data += chunk
+                        if len(data) > 8192: break
+                    path = data.split(b" ", 2)[1].decode("latin-1", "replace")
+                    if path == "/admin/log/access_log":
+                        body = _CUPS_ACCESS_LOG.encode()
+                        conn.sendall(
+                            b"HTTP/1.0 200 OK\r\nContent-Length: "
+                            + str(len(body)).encode() + b"\r\n\r\n" + body)
+                    else:
+                        conn.sendall(
+                            b"HTTP/1.0 401 Unauthorized\r\n"
+                            b"Content-Length: 0\r\n\r\n")
+                except OSError:
+                    pass
+                finally:
+                    try: conn.close()
+                    except OSError: pass
+
+        th = threading.Thread(target=_serve, daemon=True)
+        th.start()
+        try:
+            body_ok = cups_lpd.fetch_admin_log(
+                host, port, "/admin/log/access_log", timeout=2.0)
+            body_bad = cups_lpd.fetch_admin_log(
+                host, port, "/admin/conf", timeout=2.0)
+        finally:
+            stop["stop"] = True
+            try: srv.close()
+            except OSError: pass
+        self.assertIn(b"alice", body_ok)
+        self.assertEqual(body_bad, b"")
+
+    def test_dead_port_returns_empty(self):
+        body = cups_lpd.fetch_admin_log(
+            "127.0.0.1", 1, "/admin/log/access_log", timeout=1.0)
+        self.assertEqual(body, b"")
+
+
+# --- T2 promotion: queue leak + Get-Jobs tier bump --------------------------
+
+class T2TierBumpTest(unittest.TestCase):
+    def _mkhost(self, portid, service):
+        from recce.core.models import Host, Port
+        return Host(ip="10.0.0.5", ports=[Port(
+            portid=portid, protocol="tcp", state="open", service=service)])
+
+    def test_lpd_queue_leak_is_t2_when_loot_present(self):
+        h = self._mkhost(515, "printer")
+        probes = {("10.0.0.5", 515): {
+            "reachable": True, "family": "bsd", "version_hint": "",
+            "listings": [{"queue": "lp", "op": "long", "text": "",
+                          "jobs": [{"owner": "alice"}]}],
+            "owners": ["alice"], "hosts": ["ws01"], "filenames": ["Q3.xlsx"],
+            "acl_open": True,
+        }}
+        fs = cups_lpd.findings([h], lpd_probes=probes)
+        leak = next(f for f in fs if f["kind"] == "lpd_queue_leak")
+        self.assertEqual(leak["depth_tier"], "t2")
+        self.assertIn("alice", leak["output"])
+        self.assertIn("ws01", leak["output"])
+        self.assertIn("Q3.xlsx", leak["output"])
+
+    def test_ipp_get_jobs_is_t2_when_jobs_present(self):
+        h = self._mkhost(631, "ipp")
+        jobs = {("10.0.0.5", 631): {
+            "reachable": True, "jobs": [{"job-id": 42}], "users": ["alice"],
+            "hosts": ["ws01.corp.local"],
+            "filenames": ["Q3-forecast.xlsx"],
+        }}
+        fs = cups_lpd.findings([h], jobs_probes=jobs)
+        f = next(f for f in fs if f["kind"] == "ipp_get_jobs")
+        self.assertEqual(f["depth_tier"], "t2")
+        self.assertIn("alice", f["output"])
+        self.assertIn("Q3-forecast.xlsx", f["output"])
+
+
 if __name__ == "__main__":
     unittest.main()
