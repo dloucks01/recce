@@ -93,7 +93,7 @@ function cycleDensity(cur: Density): Density {
 }
 
 // Main App
-const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology", "sessions", "timeline", "report", "exploit", "surface", "ad-chain", "credentials", "playbook", "assets"];
+const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology", "sessions", "timeline", "report", "plan", "exploit", "ad-chain", "credentials", "playbook", "assets"];
 const isTab = (t: string): t is TabId => (VALID_TABS as string[]).includes(t);
 
 // Read the initial UI state from the URL once, so a shared link opens in
@@ -273,7 +273,7 @@ export default function App() {
       setHostCov("all");
       setTab("hosts");
     },
-    toAct: () => setTab("exploit"),
+    toAct: () => setTab("plan"),
     openHost: (ip) => setDrawerIp(ip),
     toSessions: () => setTab("sessions"),
     toScan: (target) => { if (target) setScanPrefill(target); setTab("scan"); },
@@ -305,8 +305,8 @@ export default function App() {
     sessions: undefined,
     timeline: undefined,
     report: undefined,
+    plan: undefined,
     exploit: undefined,
-    surface: undefined,
     "ad-chain": undefined,
     credentials: undefined,
     playbook: undefined,
@@ -373,7 +373,7 @@ export default function App() {
                   Renders nothing when no findings carry an exploit_note. */}
               <ExploitSurfaceCallout
                 onOpenHost={(ip) => setDrawerIp(ip)}
-                onJumpToSurface={() => setTab("surface")}
+                onJumpToSurface={() => setTab("exploit")}
               />
               {ov ? <Dashboard nav={nav} hosts={hosts} ov={ov} /> : <DashboardSkeleton />}
             </>
@@ -415,8 +415,8 @@ export default function App() {
             onScanHost={(ip) => { setScanPrefill(ip); setTab("scan"); }}
             onViewHost={(ip) => setDrawerIp(ip)} />}
           {tab === "report" && <ReportTab findings={findings} onRefresh={() => refresh().catch(() => {})} />}
-          {tab === "exploit" && <Exploitation nav={nav} />}
-          {tab === "surface" && <ExploitSurface onOpenHost={(ip) => setDrawerIp(ip)} />}
+          {tab === "plan" && <Exploitation nav={nav} />}
+          {tab === "exploit" && <ExploitSurface onOpenHost={(ip) => setDrawerIp(ip)} />}
           {tab === "ad-chain" && <AttackChain onOpenHost={(ip) => setDrawerIp(ip)} />}
           {tab === "credentials" && <Credentials nav={nav} />}
           {tab === "playbook" && <Playbook pb={pb} nav={nav} />}

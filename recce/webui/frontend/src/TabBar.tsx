@@ -1,6 +1,6 @@
 import { Fragment, useState, useEffect, useRef } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "exploit" | "surface" | "ad-chain" | "credentials" | "playbook" | "assets";
+export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "plan" | "exploit" | "ad-chain" | "credentials" | "playbook" | "assets";
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
@@ -12,11 +12,15 @@ const TAB_LABELS: Record<TabId, string> = {
   sessions: "Sessions",
   timeline: "Timeline",
   report: "Report",
-  exploit: "Exploit",
+  // Historical action-plan view (was "exploit" before Phase C). Kept for
+  // testers who use the archetype-driven attack-plan tree; the primary
+  // "what should I run next" surface moved to the Exploit tab below.
+  plan: "Plan",
   // Phase C — proven-exploitable findings + tester "next move" surface.
   // Default-visible: this IS the tab a pentester should land on for
-  // "what should I do next given what recce has found".
-  surface: "Surface",
+  // "what should I do next given what recce has found". Was called
+  // "Surface" during Phase C; renamed to Exploit in P0-4.
+  exploit: "Exploit",
   // Phase D — end-to-end AD attack-chain walkthrough. Default-visible so
   // a tester on an AD engagement lands one click from the whole story.
   "ad-chain": "AD Chain",
@@ -40,21 +44,21 @@ const TAB_LABELS: Record<TabId, string> = {
 //
 // Testers can still drag-and-drop within the visible set to reorder.
 const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                           "surface", "ad-chain", "exploit", "sessions", "credentials", "report",
+                           "exploit", "ad-chain", "plan", "sessions", "credentials", "report",
                            "playbook", "timeline", "assets"];
 // The DEFAULT visible set. Everything after "report" is optional.
-// `surface` (Phase C — proven-exploitable + next-move surface) sits between
+// `exploit` (Phase C — proven-exploitable + next-move surface) sits between
 // findings/hosts and the ATTACK group so a fresh tester lands one click
 // from "what should I do next".
-// `ad-chain` (Phase D — AD attack-chain walkthrough) sits next to Surface —
+// `ad-chain` (Phase D — AD attack-chain walkthrough) sits next to Exploit —
 // the tester who's on an AD engagement lands on the whole compromise story.
 const DEFAULT_VISIBLE: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                                   "surface", "ad-chain", "exploit", "sessions", "credentials", "report"];
+                                   "exploit", "ad-chain", "plan", "sessions", "credentials", "report"];
 
 // Visual group boundaries — a divider is inserted BEFORE these tab ids
 // when they appear in the visible set. Purely presentational — no
 // impact on ordering, drag, or state.
-const GROUP_BOUNDARIES: Set<TabId> = new Set(["scan", "surface", "report"]);
+const GROUP_BOUNDARIES: Set<TabId> = new Set(["scan", "exploit", "report"]);
 
 interface TabBarProps {
   active: TabId;
@@ -66,12 +70,18 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
   const [tabs, setTabs] = useState<TabId[]>(() => {
     const saved = localStorage.getItem("recce.tabs");
     if (saved) {
-      // Migrate: earlier versions used "exploitation" as the tab id; the
-      // shorter "exploit" replaced it. Rewrite in-place so returning users
-      // don't see a stale (or duplicate) tab.
-      let parsed: TabId[] = JSON.parse(saved).map((t: string) =>
-        t === "exploitation" ? "exploit" : t
-      );
+      // Migrate stored tab ids to current names. Two historical renames:
+      //   * "exploitation" (very old) -> "exploit"
+      //   * P0-4 swap: old "exploit" (attack-plan panel) -> "plan"
+      //                new "surface" (Exploit Surface) -> "exploit"
+      // The order matters — the swap must happen atomically so we don't
+      // land two "exploit" ids on the tab bar.
+      let parsed: TabId[] = JSON.parse(saved).map((t: string): TabId => {
+        if (t === "exploitation") return "plan";
+        if (t === "exploit") return "plan";      // old attack-plan panel
+        if (t === "surface")  return "exploit";  // new Exploit Surface
+        return t as TabId;
+      });
       // Dedup after migration (in case both ids were present).
       parsed = Array.from(new Set(parsed)) as TabId[];
       // Filter out any obsolete ids we no longer support.
