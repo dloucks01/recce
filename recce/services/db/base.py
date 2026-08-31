@@ -60,12 +60,18 @@ def cred_list(creds: Any) -> list[tuple]:
 
 
 def finding(tool: str, sev: str, title: str, target: str, detail: str,
-            cmd: str, rem: str, cwes: list, kind: str = "") -> dict:
+            cmd: str, rem: str, cwes: list, kind: str = "",
+            exploit_note: str = "", depth_tier: str = "") -> dict:
     """The common finding dict every engine emits. Consumed by the engine's
-    own `findings_to_vulns()` and by svccommon.finding_builder."""
+    own `findings_to_vulns()` and by svccommon.finding_builder.
+
+    `exploit_note` is the tester-facing "your next move" advisory (the exact
+    command / PoC URL / manual step) surfaced in the WebUI Findings drawer;
+    `depth_tier` is the T0-T4 slug from `recce.core.depth`. Both default to
+    empty when the emission site hasn't yet been wired for depth."""
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem, "cwes": cwes,
-            "kind": kind}
+            "kind": kind, "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 # --- engine contract ---------------------------------------------------------

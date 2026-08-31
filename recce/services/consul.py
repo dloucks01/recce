@@ -270,9 +270,12 @@ def consul_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "consul", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind}
+            "tool": "consul", "command": cmd, "remediation": rem, "cwes": cwes,
+            "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -303,7 +306,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"curl http://{h.ip}:{p.portid}/v1/kv/?recurse",
                     "Enable ACLs with default_policy=deny in consul config; issue "
                     "scoped tokens to each service. Bind Consul to a private interface.",
-                    ["CWE-306", "CWE-284", "CWE-200"], kind="consul_unauth_read"))
+                    ["CWE-306", "CWE-284", "CWE-200"], kind="consul_unauth_read",
+                    exploit_note=(
+                        "curl -s http://<ip>:8500/v1/kv/?recurse | jq -r '.[] | "
+                        "\"\\(.Key)=\\(.Value|@base64d)\"'; curl -s "
+                        "http://<ip>:8500/v1/snapshot -o consul.snap — then consul "
+                        "snapshot inspect."),
+                    depth_tier="t1"))
             else:
                 out.append(_finding(
                     "info", "Consul endpoint reachable (ACL enforcing)", tgt,
@@ -329,7 +338,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "| jq -r '.[] | \"\\(.Key) \\(.Value|@base64d)\"'",
                     "Remove secrets from Consul KV; store credentials in Vault or a "
                     "secrets manager and reference them via templates with strict ACLs.",
-                    ["CWE-200", "CWE-522"], kind="consul_kv_secrets"))
+                    ["CWE-200", "CWE-522"], kind="consul_kv_secrets",
+                    exploit_note=(
+                        "curl -s http://<ip>:8500/v1/kv/?recurse | jq -r '.[] | "
+                        "\"\\(.Key)|\\(.Value|@base64d)\"' | grep -Ei "
+                        "'BEGIN.*PRIVATE|postgres://|AKIA|xox[abpr]-' — try each "
+                        "against its target service."),
+                    depth_tier="t3"))
 
             if pr.get("gossip_encrypted") is False:
                 out.append(_finding(
@@ -343,7 +358,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "| jq .DebugConfig.EncryptKey",
                     "Set an `encrypt` key in every agent config (consul keygen) and "
                     "enable verify_incoming/outgoing for Serf.",
-                    ["CWE-319"], kind="consul_gossip_unencrypted"))
+                    ["CWE-319"], kind="consul_gossip_unencrypted",
+                    exploit_note=(
+                        "tcpdump -i any -w gossip.pcap 'udp port 8301' — snoop "
+                        "membership; or use serf agent -join <ip>:8301 with no key "
+                        "to attempt cluster join."),
+                    depth_tier="t1"))
 
             tls_min = (pr.get("tls_min_version") or "").upper()
             if tls_min in ("TLSV10", "TLSV1.0", "TLS10", "TLSV11", "TLSV1.1", "TLS11"):

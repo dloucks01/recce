@@ -653,10 +653,12 @@ def _has_udp_io_port(host: Host) -> bool:
     return False
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target,
             "detail": detail, "tool": "cpppo / pylogix", "command": cmd,
-            "remediation": rem, "cwes": cwes, "kind": kind}
+            "remediation": rem, "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -681,7 +683,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "2221/udp) so the I/O assemblies are authenticated and "
                 "encrypted. Never carry Class 1 traffic across an untrusted "
                 "L2 domain.",
-                ["CWE-319", "CWE-345"], kind="enip_io_traffic_exposed"))
+                ["CWE-319", "CWE-345"], kind="enip_io_traffic_exposed",
+                exploit_note=(
+                    "tcpdump -ni any -w /tmp/enip-io.pcap udp port 2222 and "
+                    "host <ip>; parse with cip-dissector; identify assemblies. "
+                    "Injection PoC is lab-only."),
+                depth_tier="t1"))
 
         for p in h.open_ports:
             if not is_enip(p):
@@ -711,7 +718,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "DPI-capable switch / equivalent gateway that restricts "
                 "source IPs and blocks explicit-messaging requests from "
                 "untrusted networks.",
-                ["CWE-923", "CWE-1188"], kind="enip_reachable"))
+                ["CWE-923", "CWE-1188"], kind="enip_reachable",
+                exploit_note=(
+                    "nmap -sU -p 44818 --script enip-info <ip>; python -m "
+                    "cpppo.server.enip.client --address <ip> --print."),
+                depth_tier="t1"))
 
             # Identity fingerprint disclosure.
             if ident:
@@ -756,7 +767,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "not available on the controller firmware, restrict "
                     "44818 to management-only source IPs at the switch/"
                     "firewall.",
-                    ["CWE-306", "CWE-287"], kind="enip_unauth_session"))
+                    ["CWE-306", "CWE-287"], kind="enip_unauth_session",
+                    exploit_note=(
+                        "python -m cpppo.server.enip.client --address <ip> "
+                        "--print --route-path 1/0 (backplane walk); if session "
+                        "accepts explicit messaging, enumerate all classes."),
+                    depth_tier="t1"))
 
             # CIP Security disabled — plaintext accepted.
             if pr.get("cip_security_off"):
@@ -777,7 +793,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "and provision device certificates. Migrate all clients "
                     "to the 2221 TLS/DTLS endpoint and firewall-block 44818 "
                     "at the plant edge.",
-                    ["CWE-319"], kind="enip_cip_security_off"))
+                    ["CWE-319"], kind="enip_cip_security_off",
+                    exploit_note=(
+                        "nmap -p 2221,44818 <ip> — if 2221 is also open, CIP "
+                        "Security is available but not enforced (worse); if "
+                        "2221 is closed, firmware may not support it."),
+                    depth_tier="t1"))
 
             # TCP/IP object disclosure — hostname / domain / DNS.
             tcpip = pr.get("tcpip") or {}
@@ -880,7 +901,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "network. On ControlLogix chassis, place a "
                     "communications module in the DMZ role and disable "
                     "unnecessary routing paths at the backplane.",
-                    ["CWE-923"], kind="enip_backplane_enum"))
+                    ["CWE-923"], kind="enip_backplane_enum",
+                    exploit_note=(
+                        "python -m cpppo.server.enip.client --address <ip> "
+                        "--route-path 1/0 --print '@0x01/1'; identity read via "
+                        "ForwardOpen proves backplane traversal to the CPU."),
+                    depth_tier="t1"))
 
             # PCCC (Rockwell legacy) — critical, unauthenticated memory access.
             if pr.get("pccc_supported"):
@@ -903,7 +929,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "families. Segment the PLC onto an isolated OT VLAN "
                     "and require jump-host access. Replace end-of-life "
                     "MicroLogix / SLC 500 platforms.",
-                    ["CWE-306", "CWE-284"], kind="enip_pccc_read"))
+                    ["CWE-306", "CWE-284"], kind="enip_pccc_read",
+                    exploit_note=(
+                        "python -m cpppo.server.enip.client --address <ip> "
+                        "--pccc 'N7:0-N7:9' (read PCCC integer file); "
+                        "MicroLogix password hash: pylogix-pccc-dump-password "
+                        "<ip> then john hash.txt --format=raw-md5 (or bespoke "
+                        "ML1400 cracker)."),
+                    depth_tier="t2"))
 
             # Reset service capability (CPU stop) — critical.
             if pr.get("reset_service_capable"):
@@ -931,7 +964,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "key-switch in RUN (some controllers refuse Reset in "
                     "that position).",
                     ["CWE-306", "CWE-284", "CWE-1188"],
-                    kind="enip_unauth_stop_cpu"))
+                    kind="enip_unauth_stop_cpu",
+                    exploit_note=(
+                        "TEST-CELL ONLY: python -m cpppo.server.enip.client "
+                        "--address <ip> --reset; verify on the CPU face-plate "
+                        "the LED goes to PROG. Never on production."),
+                    depth_tier="t1"))
 
             # Firmware download capability (File Object 0x37 / vendor 0x4E).
             if pr.get("file_object_supported"):
@@ -956,7 +994,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "fix is in place; enforce jump-host + physical-key-"
                     "switch procedure for updates.",
                     ["CWE-306", "CWE-345", "CWE-494"],
-                    kind="enip_firmware_upload_capable"))
+                    kind="enip_firmware_upload_capable",
+                    exploit_note=(
+                        "TEST-CELL ONLY: study Rockwell CVE-2016-9343/ICSA-21-"
+                        "056-03 PoC, use vendor firmware kit; do NOT attempt on "
+                        "production or you brick the controller."),
+                    depth_tier="t2"))
 
             # CVE fingerprints from Identity Object.
             for m in pr.get("cve_matches") or []:
@@ -970,7 +1013,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "# https://www.cisa.gov/news-events/ics-advisories",
                     f"Apply the vendor firmware release addressing "
                     f"{m['cve']}; segment the controller regardless.",
-                    ["CWE-1395"], kind="enip_known_cve"))
+                    ["CWE-1395"], kind="enip_known_cve",
+                    exploit_note=(
+                        "For Rockwell Logix 5000 CVE-2021-22681: use CIP-Sec "
+                        "PoC to prove weak session-key derivation; for "
+                        "MicroLogix ICSA-17-138-03: pull the PCCC password hash "
+                        "and crack it."),
+                    depth_tier="t1"))
     return out
 
 

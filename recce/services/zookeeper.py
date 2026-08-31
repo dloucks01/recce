@@ -99,9 +99,12 @@ def zk_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "nc", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind}
+            "tool": "nc", "command": cmd, "remediation": rem, "cwes": cwes,
+            "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -133,7 +136,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict 4LW to safe commands: `4lw.commands.whitelist=srvr,ruok` "
                     "in zoo.cfg. Bind Zookeeper to a private interface; require SASL "
                     "authentication for clients.",
-                    ["CWE-200", "CWE-306"], kind="zk_dump"))
+                    ["CWE-200", "CWE-306"], kind="zk_dump",
+                    exploit_note=(
+                        f"echo dump | nc {h.ip} {p.portid}  ; "
+                        f"echo conf | nc {h.ip} {p.portid}  ; then: "
+                        "python3 -c 'from kazoo.client import KazooClient; "
+                        f"z=KazooClient(hosts=\"{h.ip}:{p.portid}\"); "
+                        "z.start(); print(z.get_children(\"/\"))'"),
+                    depth_tier="t1"))
 
             if pr.get("leaks_admin"):
                 admin_cmds = sorted(c for c in exposed if c in _ADMIN_4LW)

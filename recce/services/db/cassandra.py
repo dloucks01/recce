@@ -289,7 +289,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"and check CREATE FUNCTION (UDF) permission for CVE-2021-44521",
                     "Set authenticator: PasswordAuthenticator + authorizer: "
                     "CassandraAuthorizer; firewall 9042/7000/7199; restrict FUNCTION perms.",
-                    ["CWE-306", "CWE-284"], kind="cassandra_noauth"))
+                    ["CWE-306", "CWE-284"], kind="cassandra_noauth",
+                    exploit_note=(
+                        "cqlsh <ip> <port> -e 'SELECT * FROM "
+                        "system_schema.keyspaces' ; cqlsh <ip> <port> -e 'SELECT "
+                        "role,salted_hash,is_superuser FROM system_auth.roles' - "
+                        "the bcrypt hashes feed hashcat -m 3200."),
+                    depth_tier="t2"))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "medium", "Apache Cassandra - UDF RCE / legacy build", tgt,

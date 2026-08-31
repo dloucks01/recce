@@ -379,10 +379,12 @@ def ntp_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "ntpq", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -424,7 +426,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "ntpdc -n -c monlist <ip>   # or: nmap -sU -p123 --script ntp-monlist <ip>",
                     "Upgrade to ntpd 4.2.7p26+, or set `disable monitor` in ntp.conf. "
                     "Restrict mode 6/7 with `restrict default noquery`.",
-                    ["CWE-200", "CWE-406"], kind="ntp_monlist"))
+                    ["CWE-200", "CWE-406"], kind="ntp_monlist",
+                    exploit_note=(
+                        "ntpdc -n -c monlist <ip>  # ingest client list, then "
+                        "nxc smb <clients> -u '' -p '' to catch null-session "
+                        "hosts among them."
+                    ),
+                    depth_tier="t1"))
 
             if pr.get("mode6"):
                 v = pr.get("ntpd_version") or "unknown"
@@ -470,7 +478,15 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Upgrade to the current ntpd 4.2.8 patchset (or migrate to "
                         "chrony / ntpsec). If a distro backport is in place, cite "
                         "the vendor CVE bulletin to close this finding.",
-                        ["CWE-1104", "CWE-1395"], kind="ntp_version_cve"))
+                        ["CWE-1104", "CWE-1395"], kind="ntp_version_cve",
+                        exploit_note=(
+                            "ntpq -c readvar <ip>; searchsploit ntpd <ver>; "
+                            "for CVE-2014-9295 test with: python3 -c 'from "
+                            "scapy.all import *; send(IP(dst=\"<ip>\")/"
+                            "UDP(sport=123,dport=123)/Raw(load=b\"\\x17\\x00"
+                            "\\x00\\x02\\x00\\x00\\x00\\x00...\"))'."
+                        ),
+                        depth_tier="t0"))
                     # CVE ids are named in the detail; keep them on the dict
                     # so downstream consumers that DO index `ids` (like the
                     # vuln-DB matchers) can pick them up.

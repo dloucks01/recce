@@ -611,7 +611,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"{h.ip}:{p.portid} -xmpphost {pr.get('server_from') or h.ip}",
                         "Enable STARTTLS with <required/> (RFC 7590) and modern "
                         "ciphers; migrate 5223-only clients to 5222+STARTTLS.",
-                        ["CWE-319", "CWE-326"], kind="xmpp_starttls_missing"))
+                        ["CWE-319", "CWE-326"], kind="xmpp_starttls_missing",
+                        exploit_note=(
+                            "tcpdump -i any -A -s 0 'tcp port 5222' | "
+                            "grep -B2 -A2 mechanism=.PLAIN; base64 -d to reveal "
+                            "user\\0user\\0pass."),
+                        depth_tier="t1"))
                 elif not feats.get("starttls_required"):
                     out.append(_finding(
                         "medium",
@@ -633,7 +638,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "python", "python -c 'see recce probe xmpp'",
                     "Disable mod_register (Prosody) / mod_register (ejabberd) "
                     "or restrict it to a trusted network.",
-                    ["CWE-306", "CWE-284"], kind="xmpp_ibr_open"))
+                    ["CWE-306", "CWE-284"], kind="xmpp_ibr_open",
+                    exploit_note=(
+                        "Send <iq type='set' id='r2'><query "
+                        "xmlns='jabber:iq:register'><username>recce</username>"
+                        "<password>Recce!Pw1</password></query></iq> to <domain>; "
+                        "then SASL SCRAM as recce and dump roster."),
+                    depth_tier="t1"))
 
             # Anonymous SASL success.
             if pr.get("anonymous"):
@@ -645,7 +656,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "python", f"python -c 'anon bind to {h.ip}:{p.portid}'",
                     "Remove ANONYMOUS from mod_saslauth mechanisms (Prosody) or "
                     "the equivalent (ejabberd auth_method) on production listeners.",
-                    ["CWE-287", "CWE-306"], kind="xmpp_anon_bind"))
+                    ["CWE-287", "CWE-306"], kind="xmpp_anon_bind",
+                    exploit_note=(
+                        "python -c 'via slixmpp anonymous bind then send "
+                        "disco#items to conference.<domain>'; then send "
+                        "<presence to='public-room@conference.<domain>/recce'/> "
+                        "to join & lurk."),
+                    depth_tier="t2"))
 
             # Weak SASL — flag PLAIN/LOGIN on cleartext; DIGEST/CRAM anywhere.
             weak_here = mechs & _WEAK_SASL

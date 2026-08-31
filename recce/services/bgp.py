@@ -528,10 +528,12 @@ def bgp_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "bgp", "command": cmd, "remediation": rem, "cwes": cwes,
-            "kind": kind}
+            "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def _cap_summary(caps: list[dict]) -> str:
@@ -603,7 +605,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "reachable from configured neighbor addresses. Enforce GTSM "
                 "(RFC 5082 TTL=255) and TCP-MD5 (RFC 2385) or TCP-AO "
                 "(RFC 5925) on every eBGP session.",
-                ["CWE-284", "CWE-306"], kind="bgp_reachable"))
+                ["CWE-284", "CWE-306"], kind="bgp_reachable",
+                exploit_note=(
+                    "nmap --script bgp-info -p 179 <ip>; then correlate peer "
+                    "AS with whois -h whois.arin.net 'a AS<n>' for ownership."
+                ),
+                depth_tier="t0"))
 
             # bgp_no_neighbor_auth — session establishment did not require
             # transport-layer authentication.
@@ -624,7 +631,15 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "every eBGP session. Enforce GTSM (TTL=255) between "
                     "single-hop peers. Move iBGP off any segment reachable "
                     "from tenants / users.",
-                    ["CWE-306", "CWE-923"], kind="bgp_no_neighbor_auth"))
+                    ["CWE-306", "CWE-923"], kind="bgp_no_neighbor_auth",
+                    exploit_note=(
+                        "exabgp with 'neighbor <ip> {local-as <expected>; "
+                        "peer-as <peer_asn>; router-id 192.0.2.1; family "
+                        "{inet unicast;} static { route 198.51.100.0/32 "
+                        "next-hop self; }}' — verify at looking-glass; do NOT "
+                        "run without written ROE."
+                    ),
+                    depth_tier="t1"))
 
             # bgp_peer_id — parsed OPEN disclosure.
             if op:
@@ -749,7 +764,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict TCP/179 to configured neighbors. Require "
                     "TCP-MD5 / TCP-AO so knowing the AS pair alone is "
                     "insufficient to bring up a session.",
-                    ["CWE-200", "CWE-307"], kind="bgp_expected_as_disclosed"))
+                    ["CWE-200", "CWE-307"], kind="bgp_expected_as_disclosed",
+                    exploit_note=(
+                        "With disclosed AS pair, exabgp neighbor <ip> "
+                        "{peer-as <peer>; local-as <expected>; router-id "
+                        "192.0.2.1;} — session comes up = full-hijack "
+                        "primitive."
+                    ),
+                    depth_tier="t1"))
 
             # bgp_version_probe — extracted version ceiling.
             if pr.get("peer_max_version"):

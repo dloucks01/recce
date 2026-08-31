@@ -323,10 +323,12 @@ def ipp_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -396,7 +398,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"http://{h.ip}:{p.portid}/     # confirm the reachability",
                         "Update CUPS; disable cups-browsed if not needed (systemctl "
                         "disable cups-browsed); firewall 631/udp and restrict 631/tcp.",
-                        ["CWE-77", "CWE-306"], kind="ipp_cups"))
+                        ["CWE-77", "CWE-306"], kind="ipp_cups",
+                        exploit_note=(
+                            "# ROE-required: PoC scripts on the 2024-09 CUPS "
+                            "foomatic chain are public but destructive; do "
+                            "not run against production. Confirm reachability: "
+                            f"curl -sSI http://{h.ip}:{p.portid}/ ; assess "
+                            "cups-browsed with `recce cups_lpd`"),
+                        depth_tier="t1"))
                 else:
                     # Patched build. Emit an informational entry instead of
                     # the high-severity finding so scoring is not FP-heavy on

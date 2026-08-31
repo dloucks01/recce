@@ -578,10 +578,12 @@ def lpd_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes), "kind": kind}
+            "cwes": list(cwes), "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 _LPRNG_CVES = ["CVE-2000-0917", "CVE-2001-0670"]
@@ -640,7 +642,11 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         "Restrict 515/tcp to trusted print sources; require "
                         "authenticated printing; move to IPP/HTTPS with client "
                         "certificates where possible.",
-                        ["CWE-200", "CWE-306"], kind="lpd_queue_leak"))
+                        ["CWE-200", "CWE-306"], kind="lpd_queue_leak",
+                        exploit_note=(
+                            f"lpq -P lp -h {h.ip} ; then feed owners into "
+                            "known_users, hosts into known_hostnames"),
+                        depth_tier="t1"))
                 else:
                     out.append(_finding(
                         "medium",
@@ -675,7 +681,12 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         f"the LPRng-style Printer: header",
                         "Upgrade LPRng past the vendor-patched line, or migrate "
                         "to CUPS with the LPD compat layer disabled.",
-                        ["CWE-134", "CWE-77"], kind="lpd_lprng_cve"))
+                        ["CWE-134", "CWE-77"], kind="lpd_lprng_cve",
+                        exploit_note=(
+                            "review LPRng version and vendor patch date; "
+                            "Metasploit modules exist (aux/scanner/printer/"
+                            "lprng_format_string) but destructive."),
+                        depth_tier="t1"))
                 elif fam == "hp-jetdirect":
                     out.append(_finding(
                         "high",
@@ -693,7 +704,12 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         "Update JetDirect firmware; block 515/tcp and "
                         "9100/tcp at the perimeter; enforce PJL access "
                         "controls on the printer web UI.",
-                        ["CWE-77", "CWE-306"], kind="lpd_jetdirect_cve"))
+                        ["CWE-77", "CWE-306"], kind="lpd_jetdirect_cve",
+                        exploit_note=(
+                            f"nmap -p9100 --script pjl-ready-message {h.ip} "
+                            f" ; # or: printf '@PJL INFO ID\\r\\n' | nc "
+                            f"{h.ip} 9100"),
+                        depth_tier="t1"))
                 elif fam == "windows":
                     out.append(_finding(
                         "high",
@@ -709,7 +725,12 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         f"posture is in the SMB finding",
                         "Apply the PrintNightmare KBs; disable the Print "
                         "Spooler on non-print servers; restrict 515/tcp.",
-                        ["CWE-284"], kind="lpd_windows_pn"))
+                        ["CWE-284"], kind="lpd_windows_pn",
+                        exploit_note=(
+                            f"recce smb {h.ip}  # cross-check spooler "
+                            "status; then rpcdump.py --print-services for "
+                            "MS-RPRN"),
+                        depth_tier="t0"))
 
                 # Detection-only exposure flag for the classic control-file
                 # injection family. NEVER invoke op 02.
@@ -758,7 +779,11 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         "authentication on IPP operations (cupsd Location / "
                         "AuthType); disable job-attribute exposure on "
                         "shared printers.",
-                        ["CWE-200"], kind="ipp_get_jobs"))
+                        ["CWE-200"], kind="ipp_get_jobs",
+                        exploit_note=(
+                            f"ipptool -tv ipp://{h.ip}:{p.portid}/printers/lp "
+                            "get-jobs.test"),
+                        depth_tier="t1"))
 
                 # cups-browsed 631/udp exposure signal.
                 br = browsed_probes.get(h.ip)
@@ -781,7 +806,12 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         "Disable cups-browsed if not required (systemctl "
                         "disable --now cups-browsed); firewall 631/udp; "
                         "update CUPS past the 2024-09 chain.",
-                        ["CWE-306", "CWE-940"], kind="cups_browsed_reachable"))
+                        ["CWE-306", "CWE-940"], kind="cups_browsed_reachable",
+                        exploit_note=(
+                            "# ROE-required. PoC: cups-2024-47176 exploit "
+                            "scripts on public repos; recce leaves the "
+                            "actual payload delivery to the operator."),
+                        depth_tier="t2"))
 
                 # Version-gate the pre-existing ipp.py CVE-2024-47176 chain.
                 vg = version_gate.get((h.ip, p.portid))
@@ -811,7 +841,13 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                             "25, Debian bookworm-security.",
                             "Update CUPS to the vendor's patched build; "
                             "disable cups-browsed; firewall 631/udp.",
-                            ["CWE-77", "CWE-306"], kind="cups_foomatic_vuln"))
+                            ["CWE-77", "CWE-306"], kind="cups_foomatic_vuln",
+                            exploit_note=(
+                                "See PoC scripts on public repos; run only "
+                                "with ROE. Verify fixed line: upstream "
+                                "2.4.9+, Ubuntu 24.04.1 cups 2.4.7-1.2"
+                                "ubuntu7.1, RHEL 9 cups 2.3.3op2-25."),
+                            depth_tier="t1"))
                     else:
                         out.append(_finding(
                             "info",
@@ -845,7 +881,12 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                             "Restrict cupsd Location /admin to localhost; "
                             "require AuthType on log endpoints; move the "
                             "listener off the public interface.",
-                            ["CWE-200", "CWE-284"], kind="cups_admin_open"))
+                            ["CWE-200", "CWE-284"], kind="cups_admin_open",
+                            exploit_note=(
+                                f"curl -sS http://{h.ip}:{p.portid}"
+                                "/admin/log/error_log | tail -200  # user "
+                                "+ IP + filename history"),
+                            depth_tier="t1"))
                     elif ar.get("auth_required"):
                         out.append(_finding(
                             "medium",

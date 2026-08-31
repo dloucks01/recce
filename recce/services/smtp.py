@@ -157,9 +157,11 @@ def smtp_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "smtp", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind}
+            "tool": "smtp", "command": cmd, "remediation": rem, "cwes": cwes,
+            "kind": kind, "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -183,7 +185,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"--to {_EXTERNAL}",
                     "Restrict relaying to authenticated senders / trusted networks "
                     "(smtpd_relay_restrictions / mynetworks).",
-                    ["CWE-269", "CWE-16"], kind="smtp_open_relay"))
+                    ["CWE-269", "CWE-16"], kind="smtp_open_relay",
+                    exploit_note=(
+                        "swaks --server IP:PORT --from x@example.com --to "
+                        "your-test@controlled.tld --header 'Subject: recce-relay-canary' "
+                        "; verify inbound at the collector. Or: nmap --script "
+                        "smtp-open-relay -p25 IP."),
+                    depth_tier="t1"))
             if pr.get("vrfy"):
                 out.append(_finding(
                     "low", "SMTP VRFY user enumeration", tgt,
@@ -282,7 +290,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"searchsploit {fp.get('product','').lower()} "
                     f"{fp.get('version','')}",
                     c.get("rem", "Apply vendor patch."),
-                    c.get("cwes", []) + [c["id"]], kind="smtp_cve"))
+                    c.get("cwes", []) + [c["id"]], kind="smtp_cve",
+                    exploit_note=(
+                        "For Exim < 4.92: use exim_4.87-4.91 metasploit module "
+                        "(exploit/unix/smtp/exim4_dovecot_exec) OR public "
+                        "CVE-2019-10149 PoC delivering an OAST callback "
+                        "(interact.sh). Confirm shell before running any secondary "
+                        "payload."),
+                    depth_tier="t0"))
             # EXPN alias expansion: a single 250 body naming N mailboxes on
             # `all`, `everyone`, `staff` etc — the highest-yield single-shot
             # user-roster leak on legacy /etc/aliases-driven MTAs.

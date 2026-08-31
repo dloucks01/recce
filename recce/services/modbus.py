@@ -269,9 +269,11 @@ def modbus_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "modpoll", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind}
+            "tool": "modpoll", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -303,7 +305,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "reachable, front it with a Modbus-aware firewall/gateway that "
                 "restricts read/write privileges by source IP. Never allow write "
                 "functions (0x05, 0x06, 0x0F, 0x10) from untrusted networks.",
-                ["CWE-306", "CWE-923", "CWE-284"], kind="modbus_reachable"))
+                ["CWE-306", "CWE-923", "CWE-284"], kind="modbus_reachable",
+                exploit_note=(
+                    "modpoll -m tcp -a 1 -r 1 -c 20 <ip>; for write proof "
+                    "(DESTRUCTIVE, do in test cell only): modpoll -m tcp -a 1 "
+                    "-r 100 -c 1 -t 4 <ip> 0x1234 && modpoll -m tcp -a 1 -r 100 "
+                    "-c 1 <ip>"),
+                depth_tier="t1"))
             if pr.get("vendor") or pr.get("product"):
                 extra = ""
                 if pr.get("run_indicator"):
@@ -341,7 +349,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "that must be reachable from this network position; front "
                     "the gateway with a Modbus-aware firewall that filters by "
                     "unit ID as well as by source IP.",
-                    ["CWE-668", "CWE-778"], kind="modbus_gateway_units"))
+                    ["CWE-668", "CWE-778"], kind="modbus_gateway_units",
+                    exploit_note=(
+                        "for u in $(seq 0 247); do modpoll -0 -1 -m tcp -a $u "
+                        "-r 1 -c 1 <ip>; done | grep -v 'Gateway Target'; each "
+                        "responding unit is a distinct PLC — attempt FC 0x11 "
+                        "Report Slave ID and FC 0x2B device-ID per unit."),
+                    depth_tier="t1"))
     return out
 
 

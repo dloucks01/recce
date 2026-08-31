@@ -385,9 +385,12 @@ def kafka_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "kcat", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind}
+            "tool": "kcat", "command": cmd, "remediation": rem, "cwes": cwes,
+            "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -417,7 +420,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"kcat -L -b {h.ip}:{p.portid}",
                     "Enable SASL_SSL (SASL_PLAINTEXT at minimum) on the listener; "
                     "disable ANONYMOUS ACLs; bind Kafka to a private interface.",
-                    ["CWE-306", "CWE-200"], kind="kafka_metadata_leaked"))
+                    ["CWE-306", "CWE-200"], kind="kafka_metadata_leaked",
+                    exploit_note=(
+                        f"kcat -L -b {h.ip}:{p.portid}  ; then: kcat -C -b "
+                        f"{h.ip}:{p.portid} -t <leaked-topic> -o beginning "
+                        "-c 20  # read messages"),
+                    depth_tier="t1"))
             else:
                 out.append(_finding(
                     "info", "Kafka endpoint reachable (SASL/mTLS suspected)", tgt,

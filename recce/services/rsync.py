@@ -238,7 +238,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"rsync -av rsync://{h.ip}:{p.portid}/{mod0}/ loot/",
                     "Require 'auth users' + a secrets file on every module, set 'read "
                     "only = true', and restrict with 'hosts allow' / a firewall.",
-                    ["CWE-306", "CWE-284"], kind="rsync_open"))
+                    ["CWE-306", "CWE-284"], kind="rsync_open",
+                    exploit_note=(
+                        f"rsync --list-only rsync://{h.ip}:{p.portid}/{mod0}/ ; "
+                        f"rsync -av rsync://{h.ip}:{p.portid}/{mod0}/ loot/ ; "
+                        "grep -RIE 'password|token|api[_-]?key|BEGIN.*PRIVATE' "
+                        "loot/ | head -50"),
+                    depth_tier="t2"))
             if mods:
                 names = ", ".join(m["name"] for m in mods[:12])
                 out.append(_finding(

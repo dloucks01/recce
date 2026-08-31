@@ -922,10 +922,12 @@ def bacnet_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "bacnet-stack", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def _has_bacnet_sc(host: Host) -> bool:
@@ -966,7 +968,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "Place BACnet/IP on an isolated OT VLAN. If off-site management is "
                 "required, front the segment with a BACnet-aware firewall / proxy "
                 "and consider migrating to BACnet/SC (Annex AB, TLS-authenticated).",
-                ["CWE-306", "CWE-284"], kind="bacnet_reachable"))
+                ["CWE-306", "CWE-284"], kind="bacnet_reachable",
+                exploit_note=(
+                    "bacnet-discover -a <ip>; then walk the object list "
+                    "(bacwi -1 <ip>) and read Device object properties "
+                    "(bacrp <ip> device <inst> object-name)."),
+                depth_tier="t1"))
 
             # 2. Device identity disclosure.
             if identity:
@@ -1013,7 +1020,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"bvlc read-bdt {h.ip}:{p.portid}",
                     "Restrict BBMD peers to an explicit allow-list at the BAS controller and "
                     "at the network firewall; do not accept Read-BDT from untrusted sources.",
-                    ["CWE-200"], kind="bacnet_bbmd_topology_disclosure"))
+                    ["CWE-200"], kind="bacnet_bbmd_topology_disclosure",
+                    exploit_note=(
+                        "For each BDT entry, run bacnet-discover -a <peer_ip>; "
+                        "the BDT maps the entire multi-site BAS. On corp-"
+                        "reachable BBMDs this reveals sites behind NAT."),
+                    depth_tier="t1"))
 
             # 5. BBMD FDT.
             fdt = pr.get("fdt") or []
@@ -1048,7 +1060,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "explicit allow-list, or disable the feature entirely if remote peers "
                     "are not required.",
                     ["CWE-284", "CWE-306"],
-                    kind="bacnet_foreign_device_registration_permitted"))
+                    kind="bacnet_foreign_device_registration_permitted",
+                    exploit_note=(
+                        "bacnet-fdr-register <ip>:47808 --ttl 60; then broadcast "
+                        "a Who-Is via the BBMD and receive I-Am from every peer "
+                        "segment — proves segment-wide read from an off-site "
+                        "host."),
+                    depth_tier="t1"))
 
             # 7. Amplification.
             amp = pr.get("amplification") or {}
@@ -1083,7 +1101,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Deploy BACnet/SC (Annex AB) with certificate-based mutual auth, or "
                     "front the segment with a BACnet-aware firewall that blocks write "
                     "services (0x0F / 0x0E-WriteMultiple) from untrusted networks.",
-                    ["CWE-306", "CWE-862"], kind="bacnet_unauth_write"))
+                    ["CWE-306", "CWE-862"], kind="bacnet_unauth_write",
+                    exploit_note=(
+                        "TEST-CELL ONLY: bacwp -1 -p 47808 <ip> 2 <av_inst> 85 "
+                        "1 4 <new_val>; verify with bacrp then restore. Never "
+                        "against production."),
+                    depth_tier="t2"))
 
             # 9. DCC accepted with default password.
             dcc = pr.get("dcc") or {}
@@ -1101,7 +1124,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"bacdcc -p {p.portid} {h.ip} --disable --duration 1 --password {pw!r}",
                     "Set a strong non-default DCC password on every controller; where "
                     "the vendor supports it, disable DCC entirely from the network side.",
-                    ["CWE-521", "CWE-1188"], kind="bacnet_dcc_default_password"))
+                    ["CWE-521", "CWE-1188"], kind="bacnet_dcc_default_password",
+                    exploit_note=(
+                        "TEST-CELL ONLY: bacdcc -p 47808 <ip> --disable "
+                        "--duration 0 --password '<accepted_pw>' — brings the "
+                        "controller offline until manual re-enable. Never on "
+                        "production."),
+                    depth_tier="t2"))
 
             # 10. Reinitialize reachable without valid password.
             ri = pr.get("reinit") or {}
@@ -1119,7 +1148,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Set a strong non-default ReinitializeDevice password on every "
                     "controller. Where feasible, restrict the service to a management "
                     "VLAN only.",
-                    ["CWE-306", "CWE-521"], kind="bacnet_reinitialize_permitted"))
+                    ["CWE-306", "CWE-521"], kind="bacnet_reinitialize_permitted",
+                    exploit_note=(
+                        "TEST-CELL ONLY: bacrd -p 47808 <ip> warmstart; observe "
+                        "the controller reboot and all points drop for the boot "
+                        "cycle."),
+                    depth_tier="t2"))
 
             # 11. AtomicReadFile.
             files = pr.get("atomic_files") or []

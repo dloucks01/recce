@@ -56,10 +56,12 @@ def rservices_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -90,7 +92,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"Disable {svc} (xinetd / inetd / systemd unit); require SSH "
                 "with key auth. The tools should not be in $PATH on modern "
                 "systems.",
-                ["CWE-319", "CWE-287"], kind=f"r_{svc}"))
+                ["CWE-319", "CWE-287"], kind=f"r_{svc}",
+                exploit_note=(
+                    f"rsh -l root {h.ip} id ; rlogin -l root {h.ip} ; echo id | "
+                    f"rexec -l root -p '' {h.ip} ; also try daemon, bin, sync, "
+                    "adm, halt, uucp as trust names; capture -A 'port 512-514' "
+                    "for cleartext-cred proof."),
+                depth_tier="t1"))
     return out
 
 

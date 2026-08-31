@@ -542,10 +542,12 @@ def stun_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "stun", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -600,7 +602,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"nmap -sU -p{p.portid} --script stun-info {h.ip}",
                     "Set `no-auth = false` (coturn) and require long-term credentials "
                     "on every allocation. Restrict TURN to authenticated clients only.",
-                    ["CWE-306", "CWE-284"], kind="turn_open_relay"))
+                    ["CWE-306", "CWE-284"], kind="turn_open_relay",
+                    exploit_note=(
+                        f"turnutils_uclient -v -y {h.ip}  # or: python3 "
+                        "stun-turn-toolkit / rfc5766-turn-server client to "
+                        "send data via the open relay"),
+                    depth_tier="t2"))
 
             if pr.get("turn_internal_relay"):
                 peers = ", ".join(pr["turn_internal_relay"])
@@ -616,7 +623,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"# recce accepted a CreatePermission for {peers} but issued no Send",
                     "Set `denied-peer-ip` for RFC1918 / 127.0.0.0/8 / 169.254.0.0/16 "
                     "(coturn), or the equivalent peer-address ACL on the TURN server.",
-                    ["CWE-918", "CWE-441"], kind="turn_internal_relay"))
+                    ["CWE-918", "CWE-441"], kind="turn_internal_relay",
+                    exploit_note=(
+                        "Use TURN SEND indication to relay HTTP GET "
+                        "/latest/meta-data/iam/security-credentials/ "
+                        "toward 169.254.169.254; parse returned STS keys "
+                        "via cloud_metadata."),
+                    depth_tier="t2"))
 
             # Cleartext-creds channel: 3478 speaks TURN and no 5349 companion.
             if (pr.get("speaks_turn") and p.portid == _DEFAULT_PORT
@@ -633,7 +646,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Deploy a TURNS listener on 5349/tls with a real certificate; "
                     "clients should use the turns: URI scheme (RFC 8656 §3.1). "
                     "Consider a firewall rule to force TURN to 5349.",
-                    ["CWE-319"], kind="turn_cleartext_creds"))
+                    ["CWE-319"], kind="turn_cleartext_creds",
+                    exploit_note=(
+                        f"openssl s_client -connect {h.ip}:5349  "
+                        "# confirms no TURNS; tcpdump -i any 'udp and "
+                        "port 3478' to capture client hashes over time"),
+                    depth_tier="t0"))
 
             if pr.get("software"):
                 prod = pr.get("product") or ""

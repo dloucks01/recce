@@ -50,11 +50,18 @@ def recvn(sock, n: int, timeout: float | None = None):
 def finding_builder(category: str, narrative: dict):
     """Return a deep-service module's `_finding(...)` builder. Every module built a
     byte-identical copy differing only in the `category` label; this owns the one shape.
-    `narrative` is the module's `_NARRATIVE` map (kind -> the 'what this enables' blurb)."""
-    def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+    `narrative` is the module's `_NARRATIVE` map (kind -> the 'what this enables' blurb).
+
+    Optional `exploit_note` (tester-facing next-move advisory) and `depth_tier`
+    (T0-T4 slug from `recce.core.depth`) thread through into the Vuln via
+    `findings_to_vulns` — both default to empty when the call site hasn't yet
+    been wired for depth."""
+    def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
+                 exploit_note="", depth_tier=""):
         return {"category": category, "severity": sev, "title": title, "target": target,
                 "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-                "cwes": list(cwes), "kind": kind, "narrative": narrative.get(kind, "")}
+                "cwes": list(cwes), "kind": kind, "narrative": narrative.get(kind, ""),
+                "exploit_note": exploit_note, "depth_tier": depth_tier}
     return _finding
 
 
@@ -91,7 +98,9 @@ def findings_to_vulns(fs: list[dict], source: str, default_port: int,
             severity=f["severity"], source=source, confidence=conf,
             cwes=list(f.get("cwes") or ["CWE-284"]),
             output=out_text.strip(), remediation=f.get("remediation", ""),
-            evidence=evidence))
+            evidence=evidence,
+            exploit_note=f.get("exploit_note", ""),
+            depth_tier=f.get("depth_tier", "")))
     return by_ip
 
 

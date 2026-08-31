@@ -878,7 +878,13 @@ def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict
             f"ldapsearch -x -H ldap://{dc_ip} -D {shlex.quote('<user>@' + domain)} -w '<pass>' -b '<base>' "
             "'(description=*)' sAMAccountName description",
             "Remove secrets from description/info attributes; rotate the exposed passwords.",
-            ["CWE-522", "CWE-200"], kind="ldap_pw_desc"))
+            ["CWE-522", "CWE-200"], kind="ldap_pw_desc",
+            exploit_note=(
+                "ldapsearch -x -H ldap://<dc> -D '<u>@<d>' -w '<p>' -b '<base>' "
+                "'(description=*)' sAMAccountName description; parse; then nxc smb "
+                "<ip> -u <sam> -p '<extracted-pass>' to validate; if valid: "
+                "--local-auth escalation checks."),
+            depth_tier="t2"))
 
     laps = _laps_readable(computers)
     if laps:
@@ -896,7 +902,12 @@ def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict
             "# or: ldapsearch ... '(objectClass=computer)' msLAPS-Password ms-Mcs-AdmPwd",
             "Tighten the LAPS extended-right ACL to a break-glass group only; audit reads; "
             "rotate every exposed local-admin password.",
-            ["CWE-522", "CWE-284"], kind="ldap_laps_readable"))
+            ["CWE-522", "CWE-284"], kind="ldap_laps_readable",
+            exploit_note=(
+                "nxc ldap <dc> -u <u> -p <p> -M laps; or ldapsearch ... "
+                "'(ms-Mcs-AdmPwd=*)' sAMAccountName ms-Mcs-AdmPwd; then for each: "
+                "impacket-secretsdump 'administrator:<lapspw>@<computer>' -local-auth."),
+            depth_tier="t3"))
 
     rbcd = _rbcd_targets(computers)
     if rbcd:
@@ -917,7 +928,13 @@ def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict
             "'(msDS-AllowedToActOnBehalfOfOtherIdentity=*)' sAMAccountName",
             "Review and remove unnecessary RBCD SD entries; restrict who can write "
             "msDS-AllowedToActOnBehalfOfOtherIdentity on computer objects.",
-            ["CWE-284", "CWE-269"], kind="ldap_rbcd"))
+            ["CWE-284", "CWE-269"], kind="ldap_rbcd",
+            exploit_note=(
+                "python3 -c 'from impacket.ldap.ldaptypes import ...' or use "
+                "bloodhound-python edge output; then if trustee is compromised: "
+                "impacket-getST -spn cifs/<target> -impersonate Administrator "
+                "-dc-ip <dc> <domain>/<trustee>:<pass>."),
+            depth_tier="t2"))
 
     summary = {"auth_ok": True, "auth_users": len(users),
                "auth_computers": len(computers), "kerberoastable": len(kerb),
@@ -1076,7 +1093,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "'(objectClass=user)' sAMAccountName servicePrincipalName description",
                     "Deny anonymous read on the directory (dsHeuristics / anonymous ACLs); "
                     "require authentication for all reads.",
-                    ["CWE-306", "CWE-200"], kind="ldap_anon_read"))
+                    ["CWE-306", "CWE-200"], kind="ldap_anon_read",
+                    exploit_note=(
+                        "ldapsearch -x -H ldap://<ip> -b '<nc>' "
+                        "'(&(objectCategory=person)(servicePrincipalName=*))' "
+                        "sAMAccountName servicePrincipalName description; feed "
+                        "sAMAccountName list to impacket-GetNPUsers and kerberoast "
+                        "module; grep description for pass/pwd/secret."),
+                    depth_tier="t2"))
             # A bare anonymous *bind* success is the Windows AD default (it is anonymous
             # *reads* that are denied, flagged separately above as HIGH). Reporting it as
             # a medium finding on every DC is a false positive, so it is info-level and

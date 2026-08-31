@@ -529,9 +529,11 @@ def dns_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "dig", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind}
+            "tool": "dig", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -566,7 +568,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"dig AXFR {z} @{h.ip}",
                     "Restrict zone transfers to authorized secondaries "
                     "(allow-transfer / xfer-out ACLs); disable AXFR to the world.",
-                    ["CWE-200", "CWE-284"], kind="dns_axfr"))
+                    ["CWE-200", "CWE-284"], kind="dns_axfr",
+                    exploit_note=(
+                        "dig AXFR <zone> @<ip> +tcp; ingest hostnames/IPs into "
+                        "scope, then run: crackmapexec smb <new_ips> --gen-relay-list "
+                        "relay.txt; kerbrute userenum -d <zone> users.txt --dc <ip>."
+                    ),
+                    depth_tier="t1"))
             # SRV/MX/NS discovery per zone. The AD anchor set (_ldap._tcp +
             # _kerberos._tcp under a zone) authoritatively identifies an
             # AD-integrated domain — high-value recon intel (points every

