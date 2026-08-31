@@ -7,6 +7,7 @@ import { useEngagement } from "./useEngagement";
 import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Timeline, Topology, Nav, FindingFilters } from "./views";
 import { KnownAssets } from "./views/KnownAssets";
 import { ExploitSurface, ExploitSurfaceCallout } from "./views/ExploitSurface";
+import { AttackChain } from "./views/AttackChain";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
 import { TabBar, TabId } from "./TabBar";
@@ -92,7 +93,7 @@ function cycleDensity(cur: Density): Density {
 }
 
 // Main App
-const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology", "sessions", "timeline", "report", "exploit", "surface", "credentials", "playbook", "assets"];
+const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology", "sessions", "timeline", "report", "exploit", "surface", "ad-chain", "credentials", "playbook", "assets"];
 const isTab = (t: string): t is TabId => (VALID_TABS as string[]).includes(t);
 
 // Read the initial UI state from the URL once, so a shared link opens in
@@ -306,6 +307,7 @@ export default function App() {
     report: undefined,
     exploit: undefined,
     surface: undefined,
+    "ad-chain": undefined,
     credentials: undefined,
     playbook: undefined,
     assets: undefined,
@@ -415,6 +417,7 @@ export default function App() {
           {tab === "report" && <ReportTab findings={findings} onRefresh={() => refresh().catch(() => {})} />}
           {tab === "exploit" && <Exploitation nav={nav} />}
           {tab === "surface" && <ExploitSurface onOpenHost={(ip) => setDrawerIp(ip)} />}
+          {tab === "ad-chain" && <AttackChain onOpenHost={(ip) => setDrawerIp(ip)} />}
           {tab === "credentials" && <Credentials nav={nav} />}
           {tab === "playbook" && <Playbook pb={pb} nav={nav} />}
           {tab === "assets" && <KnownAssets />}

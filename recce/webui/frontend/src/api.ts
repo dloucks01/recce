@@ -730,3 +730,38 @@ export type ExploitSurfaceResponse = {
 };
 export const getExploitSurface = () =>
   getJSON<ExploitSurfaceResponse>("/api/exploit-surface");
+
+// --- Phase D — AD attack-chain walkthrough -----------------------------------
+// The AD compromise modelled as an ordered 11-step chain. Every step
+// reports current engagement state (proven / pending / blocked) plus per-step
+// evidence + the "your next move" advisory to run when it's not yet proven.
+export type AttackChainStepStatus = "proven" | "pending" | "blocked" | "skipped";
+export type AttackChainEvidence = {
+  finding_kind: string;
+  ip: string;
+  port: number | null;
+  output_excerpt: string;
+};
+export type AttackChainStep = {
+  id: string;
+  title: string;
+  status: AttackChainStepStatus;
+  evidence: AttackChainEvidence[];
+  next_step: string;
+  depends_on: string[];
+  shared_surfaces_read: string[];
+};
+export type AttackChainAdResponse = {
+  steps: AttackChainStep[];
+  summary: {
+    proven: number;
+    pending: number;
+    blocked: number;
+    total: number;
+    highest_reached: string;
+    next_action: string;
+    step_ids: string[];
+  };
+};
+export const getAttackChainAd = () =>
+  getJSON<AttackChainAdResponse>("/api/attack-chain/ad");

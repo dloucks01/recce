@@ -1,6 +1,6 @@
 import { Fragment, useState, useEffect, useRef } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "exploit" | "surface" | "credentials" | "playbook" | "assets";
+export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "exploit" | "surface" | "ad-chain" | "credentials" | "playbook" | "assets";
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
@@ -17,6 +17,9 @@ const TAB_LABELS: Record<TabId, string> = {
   // Default-visible: this IS the tab a pentester should land on for
   // "what should I do next given what recce has found".
   surface: "Surface",
+  // Phase D — end-to-end AD attack-chain walkthrough. Default-visible so
+  // a tester on an AD engagement lands one click from the whole story.
+  "ad-chain": "AD Chain",
   credentials: "Creds",
   playbook: "Playbook",
   // Power-user surface (Phase 7b): unions of everything recce learned across
@@ -37,14 +40,16 @@ const TAB_LABELS: Record<TabId, string> = {
 //
 // Testers can still drag-and-drop within the visible set to reorder.
 const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                           "surface", "exploit", "sessions", "credentials", "report",
+                           "surface", "ad-chain", "exploit", "sessions", "credentials", "report",
                            "playbook", "timeline", "assets"];
 // The DEFAULT visible set. Everything after "report" is optional.
 // `surface` (Phase C — proven-exploitable + next-move surface) sits between
 // findings/hosts and the ATTACK group so a fresh tester lands one click
 // from "what should I do next".
+// `ad-chain` (Phase D — AD attack-chain walkthrough) sits next to Surface —
+// the tester who's on an AD engagement lands on the whole compromise story.
 const DEFAULT_VISIBLE: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                                   "surface", "exploit", "sessions", "credentials", "report"];
+                                   "surface", "ad-chain", "exploit", "sessions", "credentials", "report"];
 
 // Visual group boundaries — a divider is inserted BEFORE these tab ids
 // when they appear in the visible set. Purely presentational — no
