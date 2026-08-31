@@ -1,0 +1,148 @@
+{
+  "service": "nbd_ndmp",
+  "module_files": [
+    "recce/services/nbd_ndmp.py"
+  ],
+  "summary": "Two protocols in one module. NBD list + info (T1), plus optional block-0 fingerprint read (T2). NDMP CONFIG_GET_* (T1), AUTH_MD5 challenge+bogus-response capture (T2 crack material). Missing T3 loot: NBD write test, NDMP CONNECT_CLIENT_AUTH with a cracked password, NDMP DATA/MOVER hijack proof.",
+  "findings": [
+    {
+      "kind": "nbd_export_list",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "NBD exports enumerable without authentication",
+      "tier_evidence": "NBD_OPT_LIST succeeds only against a server that answers unauth \u2014 deterministic, non-destructive.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Already paired with block-0 read (active_deep) fingerprint \u2014 that's T2.",
+      "promotion_risk": "low",
+      "tester_next_step": "nbd-client -l IP 10809  # list every export by name and description"
+    },
+    {
+      "kind": "nbd_export_writable",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "NBD export writable without authentication (block-level ransomware)",
+      "tier_evidence": "READ_ONLY transmission flag absent \u2014 posture read from NBD_OPT_INFO. Nothing is actually written.",
+      "can_promote_to": "t2",
+      "promotion_notes": "T2 write-proof would require an actual NBD_CMD_WRITE at a canary offset \u2014 destructive. Better: T2 via READ of block 0 (already implemented as fingerprint).",
+      "promotion_risk": "destructive",
+      "tester_next_step": "modprobe nbd; nbd-client IP 10809 -N <export> /dev/nbd0; blockdev --getro /dev/nbd0  # 0 = writable"
+    },
+    {
+      "kind": "nbd_export_fingerprint",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "NBD export fingerprint reveals <label>",
+      "tier_evidence": "NBD_CMD_READ of block 0 is a real transmission-phase read against the volume \u2014 proves data access; matched against LUKS/VMDK/QCOW/GPT signature list. Non-destructive.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Extend to bounded read of full boot sector + LUKS header dump (< 2 MiB) for offline crack loop.",
+      "promotion_risk": "medium",
+      "tester_next_step": "nbd-client IP 10809 -N <export> /dev/nbd0; dd if=/dev/nbd0 bs=1M count=2 of=header.bin; cryptsetup luksDump header.bin ; # or fsck -N /dev/nbd0"
+    },
+    {
+      "kind": "nbd_cleartext",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "NBD transport is cleartext (NBD_OPT_STARTTLS not enforced)",
+      "tier_evidence": "Posture from STARTTLS refusal.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Posture; no promotion path.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -connect IP:10809  # if NBDMAGIC banner instead of TLS ServerHello, plaintext confirmed"
+    },
+    {
+      "kind": "ndmp_info_unauth",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "NDMP server info leaked pre-auth (CONFIG_GET_SERVER_INFO)",
+      "tier_evidence": "Succeeds only when the server discloses vendor/product/revision without a credential \u2014 deterministic vuln signal, read-only.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Combined with AUTH_MD5 challenge/response capture the module already emits, this is T2.",
+      "promotion_risk": "low",
+      "tester_next_step": "ndmpcopy -sa root:'' IP:/ /tmp/dev-null-mock  # if CONFIG_GET_SERVER_INFO returns pre-auth"
+    },
+    {
+      "kind": "ndmp_unauth",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "NDMP server accepts unauthenticated backup control (AUTH_NONE advertised)",
+      "tier_evidence": "AUTH_NONE is in the server-advertised auth_types array \u2014 deterministic posture.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Send NDMP_CONNECT_CLIENT_AUTH with AUTH_NONE and then DATA_START_BACKUP \u2014 real backup exfil. Recce currently only reads the advertisement, does not attempt AUTH_NONE.",
+      "promotion_risk": "high",
+      "tester_next_step": "ndmpcopy -sa '' -da '' IP:/vol/foo /tmp/loot ; # if it copies, backup control is unauth"
+    },
+    {
+      "kind": "ndmp_cleartext_auth",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "NDMP AUTH_TEXT enabled",
+      "tier_evidence": "Posture from advertised auth types.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Requires MITM to sniff a real admin login; unsafe/impractical from recce.",
+      "promotion_risk": "high",
+      "tester_next_step": "tcpdump -i any -A 'host IP and port 10000'  # capture the AUTH_TEXT cleartext credential when an admin logs in"
+    },
+    {
+      "kind": "ndmp_host_info",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "NDMP host info leaked pre-auth",
+      "tier_evidence": "CONFIG_GET_HOST_INFO recon.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds known_hostnames.",
+      "promotion_risk": "none",
+      "tester_next_step": "review NDMP hostname/os/version fields; cross-check with SMB/AD enum"
+    },
+    {
+      "kind": "ndmp_inventory_leak",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "NDMP filesystem / tape / SCSI inventory leaked pre-auth",
+      "tier_evidence": "FS_INFO/TAPE_INFO/SCSI_INFO returning without a credential is a vuln signal; the parsed contents themselves are the proof.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain with ndmp_unauth or cracked AUTH_MD5 -> DATA_START_BACKUP to pull an actual filesystem dump.",
+      "promotion_risk": "high",
+      "tester_next_step": "review recce probe output for filesystem paths; then: ndmpcopy -sa <user>:<pass> IP:/<vol> -da root:'' /tmp/exfil"
+    },
+    {
+      "kind": "ndmp_md5_challenge_capture",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "NDMP AUTH_MD5 challenge captured (offline-crackable)",
+      "tier_evidence": "Recce solicits a real fresh 64-byte challenge AND posts a bogus response, then formats a hashcat -m 50 line \u2014 the (challenge, response, username) is a real crack primitive. Non-destructive.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Auto-crack loop against captured hash with a wordlist and if cracked, run NDMP_CONNECT_CLIENT_AUTH -> DATA_START_BACKUP for real foothold. Currently stops at capture-and-format.",
+      "promotion_risk": "high",
+      "tester_next_step": "printf '%s\\n' \"<response>:<challenge>:<user>\" > loot/ndmp.hash ; hashcat -m 50 loot/ndmp.hash /usr/share/wordlists/rockyou.txt ; then ndmpcopy -sa <user>:<cracked> IP:/vol/\u2026 -da root:'' /tmp/loot",
+      "related_cves": []
+    },
+    {
+      "kind": "ndmp_legacy_version",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "NDMP legacy protocol version negotiated",
+      "tier_evidence": "Posture \u2014 chosen protocol version.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "note version in report; pair with vendor advisory review"
+    },
+    {
+      "kind": "ndmp_session_hijack_surface",
+      "tier": "t0",
+      "severity": "critical",
+      "title_pattern": "NDMP DATA / MOVER session hijack surface exposed",
+      "tier_evidence": "Emitted for every reachable NDMP endpoint; not probe-driven \u2014 this is a category/surface note, not proof.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Actually solicit NDMP_MOVER_LISTEN and connect to the returned port to prove hijack; today it's asserted on every reachable server without verification.",
+      "promotion_risk": "high",
+      "tester_next_step": "wireshark: tcp.port==10000 and ip.addr==IP  # observe MOVER_LISTEN + connect to the returned data port"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames",
+    "known_domains",
+    "cred_store (AUTH_MD5 hashes)",
+    "known_users"
+  ]
+}

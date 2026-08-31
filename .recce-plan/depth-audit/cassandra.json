@@ -1,0 +1,40 @@
+{
+  "service": "cassandra",
+  "summary": "Minimum-viable T2: hand-rolled CQL v4 wire, STARTUP-vs-AUTHENTICATE discriminator, and a real SELECT ... FROM system.local read on unauth. Only two finding kinds. Big gap: no CVE-2021-44521 UDF probe (module claims it but never actually checks CREATE FUNCTION perm), no PasswordAuthenticator cred sweep, no auth_challenge follow-through, no keyspace enumeration.",
+  "module_files": [
+    "recce/services/db/cassandra.py"
+  ],
+  "findings": [
+    {
+      "kind": "cassandra_noauth",
+      "title_pattern": "Apache Cassandra exposed - no authentication (AllowAll)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "STARTUP -> READY completes and SELECT release_version,cluster_name,data_center,partitioner FROM system.local returns real row bytes - proof of query access.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Add follow-on SELECT * FROM system_auth.roles (roles + salted_hash if PasswordAuthenticator is on but role table readable), SELECT keyspace_name FROM system_schema.keyspaces, and a UDF-permission read (SELECT permissions FROM system_auth.role_permissions WHERE resource LIKE 'functions%'). T3 comes from harvesting the bcrypt hashes for hashcat -m 3200.",
+      "promotion_risk": "low",
+      "tester_next_step": "cqlsh <ip> <port> -e 'SELECT * FROM system_schema.keyspaces' ; cqlsh <ip> <port> -e 'SELECT role,salted_hash,is_superuser FROM system_auth.roles' - the bcrypt hashes feed hashcat -m 3200.",
+      "related_cves": []
+    },
+    {
+      "kind": "cassandra_version",
+      "title_pattern": "Apache Cassandra - UDF RCE / legacy build",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "release_version < 4.0.2 flagged; CVE-2021-44521 UDF path is only inferred from version, never actively probed.",
+      "can_promote_to": "t2",
+      "promotion_notes": "T1: SELECT enable_user_defined_functions and enable_scripted_user_defined_functions from system_views.settings (4.0+) to positively confirm the surface is open. T2: on unauth+scripting-enabled, CREATE FUNCTION test with a JS body that emits a benign OOB DNS callback.",
+      "promotion_risk": "high",
+      "tester_next_step": "cqlsh <ip> <port> -e \"SELECT * FROM system_views.settings WHERE name IN ('enable_user_defined_functions','enable_scripted_user_defined_functions') ALLOW FILTERING\" ; if both true, PoC per Apache advisory CVE-2021-44521 (test-scope only).",
+      "related_cves": [
+        "CVE-2021-44521"
+      ]
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "credentials.hash (bcrypt from system_auth.roles -> hashcat 3200)",
+    "known_users (cassandra role names -> generic spray)",
+    "cluster_pool (data_center/cluster_name for lateral peer inventory)"
+  ]
+}

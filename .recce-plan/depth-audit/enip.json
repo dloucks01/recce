@@ -1,0 +1,186 @@
+{
+  "service": "enip",
+  "summary": "EtherNet/IP module reaches T2 across multiple critical findings: pccc_supported (class 0x67 answered \u2192 PCCC read/write reachable on MicroLogix/SLC \u2192 password hash pull is one packet away), reset_service_capable (Identity Object accepts GetAttrsAll \u2192 service 0x05 Reset is exposed on the same session, unauth CPU stop is one packet away), file_object_supported (class 0x37 instance 0xC8 \u2192 firmware download slot reachable). Also strong stance findings (unauth_session, cip_security_off) and rich fingerprint (TCPIP object \u2192 hostname/domain/DNS, EthLink \u2192 MAC). Gap: never actually issues PCCC read or File Object upload even as safe canary \u2014 could pull PCCC password hash on MicroLogix without hurting anything.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/enip.py"
+  ],
+  "findings": [
+    {
+      "kind": "enip_io_traffic_exposed",
+      "title_pattern": "EtherNet/IP Class 1 implicit I/O exposed on UDP/2222",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "UDP/2222 open is deterministic evidence of Class 1 implicit I/O on the segment.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Passive capture: tcpdump on 2222/udp for N seconds; parse assemblies to prove sensor values are readable/forgeable \u2192 T2 evidence of the exposure.",
+      "promotion_risk": "low",
+      "tester_next_step": "tcpdump -ni any -w /tmp/enip-io.pcap udp port 2222 and host <ip>; parse with cip-dissector; identify assemblies. Injection PoC is lab-only.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_reachable",
+      "title_pattern": "EtherNet/IP device reachable on scanned network",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "List Identity returned a valid CIP Identity item \u2014 deterministic ENIP fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Stance covered by unauth_session/pccc_read/unauth_stop_cpu.",
+      "promotion_risk": "none",
+      "tester_next_step": "nmap -sU -p 44818 --script enip-info <ip>; python -m cpppo.server.enip.client --address <ip> --print.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_identity_detailed",
+      "title_pattern": "EtherNet/IP identity disclosed (vendor / product / firmware / serial)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Identity Object attributes \u2014 protocol-exposed fingerprint.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Already partly promoted via enip_known_cve; keep this informational.",
+      "promotion_risk": "none",
+      "tester_next_step": "Look up vendor_id + product_code + revision on the Rockwell/Schneider/Omron support portals for firmware CVE bands.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_unauth_session",
+      "title_pattern": "Unauthenticated CIP session accepted (RegisterSession succeeded)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "RegisterSession returned a real session handle \u2014 deterministic policy failure.",
+      "can_promote_to": "t2",
+      "promotion_notes": "T2 evidence is provided by the follow-on unauth GetAttrsAll on Identity/TCPIP/EthLink/PCCC/File classes \u2014 any of them succeeding on this session IS the proof-of-primitive.",
+      "promotion_risk": "none",
+      "tester_next_step": "python -m cpppo.server.enip.client --address <ip> --print --route-path 1/0 (backplane walk); if session accepts explicit messaging, enumerate all classes.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_cip_security_off",
+      "title_pattern": "CIP Security disabled \u2014 plaintext explicit messaging accepted",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Plaintext RegisterSession on 44818 succeeded \u2192 CIP Security Confidentiality Profile not enforced.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Posture \u2014 no further probe available beyond the port 2221 co-presence check.",
+      "promotion_risk": "none",
+      "tester_next_step": "nmap -p 2221,44818 <ip> \u2014 if 2221 is also open, CIP Security is available but not enforced (worse); if 2221 is closed, firmware may not support it.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_tcpip_disclosure",
+      "title_pattern": "CIP TCP/IP Interface Object exposes hostname / domain / DNS",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Class 0xF5 GetAttrsAll returns actual hostname/domain/DNS/gateway strings from the device \u2014 deterministic disclosure.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Feed hostname/domain into AD/DNS correlation; internal DNS reachability is a segmentation finding \u2014 probe listed DNS servers with dig ANY from same segment.",
+      "promotion_risk": "low",
+      "tester_next_step": "python -m cpppo.server.enip.client --address <ip> --print '@0xF5/1'; dig ANY <domain_name> @<name_server_1>; identify AD forest / internal namespace exposed to OT.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_mac_disclosure",
+      "title_pattern": "CIP Ethernet Link Object exposes MAC address",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Class 0xF6 GetAttrsAll \u2014 protocol-exposed MAC. Not a vuln.",
+      "can_promote_to": "stay",
+      "promotion_notes": "MAC is the reference for asset inventory; feeds known_ot_assets.",
+      "promotion_risk": "none",
+      "tester_next_step": "Cross-reference MAC OUI against IEEE registry (Rockwell 00:00:BC / Siemens 00:1B:1B / etc); correlate with ARP/DHCP scans on the same segment.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_list_services",
+      "title_pattern": "EtherNet/IP List Services enumerated",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "List Services enumeration \u2014 fingerprint only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Info-level, feeds unauth_session/reachable.",
+      "promotion_risk": "none",
+      "tester_next_step": "Note the cip_encapsulation flag \u2014 if clear, RegisterSession will fail even though the port answered.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_bridge_detected",
+      "title_pattern": "EtherNet/IP bridge / gateway detected (List Interfaces populated)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Non-CIP interface items in List Interfaces reply \u2014 deterministic bridge/chassis indicator.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Walk the backplane via ForwardOpen with padded EPATHs to enumerate downstream modules \u2014 safe if only reads; also see enip_backplane_enum.",
+      "promotion_risk": "medium",
+      "tester_next_step": "python -m cpppo.server.enip.client --address <ip> --route-path 1/0 --print (slot 0 CPU); repeat with --route-path 1/1, 1/2, ... to enumerate every module on the chassis backplane.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_backplane_enum",
+      "title_pattern": "CIP backplane routable \u2014 ForwardOpen accepted by Connection Manager",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Class 0x06 answered GetAttrsAll \u2014 Connection Manager present, ForwardOpen routing is capability. Not proof of a successful ForwardOpen.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Actually send ForwardOpen with a padded EPATH targeting slot 0, then Identity read via that path \u2192 proof the chassis module answered. Behind --enip-backplane flag.",
+      "promotion_risk": "medium",
+      "tester_next_step": "python -m cpppo.server.enip.client --address <ip> --route-path 1/0 --print '@0x01/1'; identity read via ForwardOpen proves backplane traversal to the CPU.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_pccc_read",
+      "title_pattern": "Rockwell PCCC (CIP service 0x4B on class 0x67) reachable \u2014 unauthenticated memory read/write",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "Class 0x67 GetAttrsAll answered with a non-'path-dest-unknown' status \u2192 PCCC command set exposed. Class presence IS the primitive \u2014 PCCC has no auth.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Actually issue PCCC protected-typed-logical-read to N7:0 to pull tag values; on MicroLogix/SLC/PLC-5, PCCC command 0x0F function 0x17 dumps the CPU password hash (offline-crackable) \u2192 T3 initial access.",
+      "promotion_risk": "medium",
+      "tester_next_step": "python -m cpppo.server.enip.client --address <ip> --pccc 'N7:0-N7:9' (read PCCC integer file); MicroLogix password hash: pylogix-pccc-dump-password <ip> then john hash.txt --format=raw-md5 (or bespoke ML1400 cracker).",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_unauth_stop_cpu",
+      "title_pattern": "Unauthenticated CPU stop/reset capable (Identity Object service 0x05)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Identity Object GetAttrsAll accepted on unauth session \u2014 service 0x05 Reset is present under same session by spec. The Reset itself is NOT sent by recce, so this is capability (T1), not proof of a successful reset (T2).",
+      "can_promote_to": "t2",
+      "promotion_notes": "T2 = actually send Reset (drops CPU to Program). Destructive \u2014 only in a test cell under --enip-reset.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: python -m cpppo.server.enip.client --address <ip> --reset; verify on the CPU face-plate the LED goes to PROG. Never on production.",
+      "related_cves": []
+    },
+    {
+      "kind": "enip_firmware_upload_capable",
+      "title_pattern": "Unauthenticated firmware-download service exposed (File Object 0x37)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "GetAttributeSingle on class 0x37 instance 0xC8 answered without path-dest-unknown \u2192 File Object present on unauth session. Availability IS the primitive.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 = actually download attacker firmware (service 0x4E Initiate_Upload write path). DESTRUCTIVE beyond recovery; recce must NEVER do this.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: study Rockwell CVE-2016-9343/ICSA-21-056-03 PoC, use vendor firmware kit; do NOT attempt on production or you brick the controller.",
+      "related_cves": [
+        "CVE-2021-22681"
+      ]
+    },
+    {
+      "kind": "enip_known_cve",
+      "title_pattern": "EtherNet/IP fingerprint matches advisory ({CVE})",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Identity vendor+product+revision matches a known-vulnerable family per _cve_fingerprint.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add firmware-band verification (compare revision_major/minor to CVE's mitigated release) before assigning CVE; else emit CWE-1395 generic.",
+      "promotion_risk": "none",
+      "tester_next_step": "For Rockwell Logix 5000 CVE-2021-22681: use CIP-Sec PoC to prove weak session-key derivation; for MicroLogix ICSA-17-138-03: pull the PCCC password hash and crack it.",
+      "related_cves": [
+        "CVE-2021-22681"
+      ]
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_ot_assets",
+    "known_users",
+    "relay_targets"
+  ]
+}

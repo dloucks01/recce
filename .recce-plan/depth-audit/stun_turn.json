@@ -1,0 +1,135 @@
+{
+  "service": "stun_turn",
+  "module_files": [
+    "recce/services/stun_turn.py"
+  ],
+  "summary": "Very deep module. STUN Binding (T0). TURN Allocate 401 with REALM+NONCE (T1 identity namespace leak). Open TURN Allocate + CreatePermission for 169.254.169.254/127.0.0.1/RFC1918 (T2 \u2014 proves bidirectional SSRF into internal network, cloud-metadata reach). RFC 3489 legacy, amplification, TURNS TLS posture. Refresh with lifetime=0 to clean up. Missing: no MESSAGE-INTEGRITY relay/crack loop.",
+  "findings": [
+    {
+      "kind": "turn_realm_disclosure",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "TURN Allocate discloses REALM and NONCE without authentication",
+      "tier_evidence": "Allocate 401 answer contains REALM+NONCE only against a real TURN endpoint; the realm text is often SIP/AD domain \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Feed REALM into ldap/kerberos/sip/smtp cross-service correlation; module already implies this.",
+      "promotion_risk": "low",
+      "tester_next_step": "python3 -c \"import socket,os;s=socket.socket(2,2);s.sendto(bytes.fromhex('000300082112a442')+os.urandom(12)+bytes.fromhex('0019000411000000'),('IP',3478));print(s.recvfrom(4096)[0])\""
+    },
+    {
+      "kind": "turn_open_relay",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "TURN accepts allocations without authentication (open relay)",
+      "tier_evidence": "Allocate returned 0x0103 Allocate Success (relayed address given) with NO MESSAGE-INTEGRITY \u2014 recce holds a real relay allocation. Refresh lifetime=0 sent to release. This is proof-of-exploit: attacker gets free egress + IP laundering.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Send data through the allocation (SEND indication) to prove real forwarded traffic; use the relayed address to reflect toward a canary listener.",
+      "promotion_risk": "medium",
+      "tester_next_step": "turnutils_uclient -v -y IP  # or: python3 stun-turn-toolkit / rfc5766-turn-server client to send data via the open relay"
+    },
+    {
+      "kind": "turn_internal_relay",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "TURN allocation permits relay to internal / loopback / cloud-metadata peer",
+      "tier_evidence": "After open-relay Allocate, CreatePermission for 169.254.169.254 / 127.0.0.1 / 10.0.0.1 was ACCEPTED \u2014 RFC 8656 \u00a79 says MUST refuse. Recce holds a proof primitive of bidirectional SSRF.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain: use TURN to hit 169.254.169.254 IMDS and pull STS credentials on cloud-hosted TURN \u2014 hands off to cloud_metadata for finish.",
+      "promotion_risk": "medium",
+      "tester_next_step": "Use TURN SEND indication to relay HTTP GET /latest/meta-data/iam/security-credentials/ toward 169.254.169.254; parse returned STS keys via cloud_metadata."
+    },
+    {
+      "kind": "turn_cleartext_creds",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "TURN long-term credentials sent cleartext on 3478 with no TURNS (5349) alternative",
+      "tier_evidence": "Correlation between speaks_turn on 3478 and absence of TURNS on 5349.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Would need a live capture of a real client's MESSAGE-INTEGRITY hash for offline crack (hashcat -m 31300).",
+      "promotion_risk": "high",
+      "tester_next_step": "openssl s_client -connect IP:5349  # confirms no TURNS; tcpdump -i any 'udp and port 3478' to capture client hashes over time"
+    },
+    {
+      "kind": "stun_version_disclosure",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "STUN/TURN SOFTWARE attribute discloses server version",
+      "tier_evidence": "SOFTWARE attribute recon.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feed to CVE mapper.",
+      "promotion_risk": "none",
+      "tester_next_step": "nmap -sU -p3478 --script stun-version IP"
+    },
+    {
+      "kind": "stun_external_mapping",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "STUN Binding Response reveals scanner's external IP mapping",
+      "tier_evidence": "XOR-MAPPED-ADDRESS is the design of STUN Binding.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "n/a \u2014 informational"
+    },
+    {
+      "kind": "stun_legacy_rfc3489",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "STUN server responds to legacy RFC 3489 ClassicSTUN",
+      "tier_evidence": "Posture \u2014 a legacy request-parse acceptance flag.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Legacy daemon flag.",
+      "promotion_risk": "none",
+      "tester_next_step": "raw RFC 3489 probe (no magic cookie); confirm plain MAPPED-ADDRESS"
+    },
+    {
+      "kind": "stun_second_address_disclosure",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "STUN OTHER-ADDRESS discloses a second server IP",
+      "tier_evidence": "OTHER-ADDRESS attribute recon.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Rescan the disclosed second IP \u2014 the host was not in scope discovery.",
+      "promotion_risk": "low",
+      "tester_next_step": "nmap -sU -p3478 <other-address-ip>  # portscan the second STUN interface"
+    },
+    {
+      "kind": "stun_amplification",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "STUN/TURN reflective amplification factor N x exceeds 4x",
+      "tier_evidence": "Amplification factor measured from real request/response byte lengths \u2014 objective probe result.",
+      "can_promote_to": "stay",
+      "promotion_notes": "DDoS building block; recce cannot itself amplify.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "n/a \u2014 DDoS proof would be unsafe; report the ratio only"
+    },
+    {
+      "kind": "turns_tls_weak",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "TURNS TLS posture is weak (protocol version or certificate)",
+      "tier_evidence": "TLS handshake result: version + cert self-signed.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Posture.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -connect IP:5349 -showcerts"
+    },
+    {
+      "kind": "stun_fingerprint",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "STUN/TURN endpoint reachable",
+      "tier_evidence": "Always emitted for a reachable endpoint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "nmap -sU -p3478 --script stun-info,stun-version IP"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_domains (from TURN REALM)",
+    "known_hostnames (from OTHER-ADDRESS + cert SANs)",
+    "cred_store (captured MESSAGE-INTEGRITY hashes if extended)"
+  ]
+}

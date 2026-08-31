@@ -1,0 +1,140 @@
+{
+  "service": "nis_yp",
+  "module_files": [
+    "recce/services/nisyp.py"
+  ],
+  "summary": "This is the ONLY T3 module in the tranche \u2014 nis_passwd_hashes actually captures crackable crypt(3) hashes and hands them to the shared credentials store, from which the estate-wide SSH/SMB spray executes. Full chain from portmap DUMP -> domain guess -> YPPROC_ALL is deterministic. yppasswdd/ypupdated flags are T0 (registration only). Biggest gap is offline crack automation and auto-spraying (already partly wired via _handoff_hashes into creds bucket).",
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_hosts",
+    "credentials",
+    "netgroup_trust"
+  ],
+  "findings": [
+    {
+      "kind": "nis_rpc_names",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "NIS RPC programs registered on rpcbind",
+      "tier_evidence": "Pure portmap enumeration \u2014 RPC programs 100004/100007/100009/100028 named.",
+      "can_promote_to": "t1",
+      "promotion_risk": "none",
+      "promotion_notes": "Already effectively lifts the generic RPC-services finding; used as gate for T3 chain below.",
+      "related_cves": [],
+      "tester_next_step": "rpcinfo -p <ip>; note ports for 100004 (ypserv) and 100009 (yppasswdd); recce auto-continues to domain guess."
+    },
+    {
+      "kind": "nis_yppasswdd",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "rpc.yppasswdd registered (accepts password-change RPCs)",
+      "tier_evidence": "Registration-only; recce does not actually invoke the RPC.",
+      "can_promote_to": "t2",
+      "promotion_risk": "destructive",
+      "promotion_notes": "T2 = actual CVE-2001-0779 heap-overflow probe (send crafted username, observe crash / signature response). Destructive: crashes yppasswdd. Only under explicit --active-yppasswdd-poc flag.",
+      "related_cves": [
+        "CVE-2001-0779",
+        "CVE-2015-1391"
+      ],
+      "tester_next_step": "rpcinfo -p <ip>; searchsploit yppasswdd; PoC only in a lab: metasploit auxiliary/dos/rpc/yppasswdd (crashes it)."
+    },
+    {
+      "kind": "nis_ypupdated",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "rpc.ypupdated registered (historical unauth RCE, CVE-1999-0208 class)",
+      "tier_evidence": "Registration only \u2014 recce does NOT invoke.",
+      "can_promote_to": "t3",
+      "promotion_risk": "destructive",
+      "promotion_notes": "T3 = fire the CVE-1999-0208 shell-interpolation payload for real RCE. Very destructive (SunOS RCE, ancient); requires explicit --exploit flag and target must be lab-only.",
+      "related_cves": [
+        "CVE-1999-0208"
+      ],
+      "tester_next_step": "rpcinfo -p <ip>; MSF exploit/solaris/misc/ypupdated_exec target=<ip> \u2014 RCE as root on SunOS 4.x/Solaris 2.x; ONLY IN LAB."
+    },
+    {
+      "kind": "nis_maplist",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "NIS domain '{domain}' confirmed \u2014 {N} maps enumerable",
+      "tier_evidence": "YPPROC_DOMAIN TRUE + YPPROC_MAPLIST returned list \u2014 deterministic on-vuln.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Already gates the T3 credential dump below. Enrich with cross-service domain-hint feeds (LDAP baseDN / Kerberos realm / SMB workgroup).",
+      "related_cves": [],
+      "tester_next_step": "ypcat -d <domain> -h <ip> -x; then per-map: ypcat -d <domain> -h <ip> <map>."
+    },
+    {
+      "kind": "nis_passwd_hashes",
+      "tier": "t3",
+      "severity": "critical",
+      "title_pattern": "NIS passwd map exposes hashed passwords",
+      "tier_evidence": "Actual crypt(3) hashes extracted, classified, and materialized as Credential objects in the shared creds store \u2014 this is captured credential material, downstream spray follows.",
+      "can_promote_to": "t4",
+      "promotion_risk": "none",
+      "promotion_notes": "T4 = crack loop (auto-invoke hashcat with format detection by hash_format field), then loop cracked passwords back into SSH/SMB/LDAP/telnet spray via the existing credentials shared surface. Some scaffolding via _handoff_hashes already exists.",
+      "related_cves": [],
+      "tester_next_step": "ypcat -d <domain> -h <ip> passwd > loot/nis.pw; hashcat -m 1500 (DES) / -m 500 (md5crypt) / -m 7400 (sha256crypt) / -m 1800 (sha512crypt) loot/nis.pw rockyou.txt; nxc ssh <estate_ips> -u loot/users.txt -p loot/cracked.txt."
+    },
+    {
+      "kind": "nis_hash_age",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "NIS passwd map contains 13-char DES crypt hashes (EOL OS)",
+      "tier_evidence": "Regex-classified DES hash present in dumped output.",
+      "can_promote_to": "t3",
+      "promotion_risk": "none",
+      "promotion_notes": "Prioritize DES hashes to head of crack queue (fastest to break \u2014 minutes on GPU) so they land as spray-ready creds first.",
+      "related_cves": [],
+      "tester_next_step": "hashcat -m 1500 -a 0 loot/nis-des.pw rockyou.txt -O -w 4  # DES cracks in minutes."
+    },
+    {
+      "kind": "nis_group_hashes",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "NIS group map exposes membership (privileged groups named)",
+      "tier_evidence": "group.byname walked and privileged group names detected in the actual output.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Auto-tag every user in wheel/sudo/adm as high-value in the crack queue and prioritize their hashes.",
+      "related_cves": [],
+      "tester_next_step": "ypcat -d <domain> -h <ip> group | grep -E '^(wheel|sudo|adm|root):'; then hashcat prioritized on those users' hashes."
+    },
+    {
+      "kind": "nis_netgroup_trust",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "NIS netgroup map reveals host-to-host / user-to-host trust",
+      "tier_evidence": "netgroup map returned and 'root' / '-' entries counted as trust primitives.",
+      "can_promote_to": "t3",
+      "promotion_risk": "medium",
+      "promotion_notes": "T3 = actual rsh/rlogin passwordless test into netgroup-trusted hosts. Requires an r-services module target. Medium risk since it hits live services.",
+      "related_cves": [],
+      "tester_next_step": "For each netgroup granting root/-: rlogin -l root <host_in_netgroup>; rsh <host_in_netgroup> 'id'  # if trust wired via .rhosts/hosts.equiv this returns a shell."
+    },
+    {
+      "kind": "nis_topology_leak",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "NIS topology maps leak internal hosts / ypservers",
+      "tier_evidence": "hosts.byname / ypservers actively read.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Auto-ingest hosts.byname into known_hosts + queue each ypservers entry as an alternate map source (bypasses securenets from a different source IP).",
+      "related_cves": [],
+      "tester_next_step": "ypcat -d <domain> -h <ip> ypservers; then re-run nisyp probe against each slave server \u2014 may bypass securenets ACL of the master."
+    },
+    {
+      "kind": "nis_domain_leak",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "NIS domain leaks but map dumps refused (securenets partially applied)",
+      "tier_evidence": "YPPROC_DOMAIN=TRUE but YPPROC_ALL empty \u2014 deterministic evidence of partial hardening.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Chain: after foothold on any host with SNMP/SSH creds, auto-retry NIS dump from that source IP.",
+      "related_cves": [],
+      "tester_next_step": "After foothold on any in-range client: ssh <client> 'ypcat -d <domain> passwd'  # may succeed where direct scan failed."
+    }
+  ]
+}

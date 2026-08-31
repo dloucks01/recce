@@ -1,0 +1,143 @@
+{
+  "service": "ipmi",
+  "module_files": [
+    "recce/services/ipmi.py"
+  ],
+  "summary": "One of the deepest modules. GCAC (T0/T1 posture). Cipher-suite 0 hard-confirmed via App/0x54 (T1). RAKP sweep across default+known-user list captures HMAC-SHA1/SHA256 hashes verbatim in hashcat -m 7300/-m 7302 format \u2014 that is real crack material (T2). Username enumeration via RAKP status asymmetry is T1. Get Device ID vendor/firmware fingerprint (T0). Missing T3: no post-crack ipmitool session (correctly out of scope per user directive).",
+  "findings": [
+    {
+      "kind": "ipmi_cipher_zero_confirmed",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "IPMI cipher suite 0 supported (CVE-2013-4786)",
+      "tier_evidence": "App/0x54 Get Channel Cipher Suites returned an auth_alg=0 record \u2014 HARD confirmation the vuln config is live. Any username + any password authenticates as admin.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Follow-on: send one benign 'chassis power status' via ipmitool -C 0 -U root -P '' \u2014 probe SUCCEEDS only if server accepts arbitrary auth, giving proof-of-admin. Per airgap + read-only directive this is a manual step.",
+      "promotion_risk": "high",
+      "tester_next_step": "ipmitool -I lanplus -C 0 -H IP -U root -P '' user list ; ipmitool -I lanplus -C 0 -H IP -U root -P '' chassis power status  # if either succeeds, full BMC admin",
+      "related_cves": [
+        "CVE-2013-4786"
+      ]
+    },
+    {
+      "kind": "ipmi_cipher_zero",
+      "tier": "t0",
+      "severity": "critical",
+      "title_pattern": "IPMI cipher suite 0 supported (heuristic)",
+      "tier_evidence": "Heuristic from GCAC ('none' auth type + IPMI 2.0) \u2014 inference, not a hard confirmation.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Currently downgraded when App/0x54 doesn't answer; already promoted via ipmi_cipher_zero_confirmed when it does.",
+      "promotion_risk": "medium",
+      "tester_next_step": "ipmitool -I lanplus -C 0 -H IP -U <any> -P anything user list  # if succeeds, cipher-0 is real",
+      "related_cves": [
+        "CVE-2013-4786"
+      ]
+    },
+    {
+      "kind": "ipmi_anonymous",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "IPMI null-user / anonymous logon enabled",
+      "tier_evidence": "Auth Status byte bits 0/1 \u2014 a real BMC-reported posture that only fires when the daemon says anonymous/null-user is enabled.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain: ipmitool with U='' P='' -> user list -> if admin default (ADMIN/admin) works, full BMC control.",
+      "promotion_risk": "high",
+      "tester_next_step": "ipmitool -I lanplus -H IP -U '' -P '' user list ; ipmitool -I lanplus -H IP -U ADMIN -P ADMIN sol activate  # KVM/serial into host"
+    },
+    {
+      "kind": "ipmi_weak_auth",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "IPMI weak auth algorithm(s) advertised: MD2/MD5",
+      "tier_evidence": "GCAC auth type bitmap read.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Posture.",
+      "promotion_risk": "none",
+      "tester_next_step": "review GCAC output; MD5 hash is captured via ipmi_rakp_hash separately"
+    },
+    {
+      "kind": "ipmi_rakp_hash",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "IPMI RAKP hashes captured (RMCP+ password HMAC is offline-crackable)",
+      "tier_evidence": "recce performs a real RMCP+ Open Session + RAKP1 exchange, receives the server-computed HMAC, and writes a valid hashcat -m 7300/7302 line \u2014 a real crack primitive per user + per algorithm. Non-destructive.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Automate hashcat crack loop against captured hashes; on success feed cracked cred back to ipmitool for session \u2014 the sessions/rakp promotion tier.",
+      "promotion_risk": "high",
+      "tester_next_step": "hashcat -m 7300 loot/ipmi.hash /usr/share/wordlists/rockyou.txt --force ; then ipmitool -I lanplus -H IP -U <user> -P <cracked> user list ; sol activate",
+      "related_cves": [
+        "CVE-2013-4805"
+      ]
+    },
+    {
+      "kind": "ipmi_user_enum",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "IPMI username enumeration via RAKP status codes",
+      "tier_evidence": "Deterministic: some users produce hashes, others get 'invalid role' \u2014 that response asymmetry only appears if the BMC distinguishes existing accounts. Real names surfaced.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Widen the known_users sweep and cite exact accounts; already implemented.",
+      "promotion_risk": "medium",
+      "tester_next_step": "Extend probe with --rakp-users <big-list>; feed valid users to hashcat crack loop focused on those accounts."
+    },
+    {
+      "kind": "ipmi_per_msg_auth_disabled",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "IPMI per-message authentication disabled",
+      "tier_evidence": "Auth Status bit 4 posture.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Would need to actually inject a spoofed IPMI command into an observed session \u2014 destructive/impractical.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "review GCAC output; capture a live session with tcpdump and inspect for MAC-less messages"
+    },
+    {
+      "kind": "ipmi_userlevel_auth_disabled",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "IPMI user-level authentication disabled",
+      "tier_evidence": "Bit 3 of Auth Status: user-priv commands take no auth. When set, unauth sensor/SEL reads are the actual data leak \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Actively send a sensor-read at USER priv with auth-type NONE and record the returned SDR/SEL \u2014 proves the leak.",
+      "promotion_risk": "low",
+      "tester_next_step": "ipmitool -I lan -H IP -A NONE sensor list ; ipmitool -I lan -H IP -A NONE sel list"
+    },
+    {
+      "kind": "ipmi_kg_key_status",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "IPMI BMC key (KG) not configured",
+      "tier_evidence": "Auth Status bit 5.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Correlates with ipmi_rakp_hash crack difficulty; not standalone.",
+      "promotion_risk": "none",
+      "tester_next_step": "note in report; combine with any captured RAKP hash"
+    },
+    {
+      "kind": "ipmi_device_id",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "IPMI BMC identified: <vendor> firmware <fw>",
+      "tier_evidence": "Get Device ID App/0x01 vendor + firmware fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feed to vendor advisory correlation externally.",
+      "promotion_risk": "none",
+      "tester_next_step": "ipmitool -H IP -I lan mc info  # cross-check the same fields"
+    },
+    {
+      "kind": "ipmi_fingerprint",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "IPMI endpoint reachable",
+      "tier_evidence": "Always emitted for a reachable BMC.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "ipmitool -H IP -I lan channel info"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "cred_store (RAKP hashes)"
+  ]
+}

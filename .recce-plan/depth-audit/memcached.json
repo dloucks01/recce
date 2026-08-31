@@ -1,0 +1,66 @@
+{
+  "service": "memcached",
+  "summary": "Strong T2 module: unauth stats + cachedump + lru_crawler metadump + bounded multi-GET actually retrieve cached values with sensitive-shape tagging (session/JWT/csrf/apikey), and the UDP amplification probe measures a real amp ratio. Weakest area: no attempt at binary/SASL protocol probing (would let it distinguish SASL-enforced vs 'listening but broken'), no session-hijack chain (a captured JWT sample isn't fed to any HTTP module).",
+  "module_files": [
+    "recce/services/db/memcached.py"
+  ],
+  "findings": [
+    {
+      "kind": "memcached_unauth",
+      "title_pattern": "memcached exposed without authentication",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "stats + stats items + stats cachedump return real key names and per-slab counts - proof of read.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Values-read is already emitted as a separate T2 (memcached_values_readable), which is the natural next tier for this kind.",
+      "promotion_risk": "none",
+      "tester_next_step": "printf 'stats\\r\\nstats items\\r\\nstats cachedump 1 200\\r\\n' | ncat <ip> <port>",
+      "related_cves": []
+    },
+    {
+      "kind": "memcached_values_readable",
+      "title_pattern": "memcached cached values readable without credential",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "Multi-get retrieves actual cached bytes with 256B preview; ranks by session/JWT/csrf/apikey key-shape tags so the sample is the interesting ones.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 = feed captured JWT/session tokens into the loot pool and auto-replay against paired HTTP services (matching hostname/vhost). Also emit a session-hijack Credential per value hit.",
+      "promotion_risk": "low",
+      "tester_next_step": "printf 'get <sensitive-key>\\r\\n' | ncat <ip> <port> ; then curl -H 'Cookie: SESSIONID=<hijacked>' https://<paired-app>/ to prove the hijack.",
+      "related_cves": []
+    },
+    {
+      "kind": "memcached_udp_amplification",
+      "title_pattern": "memcached UDP reflection/amplification confirmed",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "udp_stats_probe sends one UDP frame and measures reply size + amp ratio - positive verify (>=2x) only when UDP is actually answering.",
+      "can_promote_to": "t2",
+      "promotion_notes": "T2 = additionally send a large `get <large-key>' UDP query to measure the historic ~51,000x amp; but that requires knowing a big-value key. Keep at T1 - single-datagram evidence is enough for reporting.",
+      "promotion_risk": "medium",
+      "tester_next_step": "printf '\\x00\\x01\\x00\\x00\\x00\\x01\\x00\\x00stats\\r\\n' | ncat -u <ip> <port> - measure reply size vs request size.",
+      "related_cves": []
+    },
+    {
+      "kind": "memcached_version",
+      "title_pattern": "memcached end-of-life / legacy build",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "vulndb._cmp against 1.4.32 floor; fingerprint only.",
+      "can_promote_to": "t1",
+      "promotion_notes": "CVE-2016-8704/8705/8706 are binary/SASL integer overflows - emit them as version-gated kinds with a safe SASL-binary-header parse verify.",
+      "promotion_risk": "none",
+      "tester_next_step": "printf 'version\\r\\n' | ncat <ip> <port> ; compare against 1.4.32 / 1.6.x advisories.",
+      "related_cves": [
+        "CVE-2016-8704",
+        "CVE-2016-8705",
+        "CVE-2016-8706"
+      ]
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "loot.session_tokens (JWT/session values captured -> HTTP module replay)",
+    "hostname_pool (from any cached key metadata that names hosts)",
+    "amp_registry (record confirmed reflection sources for the engagement)"
+  ]
+}

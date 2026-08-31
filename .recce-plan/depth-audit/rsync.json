@@ -1,0 +1,36 @@
+{
+  "service": "rsync",
+  "summary": "rsync module is well-focused: T1 handshake to inventory modules (@RSYNCD greeting + #list \u2014 'rsync_list' medium), then T2 per-module anonymous-access probe (opens fresh connection per module, requests it, reads @RSYNCD: OK vs AUTHREQD verdict \u2014 'rsync_open' high). Stops at the verdict line \u2014 never transfers a file. Solid separation of enum vs proven-access. Biggest gap: no LIST directory listing to sample file names (elevate T2\u2192T3 loot proof), no writable-module probe (require pushing a canary file to prove --read-only=false), no rsync-binary version detection for CVE-2024-12084 (heap OOB in checksum length handling).",
+  "module_files": [
+    "recce/services/rsync.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames"
+  ],
+  "findings": [
+    {
+      "kind": "rsync_list",
+      "title_pattern": "rsync modules enumerable without authentication",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "@RSYNCD handshake completes and #list returns concrete share names/comments with no credential \u2014 an actual info-disclosure oracle, not just port-open.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Feed module names into known_hostnames when comments carry FQDNs; motivates rsync_open per-module probe (already implemented).",
+      "promotion_risk": "none",
+      "tester_next_step": "rsync rsync://IP:873/ \u2014 grep for backups, home, srv, web, www; each hit is a candidate for the next-step per-module probe.",
+      "related_cves": []
+    },
+    {
+      "kind": "rsync_open",
+      "title_pattern": "rsync module readable without authentication",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Per-module probe actually received @RSYNCD: OK \u2014 a proven unauth session was granted at the protocol level (recce stops before transfer, but the primitive is demonstrated).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Elevate to T3 by issuing a --list-only walk + fetching a sample file (e.g. .htaccess, README) to prove read-loot. For write: attempt to STOR a canary; if success, T3 write foothold and often T4 RCE via web-root overlap.",
+      "promotion_risk": "medium",
+      "tester_next_step": "rsync --list-only rsync://IP:873/<module>/ ; rsync -av rsync://IP:873/<module>/ loot/ ; also test write: echo probe > /tmp/x ; rsync -av /tmp/x rsync://IP:873/<module>/recce_probe ; and check for id_rsa, .git, backup.sql inside.",
+      "related_cves": []
+    }
+  ]
+}

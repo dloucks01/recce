@@ -1,0 +1,27 @@
+{
+  "service": "netbios",
+  "module_files": [
+    "recce/services/netbios.py"
+  ],
+  "summary": "Minimal but correct T1 \u2014 one UDP query, deterministic disclosure. Only emits a single finding kind. Biggest gap is aggregation and downstream chaining: hostname/domain/DC-role should feed into SMB/LDAP/kerb modules, and MAC OUI should feed device-type fingerprinting. The is_dc flag is captured but not surfaced as its own finding (DC-role discovery on 137/udp is a strong recon signal).",
+  "proposed_shared_surface_consumers": [
+    "known_hostnames",
+    "known_domains",
+    "known_dcs",
+    "mac_oui"
+  ],
+  "findings": [
+    {
+      "kind": "netbios_disclosure",
+      "tier": "t1",
+      "severity": "low",
+      "title_pattern": "NetBIOS Name Service discloses hostname / workgroup / MAC",
+      "tier_evidence": "NBNS node-status query answered with name list + MAC \u2014 deterministic wire evidence.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Split into 3 kinds: netbios_dc_discovery (is_dc=true, medium severity \u2014 high-value recon), netbios_mac_oui (add OUI vendor lookup \u2014 device-type identification), and the base disclosure. Auto-ingest hostname->IP and workgroup/domain into shared surfaces for SMB/LDAP/kerb pivot.",
+      "related_cves": [],
+      "tester_next_step": "nbtscan -v <ip>; then use disclosed hostname: rpcclient -U '' -N <ip>; if suffix 0x1C present: kerbrute userenum -d <domain> --dc <ip> users.txt."
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "service": "consul",
+  "summary": "Comprehensive: enumerates /agent/self for version + ACL default policy + gossip encryption + TLS min-version, catalog/services + catalog/nodes, and /v1/kv?recurse with secret-pattern scoring on both key and value. Distinguishes unauth-read vs auth-enforcing. Missing: no default-token guess (Consul doesn't ship default tokens but old bootstrap tokens are worth trying), no snapshot download probe (/v1/snapshot is a bbolt-equivalent full dump on Consul).",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/consul.py"
+  ],
+  "findings": [
+    {
+      "kind": "consul_unauth_read",
+      "title_pattern": "Consul unauthenticated cluster read (ACLs disabled)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "ACL default_policy != deny AND services/nodes/kv reads succeed = deterministic proof.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Also GET /v1/snapshot to pull the raft snapshot (contains ACL tokens hashed but readable KV+intentions). Then curl /v1/agent/token \u2014 writable token endpoints exist.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -s http://<ip>:8500/v1/kv/?recurse | jq -r '.[] | \"\\(.Key)=\\(.Value|@base64d)\"'; curl -s http://<ip>:8500/v1/snapshot -o consul.snap \u2014 then consul snapshot inspect."
+    },
+    {
+      "kind": "consul_authed",
+      "title_pattern": "Consul endpoint reachable (ACL enforcing)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Fingerprint only; ACL denied reads.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Try token bruteforce is impractical (256-bit UUIDs). Instead try /v1/acl/bootstrap once \u2014 succeeds only if ACLs were enabled but never initialized (mirrors Nomad's pattern).",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -X PUT http://<ip>:8500/v1/acl/bootstrap \u2014 if 200, JSON contains the initial management token (cluster-god); if 403 the system is already bootstrapped."
+    },
+    {
+      "kind": "consul_kv_secrets",
+      "title_pattern": "Consul KV contains suspected secrets",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "Actual base64-decoded KV values matched against private-key/AWS/JWT/DB-URI regexes and returned with a 120-byte preview \u2014 real credentials in hand.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed DB URIs into db/* modules and AWS keys into a metadata probe; wire into known_creds shared pool for cross-service reuse.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -s http://<ip>:8500/v1/kv/?recurse | jq -r '.[] | \"\\(.Key)|\\(.Value|@base64d)\"' | grep -Ei 'BEGIN.*PRIVATE|postgres://|AKIA|xox[abpr]-' \u2014 try each against its target service."
+    },
+    {
+      "kind": "consul_gossip_unencrypted",
+      "title_pattern": "Consul Serf gossip is unencrypted",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Absence of EncryptKey/SecretKey in DebugConfig via anon /agent/self is authoritative proof; passive read.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Send a crafted Serf join packet on 8301/UDP with no gossip key and confirm cluster membership acceptance \u2014 proves spoofing primitive.",
+      "promotion_risk": "high",
+      "tester_next_step": "tcpdump -i any -w gossip.pcap 'udp port 8301' \u2014 snoop membership; or use serf agent -join <ip>:8301 with no key to attempt cluster join."
+    },
+    {
+      "kind": "consul_weak_tls",
+      "title_pattern": "Consul accepts obsolete TLS versions",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Config disclosure of TLSMinVersion string only; no TLS handshake actually attempted with TLS 1.0.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Actually attempt a TLSv1.0 ClientHello against the port and confirm ServerHello negotiates it \u2014 deterministic probe.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -connect <ip>:8501 -tls1 -quiet \u2014 if handshake succeeds, TLS 1.0 is enabled on the wire."
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_creds (KV secrets)",
+    "known_hosts (services/catalog output)",
+    "known_hostkeys (private keys in KV)"
+  ]
+}

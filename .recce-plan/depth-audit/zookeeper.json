@@ -1,0 +1,45 @@
+{
+  "service": "zookeeper",
+  "module_files": [
+    "recce/services/zookeeper.py"
+  ],
+  "summary": "4-letter-word sweep. ruok/stat/isro (safe/T0). dump/conf/cons/wchs/envi (T1 unauth data disclosure \u2014 real cluster state). wchc/wchp (T1 admin recon). Missing: no ZK client-protocol probe for reading znode ACLs, no getData on /zookeeper znode, no jute wire probe.",
+  "findings": [
+    {
+      "kind": "zk_dump",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "Zookeeper 4LW leaks cluster state / config",
+      "tier_evidence": "Data-dumping 4LWs (conf, cons, dump, envi) fire only when the operator did NOT set 4lw.commands.whitelist \u2014 deterministic misconfig signal, real cluster state disclosed.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add ZK client-protocol probe: connect, getData('/'), list ephemeral session znodes (real data-plane read).",
+      "promotion_risk": "low",
+      "tester_next_step": "echo dump | nc IP 2181  ; echo conf | nc IP 2181  ; then: python3 -c 'from kazoo.client import KazooClient; z=KazooClient(hosts=\"IP:2181\"); z.start(); print(z.get_children(\"/\"))'"
+    },
+    {
+      "kind": "zk_admin_4lw",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "Zookeeper watch-inspection 4LW accepted",
+      "tier_evidence": "wchc/wchp responses reveal which paths are watched by which sessions.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Recon.",
+      "promotion_risk": "none",
+      "tester_next_step": "echo wchs | nc IP 2181 ; echo wchc | nc IP 2181"
+    },
+    {
+      "kind": "zk_fingerprint",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "Zookeeper 4LW commands enumerated",
+      "tier_evidence": "Version + accepted-4LW enumeration.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "echo srvr | nc IP 2181"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames (from cons client-list)"
+  ]
+}

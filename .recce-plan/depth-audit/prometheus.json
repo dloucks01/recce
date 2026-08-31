@@ -1,0 +1,80 @@
+{
+  "service": "prometheus",
+  "summary": "Solid unauthenticated Prometheus probe covering the highest-value exfil surfaces: /-/reload lifecycle writes, /federate bulk metric exfil, /debug/pprof/cmdline argv leak, /api/v1/status/config with embedded scrape credentials, and /api/v1/query topology dump. All findings sit at T1 (safe-verify with deterministic 200-based signals) \u2014 the module has no post-exploitation flow, so promotion to T2 would mean actually parsing bearer tokens/basic-auth out of the config YAML into the credential store, and to T3 replaying those tokens against the disclosed scrape targets. Biggest gap: config-embedded credentials are shown but not extracted into cross-service creds; federate/pprof data is size-hinted only, never mined for secret material.",
+  "module_files": [
+    "recce/services/prometheus.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames",
+    "known_credentials",
+    "relay_targets"
+  ],
+  "findings": [
+    {
+      "kind": "prom_fingerprint",
+      "title_pattern": "Prometheus endpoint reachable",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Version + capability-boolean summary; no vuln signal on its own.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Enum row; not exploitable in itself.",
+      "tester_next_step": "curl -sk http://<ip>:9090/api/v1/status/buildinfo \u2014 record version for CVE mapping."
+    },
+    {
+      "kind": "prom_admin_writable",
+      "title_pattern": "Prometheus lifecycle API accepts unauthenticated writes",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "POST /-/reload returned 200/204 anonymously \u2014 deterministic proof --web.enable-lifecycle is on. No payload delivered.",
+      "can_promote_to": "t2",
+      "promotion_risk": "destructive",
+      "promotion_notes": "T2 would POST an attacker-controlled prometheus.yml body (or force the exposed one to reload after a config swap) and confirm scrape-target redirect via /api/v1/status/config diff. Destructive: reload alone can rotate scrape targets; /-/quit is a full outage. Gate behind --exploit.",
+      "tester_next_step": "curl -X POST http://<ip>:9090/-/reload; then curl -X POST http://<ip>:9090/-/quit for a monitoring blackout PoC (destructive). To exfiltrate: swap the config on disk if you have write access, then reload."
+    },
+    {
+      "kind": "prom_federate_open",
+      "title_pattern": "Prometheus /federate open (bulk metric exfil)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "GET /federate with permissive matcher parsed exposition markers \u2014 content-type + '# TYPE' guard makes it deterministic.",
+      "can_promote_to": "t3",
+      "promotion_risk": "low",
+      "promotion_notes": "Pull the full federation dump (unbounded), regex-scan for hostnames/service-account tokens/JWTs/env-vars-in-labels, feed to known_hostnames + credential store. Big cluster dumps are many MB \u2014 bounded fetch already exists, just needs a mining pass.",
+      "tester_next_step": "curl -skG --data-urlencode 'match[]={__name__=~\".+\"}' http://<ip>:9090/federate -o federate.txt; grep -aE '(token|password|jwt|Bearer|AKIA|-----BEGIN)' federate.txt"
+    },
+    {
+      "kind": "prom_pprof_cmdline",
+      "title_pattern": "Prometheus /debug/pprof/cmdline leaks process argv",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "GET returned NUL-separated argv confirmed by NUL byte or 'prometheus' substring.",
+      "can_promote_to": "t3",
+      "promotion_risk": "low",
+      "promotion_notes": "Pull the full argv, extract --web.config.file / --storage.tsdb.path / any *token* / *pass* flag, fold into creds. Also hit /debug/pprof/goroutine + /debug/pprof/heap for in-memory secret material (Vault-style).",
+      "tester_next_step": "curl http://<ip>:9090/debug/pprof/cmdline | tr '\\0' '\\n'; then curl http://<ip>:9090/debug/pprof/heap?debug=1 | grep -aiE 'token|password|bearer|aws_|gcp_' \u2014 mine for in-flight secrets."
+    },
+    {
+      "kind": "prom_config_readable",
+      "title_pattern": "Prometheus scrape config readable without auth",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Deterministic JSON success + 'yaml' key parse; scrape count reported.",
+      "can_promote_to": "t3",
+      "promotion_risk": "low",
+      "promotion_notes": "Parse the YAML with a real parser (or regex fallback), extract bearer_token / basic_auth username+password / bearer_token_file references, and populate known_hostnames from scrape-target URLs + credential store. Then replay against those targets.",
+      "tester_next_step": "curl -sk http://<ip>:9090/api/v1/status/config | jq -r .data.yaml | grep -E 'bearer_token|username|password|http[s]?://' \u2014 collect creds + internal URLs, then curl each with the disclosed bearer to confirm reuse."
+    },
+    {
+      "kind": "prom_query_open",
+      "title_pattern": "Prometheus query API open (metric-data disclosure)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "/api/v1/query?query=up returned status=success anonymously.",
+      "can_promote_to": "t2",
+      "promotion_risk": "low",
+      "promotion_notes": "Chain queries (up, node_uname_info, kube_pod_info, process_cmdline) to build a full topology + running-service inventory as a probe payload; feeds hostnames/relays into cross-service surfaces.",
+      "tester_next_step": "curl -sG http://<ip>:9090/api/v1/query --data-urlencode 'query=node_uname_info' | jq '.data.result[].metric' \u2014 enumerate hostnames/kernels/architectures for target selection."
+    }
+  ]
+}

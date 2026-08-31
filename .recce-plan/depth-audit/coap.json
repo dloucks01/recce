@@ -1,0 +1,170 @@
+{
+  "service": "coap",
+  "summary": "CoAP module is the deepest of the tranche: /.well-known/core inventory, Observe live telemetry drain, actuator PUT with pre-value rollback (T2 write-proof with safety), DTLS ClientHello parse pulling PSK identity hint + weak-cipher selection, Proxy-Uri open-proxy test, and UDP amplifier ratio. test_write defaults False so actuator PUT is opt-in \u2014 reasonable. Biggest gap: no /.well-known/edhoc (RFC 9528) or /.well-known/certauth probe; no OSCORE-context enumeration; DTLS probe stops at ServerHello \u2014 doesn't try common PSK IDs like 'Client_identity'/'admin' to attempt a T3 handshake.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/coap.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_devices (vendor from /oic/d)",
+    "known_users (PSK identity hints)",
+    "known_secrets (PSK values from other services)"
+  ],
+  "findings": [
+    {
+      "kind": "coap_empty_ping",
+      "title_pattern": "CoAP empty-CON ping fingerprint",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "RST/ACK to an empty CON just fingerprints the service.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Fingerprint-only by design \u2014 resource_inventory/observe cover T1+.",
+      "promotion_risk": "none",
+      "tester_next_step": "coap-client -m ping coap://<ip>:5683/",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_resource_inventory",
+      "title_pattern": "CoAP endpoint exposes resource inventory via /.well-known/core",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Unauth GET /.well-known/core \u2192 2.05 + parsed link-format list proves anon inventory read.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Already partly T2 via resource_sweep (reads every resource). Add: promote sev to critical when actuator-typed resources appear (already done). Detect /.well-known/edhoc, /.well-known/rd (Resource Directory) \u2014 RD write attempts land T2 registration hijack.",
+      "promotion_risk": "low",
+      "tester_next_step": "coap-client -m get coap://<ip>:5683/.well-known/core; for path in <list>; do coap-client -m get coap://<ip>:5683$path; done.",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_actuator_exposed",
+      "title_pattern": "CoAP endpoint accepts anonymous PUT to an actuator resource",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "Real PUT sent, 2.xx response confirmed, rollback attempted with pre-captured value \u2014 deterministic proof of physical-world write primitive.",
+      "can_promote_to": "t3",
+      "promotion_notes": "This IS the initial access on IoT; foothold=controlling the actuator. Wire to a per-device tester note (Shelly relay=0/1, Tasmota POWER, valve position) once vendor known. Already gated on test_write flag \u2014 keep that.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "coap-client -m put -e '<pre_value>' coap://<ip>:5683<path> (recce already captured pre_value); operator command example: coap-client -m put -e '1' coap://<ip>:5683/a/light \u2014 DO NOT run without written authorization.",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_device_disclosure",
+      "title_pattern": "CoAP endpoint discloses device identity / firmware via device resource",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Actual GET body pulled (up to 256B snippet) from /oic/d, /oic/p, /device etc. \u2014 real vendor/model/firmware bytes captured.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Parse the CBOR/JSON snippet to extract di (device id), n (name), mnmn (manufacturer), mnmo (model), mnfv (firmware) fields per OCF spec. Feed model+firmware to CVE mapper (iotivity CVEs, ESP-IDF advisories). No new traffic \u2014 parse existing snippet.",
+      "promotion_risk": "none",
+      "tester_next_step": "coap-client -m get -f 60 coap://<ip>:5683/oic/d | cbor-diag; then searchsploit <vendor> <firmware>.",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_observe_leak",
+      "title_pattern": "CoAP endpoint leaks live telemetry via Observe (RFC 7641)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Observe registered, notification packets captured with payload snippets \u2014 live telemetry actually pulled.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Extend window to observe sensor cycles (30-60s), grep for GPS coords, temperature streams, camera frame counters. Feed into known_devices as telemetry_stream=<path> so a later replay attack can be scripted.",
+      "promotion_risk": "low",
+      "tester_next_step": "coap-client -m get -s 60 coap://<ip>:5683<obs-path> | tee loot/coap_obs.txt; grep -E 'lat|lon|temp|volt|amp' loot/coap_obs.txt.",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_open_proxy",
+      "title_pattern": "CoAP endpoint acts as an open proxy (Proxy-Uri accepted)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Proxy-Uri to 192.0.2.1 returned anything other than 5.05/4.05 \u2014 proof endpoint interpreted request as proxy.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Point Proxy-Uri at an internal loopback CoAP resource or an intranet HTTP endpoint (Proxy-Uri http://internal/) and confirm response body echoed back \u2014 proves SSRF-class relay reaching internal targets.",
+      "promotion_risk": "medium",
+      "tester_next_step": "coap-client -m get -P coap://<ip>:5683 coap://127.0.0.1/.well-known/core; then coap-client -m get -P coap://<ip>:5683 http://<internal-ip>/ to test HTTP SSRF pivot.",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_amplifier",
+      "title_pattern": "CoAP endpoint is a viable UDP amplifier",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Real byte-ratio measured (>5x) from a live request/response \u2014 deterministic amp characterisation.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Higher tier requires actually launching a spoofed-source amplification attack \u2014 always destructive/illegal. Keep at T1.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "Document ratio only. If in-scope stress test: hping3 --udp --spoof <victim> -s 5683 -p 5683 -d 20 <target> \u2014 DO NOT run against internet-reachable hosts.",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_dtls_psk_hint",
+      "title_pattern": "CoAP-DTLS ServerKeyExchange leaks PSK identity hint",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Real ServerKeyExchange psk_identity_hint bytes parsed from DTLS handshake \u2014 probe succeeds only when hint is disclosed.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Feed hint into a bounded PSK dictionary attack: hint often IS the PSK identity to use (e.g. 'Client_identity'/'admin'/serial). Try common PSKs ('','secretPSK', device serial reversed) via mbedtls_ssl_client PSK.",
+      "promotion_risk": "medium",
+      "tester_next_step": "openssl s_client -dtls1_2 -psk_identity '<hint>' -psk deadbeefdeadbeef -connect <ip>:5684; then coap-client -u '<hint>' -k '<PSK>' coaps://<ip>/.well-known/core once a PSK candidate is found.",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_dtls_weak",
+      "title_pattern": "CoAP-DTLS server selected a weak / NULL cipher",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "ServerHello cipher_suite parsed and matched against NULL/export table \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Complete a full NULL-cipher handshake and issue a plaintext CoAP GET over the resulting session \u2014 proves confidentiality is nil. Requires DTLS session bring-up code.",
+      "promotion_risk": "medium",
+      "tester_next_step": "openssl s_client -dtls1_2 -cipher 'NULL' -psk_identity '<any>' -psk 00 -connect <ip>:5684; then send a CoAP GET over that channel.",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_dtls_fingerprint",
+      "title_pattern": "CoAP-DTLS endpoint reachable",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Handshake reachability only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Covered by dtls_psk_hint / dtls_weak for real signal.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -dtls1_2 -connect <ip>:5684",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_authgated",
+      "title_pattern": "CoAP endpoint reachable, authorization enforced",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "4.01/4.03 on /.well-known/core \u2014 enum marker.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Once known_secrets carry PSK material harvested from other services, retry as coaps:// with each candidate PSK.",
+      "promotion_risk": "low",
+      "tester_next_step": "coap-client -u <psk-id> -k <psk> coaps://<ip>:5684/.well-known/core",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_oscore",
+      "title_pattern": "CoAP endpoint uses OSCORE (RFC 8613)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "OSCORE Option observed in a reply \u2014 fingerprint only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "OSCORE without the context is opaque; no probe promotes without the master secret.",
+      "promotion_risk": "none",
+      "tester_next_step": "coap-client coap://<ip>:5683/.well-known/core; note OSCORE option presence \u2014 hunt OSCORE contexts in the enrolling app's binaries.",
+      "related_cves": []
+    },
+    {
+      "kind": "coap_plaintext",
+      "title_pattern": "CoAP endpoint on 5683/udp (plaintext, no DTLS)",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Port-number based, no probe result required.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Pair with on-network sniff: capture any CoAP payload = plaintext IoT telemetry. Requires network position.",
+      "promotion_risk": "medium",
+      "tester_next_step": "tcpdump -i any -w coap.pcap 'udp port 5683'; tshark -r coap.pcap -Y coap -T fields -e coap.uri_path -e coap.payload.",
+      "related_cves": []
+    }
+  ]
+}

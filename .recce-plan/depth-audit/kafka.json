@@ -1,0 +1,57 @@
+{
+  "service": "kafka",
+  "module_files": [
+    "recce/services/kafka.py"
+  ],
+  "summary": "Well-scoped module. MetadataRequest v1 unauth (T1). ApiVersions release-line fingerprint (T0). KIP-43 SaslHandshake probe with bogus mechanism to solicit enabled_mechanisms (T1 \u2014 a real, deterministic enumeration probe). Missing: no SCRAM/PLAIN spray, no consumer-fetch on leaked topics.",
+  "findings": [
+    {
+      "kind": "kafka_metadata_leaked",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "Kafka broker returns metadata without authentication",
+      "tier_evidence": "MetadataRequest v1 succeeds only against a broker with no SASL/mTLS gate \u2014 deterministic vuln signal. Real broker+topic list returned.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Send a real Fetch v0 against one leaked topic and pull first N records \u2014 proves data-plane read without auth.",
+      "promotion_risk": "medium",
+      "tester_next_step": "kcat -L -b IP:9092  ; then: kcat -C -b IP:9092 -t <leaked-topic> -o beginning -c 20  # read messages"
+    },
+    {
+      "kind": "kafka_saslgated",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "Kafka endpoint reachable (SASL/mTLS suspected)",
+      "tier_evidence": "TCP connect but MetadataRequest refused.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Posture; SASL enumeration handles the rest.",
+      "promotion_risk": "none",
+      "tester_next_step": "kcat -L -b IP:9092 -X security.protocol=SASL_SSL -X sasl.mechanisms=PLAIN -X sasl.username=<user> -X sasl.password=<pw>"
+    },
+    {
+      "kind": "kafka_version_fingerprint",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "Kafka broker release fingerprint",
+      "tier_evidence": "ApiVersions release-line inference.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feed to CVE mapper externally.",
+      "promotion_risk": "none",
+      "tester_next_step": "kcat -L -b IP:9092 ; correlate release with KEV/CVE database"
+    },
+    {
+      "kind": "kafka_sasl_mechanisms_enumerated",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "Kafka SASL mechanisms enumerated (KIP-43 SaslHandshake)",
+      "tier_evidence": "KIP-43 says the server unconditionally returns enabled_mechanisms on UNSUPPORTED_SASL_MECHANISM \u2014 recce sends a nonsense mechanism and captures the real list. Deterministic, non-destructive.",
+      "can_promote_to": "t3",
+      "promotion_notes": "For PLAIN: send SaslAuthenticate with candidate <user>:<pw> pairs from cred_store / known_users. If SCRAM: implement the SCRAM-SHA-256 exchange for cred spray (proper handshake, not destructive).",
+      "promotion_risk": "medium",
+      "tester_next_step": "kcat -L -b IP:9092 -X security.protocol=SASL_PLAINTEXT -X sasl.mechanism=<from-list> -X sasl.username=<user> -X sasl.password=<pw>"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "cred_store"
+  ]
+}

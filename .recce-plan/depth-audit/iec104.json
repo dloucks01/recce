@@ -1,0 +1,157 @@
+{
+  "service": "iec104",
+  "summary": "IEC-104 module is the T2/T3 leader in this tranche. STARTDT accepted without auth is T2 (proves data-transfer gate open). General Interrogation returning the full process image with real IOAs and values is T2 (proof of unauth process-state read). Session-singleton hijack is T2 (proves legit master can be displaced). Under --iec104-write flag, clock-sync and reset-process writes are T3 (actual writes to the outstation). CAA enumeration finds multi-substation gateways. Solid vendor fingerprint from private TypeIDs.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/iec104.py"
+  ],
+  "findings": [
+    {
+      "kind": "iec104_reachable",
+      "title_pattern": "IEC-104 SCADA device on the scanned network",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "APCI 0x68 + length + valid U/S/I control field is deterministic IEC-104 fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Stance; iec104_startdt_accepted is the T2 counterpart.",
+      "promotion_risk": "none",
+      "tester_next_step": "printf '\\x68\\x04\\x43\\x00\\x00\\x00' | nc <ip> 2404 | xxd (TESTFR act); nmap --script iec-identify -p 2404 <ip>.",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_startdt_accepted",
+      "title_pattern": "IEC-104 accepts STARTDT with no authentication",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "STARTDT con (U-format ctl1=0x0B) returned to unauthenticated STARTDT act \u2014 data-transfer state opened without a credential.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 (destructive) = issue Single Command (TypeID 45) to a real IOA \u2014 trips breakers. Gated behind --iec104-write, and even then never blindly.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: iec104ctl <ip>:2404 single-command --caa 1 --ioa <known_test_ioa> --on. NEVER on live substations.",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_process_image_readable",
+      "title_pattern": "IEC-104 General Interrogation returned the full process image",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "C_IC_NA_1 returned actual TypeID/IOA/value tuples for M_SP/M_DP/M_ME points \u2014 proof of unauth live process-state read, not stance.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 = long-running monitoring / SOE capture to reveal operational rhythm; or actuation via C_SC_NA_1 to any enumerated IOA (destructive).",
+      "promotion_risk": "medium",
+      "tester_next_step": "iec104ctl <ip>:2404 interrogation --caa <caa> --for 60 (log all telemetry for 60s); identify high-value IOAs (breakers/isolators) by IOA range convention (per site).",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_station_addresses",
+      "title_pattern": "IEC-104 additional Common ASDU Addresses reachable behind the gateway",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Multiple CAAs returning non-'unknown-CA' COT proves gateway fronts multiple substations.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Run general interrogation per CAA to enumerate each substation's process image (already handled by primary iteration but limited to 32 IOAs).",
+      "promotion_risk": "low",
+      "tester_next_step": "For each caa in caa_alive: iec104ctl <ip>:2404 interrogation --caa <caa> --limit 1000 \u2014 reveals each substation's full point list.",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_control_writable",
+      "title_pattern": "IEC-104 control write types reachable \u2014 unauthenticated actuation of physical equipment",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Emitted whenever startdt_ok \u2014 the surface is confirmed but the writes are NOT sent by recce. T1 (surface proven), not T2 (write proven).",
+      "can_promote_to": "t2",
+      "promotion_notes": "T2 evidence is provided by iec104_clock_writable / iec104_reset_writable when --iec104-write is set.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: iec104ctl <ip>:2404 single-command --caa 1 --ioa <ioa> --on; observe the corresponding M_SP change in the next interrogation. Never on production.",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_clock_writable",
+      "title_pattern": "IEC-104 clock synchronisation (C_CS_NA_1) writable \u2014 SOE forensic integrity at risk",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "C_CS_NA_1 with CP56Time2a was ACT-CONFIRMED (COT=7, P/N=0) \u2014 the outstation's real-time clock was actually written by an unauth session.",
+      "can_promote_to": "t4",
+      "promotion_notes": "T4 = drift-attack chain \u2014 walk the clock backwards to bury a specific event's SOE timestamp among noise, defeating post-incident forensics. Combined with control writes = full grid-manipulation chain.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: iec104ctl <ip>:2404 clock-sync --caa <caa> --time '1970-01-01T00:00:00Z' (or drifted); verify the RTU's SOE timestamps now diverge from grid time.",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_reset_writable",
+      "title_pattern": "IEC-104 Reset Process (C_RP_NA_1) reachable \u2014 unauthenticated remote RTU reboot",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "C_RP_NA_1 QRP=1 acknowledged \u2014 the outstation was actually reset from an unauth session.",
+      "can_promote_to": "t4",
+      "promotion_notes": "T4 chain: reset in a loop while sending fake events during boot windows \u2192 operational blindness.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: iec104ctl <ip>:2404 reset --caa <caa>; verify all points drop for the boot cycle. NEVER on production.",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_no_tls",
+      "title_pattern": "IEC-104 transported in cleartext (no IEC 62351-3 TLS)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "TLS ClientHello did not complete handshake \u2014 deterministic cleartext posture.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Posture finding.",
+      "promotion_risk": "none",
+      "tester_next_step": "tcpdump -w /tmp/104.pcap 'host <ip> and port 2404'; capture a legit master session to prove interrogation/control content is readable on the wire.",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_tls_present",
+      "title_pattern": "IEC-104 endpoint accepted TLS (IEC 62351-3 candidate)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "TLS handshake completed \u2014 good posture indicator.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Add mutual-auth check \u2014 attempt handshake without client cert; if it succeeds, TLS is 'in name only' (T1 finding).",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -connect <ip>:2404 -showcerts (no client cert); if it completes, the peer accepts any client \u2014 IEC 62351-3 \u00a75 mutual auth is not enforced.",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_vendor_identified",
+      "title_pattern": "IEC-104 vendor / RTU model identified",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Private-range TypeID pattern maps to vendor family \u2014 passive fingerprint.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Expand _vendor_hint mapping and add per-vendor CVE cross-reference; e.g. Siemens SICAM CVEs, ABB RTU5xx CVEs.",
+      "promotion_risk": "none",
+      "tester_next_step": "Correlate against Siemens/ABB/GE/SEL/Schneider IEC-104 advisories; check the RTU's web UI on 80/443 for default creds (SICAM: admin/100, RTU5xx: admin/admin).",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_ioa_read_ok",
+      "title_pattern": "IEC-104 targeted per-IOA read succeeded without authentication",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "C_RD_NA_1 returned a real value for the requested IOA \u2014 proof of per-object read primitive.",
+      "can_promote_to": "stay",
+      "promotion_notes": "T2 is the ceiling of read primitives.",
+      "promotion_risk": "none",
+      "tester_next_step": "iec104ctl <ip>:2404 read --caa <caa> --ioa <n>; loop over the IOA-list from interrogation for continuous per-object monitoring.",
+      "related_cves": []
+    },
+    {
+      "kind": "iec104_session_hijack",
+      "title_pattern": "IEC-104 session singleton: legitimate master can be forcibly displaced",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "Second STARTDT succeeded AND first session was torn down \u2014 proof of displacing hijack primitive.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 = maintain the hijack while sending forged data on the displaced master's slot; requires the legitimate master's source IP to be spoofable (or reachable from the tester).",
+      "promotion_risk": "high",
+      "tester_next_step": "LAB ONLY: open two concurrent iec104ctl sessions; while the second is live, issue interrogation/control from it while the operator's HMI sees connection drop then reconnect. Never on production.",
+      "related_cves": []
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_ot_assets",
+    "relay_targets"
+  ]
+}

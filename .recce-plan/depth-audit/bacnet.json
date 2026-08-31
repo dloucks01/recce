@@ -1,0 +1,169 @@
+{
+  "service": "bacnet",
+  "summary": "Most sophisticated OT probe in this tranche. Reaches T2 in three places: WriteProperty dry-run (reads then re-writes the same bytes at priority 16 \u2192 SimpleAck is direct proof of unauth write to a physical point), DCC accepted with default password (proves DoS primitive), and ReinitializeDevice accepted with intentionally-bad password (proves remote reboot with no password check). Also does AtomicReadFile (returns actual file bytes \u2014 arguably T2 file-read). Gap: no BACnet/SC posture check beyond port co-presence; amplification finding could be measured against a spec-corpus ratio.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/bacnet.py"
+  ],
+  "findings": [
+    {
+      "kind": "bacnet_reachable",
+      "title_pattern": "BACnet/IP endpoint reachable (unauthenticated building-automation control plane)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "I-Am reply after unicast Who-Is is deterministic BACnet fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Already promoted by bacnet_unauth_write (T2) and bacnet_reinitialize_permitted (T2).",
+      "promotion_risk": "none",
+      "tester_next_step": "bacnet-discover -a <ip>; then walk the object list (bacwi -1 <ip>) and read Device object properties (bacrp <ip> device <inst> object-name).",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_device_identity",
+      "title_pattern": "BACnet device identity disclosed",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Vendor/model/firmware/object-name via ReadProperty \u2014 pure fingerprint.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Add vendor\u2192CVE map (Siemens Desigo, JCI Metasys, Distech, Automated Logic) so vendor_name+firmware pins known BAS advisories.",
+      "promotion_risk": "none",
+      "tester_next_step": "Cross-reference vendor/model against ICSA-* BAS advisories; check the corresponding web UI on 80/443/8080 for default creds \u2014 Siemens Desigo: admin/admin, JCI Metasys: MetasysSysAgent/MetasysSysAgent.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_object_inventory",
+      "title_pattern": "BACnet object inventory readable without authentication",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Object-list walk returns real object type/instance tuples \u2014 enumerates physical points.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Pair with bacnet_unauth_write to prove per-object writability; expand walk beyond max_entries=32 under --bacnet-full-walk.",
+      "promotion_risk": "medium",
+      "tester_next_step": "bacwi -1 <ip>; for each analog-value: bacrp <ip> analog-value <inst> present-value; identify high-value points (chillers, dampers, door-strikes) by object-name field.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_bbmd_topology_disclosure",
+      "title_pattern": "BACnet BBMD Broadcast-Distribution-Table readable (network topology disclosure)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Read-BDT (BVLC 0x02) reply contains real peer BBMD IPs/masks \u2014 deterministic topology.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Chain: use each BDT peer as a follow-on scan target; run bacnet.probe against every peer to build cross-site BAS map.",
+      "promotion_risk": "low",
+      "tester_next_step": "For each BDT entry, run bacnet-discover -a <peer_ip>; the BDT maps the entire multi-site BAS. On corp-reachable BBMDs this reveals sites behind NAT.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_fdt_disclosure",
+      "title_pattern": "BACnet BBMD Foreign-Device-Table readable (remote-peer disclosure)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Read-FDT reply lists foreign-registered peers with TTL \u2014 real remote endpoints.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Each FDT entry is a jump-target (engineering laptop or cloud gateway); probe it for HMI/web UI defaults.",
+      "promotion_risk": "low",
+      "tester_next_step": "For each FDT entry, nmap -sV -p 80,443,8080,47808 <peer_ip>; often the peer is an engineer's Windows workstation with SMB/RDP open.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_foreign_device_registration_permitted",
+      "title_pattern": "BACnet Foreign-Device registration accepted from arbitrary host",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Register-Foreign-Device (BVLC 0x05) BVLC-Result 0x0000 is deterministic acceptance.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Once registered, send Distribute-Broadcast (0x09) to inject broadcast frames site-wide; PoC only under --bacnet-write.",
+      "promotion_risk": "medium",
+      "tester_next_step": "bacnet-fdr-register <ip>:47808 --ttl 60; then broadcast a Who-Is via the BBMD and receive I-Am from every peer segment \u2014 proves segment-wide read from an off-site host.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_amplification_reflector",
+      "title_pattern": "BACnet/IP acts as UDP amplification reflector (Who-Is/I-Am ratio)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Actual measured request/reply byte ratio \u22653.0 and reply_count \u22652 \u2014 deterministic reflection factor.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Promoting further requires generating spoofed traffic \u2014 out of scope for a defensive scanner.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "hping3 -1 --spoof <victim> <ip> -d 12 -c 1 (with a Who-Is payload) \u2014 DO NOT run at Internet scale; corroborate the ratio only.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_unauth_write",
+      "title_pattern": "BACnet WriteProperty accepted without authentication (physical-process write)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "WriteProperty of the same bytes just read at priority 16 returned SimpleAck \u2014 direct proof unauth writes land on a real Analog-Value object. Not destructive because value is unchanged.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 would be a targeted write at priority 1 to a specific commandable point (door unlock, setpoint change) \u2014 physical actuation. Requires operator approval; recce should never do this by default.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: bacwp -1 -p 47808 <ip> 2 <av_inst> 85 1 4 <new_val>; verify with bacrp then restore. Never against production.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_dcc_default_password",
+      "title_pattern": "BACnet DeviceCommunicationControl accepted with empty/default password (DoS primitive)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "DCC SimpleAck with a known default password (or empty) is proof the DoS primitive works. Recce sends duration=1min not 0 for safety.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 (destructive) would be duration=0 = indefinite comms disable, or DCC with a stronger valid default from vendor docs.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: bacdcc -p 47808 <ip> --disable --duration 0 --password '<accepted_pw>' \u2014 brings the controller offline until manual re-enable. Never on production.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_reinitialize_permitted",
+      "title_pattern": "BACnet ReinitializeDevice reachable without valid password (remote reboot)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "SimpleAck to WARMSTART with a deliberately BAD password is deterministic proof the device never validates \u2014 reboot is one packet away.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 (destructive) = actually send the reboot; recce correctly refuses. Under --bacnet-reboot in a test cell only.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: bacrd -p 47808 <ip> warmstart; observe the controller reboot and all points drop for the boot cycle.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_atomic_file_read",
+      "title_pattern": "BACnet AtomicReadFile returned file contents without authentication",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "AtomicReadFile (0x06) returns actual bytes from a File object \u2014 that IS file-content exfiltration, not stance.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Bump read count from 32 to full file size under --bacnet-file-dump; look for controller backup/config files that contain credentials.",
+      "promotion_risk": "low",
+      "tester_next_step": "bacnet-atomic-read -p 47808 <ip> 10 <file_inst> 0 65535; save to disk and strings/hex it \u2014 look for admin creds, WPA keys, BMS API keys embedded in config backups.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_stack_fingerprint",
+      "title_pattern": "BACnet stack fingerprint (max APDU + segmentation)",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "max-APDU + segmentation \u2014 passive fingerprint, no vuln evidence.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Cross-reference the (max_apdu, segmentation, vendor_id) tuple against known parser-DoS advisories (BACnet stack CVE list).",
+      "promotion_risk": "low",
+      "tester_next_step": "Correlate small max-APDU + segmented-both against BACnet-stack DoS CVEs \u2014 e.g. Trane/SmartX / Cimetrics / Delta Controls parser bugs; do NOT fuzz against production.",
+      "related_cves": []
+    },
+    {
+      "kind": "bacnet_sc_downgrade",
+      "title_pattern": "BACnet Secure Connect (BACnet/SC) present alongside plaintext BACnet/IP (downgrade path)",
+      "severity": "low",
+      "tier": "t1",
+      "tier_evidence": "Both 47820/tcp and 47808/udp open on same host is deterministic downgrade posture.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Already the full story \u2014 evidence is port co-presence.",
+      "promotion_risk": "none",
+      "tester_next_step": "nmap -p 47820,47808 <ip>; confirm both open then talk plaintext to 47808 to prove downgrade works even though /SC exists on 47820.",
+      "related_cves": []
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_ot_assets",
+    "relay_targets"
+  ]
+}

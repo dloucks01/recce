@@ -1,0 +1,62 @@
+{
+  "service": "sip",
+  "summary": "SIP module is shallow relative to the surface. OPTIONS + REGISTER-based extension enumeration + digest challenge parse + internal-IP leak detection + MD5-only advertisement flag. No auth attempt against enumerated extensions (no svcrack-style), no INVITE toll-fraud test, no OPTIONS to a specific extension to catch alwaysauthreject=no-for-existing-user, no CVE mapping despite the vendor slug already being computed, no SIP-over-TLS (5061) TLS-side probe. sip_ext_enum reaches T2 for the seen_ok=200 branch (unauth REGISTER accepted).",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/sip.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users (extensions)",
+    "known_passwords",
+    "cve_map keyed on out['vendor']"
+  ],
+  "findings": [
+    {
+      "kind": "sip_fingerprint",
+      "title_pattern": "SIP endpoint discloses server / realm via unauth OPTIONS",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Server / realm / Allow are pure fingerprint bytes.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Once vendor slug is computed, feed to CVE mapper (Asterisk AMI CVEs, Kamailio SDP parse RCE etc). Currently vendor is stored (pr['vendor']) but no CVE mapping table exists yet.",
+      "promotion_risk": "low",
+      "tester_next_step": "svmap.py <ip>:<port>; searchsploit <vendor> <version>",
+      "related_cves": []
+    },
+    {
+      "kind": "sip_ext_enum",
+      "title_pattern": "SIP extension enumeration succeeded (svwar-style)",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "Real 401/407 vs 404 asymmetry observed on REGISTER; when seen_ok=200 a REGISTER completed unauth = T2 primitive (register-and-place-calls). Extension list captured.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain svcrack-style bounded password spray against the enumerated extensions using known_passwords once shared. Or on seen_ok, actually place an INVITE to prove toll-fraud (destructive, gate).",
+      "promotion_risk": "high",
+      "tester_next_step": "svcrack.py -u <ext> -d rockyou.txt <ip>:<port>; on hit hydra -l <ext> -P wordlist sip://<ip>. For seen_ok=200 branches, register a soft-phone (linphone --sip <ext>@<ip>) and try an outbound call to a controlled number.",
+      "related_cves": []
+    },
+    {
+      "kind": "sip_internal_ip_disclosure",
+      "title_pattern": "SIP response discloses internal IP address",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Received/Contact private IP different from reached IP is deterministic leak proof.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add the leaked internal IP to known_hosts so downstream port scans target it on the far side of a NAT/SBC pivot.",
+      "promotion_risk": "none",
+      "tester_next_step": "sipsak -vv -s sip:<ip>:<port>; feed the leaked internal IP to arp/scan (once inside).",
+      "related_cves": []
+    },
+    {
+      "kind": "sip_digest_md5_only",
+      "title_pattern": "SIP Digest authentication offers MD5 only (no RFC 8760 SHA-256)",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Advertisement-only observation.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Wait for or induce a real client REGISTER response to build a hashcat 11400 line and crack (already suggested in tester text). Alternatively, run svcrack against a discovered extension.",
+      "promotion_risk": "medium",
+      "tester_next_step": "tcpdump -i <iface> 'udp port 5060' -A | tee sip.log; grep -A20 'REGISTER sip' sip.log | grep -oE 'response=\"[a-f0-9]+\"'; assemble $sip$***realm***nonce***md5***user***uri***qop***response and feed hashcat -m 11400.",
+      "related_cves": []
+    }
+  ]
+}

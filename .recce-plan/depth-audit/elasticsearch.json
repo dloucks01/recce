@@ -1,0 +1,54 @@
+{
+  "service": "elasticsearch",
+  "summary": "Very strong T2 module: unauth /_cat/indices with doc counts, /_nodes/_local OS+JVM fingerprint, /_snapshot/_all with per-repo settings extraction (bucket/endpoint/region/base_path/location) for cloud-storage pivot, plus a specific anonymous-role discriminator via /_security/_authenticate. Auth-header support (Basic, Bearer, ApiKey). Gaps: no CVE-2015-1427 Groovy-sandbox probe, no scripting-enabled check, no _search document sampling in the probe (only counts), no snapshot-restore-arbitrary-read PoC.",
+  "module_files": [
+    "recce/services/db/elasticsearch.py"
+  ],
+  "findings": [
+    {
+      "kind": "es_unauth",
+      "title_pattern": "Elasticsearch exposed without authentication",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "/_cat/indices returns 200 with the real index array and doc counts; deep enum captures node OS/JVM and snapshot repo settings inline.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Add /_search?size=10&pretty per user-index to sample real documents (T3 evidence); dump snapshot metadata (snapshots per repo) to prove restore-tampering surface. Feed snapshot repo credentials (client name) into a cloud-cred pool.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -s 'http://<ip>:<port>/*/_search?size=20&pretty' > loot/es.json ; elasticdump --input=http://<ip>:<port>/<index> --output=loot/<index>.json ; then map snapshot bucket to aws s3 ls s3://<bucket>/<base_path>.",
+      "related_cves": []
+    },
+    {
+      "kind": "es_anonymous",
+      "title_pattern": "Elasticsearch anonymous role grants unauthenticated access",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "/_security/_authenticate returns 200 with username _anonymous / authentication_type anonymous - deterministic verify that fires only when the misconfig is present.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Immediately follow with /_cat/indices (or a Doc _search) as _anonymous to prove the granted role actually reads data - T2 = document/list read under anon.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -s http://<ip>:<port>/_security/_authenticate ; curl -s http://<ip>:<port>/_cat/indices ; curl -s 'http://<ip>:<port>/*/_search?size=5&pretty'",
+      "related_cves": []
+    },
+    {
+      "kind": "es_version",
+      "title_pattern": "Elasticsearch end-of-life / legacy build",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Version major<7 fingerprint; no scripting-sandbox CVE probe (CVE-2015-1427, CVE-2014-3120).",
+      "can_promote_to": "t2",
+      "promotion_notes": "On <=1.4.2 send the CVE-2014-3120 groovy source in a MVEL script _search and check for a benign echo. On <=1.4.4 test CVE-2015-1427 with the sandbox-escape payload against a canary. Destructive-risk medium (executes JVM code).",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -s -XPOST 'http://<ip>:<port>/_search?pretty' -d '{\"script_fields\":{\"a\":{\"script\":\"1+1\"}}}' - a returned 2 confirms scripting enabled; then swap in the CVE-2015-1427 sandbox escape (in-scope only).",
+      "related_cves": [
+        "CVE-2014-3120",
+        "CVE-2015-1427"
+      ]
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "hostname_pool (from _nodes/_local os.pretty_name)",
+    "cloud_storage_pointers (snapshot_repo_settings s3/gcs/azure -> cloud module)",
+    "credentials.apikey (echo any Bearer/ApiKey creds validated across cluster)",
+    "loot.doc_samples (index _search evidence)"
+  ]
+}

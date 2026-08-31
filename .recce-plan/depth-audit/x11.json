@@ -1,0 +1,36 @@
+{
+  "service": "x11",
+  "summary": "Sends the X11 \u00a78 byte-order + MAJOR/MINOR probe and reads status. status=1 -> unauthenticated display. Very tight, correct T1 today - the server accepted the setup (nearly a T2 already). Biggest gap: doesn't follow through with a QueryTree/GetGeometry/GetImage to render a proof-of-access screenshot; doesn't feed a loot artifact. No coverage for the write-only cookie families or MIT-MAGIC-COOKIE guessing.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/x11.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "loot_store"
+  ],
+  "findings": [
+    {
+      "kind": "x11_open",
+      "title_pattern": "X11 display accepts unauthenticated connections",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Server returned status=Success (1) to a no-cookie handshake - the server itself accepted the connection setup, no auth needed. This is stronger than most T1 findings; it's the doorstep of T2.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Follow the accepted setup with GetGeometry(root) + GetImage on a tiny 8x8 region and save the pixmap. Proves live framebuffer read, not just handshake ack. Screenshot via xwd is a T3-shaped tester_next_step but the T2 in-module is the pixel read.",
+      "promotion_risk": "low",
+      "related_cves": [],
+      "tester_next_step": "DISPLAY=<ip>:<display> xwd -root -out /tmp/scr.xwd && convert /tmp/scr.xwd /tmp/scr.png; then DISPLAY=<ip>:<display> xdotool key ctrl+alt+t   # spawn a terminal on the target's live desktop"
+    },
+    {
+      "kind": "x11_present",
+      "title_pattern": "X11 server present (authentication required)",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Handshake refused with status=0 - port speaks X but access-controlled. Discovery only.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Try a small set of common cookie material (empty MIT-MAGIC-COOKIE-1, all-zeros, sniffed local cookies) - a hit promotes to full T2. Also try XDMCP query on UDP/177 - some setups pair open XDMCP with an xhost-restricted 6000.",
+      "promotion_risk": "low",
+      "related_cves": [],
+      "tester_next_step": "nmap -sU -p 177 --script xdmcp-discover <ip>; and: DISPLAY=<ip>:<display> xhost + 2>&1   # test if the operator left xhost + on at some point"
+    }
+  ]
+}

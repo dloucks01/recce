@@ -1,0 +1,197 @@
+{
+  "service": "s7",
+  "summary": "S7 module is one of the strongest OT modules. It reaches T2 concretely via read_var_ok (FC 0x04 M0.0 succeeds \u2192 proof PUT/GET is exploitable) and via the CVE-2016-9159 legacy password readout (SZL 0x0132 index 3 \u2192 8-byte obfuscated password + deobfuscation \u2192 cleartext hint). CVE fingerprint pipeline maps MLFB order code to CVE-2015-2177/CVE-2016-9159/CVE-2020-15782/CVE-2022-38465. Biggest gap: does not chain the deobfuscated password back into an authenticated snap7 session, and never actually attempts FC 0x29 STOP even opt-in.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/s7.py"
+  ],
+  "findings": [
+    {
+      "kind": "s7_reachable",
+      "title_pattern": "Siemens S7 PLC reachable on scanned network",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "COTP CR/CC handshake with TSAP walk is a positive S7-family fingerprint, not a bare port-open guess.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Segmentation stance \u2014 cannot promote without pivoting off the same T1 evidence.",
+      "promotion_risk": "none",
+      "tester_next_step": "plcscan -p 102 <ip>; snap7-client -h <ip> -c connect -R 0 -S 2 (rack 0 slot 2 = classic S7-300/400 CPU location).",
+      "related_cves": []
+    },
+    {
+      "kind": "s7_cotp_reachable",
+      "title_pattern": "S7 COTP layer reachable, S7COMM setup rejected",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "COTP-CC but no S7 setup \u2014 protocol layer reachable, no vuln evidence.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Try alternate TSAPs (0x4C01, 0x4C02 for S7-1500 basic panel), and probe port 102 for RUGGEDCOM/OMSA disguised iso-tsap listeners.",
+      "promotion_risk": "low",
+      "tester_next_step": "for tsap in 0100 0200 0201 0300 4c01 4c02 1000; do python -c \"import snap7; c=snap7.client.Client(); c.set_connection_params('<ip>',0x0100,int('$tsap',16)); c.connect_tsap()\"; done",
+      "related_cves": []
+    },
+    {
+      "kind": "s7_plus_detected",
+      "title_pattern": "S7COMM-PLUS detected (S7-1200 v4 / S7-1500)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Protocol byte 0x72 identifies S7COMM-PLUS \u2014 fingerprint only.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Parse the OPN/S7CommPlus fields more deeply to extract PLC serial / hardware version; correlate against CVE-2020-15782 firmware bands.",
+      "promotion_risk": "low",
+      "tester_next_step": "snap7-plus-cli connect <ip>; check firmware via TIA Portal Online-Diagnostics; correlate with SSA-434534 and SSA-568427.",
+      "related_cves": [
+        "CVE-2020-15782",
+        "CVE-2022-38465"
+      ]
+    },
+    {
+      "kind": "s7_stack_confirmed",
+      "title_pattern": "S7COMM protocol stack confirmed",
+      "severity": "info",
+      "tier": "t1",
+      "tier_evidence": "Setup Communication ACK with parameter 0xF0 is deterministic evidence classic S7COMM is spoken.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Absorbed by s7_read_var_ok/s7_put_get_enabled promotions.",
+      "promotion_risk": "none",
+      "tester_next_step": "snap7-client -h <ip> -c connect -R 0 -S 2 && snap7-client -h <ip> -c szl -i 0x0011",
+      "related_cves": []
+    },
+    {
+      "kind": "s7_tsap_enumerated",
+      "title_pattern": "S7 TSAP enumeration (rack/slot topology)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "TSAP list is rack/slot layout \u2014 fingerprint only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Already covered by reachable/stack_confirmed.",
+      "promotion_risk": "none",
+      "tester_next_step": "Try each confirmed TSAP with snap7-client set_connection_params \u2014 one may reach a CP343-1/CP443-1 with different protection level than the CPU.",
+      "related_cves": []
+    },
+    {
+      "kind": "s7_module_identification",
+      "title_pattern": "S7 CPU identity disclosed (order code + firmware)",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "SZL 0x0011 read \u2014 protocol-exposed fingerprint feeding CVE map.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Already partly promoted via cve_matches; keep the MLFB itself informational and rely on s7_firmware_cve for the T1 evidence.",
+      "promotion_risk": "none",
+      "tester_next_step": "MLFB decoded \u2014 search Siemens ProductCERT + siemens.com/cert-services for MLFB prefix; consult CVE-2015-2177/CVE-2016-9159 for 6ES73* CPUs.",
+      "related_cves": []
+    },
+    {
+      "kind": "s7_component_identification",
+      "title_pattern": "S7 component identification disclosed (plant/location/serial)",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "SZL 0x001C free-text \u2014 high info-leak value but not proof of vuln.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Info-leak is the whole finding \u2014 feed serial into cross-scan correlation via known_ot_assets.",
+      "promotion_risk": "none",
+      "tester_next_step": "Record plant_designation / location \u2014 often names the physical process/site. Correlate serial against vendor RMA / engineering-station project files if reachable.",
+      "related_cves": []
+    },
+    {
+      "kind": "s7_put_get_enabled",
+      "title_pattern": "S7 PUT/GET communication enabled \u2014 unauthenticated memory read/write",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "SZL 0x0131 index 3 record_seen \u2014 deterministic proof PUT/GET is enabled.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Chain into s7_read_var_ok result: if read succeeded on M0.0, that IS the T2 proof.",
+      "promotion_risk": "none",
+      "tester_next_step": "snap7-client -h <ip> -c getvar -a M -s 0 -n 1; then enumerate DBs: snap7-client -c listblocks; snap7-client -c getvar -a DB -d 1 -s 0 -n 16 \u2014 dump plant recipes/setpoints without auth.",
+      "related_cves": []
+    },
+    {
+      "kind": "s7_read_var_ok",
+      "title_pattern": "S7 unauthenticated variable read succeeded (M0.0)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "FC 0x04 return_code 0xFF is a concrete unauthenticated 1-byte read of a real CPU memory area \u2014 proof of exploit, not stance.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 would be full DB dump / block upload + interpretation. Recce deliberately stops at 1 byte to avoid noise; a --s7-dump mode could enumerate DBs and pull first N bytes of each.",
+      "promotion_risk": "medium",
+      "tester_next_step": "snap7-client -h <ip> -c getvar -a DB -d <n> -s 0 -n 256 for each DB from the block list; snap7-client -h <ip> -c dbget -d 1 (full DB1 dump) \u2014 expect process setpoints, recipes, alarms.",
+      "related_cves": [
+        "CVE-2015-2177"
+      ]
+    },
+    {
+      "kind": "s7_protection_level",
+      "title_pattern": "S7 CPU protection level = 1 (no password)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "SZL 0x0232 index 4 exposes the CPU protection level byte deterministically.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Level 1 means STOP/START/block upload accepted without password \u2014 send FC 0x29 STOP (behind --s7-stop) for T2. Destructive.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "snap7-client -h <ip> -c szl -i 0x0232 -x 4; if level=1, DO NOT run stop against production. Test-cell prove: snap7-client -h <ip> -c stop then snap7-client -c start.",
+      "related_cves": [
+        "CVE-2015-2177"
+      ]
+    },
+    {
+      "kind": "s7_legacy_password_readout",
+      "title_pattern": "S7 legacy CPU password readout (CVE-2016-9159)",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "SZL 0x0132 index 3 returns the CPU password blob AND the module deobfuscates it in _deobfuscate_s7_password \u2192 cleartext CPU credential recovered without auth. That IS initial access to the CPU.",
+      "can_promote_to": "t4",
+      "promotion_notes": "T4 chain: use recovered password to open an authenticated snap7 session, dump every DB, upload OBs (function 0x1B), then rewrite OB1 (T4 = full PLC compromise).",
+      "promotion_risk": "destructive",
+      "tester_next_step": "Use the leg['cleartext_guess'] password: snap7-client -h <ip> -c connect --password '<CLEARTEXT>'; then snap7-client -c szl -i 0x0132; dump every OB with snap7-client -c blockget -t OB -n <num>; NEVER write OBs against production.",
+      "related_cves": [
+        "CVE-2016-9159"
+      ]
+    },
+    {
+      "kind": "s7_stop_start_possible",
+      "title_pattern": "S7 CPU STOP/START function reachable \u2014 process DoS possible",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Emitted whenever s7_stack is confirmed \u2014 proves protocol reachability of FC 0x29, not that STOP itself would succeed.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Only real proof is to send FC 0x29 STOP under --s7-stop; destructive on production, safe in test cell.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: snap7-client -h <ip> -c stop; verify SF LED on CPU face; snap7-client -c start to recover. Never on production.",
+      "related_cves": [
+        "CVE-2015-2177"
+      ]
+    },
+    {
+      "kind": "s7_block_list",
+      "title_pattern": "S7 block list enumerated (OB/FB/FC/DB inventory disclosed)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "UserData 0x0D reply with 4-byte records is deterministic block inventory \u2014 real program structure leak.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Enumerate specific DB numbers via block-upload (function 0x1B, UD subfn 0x1F); paired with put_get_enabled this is full logic exfil.",
+      "promotion_risk": "medium",
+      "tester_next_step": "For each DB in blocks: snap7-client -h <ip> -c blockget -t DB -n <num>; write raw to disk and disassemble with plctool/snap7 to recover engineering IP.",
+      "related_cves": []
+    },
+    {
+      "kind": "s7_firmware_cve",
+      "title_pattern": "S7 firmware matches Siemens advisory ({CVE})",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "MLFB prefix positively identifies family \u2014 deterministic CVE-family match; firmware band still needs confirmation.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add firmware-band verification via SZL 0x0011 ausbg2 major/minor comparison against the CVE's patched-in-firmware release; only emit CVE tag when band matches, else CWE-1395 generic.",
+      "promotion_risk": "none",
+      "tester_next_step": "Compare fw_version to Siemens ProductCERT SSA-***; for CVE-2016-9159 confirm password readout worked; for CVE-2020-15782 use TIA Portal / snap7-plus PoC (private) against S7-1200 <V4.5.",
+      "related_cves": [
+        "CVE-2015-2177",
+        "CVE-2016-9159",
+        "CVE-2020-15782",
+        "CVE-2022-38465"
+      ]
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_ot_assets",
+    "known_users"
+  ]
+}

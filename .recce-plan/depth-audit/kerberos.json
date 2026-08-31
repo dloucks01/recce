@@ -1,0 +1,73 @@
+{
+  "service": "kerberos",
+  "summary": "Kerberos module is unique in the tranche: it's stdlib RC4 kerb client that actively RETRIEVES material - $krb5asrep$ and $krb5tgs$ hashes are captured to disk-ready format (T2 proof of exploit for the roast primitive itself). Pre-auth spray with PA-ENC-TIMESTAMP recovers real creds (T3). Only well-known-user fallback is a bit small; per user directive doesn't actually crack. Gap: doesn't chain roast->crack->spray via known_users, and doesn't feed etype_preflight into the roast prep (defined but not wired into kerberoast_spn).",
+  "module_files": [
+    "recce/ad/kerberos.py"
+  ],
+  "findings": [
+    {
+      "kind": "asrep_roast",
+      "title_pattern": "AS-REP roastable account (pre-auth disabled)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "recce actually captured a live AS-REP with encrypted enc-part and formatted it as $krb5asrep$23$ - the crackable material is in the finding detail. Offline crack is the T3 step, but the exfil of the hash IS proof of exploit against a pre-auth-disabled account.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Local wordlist crack (hashcat -m 18200 rockyou.txt) on the captured hash would land actual plaintext. Airgap constraint means no cloud; but a bundled small wordlist + john-jumbo run is feasible. Or auto-spray the recovered plaintext against SMB/WinRM/RDP.",
+      "promotion_risk": "low",
+      "tester_next_step": "Copy the $krb5asrep$ line from the finding into asrep.hash; hashcat -m 18200 asrep.hash /usr/share/wordlists/rockyou.txt; on crack, feed the password back via nxc smb <dc> -u <user> -p '<pass>' --local-auth first, then domain auth.",
+      "related_cves": [
+        "CVE-1999-0387"
+      ]
+    },
+    {
+      "kind": "user_enum",
+      "title_pattern": "Kerberos username enumeration (no credential)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Deterministic KDC oracle: PREAUTH_REQUIRED(25) vs PRINCIPAL_UNKNOWN(6) confirms valid usernames pre-auth, no logon attempted so no lockout. Severity is dynamic (medium/high/critical by count).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain to kerberos.spray automatically with the confirmed user list + a couple of season passwords when ldap_lockout=0 was flagged. Produces T3 (foothold) via first valid cred.",
+      "promotion_risk": "medium",
+      "tester_next_step": "impacket-GetNPUsers <REALM>/ -no-pass -usersfile users.txt -dc-ip <ip>; then kerbrute passwordspray -d <realm> --dc <ip> users.txt 'Winter2025!' (or run recce's spray)."
+    },
+    {
+      "kind": "kerberos_spray_success",
+      "title_pattern": "Kerberos pre-auth spray recovered a valid credential",
+      "severity": "high",
+      "tier": "t3",
+      "tier_evidence": "The KDC returned an AS-REP for a supplied password/hash - the credential IS validated end-to-end via a real pre-auth AS-REQ. That's a live valid credential in hand (initial access).",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed recovered cred into ldap authenticated enum + smb secretsdump attempt + winrm evil-winrm shell attempt. Auto-check whether the cred is local admin somewhere -> LSA dump.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "impacket-getTGT <realm>/<user>:'<pass>' -dc-ip <ip>; export KRB5CCNAME=<user>.ccache; then impacket-secretsdump -k -no-pass <target>; then evil-winrm -i <target> -u <user> -H <nt>."
+    },
+    {
+      "kind": "kerberos_fast_enforced",
+      "title_pattern": "Kerberos KDC enforces FAST (pre-auth armouring)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "PA-FX-FAST (padata 136) observed in a KRB-ERROR reply pre-auth - deterministic defensive posture. Correctly flags that spray path is defeated.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Defensive finding by design - the promotion is 'note the constraint' in engagement planning; nothing to prove-more.",
+      "promotion_risk": "none",
+      "tester_next_step": "None - AS-REP roast of DONT_REQ_PREAUTH accounts is the only remaining credless path; run recce kerberos and rely on that finding class."
+    },
+    {
+      "kind": "kdc_time_skew",
+      "title_pattern": "Kerberos KDC clock skew exceeds tolerance",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "KDC stime read from KRB-ERROR reply and compared to tester wall clock - authoritative unauthenticated clock oracle. Deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Use the KDC's own stime to build a valid Kerberos authenticator regardless of tester clock drift - proves the leak lets you succeed where you would otherwise fail with AP_ERR_SKEW.",
+      "promotion_risk": "low",
+      "tester_next_step": "sudo ntpdate <dc-ip> (sync to DC clock); or use faketime for the impacket call: faketime '<kdc-stime>' impacket-getTGT ..."
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users (consume - primary input for roast + spray)",
+    "known_domains (consume - realm)",
+    "known_hostnames (consume - dc_ip)",
+    "cred_store (produce - sprayed creds + roasted hashes)"
+  ]
+}

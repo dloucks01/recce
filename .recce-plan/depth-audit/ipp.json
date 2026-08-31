@@ -1,0 +1,51 @@
+{
+  "service": "ipp",
+  "module_files": [
+    "recce/services/ipp.py"
+  ],
+  "summary": "IPP CUPS-Get-Printers + Get-Printer-Attributes ingress verification. Version-gated CVE-2024-47176 finding with strict distro-suffix backport awareness. Ingress-verified upgrade lets the finding say 'RFC 8011 \u00a74.2.5 path verified', still detection-only. Missing: no cups-browsed exposure test lives here (that lives in cups_lpd module).",
+  "findings": [
+    {
+      "kind": "ipp_printers",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "CUPS/IPP printer list readable unauthenticated",
+      "tier_evidence": "CUPS-Get-Printers response is returned only when auth is absent on the endpoint.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Cross to Get-Jobs (which the cups_lpd module does) for job/user/host/filename harvest.",
+      "promotion_risk": "low",
+      "tester_next_step": "ipptool -tv ipp://IP:631/printers/ CUPS-Get-Printers.test"
+    },
+    {
+      "kind": "ipp_cups",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "CUPS reachable \u2014 check for CVE-2024-47176 chain",
+      "tier_evidence": "Fires only when CUPS version is below the vendor patch line AND (optionally) Get-Printer-Attributes returned successful-ok unauth. Version-gated with distro-backport awareness \u2014 not FP-heavy.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Detection-only per module policy (rightly). Full T2 chain lives in cups_lpd/cups_browsed_reachable + a controlled foomatic payload; recce explicitly refuses to fire the exploit.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "# ROE-required: PoC scripts on the 2024-09 CUPS foomatic chain are public but destructive; do not run against production. Confirm reachability: curl -sSI http://IP:631/ ; assess cups-browsed with `recce cups_lpd`",
+      "related_cves": [
+        "CVE-2024-47176",
+        "CVE-2024-47076",
+        "CVE-2024-47175",
+        "CVE-2024-47177"
+      ]
+    },
+    {
+      "kind": "ipp_cups_patched",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "CUPS reachable but past the 2024-09 fixed line",
+      "tier_evidence": "Informational post-gate.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "n/a \u2014 patched"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames (via cups_lpd URI harvest)"
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "service": "vnc",
+  "summary": "One-shot RFB handshake reads the version banner and the security-type list. Detects security-type 1 (no auth) and type-2-only (DES challenge). Solid T1 for no-auth (server *declares* it will accept). Biggest gap: never actually accepts the security type - stops at 'server offered X'; a T2/T3 would send SecurityResult=OK and grab a framebuffer JPEG as proof-of-desktop. Also no support for capturing the DES challenge for offline hashcat -m 11600, and no default-password sweep against 'password'/'admin'/'12345678'/blank on type-2-only endpoints.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/vnc.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "session_credentials",
+    "loot_store"
+  ],
+  "findings": [
+    {
+      "kind": "vnc_no_auth",
+      "title_pattern": "VNC accepts security type 1 (no authentication)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Server-sent security-type list includes 1 (None). Deterministic, single roundtrip, no auth attempted.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Accept security type 1 (send byte 0x01, expect SecurityResult=0), then send ClientInit (byte 1 shared), read ServerInit (framebuffer W/H/pixelformat/name), send a FramebufferUpdateRequest, and screenshot the first raw-encoding rectangle to a PNG. That's genuine T3 initial-access - eyes on the console. Cap the capture at one small tile (128x128) to keep it lightweight.",
+      "promotion_risk": "medium",
+      "related_cves": [],
+      "tester_next_step": "vncviewer <ip>::<port>   # opens KVM immediately; capture with vncsnapshot <ip>::<port> screenshot.png   or scrot the vncviewer window."
+    },
+    {
+      "kind": "vnc_des_only",
+      "title_pattern": "VNC offers only DES-based VNC Authentication (weak)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Security-type list == [2] - server itself declared VNC-Auth-only.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Send byte 0x02 to accept type 2, read the 16-byte challenge, and dump it as a hashcat -m 11600 candidate. Add a small dictionary check against ('password','admin','vnc','12345678','') as a T3 credential burn.",
+      "promotion_risk": "medium",
+      "related_cves": [],
+      "tester_next_step": "python3 -c 'import socket,struct; s=socket.create_connection((\"<ip>\",<port>));s.recv(12);s.send(b\"RFB 003.008\\n\");n=s.recv(1)[0];t=s.recv(n);s.send(b\"\\x02\");chal=s.recv(16);print(chal.hex())'  ->  hashcat -m 11600 <chal>:<known_response>"
+    },
+    {
+      "kind": "vnc_fingerprint",
+      "title_pattern": "VNC endpoint fingerprint",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Version and security-type list only - straight banner.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Correct as info - all T1 claims fork off separate finding kinds.",
+      "promotion_risk": "none",
+      "related_cves": [],
+      "tester_next_step": "nmap -p <port> --script vnc-info,realvnc-auth-bypass <ip>   # covers RealVNC CVE-2006-2369 auth-bypass among others."
+    }
+  ]
+}

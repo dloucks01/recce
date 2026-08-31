@@ -1,0 +1,26 @@
+{
+  "service": "gitdump",
+  "summary": "gitdump.py is a stdlib-only .git-directory reconstruction helper \u2014 it emits no findings itself. Its output drives the `web-git-dump` finding in recce/services/web/loot.py: parses .git/index, inflates loose objects, mines them for secrets and URL-embedded creds + AWS access keys, and folds recovered credentials into the credential store as `web-git-loot`. This is real T3 (initial access \u2014 plaintext creds captured and made sprayable); the finding itself is high-sev with concrete file counts. Packfiles are noted but not delta-resolved (biggest coverage gap \u2014 most production git repos have their history packed). Reflog / stash / branch enumeration also absent.",
+  "module_files": [
+    "recce/services/gitdump.py",
+    "recce/services/web/loot.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_credentials",
+    "known_users",
+    "known_hostnames"
+  ],
+  "findings": [
+    {
+      "kind": "web-git-dump",
+      "title_pattern": "Exposed .git reconstructed - source tree + secrets recovered",
+      "severity": "high",
+      "tier": "t3",
+      "tier_evidence": "Recovered plaintext blobs, mined real credentials (username+secret dicts), and Credential objects folded into the store with source=web-git-loot \u2014 this is direct foothold material captured, not just a safe check.",
+      "can_promote_to": "t4",
+      "promotion_risk": "low",
+      "promotion_notes": "T4 = automatic replay of captured creds across the credential-spray loop (SSH, SMB, DB, cloud AKIA\u2192STS). AKIA keys are recovered but stored with placeholder secret '(aws-access-key-id)' \u2014 needs paired SecretAccessKey mining or a T3 note to hunt the matching secret. Packfile support (delta resolution) would broadly widen coverage.",
+      "tester_next_step": "git-dumper https://<host>/.git ./loot; then trufflehog filesystem ./loot; also GitTools/Extractor.py to resolve packfiles. For any AKIA found: hunt paired `aws_secret_access_key` in same/nearby blobs; then aws sts get-caller-identity."
+    }
+  ]
+}

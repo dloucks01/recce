@@ -1,0 +1,158 @@
+{
+  "service": "bgp",
+  "module_files": [
+    "recce/services/bgp.py"
+  ],
+  "summary": "Sophisticated T1 module \u2014 OPEN + NOTIFICATION parsing yields deterministic no-auth proof, expected-AS disclosure, and Router-ID pivot. Never sends UPDATE (correct read-only posture). Biggest gaps: bgp_router_id_pivot should auto-enqueue the new address as a scan target; bgp_no_neighbor_auth doesn't attempt the actual session establishment + prefix injection that would be T2/T3 (which is intentional \u2014 destructive). GTSM TTL probe absent. TCP-MD5 detection is a hint (needs raw sockets).",
+  "proposed_shared_surface_consumers": [
+    "known_hosts",
+    "known_asns",
+    "os_fingerprints"
+  ],
+  "findings": [
+    {
+      "kind": "bgp_reachable",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "BGP speaker reachable on TCP/179",
+      "tier_evidence": "Reachability confirmation \u2014 parseable BGP frame returned.",
+      "can_promote_to": "t1",
+      "promotion_risk": "none",
+      "promotion_notes": "Already crosses into T1 by virtue of the OPEN exchange proving unauthenticated peering below. Consumer of known_hosts surface for follow-on scans of Router-ID targets.",
+      "related_cves": [],
+      "tester_next_step": "nmap --script bgp-info -p 179 <ip>; then correlate peer AS with whois -h whois.arin.net 'a AS<n>' for ownership."
+    },
+    {
+      "kind": "bgp_no_neighbor_auth",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "BGP peer accepts unauthenticated OPEN",
+      "tier_evidence": "Peer replied its own OPEN with no TCP-MD5/TCP-AO/GTSM requirement \u2014 deterministic session-setup evidence.",
+      "can_promote_to": "t3",
+      "promotion_risk": "destructive",
+      "promotion_notes": "T3 route injection = actual UPDATE with a benign /32 more-specific into the RIB (measurable via looking-glass, provable). Very destructive on production \u2014 must be strictly opt-in --active-bgp-inject with victim address chosen by operator. exabgp harness scripted as tester_next_step is the correct current posture.",
+      "related_cves": [],
+      "tester_next_step": "exabgp with 'neighbor <ip> {local-as <expected>; peer-as <peer_asn>; router-id 192.0.2.1; family {inet unicast;} static { route 198.51.100.0/32 next-hop self; }}' \u2014 verify at looking-glass; do NOT run without written ROE."
+    },
+    {
+      "kind": "bgp_expected_as_disclosed",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "BGP peer discloses expected local AS via NOTIFICATION 'Bad Peer AS'",
+      "tier_evidence": "Peer's NOTIFICATION data field parsed to extract the configured neighbor AS \u2014 deterministic proof of RFC-4271 \u00a76.2 disclosure behaviour.",
+      "can_promote_to": "t2",
+      "promotion_risk": "medium",
+      "promotion_notes": "Combined with bgp_no_neighbor_auth this IS the T2 primitive \u2014 automate a full-OPEN success using the disclosed AS as proof-of-hijack-readiness (session establishes but recce KEEPALIVEs only, no UPDATE). Requires opt-in flag.",
+      "related_cves": [],
+      "tester_next_step": "With disclosed AS pair, exabgp neighbor <ip> {peer-as <peer>; local-as <expected>; router-id 192.0.2.1;} \u2014 session comes up = full-hijack primitive."
+    },
+    {
+      "kind": "bgp_peer_id",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "BGP peer identification extracted (AS, version, hold-time, Router-ID, capabilities)",
+      "tier_evidence": "Parsed OPEN fields \u2014 fingerprint disclosure only.",
+      "can_promote_to": "t1",
+      "promotion_risk": "none",
+      "promotion_notes": "Consume peer AS into shared known_asns surface for whois attribution and cross-host BGP peering detection.",
+      "related_cves": [],
+      "tester_next_step": "whois -h whois.arin.net 'a AS<peer_asn>'; check bgp.tools/<peer_asn> for peering graph."
+    },
+    {
+      "kind": "bgp_router_id_pivot",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "BGP Router-ID reveals additional host address",
+      "tier_evidence": "Router-ID IPv4 differs from connected interface \u2014 pure discovery.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Auto-enqueue Router-ID as a scan target and mark it as management/loopback \u2014 mgmt interfaces almost always accept SSH/HTTPS with weaker ACLs than the data plane.",
+      "related_cves": [],
+      "tester_next_step": "nmap -Pn -sS -p- <router_id>; then nxc ssh <router_id> -u 'admin,cisco,root' -p 'admin,cisco,Cisco123,<vendor-defaults>'."
+    },
+    {
+      "kind": "bgp_capabilities",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "BGP capabilities enumerated",
+      "tier_evidence": "Pure informational \u2014 capability code + name list.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "No natural promotion path \u2014 fingerprint only.",
+      "related_cves": [],
+      "tester_next_step": "nmap --script bgp-info -p 179 <ip>; compare cap set against vendor stacks (Cisco IOS-XR advertises Enhanced Route Refresh; FRR advertises LLGR)."
+    },
+    {
+      "kind": "bgp_afi_safi",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "BGP MP-BGP AFI/SAFI list enumerated",
+      "tier_evidence": "Pure fingerprint \u2014 role tag (edge vs PE vs EVPN leaf).",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Consume as role tag in shared os_fingerprints surface; EVPN or L3VPN AFI on a scanned host = data-center fabric leaf, elevates severity of the reachable finding.",
+      "related_cves": [],
+      "tester_next_step": "nmap --script bgp-info -p 179 <ip>; if EVPN present, scan for L2/L3 tenant boundary bypass with e.g. VXLAN scanner."
+    },
+    {
+      "kind": "bgp_graceful_restart",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "BGP Graceful Restart advertised",
+      "tier_evidence": "Pure fingerprint \u2014 non-zero restart time hints production vs lab.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Informational \u2014 no meaningful promotion path.",
+      "related_cves": [],
+      "tester_next_step": "nmap --script bgp-info -p 179 <ip>  # note restart_time; large value = production."
+    },
+    {
+      "kind": "bgp_route_refresh",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "BGP Route Refresh capability advertised",
+      "tier_evidence": "Pure fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "None.",
+      "related_cves": [],
+      "tester_next_step": "nmap --script bgp-info -p 179 <ip>."
+    },
+    {
+      "kind": "bgp_notification_leak",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "BGP NOTIFICATION reply leaked peer configuration",
+      "tier_evidence": "NOTIFICATION data field parsed and content extracted \u2014 deterministic disclosure.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Already tightly coupled to bgp_expected_as_disclosed; keep as separate high-signal enum. Consume disclosed values into scan targets.",
+      "related_cves": [],
+      "tester_next_step": "Parse leaked value from finding; use in bgp_expected_as_disclosed follow-up."
+    },
+    {
+      "kind": "bgp_version_probe",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "BGP peer discloses maximum supported version",
+      "tier_evidence": "Send version=5 OPEN, parse NOTIFICATION 2/1 data field \u2014 fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "None \u2014 stack fingerprint only.",
+      "related_cves": [],
+      "tester_next_step": "Included in probe automatically."
+    },
+    {
+      "kind": "bgp_md5_hint",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "BGP peer accepted TCP but did not reply to OPEN (possible TCP-MD5 / ACL requirement)",
+      "tier_evidence": "Inference from silent drop \u2014 recce cannot disambiguate MD5 vs ACL from userspace.",
+      "can_promote_to": "t1",
+      "promotion_risk": "medium",
+      "promotion_notes": "Requires raw-socket TCP-MD5 probe (RFC 2385 option 19) to confirm \u2014 root privilege + raw sockets, non-portable. Alternatively, correlate with a source-address ACL test from a different vantage.",
+      "related_cves": [],
+      "tester_next_step": "sudo tcpdump -ni any 'host <ip> and tcp port 179'; retry with 'ip xfrm policy' + TCP-MD5 configured to disambiguate."
+    }
+  ]
+}

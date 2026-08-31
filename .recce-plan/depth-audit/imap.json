@@ -1,0 +1,187 @@
+{
+  "service": "imap",
+  "summary": "IMAP module is the deepest of the mail-legacy tranche: reliable T1 posture (STARTTLS presence, LOGINDISABLED lie, SASL mech inventory, ID pre-auth leak), T1 hard-verify probes (PREAUTH greeting, plaintext-LOGIN accepted, ANONYMOUS session actually granted, CRAM/DIGEST challenge captured), T0 known-bad version banner match, and T3 credentialed-login path with mailbox inventory + loot subject-search (default-cred spray built in). Cross-transport wire feeds known_mail_accounts. Biggest gap: no LOGIN-differential timing-based enum promotion, no follow-through on GSSAPI relay (Kerberos ticket capture), and no fetch of the CRAM-MD5 response for immediate cracking (only the challenge is captured).",
+  "module_files": [
+    "recce/services/imap.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_mail_accounts",
+    "known_users",
+    "known_hostnames",
+    "known_domains",
+    "cleartext_creds"
+  ],
+  "findings": [
+    {
+      "kind": "imap_preauth_greeting",
+      "title_pattern": "IMAP PREAUTH greeting (unauthenticated mailbox session)",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "A '* PREAUTH' greeting IS the authenticated session \u2014 the socket is already logged in without any credential, giving an unauth mailbox handle.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Auto-run LIST/LSUB/SELECT INBOX and dump a bounded set of message headers as loot proof; harvest addresses to known_users.",
+      "promotion_risk": "low",
+      "tester_next_step": "nc IP PORT ; then: a1 LIST \"\" \"*\" ; a2 SELECT INBOX ; a3 FETCH 1:5 (BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO)])",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_no_starttls",
+      "title_pattern": "IMAP does not offer STARTTLS on 143/tcp",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Enum-only: CAPABILITY did not advertise STARTTLS \u2014 a posture flag.",
+      "can_promote_to": "t2",
+      "promotion_notes": "No promotion practical inside recce; requires MITM/sniff. Stays a posture finding.",
+      "promotion_risk": "none",
+      "tester_next_step": "tcpdump -i any -A 'tcp port 143 and host IP' during a real user session \u2014 every LOGIN is in clear.",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_login_plaintext_allowed",
+      "title_pattern": "IMAP LOGIN accepted before STARTTLS (plaintext credentials)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Bogus LOGIN with the probe user is processed (returned NO) rather than refused with a TLS-required BAD; deterministic proof that the plaintext auth path is live.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain: run the LOGIN-differential enum sweep (already implemented) and spray captured names against common passwords for T3 mailbox access.",
+      "promotion_risk": "medium",
+      "tester_next_step": "hydra -L smtp_enum_users.txt -P rockyou.txt imap://IP:143 -t 4 -f -V",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_starttls_downgrade",
+      "title_pattern": "IMAP STARTTLS downgrade (LOGIN accepted despite LOGINDISABLED)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "LOGINDISABLED advertised in pre-TLS CAPABILITY but LOGIN nonetheless processed \u2014 a deterministic differential that IS the flaw.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Combine with a canary login to prove cred-in-clear path is exploitable, same as t1 plaintext_login.",
+      "promotion_risk": "low",
+      "tester_next_step": "openssl s_client -connect IP:143 (raw) ; a1 CAPABILITY ; a2 LOGIN user password ; note LOGINDISABLED was advertised but LOGIN worked",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_sasl_mechanisms",
+      "title_pattern": "IMAP weak SASL mechanism advertised: <MECH>",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Enum-only: advertised AUTH= mechs matched against _SASL_WEAK table; severity varies (high for PLAIN/LOGIN/GSSAPI/NTLM/ANONYMOUS on cleartext, medium for CRAM/DIGEST, low for PLAIN/LOGIN over 993).",
+      "can_promote_to": "t2",
+      "promotion_notes": "For CRAM-MD5/DIGEST-MD5, the sibling imap_offline_crack_channel captures the challenge (T2). For NTLM, add a Type-1/Type-2 exchange (like pop3.py) to harvest AV_PAIRs \u2014 a T2 information-disclosure primitive.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -connect IP:993 ; a1 CAPABILITY ; then for AUTH=NTLM: a2 AUTHENTICATE NTLM + base64(NTLMSSP Type-1) ; parse Type-2 AV_PAIRs (nmap --script imap-ntlm-info).",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_gssapi_relay",
+      "title_pattern": "IMAP AUTH=GSSAPI advertised (Kerberos relay surface)",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Presence of GSSAPI in advertised mech list; no Kerberos exchange attempted.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Requires an AD context \u2014 get an ST for imap/<host> via impacket-getST or use s4u2self with a compromised account, then relay to grant mailbox access.",
+      "promotion_risk": "medium",
+      "tester_next_step": "impacket-getST -spn imap/mail.domain.local -impersonate 'admin' -k -no-pass 'DOMAIN/svc' ; then use the ticket via KRB5CCNAME with an IMAP client that supports GSSAPI (evolution / offlineimap with kerberos).",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_anonymous_allowed",
+      "title_pattern": "IMAP AUTH=ANONYMOUS accepted",
+      "severity": "high",
+      "tier": "t3",
+      "tier_evidence": "AUTHENTICATE ANONYMOUS with an arbitrary trace returned OK \u2014 a confirmed unauth mailbox session (not just advertised).",
+      "can_promote_to": "t4",
+      "promotion_notes": "Auto-run LIST/SELECT INBOX to prove read access + dump message headers as loot (imap_mailbox_access + imap_loot_hits paths cover this).",
+      "promotion_risk": "low",
+      "tester_next_step": "openssl s_client -connect IP:PORT ; a1 AUTHENTICATE ANONYMOUS ; + <base64 arbitrary trace> ; then a2 LIST \"\" \"*\" ; a3 SELECT INBOX",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_offline_crack_channel",
+      "title_pattern": "IMAP CRAM-MD5/DIGEST-MD5 advertised - offline-crackable auth",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "Server issued an actual base64 challenge on demand \u2014 the piece required to crack a captured response is on hand (not just an advertisement).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Add MITM helper (ettercap/arpspoof) doc + capture-then-crack loop against a live client response. Beyond automated scanner scope.",
+      "promotion_risk": "medium",
+      "tester_next_step": "arpspoof + tcpdump 'tcp port 143' to capture a real AUTHENTICATE CRAM-MD5 response, then: hashcat -m 10200 '$cram_md5$<b64_chal>$<b64_resp>' rockyou.txt",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_id_disclosure",
+      "title_pattern": "IMAP pre-auth ID response leaks server/product info (RFC 2971)",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Pre-auth ID reply fields captured and reported \u2014 fingerprint only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds imap_version_cve; no direct promotion path beyond fingerprint chaining.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -connect IP:PORT ; a1 ID NIL \u2014 read version/os/vendor fields and grep CVE DB",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_version_cve",
+      "title_pattern": "Dovecot 2.3.x pre-2.3.21 / Cyrus IMAP 2.4.x or earlier",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Regex match against banner + ID product/version \u2014 no exploit probe.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For CVE-2022-30550 or CVE-2019-11500 chain to a memory-disclosure proof; for Cyrus 2.4.x, use the pre-auth heap-corruption PoC. Both are destructive.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "searchsploit dovecot 2.3 ; for Dovecot: https://dovecot.org/security.html for exact CVE ; do NOT fire memory-corruption PoC in prod without ROE.",
+      "related_cves": [
+        "CVE-2022-30550",
+        "CVE-2019-11500"
+      ]
+    },
+    {
+      "kind": "imap_user_enum",
+      "title_pattern": "IMAP valid usernames enumerated via LOGIN differential",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "Concrete valid usernames extracted via LOGIN-response differential across many probes; results recorded into known_mail_accounts.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Feed harvested existing users into a bounded spray against common passwords via try_login \u2014 a landed pair is T3.",
+      "promotion_risk": "high",
+      "tester_next_step": "hydra -L imap_enum_users.txt -P rockyou.txt -t 4 -f imap://IP:143 ; add -e nsr to try no-password, same-as-user, reversed.",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_default_creds",
+      "title_pattern": "IMAP default / weak credentials accepted",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "The default-cred spray landed a real LOGIN OK \u2014 an actual mailbox foothold (session established, credential proven).",
+      "can_promote_to": "t4",
+      "promotion_notes": "Chain: pivot the same identity to SSH/SMB/AD (AD-joined mail servers commonly share creds). Already partially covered by imap_mailbox_access + imap_loot_hits.",
+      "promotion_risk": "low",
+      "tester_next_step": "Try the landed pair as: ssh <user>@IP ; smbclient -L //IP -U '<user>%<pw>' ; then loot ~/.ssh, ~/.aws, /etc/shadow if root-adjacent.",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_mailbox_access",
+      "title_pattern": "IMAP mailbox inventory readable with credentials",
+      "severity": "high",
+      "tier": "t3",
+      "tier_evidence": "LIST/LSUB/NAMESPACE actually enumerated \u2014 real folder structure retrieved as the authenticated user.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Extend to shared-mailbox / GETACL enumeration + fetch messages older than N days as bulk-loot; already partially done via _loot_search.",
+      "promotion_risk": "low",
+      "tester_next_step": "python3 -c 'import imaplib; m=imaplib.IMAP4_SSL(\"IP\"); m.login(u,p); print(m.list()); m.select(\"INBOX\"); print(m.search(None,\"ALL\"))'",
+      "related_cves": []
+    },
+    {
+      "kind": "imap_loot_hits",
+      "title_pattern": "IMAP inbox contains high-value loot hits",
+      "severity": "high",
+      "tier": "t4",
+      "tier_evidence": "Loot-shaped subjects (password reset / VPN / SSH key / MFA) actually pulled from INBOX and returned to the operator \u2014 a discovered pivot to other services.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Optionally fetch full BODY.PEEK on top hits (currently only headers). Trade-off: more data exposure risk.",
+      "promotion_risk": "medium",
+      "tester_next_step": "After login: a1 SELECT INBOX ; a2 SEARCH SUBJECT \"password reset\" ; a3 FETCH <seq> (BODY.PEEK[TEXT]) to pull the reset token; use it on the origin service before it expires.",
+      "related_cves": []
+    }
+  ]
+}

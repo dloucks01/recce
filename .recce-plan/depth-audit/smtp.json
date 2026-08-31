@@ -1,0 +1,126 @@
+{
+  "service": "smtp",
+  "summary": "SMTP module is mid-maturity: reliable T1 posture checks (open relay envelope test, VRFY/EXPN/RCPT user enum, STARTTLS/AUTH-before-TLS, weak/leaky SASL mechs, EXPN alias roster leak) and T0 version-gated CVEs for Exim (2019-10149, 21Nails, 2024-39929). No AUTH-attempt (spraying) or NTLM info-blob parsing (leaky mech is flagged but Type-2 not captured). Cross-transport wire records users into known_mail_accounts so imap/pop3 can spray them. Biggest gap: no offline crackable challenge capture (CRAM-MD5), no CVE probe (Exim 21Nails PoC) and no NTLM AV_PAIR harvest to feed known_hostnames.",
+  "module_files": [
+    "recce/services/smtp.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_mail_accounts",
+    "known_hostnames",
+    "known_domains"
+  ],
+  "findings": [
+    {
+      "kind": "smtp_open_relay",
+      "title_pattern": "SMTP open relay",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Envelope-only MAIL FROM + RCPT to external recipient succeeded with no auth; a positive 250/251 rcpt code deterministically proves relaying is possible without ever calling DATA.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Send DATA with a self-addressed message to a controlled MX to prove end-to-end delivery; airgap-safe variant would need a controlled test recipient. Alternatively add a canary Message-Id-return-path probe.",
+      "promotion_risk": "medium",
+      "tester_next_step": "swaks --server IP:PORT --from x@example.com --to your-test@controlled.tld --header 'Subject: recce-relay-canary' ; verify inbound at the collector. Or: nmap --script smtp-open-relay -p25 IP.",
+      "related_cves": []
+    },
+    {
+      "kind": "smtp_vrfy",
+      "title_pattern": "SMTP VRFY user enumeration",
+      "severity": "low",
+      "tier": "t1",
+      "tier_evidence": "VRFY returning 250/252 is a deterministic user-existence oracle; probe only succeeds when the server honours VRFY.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Already covered by smtp_user_enum \u2014 VRFY alone stays T1 flag.",
+      "promotion_risk": "none",
+      "tester_next_step": "smtp-user-enum -M VRFY -U /usr/share/seclists/Usernames/top-usernames-shortlist.txt -t IP -p 25",
+      "related_cves": []
+    },
+    {
+      "kind": "smtp_user_enum",
+      "title_pattern": "SMTP user enumeration hits",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "Concrete valid usernames extracted via VRFY/EXPN/RCPT differential; each name is a proven-existing local account that seeds cross-service spray (recorded into known_mail_accounts).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Feed enum'd users into imap/pop3 spray via known_mail_accounts (already wired) and into ssh known_users; a landed cred here becomes T3 initial access.",
+      "promotion_risk": "medium",
+      "tester_next_step": "hydra -L users_from_recce.txt -P /usr/share/wordlists/rockyou.txt imap://IP -t 4 -f ; also try pop3://IP and ssh://IP with same list",
+      "related_cves": []
+    },
+    {
+      "kind": "smtp_cleartext",
+      "title_pattern": "SMTP without STARTTLS (cleartext)",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Enum-only: absence of STARTTLS in EHLO features \u2014 a fingerprint of posture, not a proven exploit.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Segment-sniffing to capture live credentials is out-of-band; not something recce can automate. Stays a posture finding.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -starttls smtp -connect IP:25 (expect connection refusal); tcpdump -A 'tcp port 25 and host IP' on a bridge to capture real client AUTH.",
+      "related_cves": []
+    },
+    {
+      "kind": "smtp_auth_before_tls",
+      "title_pattern": "SMTP AUTH offered without STARTTLS",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Observed AUTH mechs advertised in EHLO features while starttls missing \u2014 deterministic protocol misconfiguration (RFC 4954 \u00a74 / RFC 6409 \u00a74.3).",
+      "can_promote_to": "t2",
+      "promotion_notes": "Actually attempt AUTH PLAIN with a canary credential \u2014 a 235 response confirms server accepts plaintext creds; requires a burnable account.",
+      "promotion_risk": "low",
+      "tester_next_step": "swaks --server IP:PORT --auth PLAIN --auth-user recce_canary --auth-password recce_pw ; a 535 processes the auth path (proves cleartext channel is live)",
+      "related_cves": []
+    },
+    {
+      "kind": "smtp_auth_weak_mech",
+      "title_pattern": "SMTP AUTH offers deprecated challenge mechs",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Mere presence of CRAM-MD5/DIGEST-MD5 in advertised mech list \u2014 fingerprint only; no captured challenge/response here.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Capture the server's CRAM-MD5 challenge (send AUTH CRAM-MD5 and read the '+ b64' continuation, then abort) \u2014 mirrors what imap.py / pop3.py already do. Provides hashcat-crackable material when a real client response is sniffed.",
+      "promotion_risk": "low",
+      "tester_next_step": "openssl s_client -starttls smtp -connect IP:PORT ; type: AUTH CRAM-MD5 ; base64-decode the challenge; sniff a real client's response and: hashcat -m 10200 challenge:response wordlist.txt",
+      "related_cves": []
+    },
+    {
+      "kind": "smtp_auth_ntlm_leak",
+      "title_pattern": "SMTP AUTH advertises NTLM/GSSAPI (info-disclosure primitive)",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Detected via mere presence of NTLM/GSSAPI in AUTH mechs \u2014 the Type-2 blob itself is NOT parsed here (unlike pop3/telnet).",
+      "can_promote_to": "t2",
+      "promotion_notes": "Send AUTH NTLM + a stock Type-1 blob (recce/ad/ntlm already has type1/parse_type2 as used by pop3.py); parse AV_PAIRs to recover NetBIOS/DNS computer, domain, forest. Feed known_hostnames/known_domains.",
+      "promotion_risk": "none",
+      "tester_next_step": "nmap -p25,587 --script smtp-ntlm-info IP ; the script's Target_Name and NetBIOS_Domain_Name are the AD-anchor for further pivot.",
+      "related_cves": []
+    },
+    {
+      "kind": "smtp_cve",
+      "title_pattern": "Banner-versioned CVE (Exim <4.92 / 21Nails / 2024-39929)",
+      "severity": "critical",
+      "tier": "t0",
+      "tier_evidence": "Version-gated banner match only; the CVE is claimed based on parsed Exim version < fixed-in, no actual exploit probe.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For CVE-2019-10149: send crafted RCPT TO:<attacker+${run{...}}@localhost> with the mail-injection primitive to prove command exec by triggering a DNS callback to a controlled sink. Highly destructive if fired against production Exim; must gate on RECCE_ACTIVE_ATTACKS.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "For Exim < 4.92: use exim_4.87-4.91 metasploit module (exploit/unix/smtp/exim4_dovecot_exec) OR public CVE-2019-10149 PoC delivering an OAST callback (interact.sh). Confirm shell before running any secondary payload.",
+      "related_cves": [
+        "CVE-2019-10149",
+        "CVE-2020-28017",
+        "CVE-2024-39929"
+      ]
+    },
+    {
+      "kind": "smtp_expn_alias_leak",
+      "title_pattern": "SMTP EXPN alias expansion leaks user roster",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "EXPN 250 body actually parsed and member mailboxes extracted (multi-address roster returned) \u2014 a proven-exists roster, not just a fingerprint.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain via known_mail_accounts into pop3/imap spray with common passwords; a hit is T3 mailbox access.",
+      "promotion_risk": "medium",
+      "tester_next_step": "for a in all everyone staff wheel abuse ; do echo EXPN $a | nc IP 25 ; done ; feed harvest to hydra -L users.txt -P rockyou.txt imap://IP",
+      "related_cves": []
+    }
+  ]
+}

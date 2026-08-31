@@ -1,0 +1,175 @@
+{
+  "service": "pop3",
+  "summary": "POP3 module is the most feature-complete of the tranche: T1 posture (STLS, plaintext USER/PASS accepted, CAPA/IMPLEMENTATION disclosure), T2 offline-crackable material (APOP challenge, CRAM/DIGEST challenges captured), T2 NTLM Type-2 AV_PAIR harvest (actually parses NetBIOS/DNS/domain), T2 USER-differential enum, and T3 credentialed mailbox read (STAT/LIST/UIDL/TOP + address+Received-from harvest). Login-delay aware spray helper implemented but analyze() never calls it \u2014 biggest gap: the spray path is dead code unless the operator supplies creds directly. Also missing: cross-service wire (no known_mail_accounts feed for POP3-enumerated users), and no APOP-response cracking (only challenge captured).",
+  "module_files": [
+    "recce/services/pop3.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_mail_accounts",
+    "known_users",
+    "known_hostnames",
+    "known_domains",
+    "cleartext_creds"
+  ],
+  "findings": [
+    {
+      "kind": "pop3_implementation",
+      "title_pattern": "POP3 IMPLEMENTATION capability leaks product/version",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "CAPA IMPLEMENTATION field disclosure \u2014 fingerprint only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds pop3_known_cve.",
+      "promotion_risk": "none",
+      "tester_next_step": "nc IP 110 ; CAPA ; note IMPLEMENTATION line and cross-check offline CVE DB",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3_apop_timestamp",
+      "title_pattern": "POP3 APOP timestamp discloses internal hostname/domain",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "APOP timestamp '<pid.time@host>' parsed from greeting \u2014 the @host suffix IS internal FQDN leakage, not just a fingerprint.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Wire into known_hostnames + known_domains so downstream DNS/AD/web tools consume it.",
+      "promotion_risk": "none",
+      "tester_next_step": "nc IP 110 ; note @hostname in first line ; add to /etc/hosts or feed the AD reader for cross-service correlation",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3_apop_crackable",
+      "title_pattern": "POP3 APOP transcripts are offline-crackable (md5(challenge||pass))",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Server actively advertises the crackable challenge; a captured client response completes the offline crack tuple \u2014 the challenge half is proven in hand.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Add tcpdump/MITM helper doc + hashcat launch template using the captured timestamp; not something recce automates in-band.",
+      "promotion_risk": "medium",
+      "tester_next_step": "tcpdump -i any -A 'tcp port 110 and host IP' during real login ; then hashcat with format <md5>:<timestamp> mode 11500-style ; rockyou.txt is enough for most.",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3_no_stls",
+      "title_pattern": "POP3 does not offer STLS on 110/tcp",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "CAPA absence of STLS token \u2014 posture-only flag.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Not promotable inside recce; motivates the sniffing playbook.",
+      "promotion_risk": "none",
+      "tester_next_step": "tcpdump -i any -A 'tcp port 110 and host IP' to capture live USER/PASS",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3_cleartext_auth",
+      "title_pattern": "POP3 accepts USER/PASS in cleartext (no STLS enforced)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "USER + PASS with bogus creds was processed rather than refused with a TLS-required -ERR \u2014 deterministic proof that the plaintext auth path is live.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain the login-delay-aware spray() (already implemented, but not called from analyze) against USER-enumerated names for T3 mailbox access.",
+      "promotion_risk": "high",
+      "tester_next_step": "hydra -L users.txt -P rockyou.txt pop3://IP:110 -t 2 -w 5 (respect any LOGIN-DELAY seen in CAPA)",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3_stls_broken",
+      "title_pattern": "POP3 SASL PLAIN/LOGIN still offered inside TLS",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Compared pre-TLS and post-TLS CAPA and observed the plaintext mech set is unchanged \u2014 a determinable protocol misconfig (RFC 2595 \u00a74).",
+      "can_promote_to": "stay",
+      "promotion_notes": "Posture finding; no exploit escalation beyond the sniffing narrative.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -starttls pop3 -connect IP:110 ; type CAPA post-TLS \u2014 note PLAIN/LOGIN still present",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3_sasl_mechs",
+      "title_pattern": "POP3 weak SASL mechanism advertised: <MECH> / CRAM-MD5 challenge captured",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Weak-SASL advertisement is T0 fingerprint; the CRAM-MD5 / DIGEST-MD5 branch actively captures the challenge on demand \u2014 promoting the finding kind to T2 (offline-crackable material in hand). Severity high covers PLAIN/LOGIN/NTLM/GSSAPI/ANONYMOUS variants.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Combine captured challenge with an MITM-sniffed real client response \u2014 offline crack lands a working credential.",
+      "promotion_risk": "medium",
+      "tester_next_step": "For CRAM-MD5: hashcat -m 10200 <b64_chal>:<b64_resp> rockyou.txt after capturing a real client's AUTH CRAM-MD5 response.",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3_ntlm_info",
+      "title_pattern": "POP3 AUTH NTLM Type-2 leaks NetBIOS/DNS names",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Real NTLM Type-1 sent and Type-2 parsed for AV_PAIRs (nb_computer, nb_domain, dns_computer, dns_domain, dns_tree) \u2014 a concrete pre-auth information-disclosure primitive, not just an advertisement.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Wire nb_domain + dns_domain into known_domains and dns_computer into known_hostnames so subsequent AD/web tools consume them; use domain as the AD anchor for RID cycling / kerbrute.",
+      "promotion_risk": "none",
+      "tester_next_step": "kerbrute userenum -d <dns_domain> --dc <dns_computer> /usr/share/seclists/Usernames/xato-net-10-million-usernames.txt ; also seed impacket-lookupsid.",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3s_cert",
+      "title_pattern": "POP3S 995 certificate is expired / self-signed",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Cert CN/SAN grab + verify-error detection \u2014 posture flag.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Names in the cert already seed known_hostnames via the caller \u2014 real exploitation requires active MITM (out-of-band).",
+      "promotion_risk": "medium",
+      "tester_next_step": "openssl s_client -connect IP:995 ; grab CN/SAN; use in mitmproxy --certs to MITM a client that doesn't verify.",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3_known_cve",
+      "title_pattern": "Dovecot 2.3.x / Cyrus 2.4.x / qpopper 4.0.x banner match",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Regex match against banner/IMPLEMENTATION \u2014 version-gated CVE claim only.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For CVE-2019-11500: send an oversized IMAP/POP3 command to trigger the OOB write and observe memory-disclosure fragments in the response.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "Confirm exact build (CAPA IMPLEMENTATION), then check https://dovecot.org/security.html for the exact CVE; do NOT fire memory-corruption PoC without ROE.",
+      "related_cves": [
+        "CVE-2019-11500",
+        "CVE-2020-12100"
+      ]
+    },
+    {
+      "kind": "pop3_user_enum",
+      "title_pattern": "POP3 valid usernames enumerated via USER-command differential",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Multi-connection USER differential returns concrete existing account names (majority-vs-outlier response line + timing) \u2014 proven-existing accounts, not fingerprint.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Wire the harvested list into known_mail_accounts (imap.py already does; pop3.py analyze does NOT) and chain into spray() honoring LOGIN-DELAY for a t3 mailbox foothold.",
+      "promotion_risk": "high",
+      "tester_next_step": "hydra -L pop3_enum_users.txt -P rockyou.txt pop3://IP:110 -t 2 -w <LOGIN-DELAY+1> ; add -e nsr.",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3_mailbox_read",
+      "title_pattern": "POP3 credentialed mailbox read (RETR proof)",
+      "severity": "high",
+      "tier": "t3",
+      "tier_evidence": "STAT/LIST/UIDL/TOP against a live authenticated session, actually pulling and parsing message headers + harvesting addresses / Received-from hosts \u2014 an authenticated foothold with returned loot.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Wire the harvested From:/To:/Received: hosts into known_users, known_hostnames, known_domains for cross-service pivots. Optionally add RETR of top-N messages for full-body loot.",
+      "promotion_risk": "low",
+      "tester_next_step": "python3 -c 'import poplib; p=poplib.POP3_SSL(\"IP\"); p.user(u); p.pass_(pw); print(p.stat()); print(p.list()); print(p.top(1,25))' ; feed addresses to smtp + AD reader.",
+      "related_cves": []
+    },
+    {
+      "kind": "pop3_weak_password",
+      "title_pattern": "POP3 weak / default credentials confirmed by spray",
+      "severity": "high",
+      "tier": "t3",
+      "tier_evidence": "Fires ONLY when the credentialed pass landed with the default_creds flag \u2014 but note: analyze() never sets used_defaults=True (the pop3 module has no default-spray path, only operator-supplied creds). Dead-code branch as currently wired.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Implement a bounded default-spray (mirror imap._spray_defaults) that honors LOGIN-DELAY via the existing spray() helper. Would then actually fire.",
+      "promotion_risk": "high",
+      "tester_next_step": "Add pop3 spray of default set (admin/admin, mail/mail, cyrus/cyrus, postmaster/postmaster) \u2014 until then, run manually: hydra -C /usr/share/wordlists/seclists/Passwords/Default-Credentials/default-passwords.txt pop3://IP",
+      "related_cves": []
+    }
+  ]
+}

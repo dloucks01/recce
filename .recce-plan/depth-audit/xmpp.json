@@ -1,0 +1,149 @@
+{
+  "service": "xmpp",
+  "summary": "XMPP is broad on features but low on demonstrated foothold: STARTTLS posture, IBR form availability, SASL ANONYMOUS actual bind (T2 with anon_jid), weak-SASL advertisement, s2s dialback posture, XEP-0092 sw-version pull, XEP-0030 disco components, legacy-TLS cert grab, cert-mismatch check. enum_muc_rooms and xmpp_muc_public_rooms narrative exist but findings() never emits xmpp_muc_public_rooms \u2014 dead-emit gap. No SCRAM/PLAIN authenticated brute against advertised mechs; no IBR actual account creation (only form-availability check); anon_bind isn't chained into disco/roster to enumerate real accounts.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/xmpp.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_passwords",
+    "known_domains (from stream from='...' + SAN)",
+    "cve_map keyed on product+version"
+  ],
+  "findings": [
+    {
+      "kind": "xmpp_starttls_missing",
+      "title_pattern": "XMPP STARTTLS not offered (cleartext stream) / not required",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "stream:features actually parsed; absence of <starttls/> or of its <required/> is deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Once cleartext, sniff live PLAIN auth (tcpdump for base64 in <auth mechanism='PLAIN'>...</auth>) to capture credentials. Requires network position.",
+      "promotion_risk": "medium",
+      "tester_next_step": "tcpdump -i any -A -s 0 'tcp port 5222' | grep -B2 -A2 mechanism=.PLAIN; base64 -d to reveal user\\0user\\0pass.",
+      "related_cves": []
+    },
+    {
+      "kind": "xmpp_ibr_open",
+      "title_pattern": "XMPP in-band registration open (XEP-0077)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "IBR form returned to unauth iq get proves the endpoint accepts registration \u2014 but no account actually created yet.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Actually submit the registration form (iq set with username/password) to create a live account = T3 foothold with authenticated JID. Push new JID into known_credentials for downstream MUC / roster / adhoc probes. Currently only GETs the form.",
+      "promotion_risk": "medium",
+      "tester_next_step": "Send <iq type='set' id='r2'><query xmlns='jabber:iq:register'><username>recce</username><password>Recce!Pw1</password></query></iq> to <domain>; then SASL SCRAM as recce and dump roster.",
+      "related_cves": []
+    },
+    {
+      "kind": "xmpp_anon_bind",
+      "title_pattern": "XMPP anonymous SASL bind accepted",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "Actual SASL ANONYMOUS <success/> received and JID bound \u2014 recce holds an authenticated session (anonymous account). anon_jid captured.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Anon-bind session is already an authenticated foothold. Extend probe to (a) iq get jabber:iq:roster (usually empty for anon), (b) disco#items to server to walk components, (c) presence to a public MUC to join. Wire session into a session store so other XMPP-derived probes reuse it.",
+      "promotion_risk": "low",
+      "tester_next_step": "python -c 'via slixmpp anonymous bind then send disco#items to conference.<domain>'; then send <presence to='public-room@conference.<domain>/recce'/> to join & lurk.",
+      "related_cves": []
+    },
+    {
+      "kind": "xmpp_weak_sasl",
+      "title_pattern": "XMPP weak SASL mechanism(s) advertised",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Advertisement of PLAIN/LOGIN on cleartext or DIGEST-MD5 anywhere is deterministic and only fires when the weak set is really offered.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Combine with cleartext to sniff PLAIN. For DIGEST-MD5, do a bounded challenge/response replay attack \u2014 request challenge, compute response for candidate PSK, submit; hit == T2 auth.",
+      "promotion_risk": "medium",
+      "tester_next_step": "tcpdump 'tcp port 5222' + base64-decode PLAIN blobs; or hydra -L users.txt -P passwords.txt xmpp://<ip>",
+      "related_cves": []
+    },
+    {
+      "kind": "xmpp_s2s_dialback_weak",
+      "title_pattern": "XMPP s2s dialback without TLS (spoofable)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "5269 offers dialback without <required/> STARTTLS \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Actual dialback spoof requires DNS control over an inbound domain \u2014 script the DNS + dialback exchange from a controlled peer to prove federation identity forgery.",
+      "promotion_risk": "high",
+      "tester_next_step": "From a controlled domain: open s2s to <target>:5269, send <db:result to='<target>' from='attacker.example'>KEY</db:result>, observe accept \u2014 proves spoofable federation.",
+      "related_cves": []
+    },
+    {
+      "kind": "xmpp_disco_components",
+      "title_pattern": "XMPP service discovery reveals server components",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "disco#items + per-item disco#info actually walked; component JIDs (muc/http_upload/proxy65/pubsub) and identities/features captured \u2014 real data.",
+      "can_promote_to": "t3",
+      "promotion_notes": "For http_upload components, issue XEP-0363 slot request and PUT a canary \u2014 foothold via authenticated file host. For proxy65 issue bytestreams initiation to test relay abuse. For MUC, enum public rooms (enum_muc_rooms already implemented but not wired).",
+      "promotion_risk": "medium",
+      "tester_next_step": "Feed each component JID: <iq type='get' to='upload.<domain>'><request xmlns='urn:xmpp:http:upload:0' filename='r.txt' size='4' content-type='text/plain'/></iq>; PUT canary to returned URL.",
+      "related_cves": []
+    },
+    {
+      "kind": "xmpp_muc_public_rooms",
+      "title_pattern": "XMPP MUC public rooms enumerated",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "enum_muc_rooms() actually lists rooms with password_protected/hidden/members_only flags \u2014 real data. GAP: findings() never emits this kind, only NARRATIVE exists; enum is dead-called.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Wire enum_muc_rooms into the analyze() flow so findings() can emit it. Then join open rooms with the anon JID to sniff subject/traffic \u2014 internal team names / project codewords typically leak in room subjects.",
+      "promotion_risk": "low",
+      "tester_next_step": "First fix findings() to emit the kind. Then join open room: send <presence to='room@conference.<domain>/recce'/> and observe subject/roster.",
+      "related_cves": []
+    },
+    {
+      "kind": "xmpp_legacy_tls_5223",
+      "title_pattern": "XMPP legacy implicit-TLS port 5223 exposed",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Port-based observation + cert fingerprint.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Fingerprint-only; cert_mismatch is the deeper probe.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -connect <ip>:5223 -showcerts",
+      "related_cves": []
+    },
+    {
+      "kind": "xmpp_sw_version",
+      "title_pattern": "XMPP software version disclosure (XEP-0092)",
+      "severity": "low",
+      "tier": "t2",
+      "tier_evidence": "iq get jabber:iq:version returned parsed name/version/os \u2014 real product+firmware bytes pulled without auth (or via anon session).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Key CVE mapper on (name,version) tuples: Openfire CVE-2023-32315 admin console traversal \u2192 RCE; ejabberd CVE-2021-33036 auth bypass; Prosody mod_s2s CVEs. Auto-run CVE-2023-32315 probe (GET /setup/setup-s/*) when Openfire seen \u2014 T3 primitive.",
+      "promotion_risk": "medium",
+      "tester_next_step": "For Openfire: curl -k 'https://<ip>:9090/setup/setup-s/../../../log.jsp' \u2014 CVE-2023-32315 exposure; then vendor-specific PoC.",
+      "related_cves": [
+        "CVE-2023-32315"
+      ]
+    },
+    {
+      "kind": "xmpp_fingerprint",
+      "title_pattern": "XMPP server fingerprinted (product from stream error)",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Product substring in stream:error \u2014 pure fingerprint.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Same as sw_version but weaker signal; feed to CVE mapper when version is missing.",
+      "promotion_risk": "low",
+      "tester_next_step": "Trigger stream error with bogus 'to' and read <text> body.",
+      "related_cves": []
+    },
+    {
+      "kind": "xmpp_cert_mismatch",
+      "title_pattern": "XMPP legacy-TLS cert does not match stream 'from' domain",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "SAN/CN vs from-domain comparison \u2014 deterministic.",
+      "can_promote_to": "t1",
+      "promotion_notes": "MitM primitive against non-pinning clients \u2014 realistic only with network position; can't be tier-promoted without on-path capability.",
+      "promotion_risk": "medium",
+      "tester_next_step": "On-path: bettercap sslstrip against 5223 client traffic (rare in prod, common in isolated labs).",
+      "related_cves": []
+    }
+  ]
+}

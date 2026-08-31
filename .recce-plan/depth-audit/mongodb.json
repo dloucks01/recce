@@ -1,0 +1,160 @@
+{
+  "service": "mongodb",
+  "summary": "Best-in-tranche module: hand-rolled OP_MSG/BSON wire, unauth listDatabases discriminator plus a deep read-only sweep (usersInfo w/ credentials -> hashcat 24100/24200, replSetGetStatus, replSetGetConfig, getShardMap, hostInfo, startupWarnings, local.system.keys, collection inventory, scripting flag). Also has SCRAM auth, weak-default cred sweep, credentialed follow-through, datamine of PII/connstrs, and replica-member auto-lateral. Biggest gap: server-side JS/mapReduce is only flag-verified (T1) instead of a $where or eval PoC that would confirm the RCE primitive.",
+  "module_files": [
+    "recce/services/db/mongodb.py"
+  ],
+  "findings": [
+    {
+      "kind": "mongo_unauth",
+      "title_pattern": "MongoDB exposed without authentication",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "listDatabases actually returns the DB list; totalSize + names captured (controlled read proof), plus deep enum (users, replset, keys, shards) all fired.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Already reads users+hashes and mints __system creds via cluster_keys; T3 is achieved when those looted creds are fed into a replay/spray pool that authenticates elsewhere. Wire looted hashes into weak-cred sweep across other MongoDBs found in scope.",
+      "promotion_risk": "low",
+      "tester_next_step": "mongodump --host <ip> --port <port> --out loot/ ; then hashcat -m 24200 loot/hashes -a 0 rockyou.txt and replay any cracked pair against other mongod ports discovered in scope.",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_weak_default",
+      "title_pattern": "MongoDB accepts default credential '<user>'",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "weak_password_sweep + probe_creds actually authenticates SCRAM with a bundled default and reads DBs as that principal - foothold.",
+      "can_promote_to": "t4",
+      "promotion_notes": "T4 = pivot from foothold: use the working cred to auth to every replSet member/shard host, dump usersInfo across the cluster, cross-spray same pw at OS layer (SSH/SMB). Add a cluster-wide auto-follow using the shard_hosts + replset_members lists.",
+      "promotion_risk": "low",
+      "tester_next_step": "mongosh 'mongodb://<user>:<pw>@<ip>:<port>/?authSource=admin' --eval 'db.adminCommand({usersInfo:1,showCredentials:true})' ; then mongodump with the same URI. Try the same (user,pw) on each replSet member and OS-layer services.",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_cred_access",
+      "title_pattern": "MongoDB credentialed access (looted / weak credential)",
+      "severity": "high",
+      "tier": "t3",
+      "tier_evidence": "SCRAM auth completes with supplied creds; deep enum runs authenticated including usersInfo+hashes.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Same as weak_default: chain via cluster_keys __system relay + hash crack loop -> DB dump.",
+      "promotion_risk": "low",
+      "tester_next_step": "mongodump --uri 'mongodb://<user>:<pw>@<ip>:<port>/?authSource=admin' --out loot/ ; feed harvested SCRAM hashes to hashcat -m 24100/24200.",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_scripting_enabled",
+      "title_pattern": "MongoDB server-side JavaScript enabled",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "getParameter('scripting') returns true - passive flag read only; no $where / eval / mapReduce actually invoked.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Send a benign $where or mapReduce with a JS body that emits an OOB DNS/HTTP callback to a canary (or a computed integer echo) to prove server-side JS actually executes. On <3.x also try `eval`.",
+      "promotion_risk": "medium",
+      "tester_next_step": "mongosh 'mongodb://<ip>:<port>/test' --eval 'db.foo.find({$where: \"sleep(150); return true\"})' - a measurable delay proves JS execution; then swap sleep() for a DNS(<canary>) primitive.",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_shard_topology",
+      "title_pattern": "MongoDB sharded-cluster topology exposed",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "getShardMap returns real cluster host list - deterministic disclosure that only fires when unauth read is possible.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Auto-probe each shard host with the same probe() to prove the same exposure applies cluster-wide (target inventory -> confirmed exposures). Wire shard_hosts into svcprobe like replSet members already are.",
+      "promotion_risk": "none",
+      "tester_next_step": "for h in <shard_hosts>; do mongosh mongodb://$h/ --eval 'db.adminCommand({listDatabases:1})'; done",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_collection_inventory",
+      "title_pattern": "MongoDB collection inventory exposed",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "listCollections per DB returns real names; deterministic evidence of unauth ACL reach, no documents read here.",
+      "can_promote_to": "t2",
+      "promotion_notes": "datamine() already reads documents; this kind stays as the inventory pointer while mongo_datamine carries the T2 document-read evidence.",
+      "promotion_risk": "none",
+      "tester_next_step": "mongosh mongodb://<ip>:<port>/<db> --eval 'db.<coll>.find().limit(20)' for each interesting collection name in the inventory.",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_hostinfo",
+      "title_pattern": "MongoDB host / OS fingerprint disclosed (hostInfo)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "hostInfo returns hostname/OS - safe read that only succeeds when unauth or hostManager role assigned.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Feed hostname into shared FQDN pool consumed by SMB/RDP/Kerberos modules for TGT/spray targeting; T2 comes from any of those services confirming access with the harvested identity.",
+      "promotion_risk": "none",
+      "tester_next_step": "mongosh mongodb://<ip>:<port>/ --eval 'db.adminCommand({hostInfo:1})' ; then use the hostname/OS pair for SMB spraying or Kerberos ASREPRoast.",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_startup_warnings",
+      "title_pattern": "MongoDB self-reported startup warnings (misconfiguration)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "getLog:startupWarnings returns the server's own misconfig list - a positive server-declared verification.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Each warning line is already a targeted misconfig; parse specific lines (auth-off, weak TLS, THP) to emit individual sub-findings if further granularity is wanted.",
+      "promotion_risk": "none",
+      "tester_next_step": "mongosh mongodb://<ip>:<port>/ --eval 'db.adminCommand({getLog:\"startupWarnings\"}).log.forEach(printjson)'",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_cluster_keyfile",
+      "title_pattern": "MongoDB cluster keyfile secret exposed (local.system.keys)",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "find on local.system.keys returns cluster HMAC keyId/key bytes - the __system credential is exfiltrated to the loot pool as a Credential.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Replay the harvested __system HMAC key against every replset member / mongos as SCRAM-SHA-256 for cluster-wide impersonation; auto-wire the __system creds into replica-member auto-probe.",
+      "promotion_risk": "medium",
+      "tester_next_step": "python3 -c 'import hmac,base64,hashlib; ...' to derive the SCRAM saltedPassword from the HMAC key, then attempt SCRAM-SHA-256 as __system against each replset_member/shard_host - success = full cluster.",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_datamine",
+      "title_pattern": "MongoDB sensitive data exposed (PII / secrets / credentials)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "datamine() actually runs `find` limit=3 across up to 6 DBs / 12 collections, extracts secret-field values (redacted), and mines embedded connection strings into the credential feed.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Harvested connection strings already go into the Credential loot; auto-connect to those DSNs (Postgres/MSSQL/Mongo/Redis) to prove access on the target-of-the-target - which is T3 on that follow-on service.",
+      "promotion_risk": "low",
+      "tester_next_step": "grep -E 'mongodb://|postgres://|mysql://' loot/mongo/datamine.json - then feed each connstr to the matching recce db probe (probe_creds).",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_version",
+      "title_pattern": "MongoDB end-of-life / legacy build",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "buildInfo.version compared to a hard-coded floor (major<4); pure enum, no CVE probe fired.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Wire vuln.vulndb version->CVE map so specific CVEs (e.g. CVE-2019-2386, CVE-2020-7921) become their own kinds with a version-only T1 verify.",
+      "promotion_risk": "none",
+      "tester_next_step": "mongosh mongodb://<ip>:<port>/ --eval 'db.version()' - cross-reference against MongoDB security advisories.",
+      "related_cves": []
+    },
+    {
+      "kind": "mongo_replica_member",
+      "title_pattern": "MongoDB replica-set member exposed (<host>:<port>)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "_probe_members() reaches each advertised member and re-runs probe/probe_creds - it actually returns the DB list from a NEW node, proving lateral read access.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Already lateral; T3 = auto-datamine the lateral node with same auth path so a full cluster dump comes back. Currently only findings surface, not the loot.",
+      "promotion_risk": "low",
+      "tester_next_step": "mongodump --host <lateral-host> --port <port> --out loot/mongo/<host>/ ; feed hashes and connstrs into the shared pools like the primary path already does.",
+      "related_cves": []
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "hostname_pool (from hostInfo)",
+    "credentials.hash (SCRAM 24100/24200 already published)",
+    "credentials.connstr (datamine harvested strings already published)",
+    "cluster_keys (__system key -> lateral scram spray pool)",
+    "known_users (from usersInfo dumps -> spray other services)"
+  ]
+}

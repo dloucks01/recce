@@ -124,6 +124,23 @@ class Vuln:
     verdict: str = ""
     verdict_evidence: list[str] = field(default_factory=list)
     verdict_finish: str = ""
+    # Tester-facing "your next move" advisory. Populated by service modules
+    # when they emit the finding; rendered prominently in the WebUI's
+    # ExploitSurface view + Findings drawer. Distinct from `remediation`
+    # (that's for the defender). This is the exact command / PoC URL /
+    # manual step a pentester runs next given THIS finding. Kept short
+    # (1-3 sentences); links to a longer runbook when the depth calls for it.
+    # See recce.core.depth for the T0-T4 maturity model this feeds.
+    exploit_note: str = ""
+    # Depth tier per the T0-T4 rubric — where this finding sits on the
+    # enum-to-chain axis. Read by ExploitSurface for ranking + grouping.
+    #   t0 enum          — fingerprint / surface / version match
+    #   t1 safe verify   — probe deterministically confirmed the vuln
+    #   t2 proof         — controlled payload proved the exploit primitive
+    #   t3 initial       — foothold: creds / shell / meaningful data
+    #   t4 chain         — post-foothold follow-on (LSA / secretsdump / ADCS)
+    # Empty when not scored yet.
+    depth_tier: str = ""
 
     @property
     def key(self) -> str:

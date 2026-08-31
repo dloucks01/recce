@@ -1,0 +1,113 @@
+{
+  "service": "api",
+  "module_files": [
+    "recce/services/api.py"
+  ],
+  "summary": "api.py enumerates API surface (OpenAPI/Swagger, GraphQL, SOAP/WSDL, gRPC ServerReflection), parses specs, probes spec-marked-secured endpoints for broken auth and BOLA/IDOR, and lifts embedded credentials out of spec bodies into the credential store. Mostly T1 with one clean T2 (embedded credentials captured). Biggest gap: no follow-through on the captured spec \u2014 every unauth-secured endpoint / mutation name is a candidate but no injection/BOLA sweep runs against it beyond the basic id=1 vs id=2 diff.",
+  "proposed_shared_surface_consumers": [
+    "loot_credentials",
+    "known_paths",
+    "product_versions"
+  ],
+  "findings": [
+    {
+      "kind": "api-endpoints-unauth",
+      "title_pattern": "API endpoints reachable without authentication (broken auth)",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Spec-declared-secured endpoint returned 200 with no credential AND body length > 8 \u2014 deterministic broken-auth signal.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For each unauth-200 endpoint, fetch a larger body sample and mine for user records / PII / secrets \u2014 captured data is T2 (proof of read).",
+      "promotion_risk": "low",
+      "tester_next_step": "for p in $(jq -r '.paths|keys[]' spec.json); do curl -sSk http://IP:PORT$p | jq . | head -40; done"
+    },
+    {
+      "kind": "api-idor-bola",
+      "title_pattern": "Potential IDOR / BOLA on <path>",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "id=1 vs id=2 return different-length bodies unauth \u2014 deterministic BOLA candidate.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Sweep id 1..500, hash bodies, count distinct records \u2014 record count is data-extraction proof (T2).",
+      "promotion_risk": "medium",
+      "tester_next_step": "for i in $(seq 1 500); do curl -sSk -o /tmp/u$i http://IP:PORT/api/users/$i; done ; md5sum /tmp/u* | sort -u -k1,1 | wc -l"
+    },
+    {
+      "kind": "api-spec-creds",
+      "title_pattern": "Credentials embedded in the API spec",
+      "tier": "t2",
+      "severity": "medium",
+      "tier_evidence": "_URL_CRED_RE extracts real user:pw pairs from the spec and pushes Credential objects \u2014 extracted material.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Spray captured user:pw against the API's own login/auth endpoint and the spec's declared servers (often DB URIs) \u2192 T3 foothold.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk http://IP:PORT/openapi.json | grep -Eo '://[^:/@ ]+:[^@/ ]{3,}@' ; # then spray against DB / SSH / basic-auth panels"
+    },
+    {
+      "kind": "api-openapi-spec-exposed",
+      "title_pattern": "OpenAPI/Swagger spec exposed",
+      "tier": "t0",
+      "severity": "medium",
+      "tier_evidence": "Fetch and parse \u2014 surface only.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Already promoted via _enumerate/_spec_findings; add param-fuzzing per operation for injection.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk http://IP:PORT/openapi.json | jq '.paths|keys' ; feed to postman/burp for full surface fuzzing"
+    },
+    {
+      "kind": "api-graphql-introspection",
+      "title_pattern": "GraphQL introspection enabled (full schema readable)",
+      "tier": "t0",
+      "severity": "medium",
+      "tier_evidence": "Full __schema returned \u2014 schema map, not exploitation.",
+      "can_promote_to": "t1",
+      "promotion_notes": "For every mutation name, POST a benign call unauth and record 200 with a non-error body \u2014 successful unauth mutation = T2 write proof.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk -H 'Content-Type: application/json' -d '{\"query\":\"query{__schema{mutationType{fields{name args{name}}}}}\"}' http://IP:PORT/graphql | jq"
+    },
+    {
+      "kind": "api-graphql-batch",
+      "title_pattern": "GraphQL query batching enabled",
+      "tier": "t0",
+      "severity": "medium",
+      "tier_evidence": "Array query returned 2 results (surface signal only).",
+      "can_promote_to": "t1",
+      "promotion_notes": "Batch 100 login mutations in one HTTP request to bypass per-request rate limiting \u2192 T1 credential-brute amplification.",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -sSk -H 'Content-Type: application/json' -d '[{\"query\":\"mutation{login(user:\\\"admin\\\",pass:\\\"a\\\"){token}}\"},...(100 items)]' http://IP:PORT/graphql"
+    },
+    {
+      "kind": "api-soap-wsdl-exposed",
+      "title_pattern": "SOAP/WSDL exposed",
+      "tier": "t0",
+      "severity": "medium",
+      "tier_evidence": "WSDL parsed, operations listed.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Auto-invoke each operation with default-typed args and check for 200/soap:Fault \u2014 unauth reachable ops \u2192 T1.",
+      "promotion_risk": "low",
+      "tester_next_step": "wsdler <wsdl-url> ; then for op in operations: SoapUI test or curl -X POST -d '<soap:Envelope>...'"
+    },
+    {
+      "kind": "api-grpc-reflection",
+      "title_pattern": "gRPC ServerReflection endpoint reachable",
+      "tier": "t0",
+      "severity": "low",
+      "tier_evidence": "Server responds to gRPC reflection call.",
+      "can_promote_to": "t1",
+      "promotion_notes": "grpcurl list + describe + call each service unauth; 200/OK on a data-returning RPC = T1 broken-auth.",
+      "promotion_risk": "medium",
+      "tester_next_step": "grpcurl -plaintext IP:PORT list ; grpcurl -plaintext IP:PORT describe SomeService ; grpcurl -plaintext -d '{}' IP:PORT SomeService.GetAll"
+    },
+    {
+      "kind": "api-swagger-ui-exposed",
+      "title_pattern": "Interactive API docs exposed",
+      "tier": "t0",
+      "severity": "low",
+      "tier_evidence": "UI presence only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Same surface as OpenAPI spec once loaded; nothing new.",
+      "promotion_risk": "none",
+      "tester_next_step": "xdg-open http://IP:PORT/swagger-ui/ ; drive by hand or via Postman import from /openapi.json"
+    }
+  ]
+}

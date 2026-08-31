@@ -1,0 +1,134 @@
+{
+  "service": "mqtt",
+  "summary": "MQTT module is unusually deep for a T1/T2 module \u2014 anonymous CONNECT, empty ClientID, wildcard '#' subscribe (retained + live), $SYS scrape, and a rollback-safe QoS-1 PUBLISH canary all pull real evidence. Credential spray uses a tiny built-in default list and lands a valid CONNACK 0x00 = T3 foothold with usable creds. Biggest gap: no ClientID-collision session-hijack demo, no LWT trigger to force a device to publish a fresh Will, and the credential list is 6 passwords \u2014 should draw from core.known_users/known_passwords once shared.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/mqtt.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_passwords",
+    "known_hostkeys (for TLS 8883 cert pinning across relays)"
+  ],
+  "findings": [
+    {
+      "kind": "mqtt_anonymous_connect",
+      "title_pattern": "MQTT broker accepts anonymous CONNECT",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "CONNACK 0x00 to a no-cred CONNECT is deterministic proof anonymous access is on.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Once anon CONNECT works, drop straight into a wildcard drain + retained-secret scrape (already done) and hand tester a mosquitto_sub session \u2014 that IS the foothold on the message bus. Wire the anon socket into a session_open() so downstream modules see the broker as authenticated bus access.",
+      "promotion_risk": "low",
+      "tester_next_step": "mosquitto_sub -h <ip> -p <port> -t '#' -v -W 10; then mosquitto_sub -h <ip> -p <port> -t '$SYS/#' -v -W 3; then mosquitto_pub -h <ip> -p <port> -t recce/test -m x -q 1 to confirm write.",
+      "related_cves": []
+    },
+    {
+      "kind": "mqtt_empty_clientid",
+      "title_pattern": "MQTT broker accepts empty ClientID",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Empty-ClientID CONNECT returned CONNACK 0x00 \u2014 probe succeeds only if the broker permits it.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Two concurrent empty-ClientID CONNECTs from recce should observe a session-takeover: sub 1 subscribes '#', sub 2 opens with same empty ID, broker MUST disconnect sub 1 (MQTT-3.1.4-2). Capture the DISCONNECT/close as proof of session hijack primitive.",
+      "promotion_risk": "medium",
+      "tester_next_step": "Open two mosquitto_sub sessions with -i '' -t '#' -v; the second CONNECT should knock the first off. Then run mosquitto_pub -h <ip> -i '' -t 'legit/device/id' -m 'takeover' -r to hijack a device's retained slot.",
+      "related_cves": []
+    },
+    {
+      "kind": "mqtt_retained_messages",
+      "title_pattern": "MQTT broker leaks retained messages on wildcard subscribe (#)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "The probe already SUBSCRIBEs '#' and captures retained payloads with topic + snippet + size \u2014 that IS the exploit output for a config bus.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Grep retained payloads for JWTs, api_keys, /^(pass|pwd|token|secret|apikey)/i, base64 blobs, and MAC addresses. Feed captured JWTs into known_tokens; feed api_keys into known_secrets; feed device serial/MACs into known_devices. Also hunt for MQTT bridge credentials (bridge_password) leaked in Mosquitto retained config topics.",
+      "promotion_risk": "low",
+      "tester_next_step": "mosquitto_sub -h <ip> -p <port> -t '#' -v -W 30 | tee loot/mqtt_retained.txt; grep -iE 'token|pass|secret|api[_-]?key|jwt|bearer|BEGIN [A-Z]+ PRIVATE KEY' loot/mqtt_retained.txt.",
+      "related_cves": []
+    },
+    {
+      "kind": "mqtt_live_topics",
+      "title_pattern": "MQTT broker leaks live traffic on wildcard subscribe (#)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "PUBLISH packets with topic + payload snippet captured \u2014 real message content proves the live bus is readable.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Long-window capture (60-120s) plus MAC/serial extraction to feed known_devices. Correlate command topics vs telemetry topics to fingerprint controller/device pairs and flag replayable command shapes.",
+      "promotion_risk": "low",
+      "tester_next_step": "mosquitto_sub -h <ip> -p <port> -t '#' -v -W 120 | tee loot/mqtt_live.txt; then for interesting topic run mosquitto_pub -h <ip> -t '<topic>' -m '<observed-command>' to test replay/injection.",
+      "related_cves": []
+    },
+    {
+      "kind": "mqtt_sys_topics",
+      "title_pattern": "MQTT broker exposes $SYS metrics (version, clients, uptime)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "$SYS/broker/version + $SYS/broker/clients/* actually retrieved; version string pinned into product+firmware. Concrete data pulled without auth.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Enumerate $SYS/broker/clients/<addr> per-client stats (Mosquitto) to map the connected client roster (IPs, ClientIDs). Feed vendor+version through CVE mapper for Mosquitto 1.x pre-1.6.9 CVEs and EMQX advisories.",
+      "promotion_risk": "low",
+      "tester_next_step": "mosquitto_sub -h <ip> -p <port> -t '$SYS/#' -v -W 10; note $SYS/broker/version; searchsploit mosquitto <version> for known CVEs.",
+      "related_cves": []
+    },
+    {
+      "kind": "mqtt_anonymous_publish",
+      "title_pattern": "MQTT broker accepts anonymous PUBLISH (public write bus)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "QoS-1 PUBLISH ACKed by broker (PUBACK reason < 0x80), canary cleared with retained empty publish \u2014 deterministic proof-of-write.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Only jump to actuator control on explicit tester green-light (destructive). But we CAN promote by publishing to an observed telemetry-response topic with a benign payload and observing a device echo, proving reachability to a physical device.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "Confirmed writable: mosquitto_pub -h <ip> -p <port> -t 'shellies/<id>/command' -m 'off' (Shelly) or -t 'tasmota/cmnd/<dev>/POWER' -m 'OFF' \u2014 DO NOT run without written authorization; recce probe already proved primitive.",
+      "related_cves": []
+    },
+    {
+      "kind": "mqtt_weak_credential",
+      "title_pattern": "MQTT credential accepted via low-effort spray",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "CONNACK 0x00 returned to a specific user/password pair \u2014 that IS an authenticated session (foothold on the message bus). Credential is captured in pr['cred'].",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed the hit into known_credentials so QuickConnect / other MQTT/AMQP/HTTP modules retry it. Reuse across HiveMQ HTTP admin UI, EMQX dashboard (18083), and cross-service against RabbitMQ management. Ship the cred back as a session for wildcard subscribe automation.",
+      "promotion_risk": "low",
+      "tester_next_step": "mosquitto_sub -h <ip> -p <port> -u <user> -P <pass> -t '#' -v -W 30; then curl -u <user>:<pass> http://<ip>:18083/api/v5/nodes (EMQX) or http://<ip>:8080 (HiveMQ) to test admin UI reuse.",
+      "related_cves": []
+    },
+    {
+      "kind": "mqtt_will_message",
+      "title_pattern": "MQTT Will/Status messages disclose device identity",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "LWT/status payloads captured in the live window with topic names and snippets \u2014 real device-identity data pulled.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Trigger LWTs by opening a CONNECT+DISCONNECT loop that steals device ClientIDs (broker fires the LWT). Combine with mqtt_empty_clientid to force fresh Will payloads containing tokens.",
+      "promotion_risk": "medium",
+      "tester_next_step": "mosquitto_sub -h <ip> -p <port> -t '+/status' -t '+/online' -t '+/lwt' -v -W 60; extract MACs/tokens from payload with grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}|eyJ[A-Za-z0-9._-]+'.",
+      "related_cves": []
+    },
+    {
+      "kind": "mqtt_authgated",
+      "title_pattern": "MQTT broker reachable, authentication enforced",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "CONNACK 0x04/0x05 = enumeration marker only; no vuln proven.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Once known_users/known_passwords are shared, do a bounded spray (already partially implemented via analyze() users/passwords args) \u2014 a hit promotes this to mqtt_weak_credential T3 automatically.",
+      "promotion_risk": "low",
+      "tester_next_step": "hydra -L users.txt -P passwords.txt -s <port> <ip> mqtt; or use mosquitto_sub -h <ip> -u <user> -P <pass> -t '$SYS/#' -W 3 to loop candidates.",
+      "related_cves": []
+    },
+    {
+      "kind": "mqtt_plaintext",
+      "title_pattern": "MQTT broker on 1883/tcp (plaintext)",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Port-number condition only; no probe result required.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Pair with tcpdump helper: sniff a live client authentication (username/password sent as CONNECT payload fields) \u2014 captures live cleartext creds. Requires network position.",
+      "promotion_risk": "medium",
+      "tester_next_step": "tcpdump -i any -A -s 0 'tcp port 1883' -w mqtt.pcap; then tshark -r mqtt.pcap -Y 'mqtt.msgtype == 1' -T fields -e mqtt.username -e mqtt.passwd.",
+      "related_cves": []
+    }
+  ]
+}

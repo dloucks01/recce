@@ -1,0 +1,73 @@
+{
+  "service": "msrpc",
+  "summary": "MSRPC module builds real DCE/RPC PDUs stdlib and calls two interfaces: IOXIDResolver::ServerAlive2 (interface leak - actual RPC call succeeded, T1 confirmed) and ept_lookup (endpoint mapper dump T1 confirmed). Recognises coercion interfaces (PrinterBug/PetitPotam/DFSCoerce/DCSync) and hints at Netlogon/ZeroLogon and DPAPI BackupKey but does NOT probe those or actually coerce - per user directive. Biggest gap: coercion interfaces are named but never called even in ROE-safe way (a benign RpcRemoteFindFirstPrinterChangeNotificationEx probe would be T2); no ZeroLogon safe check (NetrServerAuthenticate3 all-zero challenge - well-known safe verify).",
+  "module_files": [
+    "recce/services/msrpc.py"
+  ],
+  "findings": [
+    {
+      "kind": "msrpc_ioxid",
+      "title_pattern": "MSRPC IOXIDResolver leaks the host's network interfaces",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "IOXIDResolver::ServerAlive2 opnum 5 was actually called and returned the host's own DUALSTRINGARRAY of interfaces. Pre-auth, deterministic. 'fresh' addresses vs known_ips bump severity based on real intel value.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add downstream pivot: for each leaked internal address, port-scan from this host via a downstream RPC-over-TCP probe (need session). Or auto-add to scope for follow-on modules.",
+      "promotion_risk": "low",
+      "tester_next_step": "impacket-rpcmap ncacn_ip_tcp:<ip>; then for each new address returned, add to nmap scope: nmap -sT -p 445,88,389,3389 <newly-discovered-ips>."
+    },
+    {
+      "kind": "msrpc_coercion",
+      "title_pattern": "MSRPC exposes authentication-coercion interfaces",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Presence of MS-RPRN/MS-PAR/MS-EFSR/MS-DFSNM UUIDs in EPM dump confirmed by ept_lookup reply; recce did NOT invoke the coercion RPC itself. Deterministic presence, not exploitation.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add a bench-safe coercion PoC: bind to spoolss and issue RpcRemoteFindFirstPrinterChangeNotificationEx pointing at 127.0.0.1 (a self-coerce that only produces network noise, safe verify that the coerce works); requires an auth session so becomes credentialed T2. For ZeroLogon: add a NetrServerAuthenticate3-with-null-challenge safe verify (does NOT reset the machine account - just checks response), see nmap smb-vuln-cve-2020-1472.",
+      "promotion_risk": "high",
+      "tester_next_step": "Coercer scan -t <ip> (identifies which coerce methods respond); Coercer coerce -t <ip> -l <you-ip> -u <lp> -p <lpass>; pair with impacket-ntlmrelayx -t ldap://<dc> or smb://<unsigned-target>."
+    },
+    {
+      "kind": "msrpc_epm",
+      "title_pattern": "MSRPC endpoint mapper enumerable (remote-management surface)",
+      "severity": "low",
+      "tier": "t1",
+      "tier_evidence": "ept_lookup returned recognised interface UUIDs pre-auth - deterministic enumeration of remote-management surface (samr/lsarpc/svcctl/wmi/winreg/etc).",
+      "can_promote_to": "t2",
+      "promotion_notes": "For anonymous-friendly interfaces (samr on some hosts, wkssvc), issue a benign no-arg call to prove the interface accepts anonymous requests (T2 for the specific interface). Also chain to nxc's --rid-brute via samr when null session is allowed.",
+      "promotion_risk": "medium",
+      "tester_next_step": "impacket-rpcmap ncacn_ip_tcp:<ip>; then targeted per-interface: rpcclient -U '' -N <ip> for samr enumdomusers; impacket-lookupsid <ip>/-; impacket-wmiquery for wmi."
+    },
+    {
+      "kind": "msrpc_high_value_iface",
+      "title_pattern": "MSRPC exposes high-value interfaces (Netlogon / BackupKey)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Netlogon (MS-NRPC) or BKRP (MS-BKRP) UUID in EPM dump directly observed. recce explicitly did NOT probe them (documented). Correctly no CVE claim attached.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add safe ZeroLogon check (nmap smb-vuln-cve-2020-1472 style): NetrServerAuthenticate3 with client challenge of 8 null bytes and check whether server accepts without resetting. Bench-safe when only the check is performed (do NOT chain the credential reset which is destructive).",
+      "promotion_risk": "high",
+      "tester_next_step": "nmap -p 445 --script smb-vuln-cve-2020-1472 <dc-ip>; or CVE-2020-1472-checker.py (SecuraBV) - runs 2000 NetrServerAuthenticate3 attempts and detects a vulnerable KDC without setting the machine password to empty. Do NOT run the full exploit without a saved secure-channel backup.",
+      "related_cves": [
+        "CVE-2020-1472"
+      ]
+    },
+    {
+      "kind": "msrpc_dynport_map",
+      "title_pattern": "MSRPC endpoint mapper discloses dynamic RPC ports",
+      "severity": "low",
+      "tier": "t1",
+      "tier_evidence": "Tower parser extracts ncacn_ip_tcp floors from EPM reply - deterministic port-map of known interfaces to 49152-65535 ports. Real disclosure.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Auto-add these dynamic ports to a follow-on scan queue so downstream modules (samr on 49155, drsuapi on 49158, etc) can direct-connect without a second EPM round-trip. Effectively feeds the shared surface.",
+      "promotion_risk": "low",
+      "tester_next_step": "impacket-rpcdump <ip>; then direct-connect on the dynamic port: e.g. impacket-samrdump ncacn_ip_tcp:<ip>[<samr-port>]."
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_coerce_sources (produce - coercion interfaces feed relay chain planning)",
+    "known_hostnames (consume+produce - fresh addresses expand scope)",
+    "known_scope (produce - IOXID leaked addresses)",
+    "zerologon_candidates (produce - Netlogon interface presence)"
+  ]
+}

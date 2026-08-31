@@ -1,0 +1,64 @@
+{
+  "service": "rdp",
+  "summary": "RDP module speaks the X.224 CR handshake, parses RDP Negotiation Response for security-mode / NLA posture (T1), and does an extra TLS+CredSSP TSRequest to harvest an NTLM CHALLENGE + CredSSP version (T1 info + version-based CVE claim). BlueKeep detection is candidate-only (banner-fingerprint) not confirmed. Doesn't ever attempt authentication - per user directive T3 stays as tester_next_step. Gap: no BlueKeep safe verify (there's a known non-destructive MS_T120 channel probe).",
+  "module_files": [
+    "recce/services/rdp.py"
+  ],
+  "findings": [
+    {
+      "kind": "rdp_no_nla",
+      "title_pattern": "RDP: Network Level Authentication (NLA) not required",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Server accepted selectedProtocol=0 (STANDARD_RDP) - direct wire observation NLA is not required. Deterministic, non-destructive.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add rdesktop-style credential prompt MitM demonstration (proves the plaintext capture path) - stays T2 without hitting the actual target. Or wire a safe BlueKeep verify (MS_T120 channel-close race probe from nmap smb-vuln-cve-2019-0708 variant - benign check).",
+      "promotion_risk": "medium",
+      "tester_next_step": "xfreerdp /v:<ip>:<port> /sec:rdp - confirms Standard RDP; nmap -p <port> --script rdp-vuln-ms12-020,rdp-enum-encryption <ip>; if Win7/2008R2: nmap --script rdp-vuln-cve-2019-0708 (safe check, does NOT trigger BSOD).",
+      "related_cves": [
+        "CVE-2019-0708"
+      ]
+    },
+    {
+      "kind": "rdp_fingerprint",
+      "title_pattern": "RDP endpoint fingerprint",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Just prints negotiated protocol / nla_required / standard_rdp_accepted - pure fingerprint, always emitted.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Baseline info; escalation belongs in the other kinds (no_nla, ntlm_info, credssp_unpatched).",
+      "promotion_risk": "none",
+      "tester_next_step": "nmap -p <port> --script rdp-enum-encryption,rdp-ntlm-info <ip>."
+    },
+    {
+      "kind": "rdp_ntlm_info",
+      "title_pattern": "RDP CredSSP NTLM CHALLENGE leaks host/domain intel",
+      "severity": "info",
+      "tier": "t1",
+      "tier_evidence": "One extra TLS+CredSSP TSRequest carrying NTLMSSP Type-1 parses the returned Type-2 for AV_PAIRs (NetBIOS/DNS/AD domain/forest/OS build) - deterministic pre-auth harvest via MS-CSSP 3.1.5.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Info-disclosure ceiling reached. Cross-service value is feeding known_hostnames/known_domains - ensure the analyze() folds ntlm_info into host.ntlm the way winrm does (currently it just stores on the target dict).",
+      "promotion_risk": "none",
+      "tester_next_step": "nmap -p <port> --script rdp-ntlm-info <ip>; then feed dns_domain into kerberos + os_version into CVE search."
+    },
+    {
+      "kind": "rdp_credssp_unpatched",
+      "title_pattern": "RDP CredSSP is unpatched for CVE-2018-0886",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "TSRequest version <=2 read directly from server's TSRequest reply - version <=2 IS the pre-March-2018 patch level per MS advisory. Deterministic version-based CVE claim.",
+      "can_promote_to": "t2",
+      "promotion_notes": "T2 would require an actual MitM demonstration with a controlled logon credential injection payload - complex, hard to do safely. Stays T1 unless a canary-driven MitM harness lands.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "Metasploit auxiliary/scanner/rdp/cve_2019_0708_bluekeep (safe check) - but for CVE-2018-0886 exploitation requires MitM position and controlled credentials; not typically exploited on internal without additional access.",
+      "related_cves": [
+        "CVE-2018-0886"
+      ]
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames (produce)",
+    "known_domains (produce)",
+    "cve_hints (produce - os_version + credssp_version)"
+  ]
+}

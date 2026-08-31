@@ -1,0 +1,132 @@
+{
+  "service": "dnp3",
+  "summary": "DNP3 module reaches T2 on the critical finding: dnp3_no_secure_auth. A plain FC1 g60v1 read succeeded \u2014 that is unauthenticated retrieval of live process telemetry, not just stance. Device-attribute extraction (g0 v240/242/243/250/252) is T0 vendor fingerprint. Unsolicited-response leak observes actual event data on connect (T1). Biggest gap: no attempt to send read-only FC1 g60v2/g30v* variants to exfil more telemetry, no g120 SA challenge probe (would positively confirm SA is disabled vs unsupported).",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/dnp3.py"
+  ],
+  "findings": [
+    {
+      "kind": "dnp3_reachable",
+      "title_pattern": "DNP3 SCADA outstation reachable on the scanned network",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Data-link 0x0564 sync + CRC-16-DNP verify + valid FC9 or FC1 reply is deterministic protocol match.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Stance; specific evidence covered by dnp3_no_secure_auth.",
+      "promotion_risk": "none",
+      "tester_next_step": "nmap -sT -p 20000 --script dnp3-info <ip>; dnp3ctl <ip>:20000 read g60v1 --dst 1.",
+      "related_cves": []
+    },
+    {
+      "kind": "dnp3_no_secure_auth",
+      "title_pattern": "DNP3 outstation accepts Read without Secure Authentication (IEEE 1815 \u00a77)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "FC1 Read of Class 0 static data succeeded without preceding g120 Authentication Request \u2014 proof SA is not enforced and every function code is reachable without a key.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 would be sending a control primitive (FC5 Direct Operate, FC13 Cold Restart). Destructive on live grid \u2014 trips protection relays. Recce correctly refuses.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: dnp3ctl <ip>:20000 direct-operate --dst <addr> --group 12 --index 0 --code Latch-On \u2014 actuates a real binary output. Never on production. Read-only continuation: dnp3ctl read g30v1 --dst <addr> for analog inputs.",
+      "related_cves": []
+    },
+    {
+      "kind": "dnp3_control_surface",
+      "title_pattern": "DNP3 control-function surface exposed alongside missing SA",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Emitted whenever class0_readable \u2014 protocol surface reachable, not proof of write.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Send FC5 Direct Operate against a canary binary output. DESTRUCTIVE, gate under --dnp3-write and only for test cells.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "TEST-CELL ONLY: dnp3ctl <ip>:20000 direct-operate --dst 1 --group 12 --index 0 --code Pulse-On --on-time 100 \u2014 sends one CROB and inspects the ACK; never against live protection relays.",
+      "related_cves": []
+    },
+    {
+      "kind": "dnp3_device_id",
+      "title_pattern": "DNP3 device identification extracted (vendor/product/firmware)",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Group 0 attribute reads \u2014 protocol-exposed fingerprint.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Add vendor\u2192CVE map (SEL, GE Multilin, SICAM, SCADAPack, Motorola ACE) with per-firmware CVE bands.",
+      "promotion_risk": "none",
+      "tester_next_step": "Cross-reference vendor+firmware against ICSA feed (SEL RTAC, GE D400, Schneider SCADAPack, Siemens SICAM); check the RTU's web UI on 80/443 for default creds (SEL: 2AC/OTTER, SCADAPack: administrator/admin).",
+      "related_cves": []
+    },
+    {
+      "kind": "dnp3_addressing",
+      "title_pattern": "DNP3 outstation source address disclosed",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Learned from wire \u2014 not a vuln.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds every follow-on request but is not a finding beyond info.",
+      "promotion_risk": "none",
+      "tester_next_step": "Use the disclosed source address as --dst on every subsequent dnp3ctl call; correlate address across scans to identify the same substation on a moved IP.",
+      "related_cves": []
+    },
+    {
+      "kind": "dnp3_iin_state",
+      "title_pattern": "DNP3 IIN flags indicate device restart / trouble / config state",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "IIN1/IIN2 bits directly parsed from the outstation reply \u2014 deterministic device state.",
+      "can_promote_to": "stay",
+      "promotion_notes": "State observation, not a promotable primitive.",
+      "promotion_risk": "none",
+      "tester_next_step": "If device_restart set unexpectedly, ask the site engineer for the last commanded restart timestamp; if the bit predates that, someone else sent FC13/14 \u2014 pull SIEM logs.",
+      "related_cves": []
+    },
+    {
+      "kind": "dnp3_broadcast_reachable",
+      "title_pattern": "DNP3 outstation responds to broadcast address 0xFFFD",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "Reply to 0xFFFD broadcast Read proves broadcast-answer misconfig.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Config issue \u2014 no further probe safely available.",
+      "promotion_risk": "none",
+      "tester_next_step": "dnp3ctl <ip>:20000 read g60v1 --dst 0xFFFD \u2014 confirms; then work with engineer to disable broadcast-answer in the outstation config.",
+      "related_cves": []
+    },
+    {
+      "kind": "dnp3_unsolicited_leak",
+      "title_pattern": "DNP3 unsolicited responses observed on connect (misconfigured target)",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "UNS bit set frame delivered without any master registration \u2014 recce captured live event data pushed to whoever answered.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Passive: keep the socket open and log all event data \u2192 continuous process visibility from a rogue master. Ethical only in agreed engagement.",
+      "promotion_risk": "low",
+      "tester_next_step": "nc -l -k -p 20000 & then tcpdump -i any -w /tmp/dnp3.pcap 'port 20000'; parse with Wireshark DNP3 dissector; extract analog values / SOE events over time \u2014 full process visibility.",
+      "related_cves": []
+    },
+    {
+      "kind": "dnp3_udp_reachable",
+      "title_pattern": "DNP3 over UDP reachable (\u00a77.2)",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "DNP3 UDP-mapped reply from the outstation \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Same T2 promotion path as TCP variant \u2014 inherits no_secure_auth once class0_readable also true on UDP.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "nmap -sU -p 20000 --script dnp3-info <ip>; craft spoofed-source UDP frames from an authorised source IP (lab only) to prove no-state-tracking.",
+      "related_cves": []
+    },
+    {
+      "kind": "dnp3_delay_measured",
+      "title_pattern": "DNP3 delay-measurement round-trip captured",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Second-source liveness signal.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Informational baseline.",
+      "promotion_risk": "none",
+      "tester_next_step": "Compare delay_ms across scans to detect network path changes or under-provisioned SCADA links.",
+      "related_cves": []
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_ot_assets"
+  ]
+}

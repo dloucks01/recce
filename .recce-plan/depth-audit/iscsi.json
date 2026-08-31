@@ -1,0 +1,146 @@
+{
+  "service": "iscsi",
+  "module_files": [
+    "recce/services/iscsi.py"
+  ],
+  "summary": "Deep module. Discovery-Login without CHAP is T1; Normal-session Login to FullFeaturePhase + INQUIRY/READ CAPACITY on LUN 0 is T2 proof-of-exploit (real block-device access, read-only). Missing T3 loot: pull a raw sector to file (dd) and pull VMDK/partclone dump.",
+  "findings": [
+    {
+      "kind": "iscsi_reachable",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "iSCSI portal reachable (RFC 7143 Login handshake)",
+      "tier_evidence": "Login handshake completion is fingerprint only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "iscsiadm -m discovery -t sendtargets -p IP:3260"
+    },
+    {
+      "kind": "iscsi_auth_none_discovery",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "iSCSI target - AuthMethod=None accepted for Discovery session",
+      "tier_evidence": "Deterministic: AuthMethod=None + StatusClass=0 on a Discovery Login only if target explicitly permits it. No exploit payload.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Already promoted via _emit_auth_none_normal + INQUIRY/READ CAPACITY, but this specific finding stops at T1.",
+      "promotion_risk": "low",
+      "tester_next_step": "iscsiadm -m discovery -t sendtargets -p IP:3260  # captures every TargetName/TargetAddress"
+    },
+    {
+      "kind": "iscsi_targets_disclosed",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "unauthenticated SendTargets discloses all IQNs and portal addresses",
+      "tier_evidence": "SendTargets=All succeeds only when unauth Discovery Login was accepted; the target list itself proves the exposure.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For each disclosed IQN, run a Normal Login attempt on its portal \u2014 the module already does this for the first target; extending to all N would raise coverage.",
+      "promotion_risk": "medium",
+      "tester_next_step": "for iqn in $(iscsiadm -m discovery -t sendtargets -p IP:3260 | awk '{print $2}'); do iscsiadm -m node -T $iqn -p IP:3260 --login; done"
+    },
+    {
+      "kind": "iscsi_auth_none_normal",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "iSCSI target - AuthMethod=None accepted for Normal session (raw LUN mount, no credential)",
+      "tier_evidence": "Reaching FullFeaturePhase on a Normal session with AuthMethod=None is real access to the LUN plane, verified by follow-on INQUIRY. Recce did not write data \u2014 proof of exploit without full compromise.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Automate iscsiadm login + `dd if=/dev/sdX bs=1M count=1 of=lun-sample.bin` to prove first-block extraction; hash-match to LUKS/VMDK/ext4 magic like nbd does. New: session-kill after sample.",
+      "promotion_risk": "medium",
+      "tester_next_step": "modprobe iscsi_tcp; iscsiadm -m node -T <iqn> -p IP:3260 --login; ls /dev/disk/by-path/*iscsi*; dd if=/dev/sdX bs=1M count=64 of=/tmp/lun0.img; file /tmp/lun0.img"
+    },
+    {
+      "kind": "iscsi_inquiry_leak",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "iSCSI target - INQUIRY leaks LUN vendor / product / revision",
+      "tier_evidence": "SCSI INQUIRY on LUN 0 succeeds ONLY when a Normal session reached FullFeaturePhase \u2014 real SCSI command trip through the array.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Combined with iSCSI login + partclone dump, this becomes T3 credential pull off the block device.",
+      "promotion_risk": "medium",
+      "tester_next_step": "sg_inq /dev/disk/by-path/ip-IP:3260-iscsi-<iqn>-lun-0 ; sg_readcap same device"
+    },
+    {
+      "kind": "iscsi_lun_readable",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "iSCSI target - READ CAPACITY (10) succeeded on LUN 0 (LUN masking absent)",
+      "tier_evidence": "READ CAPACITY response returns real block count and size only after real block-device access \u2014 proves LUN masking is absent, does not exfiltrate any content.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Extend with a bounded READ(10) of block 0 and match magic like nbd_ndmp \u2014 mounts the volume without needing kernel iscsi_tcp.",
+      "promotion_risk": "medium",
+      "tester_next_step": "sg_readcap /dev/disk/by-path/...-lun-0 ; then dd if=/dev/sdX of=lun0.raw bs=1M count=1 ; file lun0.raw"
+    },
+    {
+      "kind": "iscsi_chap_challenge_captured",
+      "tier": "t2",
+      "severity": "high",
+      "title_pattern": "iSCSI CHAP - challenge captured for offline cracking (hashcat -m 4800)",
+      "tier_evidence": "CHAP_I/CHAP_C returned is a real, freshly generated credential material \u2014 with an intercepted initiator response it is a T4 crack primitive. Without response it's more T1, but capture-formatted hashcat -m 4800 line is a proof artifact.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Currently the response side (CHAP_N + CHAP_R) is not captured. If recce can also observe/relay a real initiator (packet capture or a spoofed target listener), the pair becomes a full T4 crack loop.",
+      "promotion_risk": "high",
+      "tester_next_step": "printf '<CHAP_R>:<CHAP_C>:<CHAP_I>\\n' > loot/iscsi.chap ; hashcat -m 4800 loot/iscsi.chap /usr/share/wordlists/rockyou.txt --force"
+    },
+    {
+      "kind": "iscsi_chap_one_way",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "iSCSI CHAP - one-way authentication only",
+      "tier_evidence": "Posture bit (mutual CHAP not demanded) \u2014 not a probe result.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Posture flag; promotion would require a live relay.",
+      "promotion_risk": "high",
+      "tester_next_step": "iscsiadm -m node -T <iqn> -p IP:3260 -o show | grep -i chap"
+    },
+    {
+      "kind": "iscsi_no_digest",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "HeaderDigest=None and DataDigest=None",
+      "tier_evidence": "Posture from negotiated params.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Design posture.",
+      "promotion_risk": "none",
+      "tester_next_step": "iscsiadm -m node -T <iqn> -p IP:3260 -o show | grep -i digest"
+    },
+    {
+      "kind": "iscsi_legacy_version",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "legacy Version-Active accepted",
+      "tier_evidence": "Version-Active byte inspection.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "iscsiadm -m discovery -t sendtargets -p IP:3260 -d 8"
+    },
+    {
+      "kind": "iscsi_iqn_hostinfo",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "IQN discloses hostname / reversed-DNS domain",
+      "tier_evidence": "IQN parsing recon.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds known_hostnames.",
+      "promotion_risk": "none",
+      "tester_next_step": "iscsiadm -m discovery -t sendtargets -p IP:3260"
+    },
+    {
+      "kind": "iscsi_pivot_portal",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "SendTargets discloses internal-only storage-network portal IPs",
+      "tier_evidence": "Recon: portal IPs outside scan scope.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Try a Discovery Login against each pivoted portal IP to see whether unauth Discovery reaches internal-only segments; recce already has the code.",
+      "promotion_risk": "low",
+      "tester_next_step": "nmap -Pn -p 3260 <pivot-ips> ; then iscsiadm -m discovery -t sendtargets -p <pivot-ip>"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames",
+    "known_luns",
+    "relay_targets"
+  ]
+}

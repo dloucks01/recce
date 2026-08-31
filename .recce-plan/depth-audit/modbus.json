@@ -1,0 +1,48 @@
+{
+  "service": "modbus",
+  "summary": "Modbus/TCP module is a T1-heavy safe-verify probe. Function 0x03 Read Holding Registers succeeds ONLY if a real Modbus stack answered \u2014 that plus device-ID (0x2B) and Report Slave ID (0x11) plus a bounded unit-ID sweep (2-15) gives strong evidence beyond a bare port scan. No T2 write proof (function 0x06/0x10) is ever sent \u2014 biggest gap is a safe canary WriteProperty (write to a scratch register the module then re-reads) which would upgrade the reachable finding from stance to proof-of-write.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/modbus.py"
+  ],
+  "findings": [
+    {
+      "kind": "modbus_reachable",
+      "title_pattern": "Modbus/TCP device on the scanned network",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "FC 0x03 response with valid MBAP + non-exception PDU is deterministic proof of a Modbus stack, not just port 502 open.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add opt-in canary write: choose a holding register unused per config, FC 0x06 write a known sentinel (e.g., current value XOR 0xA5A5), FC 0x03 read it back, restore. Positive round-trip proves unauth write.",
+      "promotion_risk": "high",
+      "tester_next_step": "modpoll -m tcp -a 1 -r 1 -c 20 <ip>; for write proof (DESTRUCTIVE, do in test cell only): modpoll -m tcp -a 1 -r 100 -c 1 -t 4 <ip> 0x1234 && modpoll -m tcp -a 1 -r 100 -c 1 <ip>",
+      "related_cves": []
+    },
+    {
+      "kind": "modbus_device_id",
+      "title_pattern": "Modbus device identification extracted",
+      "severity": "info",
+      "tier": "t0",
+      "tier_evidence": "Vendor/product/revision string via FC 0x2B \u2014 pure fingerprint, feeds CVE mapper.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Cross-reference vendor+product against Schneider/Siemens/AB advisories and emit a CVE-band finding (like s7._cve_fingerprint) at T1 when the identity positively matches a known-vulnerable family.",
+      "promotion_risk": "none",
+      "tester_next_step": "Feed vendor/product into a local CVE map (Schneider Modicon M340 / Siemens SIMATIC ET200 / AB MicroLogix defaults) and check hxxps://www.cisa.gov/news-events/ics-advisories; try default web UI creds admin/admin, admin/(blank), Administrator/Administrator on port 80/443 of the same host.",
+      "related_cves": []
+    },
+    {
+      "kind": "modbus_gateway_units",
+      "title_pattern": "Modbus/TCP-to-RTU gateway \u2014 downstream units reachable",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Multiple unit-IDs answering non-0x0B exceptions is deterministic proof of downstream serial slaves behind a gateway.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Follow the same canary-write path per downstream unit, gated behind --modbus-write. Also expand sweep to full 0-247 range under --modbus-full-sweep.",
+      "promotion_risk": "high",
+      "tester_next_step": "for u in $(seq 0 247); do modpoll -0 -1 -m tcp -a $u -r 1 -c 1 <ip>; done | grep -v 'Gateway Target'; each responding unit is a distinct PLC \u2014 attempt FC 0x11 Report Slave ID and FC 0x2B device-ID per unit.",
+      "related_cves": []
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_ot_assets"
+  ]
+}

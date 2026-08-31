@@ -1,0 +1,184 @@
+{
+  "service": "cups_lpd",
+  "module_files": [
+    "recce/services/cups_lpd.py"
+  ],
+  "summary": "Combined LPD + CUPS extensions. LPD queue-list op 03/04 (T1). LPD fingerprint gates CVE citations. IPP Get-Jobs (T1). cups-browsed 631/udp probe with a real listener callback \u2014 that is T2 ingress verification of CVE-2024-47176 without payload. /admin log-endpoint read (T1). Very comprehensive; refuses op 02 and foomatic payload delivery.",
+  "findings": [
+    {
+      "kind": "lpd_queue_leak",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "LPD queue leaks usernames, source hostnames and print job filenames",
+      "tier_evidence": "RFC 1179 op 03/04 returning owner/host/filename rows requires an unauth daemon accept \u2014 deterministic.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Already promoted implicitly: real user + hostname + filename tuples are the loot.",
+      "promotion_risk": "none",
+      "tester_next_step": "lpq -P lp -h IP ; then feed owners into known_users, hosts into known_hostnames"
+    },
+    {
+      "kind": "lpd_queue_open",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "LPD queue listing readable unauthenticated (RFC 1179)",
+      "tier_evidence": "Empty queue but daemon still answered \u2014 daemon accepts unauth queries.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "lpq -P lp -h IP  # empty now, but leaks on the next job"
+    },
+    {
+      "kind": "lpd_lprng_cve",
+      "tier": "t1",
+      "severity": "critical",
+      "title_pattern": "LPRng detected - CVE-2000-0917 / CVE-2001-0670 unauth RCE class",
+      "tier_evidence": "Text fingerprint match on LPRng banner \u2014 CVE candidate, not exploit.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Format-string exploit is destructive and highly OS-specific; keep detection-only.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "review LPRng version and vendor patch date; Metasploit modules exist (aux/scanner/printer/lprng_format_string) but destructive.",
+      "related_cves": [
+        "CVE-2000-0917",
+        "CVE-2001-0670"
+      ]
+    },
+    {
+      "kind": "lpd_jetdirect_cve",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "HP JetDirect LPD/PJL command injection (CVE-2010-4107)",
+      "tier_evidence": "Text fingerprint only; requires firmware-date correlation to confirm.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Add a PJL @PJL INFO ID probe on 9100/tcp to pull the firmware date; that's a version-gate for the CVE.",
+      "promotion_risk": "low",
+      "tester_next_step": "nmap -p9100 --script pjl-ready-message IP  ; # or: printf '@PJL INFO ID\\r\\n' | nc IP 9100",
+      "related_cves": [
+        "CVE-2010-4107"
+      ]
+    },
+    {
+      "kind": "lpd_windows_pn",
+      "tier": "t0",
+      "severity": "high",
+      "title_pattern": "Windows Print Service on 515/tcp - correlate with PrintNightmare on 445",
+      "tier_evidence": "LPD banner identifies Windows Print Service \u2014 recon.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Correlate with SMB signing + spooler posture from smb module.",
+      "promotion_risk": "low",
+      "tester_next_step": "recce smb IP  # cross-check spooler status; then rpcdump.py --print-services for MS-RPRN"
+    },
+    {
+      "kind": "lpd_acl_open",
+      "tier": "t1",
+      "severity": "medium",
+      "title_pattern": "LPD daemon accepts queue commands from any peer (no /etc/hosts.lpd)",
+      "tier_evidence": "recce (an arbitrary peer) received a listing at all \u2014 deterministic ACL-off signal. Op 02 explicitly not invoked.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Op 02 control-file injection is destructive; keep detection-only.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "review /etc/hosts.lpd on the target manually; do not send op 02 without ROE"
+    },
+    {
+      "kind": "ipp_get_jobs",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "IPP Get-Jobs leaks originating user/host and document names",
+      "tier_evidence": "IPP Get-Jobs (op 0x000A) unauth returned real user/host/filename tuples.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Values are real loot; feeds known_users.",
+      "promotion_risk": "low",
+      "tester_next_step": "ipptool -tv ipp://IP:631/printers/lp get-jobs.test"
+    },
+    {
+      "kind": "cups_browsed_reachable",
+      "tier": "t2",
+      "severity": "critical",
+      "title_pattern": "cups-browsed (631/udp) accepts crafted printer URIs - CVE-2024-47176 ingress reachable",
+      "tier_evidence": "recce sends a browse advert for a fake IPP URI and OPENS a real TCP listener; only if the daemon actually reaches back does replied=True. That is proof-of-ingress, not merely a posture claim, and does NOT deliver the foomatic payload.",
+      "can_promote_to": "t3",
+      "promotion_notes": "T3 would deliver the Get-Printer-Attributes payload with attacker-controlled foomatic filter; destructive by design. Module correctly refuses.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "# ROE-required. PoC: cups-2024-47176 exploit scripts on public repos; recce leaves the actual payload delivery to the operator.",
+      "related_cves": [
+        "CVE-2024-47176"
+      ]
+    },
+    {
+      "kind": "cups_foomatic_vuln",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "CUPS reachable at vulnerable version - CVE-2024-47076/-47175/-47176/-47177 foomatic-rip chain applies",
+      "tier_evidence": "Version-gated. Severity upgrades to critical when cups_browsed_reachable also fires (ingress path confirmed).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Same as cups_browsed_reachable promotion \u2014 destructive payload delivery is out of scope.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "See PoC scripts on public repos; run only with ROE. Verify fixed line: upstream 2.4.9+, Ubuntu 24.04.1 cups 2.4.7-1.2ubuntu7.1, RHEL 9 cups 2.3.3op2-25.",
+      "related_cves": [
+        "CVE-2024-47076",
+        "CVE-2024-47175",
+        "CVE-2024-47176",
+        "CVE-2024-47177"
+      ]
+    },
+    {
+      "kind": "cups_foomatic_patched",
+      "tier": "t0",
+      "severity": "info",
+      "title_pattern": "CUPS reachable but past the 2024-09 fixed line",
+      "tier_evidence": "Informational post-gate.",
+      "can_promote_to": "stay",
+      "promotion_notes": "n/a",
+      "promotion_risk": "none",
+      "tester_next_step": "n/a \u2014 patched"
+    },
+    {
+      "kind": "cups_admin_open",
+      "tier": "t1",
+      "severity": "high",
+      "title_pattern": "CUPS /admin log endpoints readable unauthenticated",
+      "tier_evidence": "GET /admin/log/access_log or /admin/log/error_log returned HTTP 200 without auth \u2014 deterministic exposure.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Pull the log body to extract print-job history / user IPs; module already implies this next step.",
+      "promotion_risk": "low",
+      "tester_next_step": "curl -sS http://IP:631/admin/log/error_log | tail -200  # user + IP + filename history"
+    },
+    {
+      "kind": "cups_admin_auth",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "CUPS /admin endpoints require authentication (default-cred spray candidate)",
+      "tier_evidence": "WWW-Authenticate presence \u2014 posture.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Wire up default-cred quickconnect (cups/cups, admin/admin) explicitly.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -u cups:cups http://IP:631/admin ; hydra -l cups -P /usr/share/wordlists/rockyou.txt http-get://IP:631/admin"
+    },
+    {
+      "kind": "ipp_uri_harvest",
+      "tier": "t0",
+      "severity": "medium",
+      "title_pattern": "IPP printer-uri-supported discloses internal hostnames / DNS suffixes",
+      "tier_evidence": "URI parse from printer attributes \u2014 recon.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Feeds known_hostnames/known_domains.",
+      "promotion_risk": "none",
+      "tester_next_step": "ipptool -tv ipp://IP:631/ get-printer-attributes.test"
+    },
+    {
+      "kind": "printer_stack_correlation",
+      "tier": "t0",
+      "severity": "low",
+      "title_pattern": "Printer stack exposed (515/tcp + 631/tcp + 9100/tcp)",
+      "tier_evidence": "Port-presence correlation.",
+      "can_promote_to": "stay",
+      "promotion_notes": "9100 PJL analyzer is out-of-scope for this module.",
+      "promotion_risk": "none",
+      "tester_next_step": "printf '@PJL INFO ID\\r\\n' | nc IP 9100  ; # firmware + PJL support"
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_hostnames",
+    "known_domains"
+  ]
+}

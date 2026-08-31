@@ -1,0 +1,57 @@
+{
+  "service": "sqli",
+  "module_files": [
+    "recce/services/sqli.py"
+  ],
+  "summary": "sqli.py is the opt-in (RECCE_ACTIVE_ATTACKS=1) active SQL injection tester \u2014 error-based, boolean-blind, time-based \u2014 plus a sqlmap orchestration hand-off. Everything is T1 (deterministic detection) except the sqlmap chain which reaches T2/T3 depending on what sqlmap dumps. Biggest gap: no automatic wiring from crawl.py's discovered params/forms; caller must invoke test_url_param / test_form by hand, and the sqlmap chain is not currently invoked from any scan runbook.",
+  "proposed_shared_surface_consumers": [
+    "loot_credentials",
+    "known_paths"
+  ],
+  "findings": [
+    {
+      "kind": "sqli-error-based",
+      "title_pattern": "SQL injection via error-based (<db>)",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "Single-quote injection triggers canonical DB error signature \u2014 deterministic, DB flavor identified.",
+      "can_promote_to": "t2",
+      "promotion_notes": "With confirmed error-based, chain to UNION SELECT version(),user(),database() and record the returned strings \u2192 T2 data-extraction proof.",
+      "promotion_risk": "medium",
+      "tester_next_step": "sqlmap -u 'http://IP:PORT/x?id=1' --batch --technique=E --level=3 --risk=2 --current-user --current-db --hostname"
+    },
+    {
+      "kind": "sqli-boolean-blind",
+      "title_pattern": "SQL injection via boolean-blind",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "AND 1=1 vs AND 1=2 length delta >= 32 bytes reproducibly.",
+      "can_promote_to": "t2",
+      "promotion_notes": "sqlmap --technique=B extracts row counts / schema \u2014 T2 data proof.",
+      "promotion_risk": "medium",
+      "tester_next_step": "sqlmap -u 'http://IP:PORT/x?id=1' --batch --technique=B --level=3 --risk=2 --dbs --tables"
+    },
+    {
+      "kind": "sqli-time-based",
+      "title_pattern": "SQL injection via time-based (<db>)",
+      "tier": "t1",
+      "severity": "high",
+      "tier_evidence": "SLEEP payload consistently pushes response past baseline+N-margin.",
+      "can_promote_to": "t2",
+      "promotion_notes": "sqlmap --technique=T extracts data byte-by-byte via time oracle.",
+      "promotion_risk": "high",
+      "tester_next_step": "sqlmap -u 'http://IP:PORT/x?id=1' --batch --technique=T --level=3 --risk=2 -D <db> --dump-all --threads=4"
+    },
+    {
+      "kind": "sqli-sqlmap-orchestration",
+      "title_pattern": "sqlmap injected parameters",
+      "tier": "t2",
+      "severity": "critical",
+      "tier_evidence": "sqlmap's Parameter/Type lines confirm injection; --dbs/--dump can extract data \u2014 T2 read proof, T3 if admin hash cracked.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain to hash cracking (hashcat -m 300 mysql, -m 1731 mssql) and OS shell via --os-shell / --os-pwn on MSSQL/PostgreSQL \u2192 T3 foothold.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "sqlmap -u 'http://IP:PORT/x?id=1' --batch --dump -D <db> -T users ; hashcat -m 1400 users.hash /usr/share/wordlists/rockyou.txt ; sqlmap -u '...' --os-shell"
+    }
+  ]
+}

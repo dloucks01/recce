@@ -1,0 +1,25 @@
+{
+  "service": "rservices",
+  "summary": "rservices module is minimal \u2014 pure presence detection for 512/rexec, 513/rlogin, 514/rsh (bare TCP connect confirmation). One finding kind (r_<svc>) at T0/T1, generic 'high \u2014 cleartext, IP-trust auth' with no attempt to send a client packet, capture the login banner, or try a passwordless login as root/bin/daemon (the canonical .rhosts trust names). Biggest gap: the entire attack surface is untouched \u2014 no rsh 'echo test' probe against common trust names, no rexec bogus-cred send to capture the auth-failure text (which itself can enumerate valid users), no cleartext_creds recording.",
+  "module_files": [
+    "recce/services/rservices.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "cleartext_creds",
+    "known_users"
+  ],
+  "findings": [
+    {
+      "kind": "r_rexec / r_rlogin / r_rsh",
+      "title_pattern": "Legacy <svc> exposed (cleartext, IP-trust auth)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "TCP connect to 512/513/514 succeeded \u2014 enum + posture combined; the mere reachability of a Berkeley r-service in 2025 IS the finding, but no protocol handshake or trust-file probe was actually attempted.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Add a client-packet layer: for rsh 514, speak the protocol (stderr port, null, luser, ruser, cmd all NUL-terminated) with luser=root/ruser=root cmd='id' and read the reply \u2014 a shell response means .rhosts trust is open. For rlogin 513, similar handshake with common trust names. Landing any = T3 unauthenticated shell.",
+      "promotion_risk": "medium",
+      "tester_next_step": "rsh -l root IP id ; rlogin -l root IP ; echo id | rexec -l root -p '' IP ; also try daemon, bin, sync, adm, halt, uucp as trust names; capture -A 'port 512-514' for cleartext-cred proof.",
+      "related_cves": []
+    }
+  ]
+}

