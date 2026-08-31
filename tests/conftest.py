@@ -71,18 +71,55 @@ _COMPOSE_CANARIES = {
 }
 
 _VAGRANT_CANARIES = {
-    "ad-dc":     ("172.20.1.10", 445),      # Windows AD DC (planned Phase 9c)
-    "bmc":       ("172.20.1.20", 623),
-    "kernelnet": ("172.20.1.30", 3260),
+    "ad-dc":     ("172.20.1.10", 445, "tcp"),         # SMB
+    "bmc":       ("172.20.1.20", 623, "ipmi-udp"),    # IPMI needs an ASF ping
+    "kernelnet": ("172.20.1.30", 3260, "tcp"),        # iSCSI portal
 }
 
 
-def _reachable(ip: str, port: int, timeout: float = 1.0) -> bool:
+def _reachable(ip: str, port: int, timeout: float = 1.0,
+               kind: str = "tcp") -> bool:
+    """Probe reachability. `kind` selects the transport:
+      * "tcp"       — plain TCP connect (default; matches every service
+                      whose liveness maps to accept()).
+      * "ipmi-udp"  — send an ASF Presence Ping on UDP; any reply proves a
+                      BMC is up. Fixes the bmc canary — IPMI is 623/udp
+                      only, so the TCP path always reports "down" even
+                      when the BMC is alive.
+    """
+    if kind == "ipmi-udp":
+        return _ipmi_udp_reachable(ip, port, timeout)
     try:
         with socket.create_connection((ip, port), timeout=timeout):
             return True
     except (OSError, socket.timeout):
         return False
+
+
+# ASF Presence Ping over RMCP (ASF spec, DMTF DSP0136):
+#   4 B RMCP header — version=6, reserved=0, seq=0xFF, class=ASF (0x06)
+#   8 B ASF payload — IANA 4321 BE (0x000011BE), msg-type Ping (0x80),
+#                     tag (any), reserved 0, data-len 0
+# A responding BMC replies with an ASF Pong (msg-type 0x40) plus its
+# supported entities/interactions. We only care that ANYTHING answers —
+# the recv succeeds only when the datagram was consumed by a real BMC.
+_ASF_PING = b"\x06\x00\xff\x06" + b"\x00\x00\x11\xbe\x80\x01\x00\x00"
+
+
+def _ipmi_udp_reachable(ip: str, port: int, timeout: float) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(_ASF_PING, (ip, port))
+        sock.recvfrom(1024)
+        return True
+    except (OSError, socket.timeout):
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 def pytest_configure(config):
@@ -119,8 +156,8 @@ def pytest_runtest_setup(item):
         if not _env_reached(("compose", profile), canary):
             pytest.skip(f"test_env compose profile {profile!r} not up "
                         f"(canary {canary[0]}:{canary[1]} unreachable) — "
-                        f"run `docker compose --profile {profile} up --wait` "
-                        f"in test_env/")
+                        f"run `docker compose --profile {profile} up "
+                        f"--wait` in test_env/")
     for mark in item.iter_markers(name="needs_vagrant"):
         vm = (mark.args[0] if mark.args else "ad-dc")
         canary = _VAGRANT_CANARIES.get(vm)
@@ -142,11 +179,13 @@ def _env_reached(cache_key: tuple, canary: tuple) -> bool:
     if cache_key not in _ENV_REACHED:
         # Env override lets a CI runner override the subnet base
         # (`RECCE_TEST_NET=10.0.0.0/24` -> flip 172.20.x.y -> 10.0.x.y).
-        ip, port = canary
+        # Canaries are (ip, port) or (ip, port, kind); the 2-tuple form is
+        # legacy TCP, the 3-tuple form names the transport (tcp / ipmi-udp).
+        ip, port, kind = canary if len(canary) == 3 else (*canary, "tcp")
         override = os.environ.get("RECCE_TEST_NET_BASE")
         if override:
             octets = ip.split(".")
             base = override.split(".")
             ip = ".".join(base[:2] + octets[2:])
-        _ENV_REACHED[cache_key] = _reachable(ip, port)
+        _ENV_REACHED[cache_key] = _reachable(ip, port, kind=kind)
     return _ENV_REACHED[cache_key]

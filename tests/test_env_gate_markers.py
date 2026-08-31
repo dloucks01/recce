@@ -48,3 +48,26 @@ def test_unknown_profile_skips_cleanly():
 @pytest.mark.needs_vagrant("this-vm-does-not-exist")
 def test_unknown_vagrant_skips_cleanly():
     raise AssertionError("this test should have been skipped")
+
+
+# The bmc canary uses ipmi-udp probing (IPMI is 623/udp only, so the
+# default TCP-connect canary always reports the BMC down). Confirm the
+# UDP probe returns False cleanly when nothing is listening — the failure
+# mode we care about is "hangs the test suite" or "raises OSError".
+def test_ipmi_udp_probe_returns_false_when_nothing_listens():
+    from tests.conftest import _ipmi_udp_reachable
+    # 0-port is guaranteed to have nothing listening; timeout keeps the
+    # test snappy even when the loopback stack accepts the datagram and
+    # produces no reply.
+    assert _ipmi_udp_reachable("127.0.0.1", 0, timeout=0.5) is False
+
+
+def test_bmc_canary_is_registered_with_ipmi_udp_kind():
+    """Regression: the bmc canary must carry the ipmi-udp kind so
+    `@pytest.mark.needs_vagrant("bmc")` actually probes the BMC and
+    doesn't always skip through the TCP path."""
+    from tests.conftest import _VAGRANT_CANARIES
+    canary = _VAGRANT_CANARIES.get("bmc")
+    assert canary is not None
+    assert len(canary) == 3
+    assert canary[2] == "ipmi-udp"
