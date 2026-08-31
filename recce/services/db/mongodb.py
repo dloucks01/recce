@@ -186,6 +186,41 @@ def _cmd(sock, name, rid, timeout, db="admin"):
     return command(sock, bson_doc(_e_int32(name, 1), _e_str("$db", db)), rid, timeout)
 
 
+def _server_status_fingerprint(sock, timeout: float, rid: int) -> dict:
+    """SAFE T2 proof-of-exploit read that corroborates hostInfo.
+
+    Single controlled OP_MSG (`serverStatus` with the heavy sub-sections
+    suppressed) that returns live process state - host FQDN:port, process
+    name (mongod / mongos), pid, uptime, localTime, and mongod version -
+    directly from the running server. Non-destructive, single-shot, honours
+    the caller's socket timeout. Never raises."""
+    ss = command(sock, bson_doc(
+        _e_int32("serverStatus", 1),
+        # Ask the server to skip the big analytics sections; keeps the reply
+        # small (~1-2 KB) and inside our 16 MB length guard even on busy nodes.
+        _e_bool("locks", False),
+        _e_bool("metrics", False),
+        _e_bool("wiredTiger", False),
+        _e_bool("tcmalloc", False),
+        _e_bool("mem", False),
+        _e_bool("network", False),
+        _e_bool("opLatencies", False),
+        _e_bool("opcounters", False),
+        _e_str("$db", "admin")), rid, timeout)
+    if not isinstance(ss, dict) or ss.get("ok") != 1.0:
+        return {}
+    out: dict = {}
+    for k in ("host", "process", "version", "localTime"):
+        v = ss.get(k)
+        if isinstance(v, str) and v:
+            out[k] = v
+    for k in ("pid", "uptime"):
+        v = ss.get(k)
+        if isinstance(v, (int, float)) and v > 0:
+            out[k] = int(v)
+    return out
+
+
 def _scram_hashcat(username: str, mechanism: str, cred: dict) -> str:
     """Format a MongoDB SCRAM credential (from usersInfo showCredentials) as a hashcat
     line: mode 24100 for SCRAM-SHA-1 (`*0*`), mode 24200 for SCRAM-SHA-256 (`*1*`).
@@ -504,6 +539,13 @@ def _deep_mongo(sock, out: dict, timeout: float) -> None:
         }
         if any(info.values()):
             out["host_info"] = info
+    # T2 corroboration: a second SAFE controlled admin read that returns live
+    # process state (host FQDN:port, "mongod"/"mongos", pid, uptime, localTime,
+    # version). Proves the hostInfo values came from a live server socket, not
+    # a stale config file — one command, no writes, bounded.
+    ss = _server_status_fingerprint(sock, timeout, 33)
+    if ss:
+        out.setdefault("host_info", {})["server_status"] = ss
     # getLog: 'startupWarnings' — the server's OWN list of insecure-config
     # warnings ('access control not enabled', 'listening on all interfaces',
     # THP misconfigured, mmapv1 deprecated, weak TLS, ...). Unauth-readable on
@@ -853,17 +895,45 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     bits.append(f"os={hinfo['os_name']}")
                 if hinfo.get("os_version"):
                     bits.append(f"version={hinfo['os_version']}")
+                detail = ("recce read hostInfo without a specific privilege - the "
+                          "server returned its own OS fingerprint and hostname: "
+                          + ", ".join(bits) + ".")
+                # T2 SAFE PoC: a second controlled read (serverStatus) corroborates
+                # the identity with live process state. Only promote when the
+                # server actually answered with concrete fields.
+                ss = hinfo.get("server_status") or {}
+                tier = "t1"
+                if ss:
+                    ss_bits = []
+                    if ss.get("host"):
+                        ss_bits.append(f"host={ss['host']}")
+                    if ss.get("process"):
+                        ss_bits.append(f"process={ss['process']}")
+                    if ss.get("pid"):
+                        ss_bits.append(f"pid={ss['pid']}")
+                    if ss.get("version"):
+                        ss_bits.append(f"mongod={ss['version']}")
+                    if ss.get("uptime"):
+                        ss_bits.append(f"uptime={ss['uptime']}s")
+                    if ss.get("localTime"):
+                        ss_bits.append(f"localTime={ss['localTime']}")
+                    if ss_bits:
+                        detail += ("\n\nCorroborating serverStatus read (SAFE T2 "
+                                   "proof-of-exploit - one controlled admin "
+                                   "command, no writes): " + ", ".join(ss_bits)
+                                   + ". Live process state ties the hostInfo "
+                                   "fingerprint to a running mongod on this "
+                                   "socket, not a stale cached document.")
+                        tier = "t2"
                 out.append(_finding(
                     "medium", "MongoDB host / OS fingerprint disclosed (hostInfo)", tgt,
-                    "recce read hostInfo without a specific privilege - the server "
-                    "returned its own OS fingerprint and hostname: "
-                    + ", ".join(bits) + ".",
+                    detail,
                     "mongosh",
                     f"mongosh mongodb://{h.ip}:{p.portid}/ --eval "
                     "'db.adminCommand({hostInfo:1})'",
                     "Restrict the hostInfo command to trusted roles "
                     "(hostManager/clusterMonitor) and remove any unauth exposure.",
-                    ["CWE-200"], kind="mongo_hostinfo"))
+                    ["CWE-200"], kind="mongo_hostinfo", depth_tier=tier))
             warns = pr.get("startup_warnings") or []
             if warns:
                 # De-dupe by 'msg' body; startup log lines often include a

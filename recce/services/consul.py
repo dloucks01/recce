@@ -257,7 +257,64 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
             out["kv_keys"] = len(kv)
             out["kv_secrets"] = hits
 
+    # T2 SAFE proof-of-exploit: only fire when we've already established that
+    # anon reads work (services/nodes/kv fetched something) AND ACL is not
+    # enforcing. Single controlled read of /v1/agent/members — live Serf
+    # cluster membership (real operational state distinct from the static
+    # /agent/self config disclosure). Non-destructive, single-shot, bounded.
+    if (out["reachable"] and not out["acl_enabled"] and
+            (out["services"] or out["nodes"] or out["kv_keys"])):
+        ev = _probe_members_canary(ip, port,
+                                   timeout=min(timeout, 4.0), token=token)
+        if ev is not None:
+            out["members_evidence"] = ev
+
     return out
+
+
+def _probe_members_canary(ip: str, port: int, timeout: float = 4.0,
+                          token: str = "") -> dict | None:
+    """T2 SAFE proof-of-exploit: single controlled GET /v1/agent/members.
+
+    Returns a compact evidence dict — member names, address:port pairs and
+    Serf status codes for the first few live cluster members — proving that
+    anonymous access reaches live cluster state beyond the fingerprint on
+    /agent/self. Non-destructive: read-only endpoint, no state change.
+    Bounded: single HTTP request, capped body, capped timeout, at most a
+    handful of members recorded.
+
+    Returns None on any failure (no upgrade — caller keeps T1)."""
+    r = _http(ip, port, "GET", "/v1/agent/members", timeout=timeout,
+              token=token, max_bytes=200_000)
+    if r is None:
+        return None
+    status, body = r
+    if status != 200:
+        return None
+    try:
+        members = json.loads(body.decode("utf-8", "replace"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(members, list) or not members:
+        return None
+    sample: list[dict] = []
+    for m in members[:5]:
+        if not isinstance(m, dict):
+            continue
+        name = str(m.get("Name", ""))[:80]
+        addr = str(m.get("Addr", ""))[:45]
+        mport = m.get("Port")
+        if not isinstance(mport, int):
+            mport = 0
+        stat = m.get("Status")
+        if not isinstance(stat, int):
+            stat = -1
+        sample.append({"name": name, "addr": addr,
+                       "port": mport, "status": stat})
+    if not sample:
+        return None
+    return {"count": len(members), "sample": sample,
+            "endpoint": "/v1/agent/members"}
 
 
 def consul_targets(hosts: list[Host]) -> list[dict]:
@@ -294,6 +351,21 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             unauth_reads = bool(pr.get("services") or pr.get("nodes") or pr.get("kv_keys"))
             if unauth_reads and not pr.get("acl_enabled"):
                 svc_sample = ", ".join(pr.get("services", [])[:8]) or "-"
+                members_ev = pr.get("members_evidence") or {}
+                proof_tier = "t2" if members_ev else "t1"
+                proof_line = ""
+                if members_ev:
+                    sample = members_ev.get("sample") or []
+                    member_bits = []
+                    for m in sample[:3]:
+                        member_bits.append(
+                            f"{m.get('name','?')}@{m.get('addr','?')}:"
+                            f"{m.get('port','?')}(status={m.get('status','?')})")
+                    proof_line = (
+                        f" T2 proof — GET {members_ev.get('endpoint','?')} returned "
+                        f"{members_ev.get('count','?')} live Serf member(s): "
+                        + "; ".join(member_bits)
+                        + ("…" if len(sample) > 3 else "") + ".")
                 out.append(_finding(
                     "critical",
                     "Consul unauthenticated cluster read (ACLs disabled)", tgt,
@@ -302,7 +374,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"{pr.get('nodes',0)} node(s), and {pr.get('kv_keys',0)} KV key(s). "
                     f"Services: {svc_sample}"
                     + ("… (truncated)" if len(pr.get('services',[])) > 8 else "")
-                    + ". KV store may contain credentials, feature flags, service configs.",
+                    + ". KV store may contain credentials, feature flags, service configs."
+                    + proof_line,
                     f"curl http://{h.ip}:{p.portid}/v1/kv/?recurse",
                     "Enable ACLs with default_policy=deny in consul config; issue "
                     "scoped tokens to each service. Bind Consul to a private interface.",
@@ -312,7 +385,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "\"\\(.Key)=\\(.Value|@base64d)\"'; curl -s "
                         "http://<ip>:8500/v1/snapshot -o consul.snap — then consul "
                         "snapshot inspect."),
-                    depth_tier="t1"))
+                    depth_tier=proof_tier))
             else:
                 out.append(_finding(
                     "info", "Consul endpoint reachable (ACL enforcing)", tgt,

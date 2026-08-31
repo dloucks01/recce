@@ -230,35 +230,45 @@ def _close(sock) -> None:
         pass
 
 
-def _plaintext_login_probe(sock, timeout: float) -> str:
-    """Send a LOGIN with bogus creds. Returns:
-      - 'accepted'  : server processed the LOGIN and returned NO (bad creds)
-      - 'rejected'  : server refused pre-TLS ("BAD" or NO citing TLS/plaintext)
-      - 'unknown'   : nothing usable came back
+def _plaintext_login_probe(sock, timeout: float) -> tuple[str, str]:
+    """Send a LOGIN with bogus creds. Returns (status, evidence):
+      - status = 'accepted' : server processed the LOGIN and returned NO
+        (bad creds)
+      - status = 'rejected' : server refused pre-TLS ("BAD" or NO citing
+        TLS/plaintext)
+      - status = 'unknown'  : nothing usable came back
+
+    `evidence` is the server's exact tagged response line (SAFE, non-
+    destructive, bounded to 200 chars) - this is the concrete server-side
+    proof that promotes the finding from T1 to T2. It stays empty when the
+    server returned nothing or an unparseable line.
     """
     tag = "rp1"
     resp = _cmd(sock, tag, 'LOGIN "recce_probe" "recce_probe_pw"', timeout)
     if not resp:
-        return "unknown"
+        return "unknown", ""
     text = resp.decode("latin-1", "replace")
     # A server that refuses plaintext responds BAD (protocol error) or a
     # NO that explicitly cites TLS / privacy / plaintext.
     m = re.search(rf"(?m)^{tag}\s+(OK|NO|BAD)\b(.*)$", text)
     if not m:
-        return "unknown"
+        return "unknown", ""
     code = m.group(1)
-    tail = (m.group(2) or "").lower()
+    tail_raw = m.group(2) or ""
+    tail = tail_raw.lower()
+    # The exact server response line - the SAFE T2 proof.
+    evidence = f"{tag} {code}{tail_raw}".strip()[:200]
     if code == "BAD":
-        return "rejected"
+        return "rejected", evidence
     if code == "NO" and ("tls" in tail or "starttls" in tail or "privacy" in tail
                         or "plaintext" in tail or "insecure" in tail
                         or "encrypt" in tail or "logindisabled" in tail):
-        return "rejected"
+        return "rejected", evidence
     # NO with any other reason means the server processed the LOGIN attempt
     # itself (bad credentials) - plaintext auth path is open.
     if code in ("OK", "NO"):
-        return "accepted"
-    return "unknown"
+        return "accepted", evidence
+    return "unknown", evidence
 
 
 def _anonymous_login_probe(sock, timeout: float) -> bool:
@@ -301,7 +311,8 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         "reachable": False, "port": port, "banner": "", "preauth": False,
         "capabilities": [], "starttls": False, "logindisabled": False,
         "sasl": [], "id": {}, "product": "", "version": "",
-        "plaintext_login": "", "anonymous": False,
+        "plaintext_login": "", "plaintext_login_evidence": "",
+        "anonymous": False,
         "starttls_downgrade": False,
         "cram_md5_challenge": "", "digest_md5_challenge": "",
         "error": "",
@@ -347,8 +358,9 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
         # already inside implicit TLS, so the plaintext-login / downgrade
         # probes are moot there.
         if port != 993 and not out["preauth"]:
-            plt = _plaintext_login_probe(sock, timeout)
+            plt, plt_evidence = _plaintext_login_probe(sock, timeout)
             out["plaintext_login"] = plt
+            out["plaintext_login_evidence"] = plt_evidence
             # A pre-TLS server that accepts LOGIN OR AUTHENTICATE despite
             # advertising LOGINDISABLED is a downgrade (RFC 3501 §11.1).
             if plt == "accepted" and out["logindisabled"]:
@@ -700,14 +712,29 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
 
             # Plaintext LOGIN accepted pre-TLS.
             if pr.get("plaintext_login") == "accepted" and p.portid == 143:
-                out.append(_finding(
-                    "critical", "IMAP LOGIN accepted before STARTTLS (plaintext credentials)",
-                    tgt,
+                detail = (
                     "A pre-TLS LOGIN with bogus credentials was processed by the "
                     "server (returned NO invalid-credentials, not a TLS-required "
                     "refusal): every real client that logs in without upgrading to "
                     "TLS first hands its password to any passive sniffer on the "
-                    "segment.",
+                    "segment.")
+                # T2 SAFE proof: the exact server response line for the bogus
+                # LOGIN. Single controlled read, no writes, no state change,
+                # bounded timeout - concrete server-side evidence.
+                evidence = (pr.get("plaintext_login_evidence") or "").strip()
+                tier = "t2" if evidence else "t1"
+                if evidence:
+                    detail += (
+                        f"\n\nT2 proof - captured server response to canary "
+                        f"pre-TLS LOGIN (no real credentials sent):\n"
+                        f"    {evidence}\n"
+                        f"The server evaluated the credential and answered with "
+                        f"an auth-failure line (not a TLS-required BAD/NO), "
+                        f"confirming the plaintext auth path is live.")
+                out.append(_finding(
+                    "critical", "IMAP LOGIN accepted before STARTTLS (plaintext credentials)",
+                    tgt,
+                    detail,
                     "openssl",
                     f"nc {h.ip} {p.portid}   # then: a1 LOGIN <user> <pass>",
                     "Set LOGINDISABLED until STARTTLS completes (Dovecot: "
@@ -717,7 +744,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     exploit_note=(
                         "hydra -L smtp_enum_users.txt -P rockyou.txt "
                         "imap://IP:143 -t 4 -f -V"),
-                    depth_tier="t1"))
+                    depth_tier=tier))
 
             # STARTTLS downgrade: LOGINDISABLED lied.
             if pr.get("starttls_downgrade"):

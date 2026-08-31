@@ -56,6 +56,21 @@ _SENSITIVE_HREF = re.compile(
     r"appsettings\.json|settings\.py|\.aws/?|\.ssh/?|dump\.sql|db\.sqlite3?)",
     re.I)
 _XXE_HIT = re.compile(r"root:.*:0:0:|\[fonts\]|for 16-bit app support|\[extensions\]")
+# Signature-gate the T2 depth-infinity proof: an unauthenticated GET on a
+# PROPFIND-discovered sensitive href must return content that carries the
+# fingerprint of the actual sensitive file (a private-key header, a
+# .git/config section, KEY=VALUE .env pairs, wp-config DB defines,
+# web.config <configuration>, an AWS-cred stanza, or a raw
+# /etc/passwd row) — a stock 404-HTML page cannot false-positive this.
+_SENSITIVE_CONTENT = re.compile(
+    rb"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+    rb"\[core\][ \t]*\r?\n[ \t]*repositoryformatversion|"
+    rb"^[A-Z][A-Z0-9_]{2,}=[\w./\-@:+]+\s*$|"
+    rb"<\?xml[^>]*>\s*<configuration\b|"
+    rb"define\s*\(\s*['\"]DB_(?:PASSWORD|USER|NAME|HOST)['\"]|"
+    rb"aws_access_key_id\s*=|"
+    rb"^root:[^:]*:0:0:",
+    re.I | re.M)
 _XXE_BODY = (b'<?xml version="1.0"?>\n'
              b'<!DOCTYPE recce [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>\n'
              b'<D:propfind xmlns:D="DAV:"><D:prop><D:displayname>&xxe;'
@@ -553,6 +568,43 @@ def svn_repo_probe(ip: str, port: int, use_tls: bool, mount: str,
     return {"hits": hits}
 
 
+def depth_infinity_get_proof(ip: str, port: int, use_tls: bool,
+                             sensitive_hrefs: list[str],
+                             timeout: float = _TIMEOUT,
+                             cap: int = 3) -> list[dict]:
+    """SAFE T2 proof for the Depth: infinity disclosure. For up to `cap`
+    PROPFIND-classified sensitive hrefs, issue ONE unauthenticated bounded
+    GET each and return the excerpts whose bodies actually match a sensitive
+    content fingerprint (private key, .git/config, .env row, wp-config
+    define, web.config configuration, aws creds, /etc/passwd). Non-destructive
+    - never writes, no state change, single-shot reads with bounded timeout.
+    Returns [] when the tree walk turned up nothing readable, so the T1
+    finding still fires by itself."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for href in sensitive_hrefs:
+        if len(out) >= cap:
+            break
+        if not href or href in seen:
+            continue
+        seen.add(href)
+        # PROPFIND hrefs are absolute-path (RFC 4918 s.9.1 examples).
+        if not href.startswith("/"):
+            continue
+        r = _request(ip, port, "GET", href, use_tls=use_tls,
+                     timeout=timeout, read=8192)
+        if r is None or r.status != 200 or not r.body:
+            continue
+        m = _SENSITIVE_CONTENT.search(r.body)
+        if not m:
+            continue
+        idx = m.start()
+        excerpt = r.body[max(0, idx - 20): idx + 160].decode("utf-8", "replace")
+        out.append({"path": href, "status": r.status,
+                    "size": len(r.body), "excerpt": excerpt})
+    return out
+
+
 def cross_mount_leaks(hrefs: list[str]) -> list[str]:
     """Classifier: from a set of PROPFIND-discovered hrefs pick the ones that
     match sensitive path patterns (.git, .env, wp-config, backup, ...)."""
@@ -628,6 +680,14 @@ def probe(ip: str, port: int, use_tls: bool = False, *, active: bool = True,
             for h in deep_sens:
                 if h not in out["sensitive"]:
                     out["sensitive"].append(h)
+            # T2 promotion for webdav_directory_enum: unauthenticated bounded
+            # GET on the classified sensitive hrefs proves the leaked tree is
+            # actually readable and returns real config/credential content.
+            if out["sensitive"]:
+                proof = depth_infinity_get_proof(
+                    ip, port, use_tls, out["sensitive"], timeout=timeout)
+                if proof:
+                    out["depth_infinity"]["get_proof"] = proof
         # Verb allow-list enum.
         out["verbs"] = verb_allowlist(ip, port, use_tls, first, timeout=timeout)
         # Anonymous PUT proof.
@@ -790,13 +850,26 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
             # Depth:infinity walk.
             di = pr.get("depth_infinity")
             if di and di.get("href_count", 0) > 1:
+                proof = di.get("get_proof") or []
+                tier = "t2" if proof else "t1"
+                detail = (
+                    f"PROPFIND {di['path']} with Depth: infinity returned "
+                    f"{di['href_count']} href(s) in {di['size']} bytes. Sample: "
+                    + ", ".join(di["hrefs_sample"][:8]))
+                if proof:
+                    detail += (
+                        "\n\nSAFE proof (unauthenticated GET on the classified "
+                        "sensitive hrefs — bounded read, no writes):")
+                    for pp in proof[:3]:
+                        detail += (
+                            f"\n  GET {pp['path']} -> HTTP {pp['status']} "
+                            f"({pp['size']} bytes); excerpt: "
+                            f"{pp['excerpt'][:160]!r}")
                 out.append(_finding(
                     "high",
                     "WebDAV directory tree disclosed via PROPFIND Depth: infinity",
                     tgt,
-                    f"PROPFIND {di['path']} with Depth: infinity returned "
-                    f"{di['href_count']} href(s) in {di['size']} bytes. Sample: "
-                    + ", ".join(di["hrefs_sample"][:8]),
+                    detail,
                     "curl",
                     f"curl -X PROPFIND -H 'Depth: infinity' "
                     f"http://{h.ip}:{p.portid}{di['path']}",
@@ -808,7 +881,7 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                         "http://IP:PORT/webdav/ | grep -oE '<D:href>[^<]+' ; "
                         "for h in $(above); do curl -sSk http://IP:PORT$h; "
                         "done"),
-                    depth_tier="t1"))
+                    depth_tier=tier))
 
             # Verb enum.
             verbs = (pr.get("verbs") or {}).get("statuses") or {}

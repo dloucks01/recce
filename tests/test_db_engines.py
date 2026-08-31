@@ -890,6 +890,138 @@ class RedisDeepPrimitives(unittest.TestCase):
         self.assertIn("alice", acl_f[0]["detail"])
         self.assertIn("CWE-916", acl_f[0]["cwes"])
 
+    def _cve_handler(self, info, refl_reply, proof_reply):
+        """Handler that answers PING/INFO plus TWO EVALs:
+        (1) the T1 reflection ('if package.loadlib then 1 else 0') -> refl_reply,
+        (2) the T2 safe proof (loadlib -> luaopen_os -> os.getenv) -> proof_reply.
+        `*_reply` are raw RESP bytes so tests inject bytes derived from the wire
+        spec, not built via recce's encoders."""
+        counter = {"eval": 0}
+
+        def handle(conn):
+            while True:
+                cmd = self._resp_read(conn)
+                if not cmd:
+                    return
+                name = cmd[0].upper()
+                if name == "PING":
+                    conn.sendall(b"+PONG\r\n")
+                elif name == "INFO":
+                    b = info.encode()
+                    conn.sendall(b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n")
+                elif name == "EVAL":
+                    counter["eval"] += 1
+                    if counter["eval"] == 1:
+                        conn.sendall(refl_reply)
+                    else:
+                        conn.sendall(proof_reply)
+                else:
+                    conn.sendall(b"+OK\r\n")
+        return handle
+
+    def test_cve_2022_0543_t2_safe_proof_upgrades_tier(self):
+        """Vulnerable Debian build where loadlib ACTUALLY loads a lua .so:
+        T1 reflection returns 1 AND T2 proof returns real evidence (`lib=...;USER=...`)
+        -> probe captures the evidence string, finding's depth_tier is upgraded from
+        t1 to t2, and the evidence appears in the finding detail."""
+        from recce.services.db import redis
+        info = ("# Server\r\nredis_version:6.0.16\r\nos:Linux\r\n"
+                "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n")
+        # RESP bulk string: "$<len>\r\n<bytes>\r\n"
+        evidence = ("lib=/lib/x86_64-linux-gnu/liblua5.1.so.0;USER=redis;"
+                    "DATE=2026-08-31T12:00:00Z")
+        proof_reply = (b"$" + str(len(evidence)).encode() + b"\r\n"
+                       + evidence.encode() + b"\r\n")
+        port = _tcp_once(self._cve_handler(info, b":1\r\n", proof_reply))
+        pr = redis.probe("127.0.0.1", port)
+        self.assertTrue(pr["cve_2022_0543"])
+        self.assertEqual(pr.get("cve_2022_0543_evidence"), evidence)
+        fs = redis.findings([_host(port, "redis")], {("127.0.0.1", port): pr})
+        cve = [f for f in fs if f["kind"] == "redis_cve_2022_0543"][0]
+        self.assertEqual(cve["depth_tier"], "t2")
+        self.assertIn("USER=redis", cve["detail"])
+        self.assertIn("SAFE proof-of-exploit", cve["detail"])
+        # Still critical, still CVE-tagged, T1 exploit_note preserved.
+        self.assertEqual(cve["severity"], "critical")
+        self.assertIn("io.popen", cve["exploit_note"])
+
+    def test_cve_2022_0543_t1_stays_when_loadlib_returns_nil(self):
+        """Reachable-but-not-loadable: T1 reflection says :1 (package.loadlib is
+        present) BUT the T2 proof returns an empty bulk string (every candidate
+        lua .so path resolved to nil - e.g. a stripped container). Finding still
+        fires at T1 with no evidence text and no tier upgrade."""
+        from recce.services.db import redis
+        info = ("# Server\r\nredis_version:6.0.16\r\nos:Linux\r\n"
+                "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n")
+        # Empty bulk string reply (not nil): "$0\r\n\r\n"
+        proof_reply = b"$0\r\n\r\n"
+        port = _tcp_once(self._cve_handler(info, b":1\r\n", proof_reply))
+        pr = redis.probe("127.0.0.1", port)
+        self.assertTrue(pr["cve_2022_0543"])
+        self.assertNotIn("cve_2022_0543_evidence", pr)
+        fs = redis.findings([_host(port, "redis")], {("127.0.0.1", port): pr})
+        cve = [f for f in fs if f["kind"] == "redis_cve_2022_0543"][0]
+        self.assertEqual(cve["depth_tier"], "t1")
+        self.assertNotIn("SAFE proof-of-exploit", cve["detail"])
+
+    def test_cve_2022_0543_t2_proof_error_reply_stays_t1(self):
+        """Sandbox-hardened Redis: the reflection somehow returns :1 but the actual
+        proof EVAL errors (-ERR script tried to access nonexistent global 'package').
+        The proof gets a RESP error - no evidence captured, tier stays t1."""
+        from recce.services.db import redis
+        info = ("# Server\r\nredis_version:6.0.16\r\nos:Linux\r\n"
+                "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n")
+        proof_reply = b"-ERR script attempted to access nonexistent global 'package'\r\n"
+        port = _tcp_once(self._cve_handler(info, b":1\r\n", proof_reply))
+        pr = redis.probe("127.0.0.1", port)
+        self.assertTrue(pr["cve_2022_0543"])
+        self.assertNotIn("cve_2022_0543_evidence", pr)
+        fs = redis.findings([_host(port, "redis")], {("127.0.0.1", port): pr})
+        cve = [f for f in fs if f["kind"] == "redis_cve_2022_0543"][0]
+        self.assertEqual(cve["depth_tier"], "t1")
+
+    def test_cve_2022_0543_t2_proof_timeout_clean_stays_t1(self):
+        """Peer accepts the T2 proof EVAL and then goes silent - recv times out.
+        The probe must fail closed (no evidence, tier stays t1) and MUST NOT raise
+        an exception up to the analyze loop."""
+        from recce.services.db import redis
+        info = ("# Server\r\nredis_version:6.0.16\r\nos:Linux\r\n"
+                "# Replication\r\nrole:master\r\nconnected_slaves:0\r\n")
+        # Never reply to the second EVAL - _read_reply hits socket.timeout, returns
+        # None, and _cve_2022_0543_safe_proof yields "" cleanly.
+        def handle(conn):
+            evals = 0
+            while True:
+                cmd = self._resp_read(conn)
+                if not cmd:
+                    return
+                name = cmd[0].upper()
+                if name == "PING":
+                    conn.sendall(b"+PONG\r\n")
+                elif name == "INFO":
+                    b = info.encode()
+                    conn.sendall(b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n")
+                elif name == "EVAL":
+                    evals += 1
+                    if evals == 1:
+                        conn.sendall(b":1\r\n")
+                    # else: swallow - client will time out
+                else:
+                    conn.sendall(b"+OK\r\n")
+        port = _tcp_once(handle)
+        import time
+        t0 = time.monotonic()
+        # Force a short read-timeout so the test doesn't wait 5s per _read_reply.
+        pr = redis.probe("127.0.0.1", port, timeout=1.5)
+        elapsed = time.monotonic() - t0
+        self.assertTrue(pr["cve_2022_0543"])
+        self.assertNotIn("cve_2022_0543_evidence", pr)
+        self.assertLess(elapsed, 30.0)  # bounded - not a hang
+        fs = redis.findings([_host(port, "redis")], {("127.0.0.1", port): pr})
+        cve_list = [f for f in fs if f["kind"] == "redis_cve_2022_0543"]
+        self.assertEqual(len(cve_list), 1)
+        self.assertEqual(cve_list[0]["depth_tier"], "t1")
+
 
 class MongoDeepLoot(unittest.TestCase):
     """Unauth MongoDB deep pass: captured users, replica-set members, config leak."""

@@ -79,15 +79,63 @@ def _http(ip: str, port: int, method: str, path: str,
     return None
 
 
+def _query_up_topology(ip: str, port: int, timeout: float) -> dict:
+    """T2 SAFE proof for prom_query_open.
+
+    Single controlled read of /api/v1/query?query=up. `up` is the synthetic
+    metric Prometheus emits for every scrape target (1=healthy, 0=down), so
+    a non-empty vector result is REAL server-side evidence: it proves the
+    query engine ran and returned the running-service inventory (instance
+    labels + job labels + health). Non-destructive, read-only, single-shot,
+    bounded by the caller-supplied timeout.
+
+    Returns {"success": bool, "samples": [{"instance","job","up"}, ...],
+             "sample_count": int}.
+    """
+    out = {"success": False, "samples": [], "sample_count": 0}
+    r = _http(ip, port, "GET", "/api/v1/query?query=up", timeout=timeout)
+    if r is None or r[0] != 200:
+        return out
+    try:
+        j = json.loads(r[2].decode("utf-8", "replace"))
+    except (ValueError, UnicodeDecodeError):
+        return out
+    if j.get("status") != "success":
+        return out
+    out["success"] = True
+    data = j.get("data") or {}
+    result = data.get("result") or []
+    if not isinstance(result, list):
+        return out
+    out["sample_count"] = len(result)
+    # Capture up to 8 samples as evidence — enough to demonstrate topology
+    # without ballooning the finding detail.
+    for row in result[:8]:
+        if not isinstance(row, dict):
+            continue
+        metric = row.get("metric") or {}
+        val = row.get("value") or []
+        up_val = ""
+        if isinstance(val, list) and len(val) >= 2:
+            up_val = str(val[1])[:8]
+        out["samples"].append({
+            "instance": str(metric.get("instance", ""))[:120],
+            "job": str(metric.get("job", ""))[:60],
+            "up": up_val,
+        })
+    return out
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
     """Return {reachable, version, config_readable, query_open, admin_writable,
     federate_open, pprof_cmdline, build_info, scrape_targets_hint,
-    federate_series_hint, cmdline_sample}."""
+    federate_series_hint, cmdline_sample, query_topology}."""
     out = {"reachable": False, "version": "", "config_readable": False,
            "query_open": False, "admin_writable": False,
            "federate_open": False, "pprof_cmdline": False,
            "build_info": {}, "scrape_targets_hint": 0,
-           "federate_series_hint": 0, "cmdline_sample": ""}
+           "federate_series_hint": 0, "cmdline_sample": "",
+           "query_topology": {}}
     # /-/healthy — Prometheus's canonical reachability endpoint. Answers 200
     # with body "Prometheus Server is Healthy.\n"
     r = _http(ip, port, "GET", "/-/healthy", timeout=timeout)
@@ -127,14 +175,13 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
             pass
 
     # /api/v1/query — the actual metric-query endpoint. `query=up` returns the
-    # scrape health for every target = full topology disclosed.
-    r = _http(ip, port, "GET", "/api/v1/query?query=up", timeout=timeout)
-    if r is not None and r[0] == 200:
-        try:
-            j = json.loads(r[2].decode("utf-8", "replace"))
-            out["query_open"] = (j.get("status") == "success")
-        except (ValueError, UnicodeDecodeError):
-            pass
+    # scrape health for every target = full topology disclosed. The helper
+    # does a SINGLE controlled read and parses the returned vector so that
+    # observed instance/job/up samples become the T2 evidence.
+    qt = _query_up_topology(ip, port, timeout)
+    if qt["success"]:
+        out["query_open"] = True
+        out["query_topology"] = qt
 
     # /-/reload — only routable when Prometheus was started with
     # --web.enable-lifecycle. POST accepted = lifecycle write is on
@@ -323,17 +370,41 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "each with the disclosed bearer to confirm reuse."),
                     depth_tier="t1"))
             if pr.get("query_open"):
-                out.append(_finding(
-                    "medium",
-                    "Prometheus query API open (metric-data disclosure)", tgt,
+                # T1 baseline: /api/v1/query answered status=success anonymously.
+                detail = (
                     "/api/v1/query returned metric data anonymously. `query=up` "
                     "discloses the full scrape topology; other queries reveal "
                     "deployment behavior (traffic patterns, resource usage, "
-                    "failure rates) usable to plan targeted attacks.",
+                    "failure rates) usable to plan targeted attacks.")
+                tier = "t1"
+                qt = pr.get("query_topology") or {}
+                samples = qt.get("samples") or []
+                sample_count = qt.get("sample_count", 0)
+                if samples:
+                    # T2 SAFE proof: the anonymous query engine actually
+                    # returned running-service inventory. Render the first
+                    # few (instance, job, up) tuples as evidence.
+                    tier = "t2"
+                    preview = ", ".join(
+                        f"{s.get('instance','?')} (job={s.get('job','?')}, "
+                        f"up={s.get('up','?')})"
+                        for s in samples[:3])
+                    more = "" if sample_count <= 3 else f" (+{sample_count - 3} more)"
+                    detail += (
+                        f" T2 PROOF: anonymous GET /api/v1/query?query=up "
+                        f"returned {sample_count} scrape-target sample(s) — "
+                        f"the query engine actually ran and disclosed the "
+                        f"running-service inventory. Observed: "
+                        f"{preview}{more}.")
+                out.append(_finding(
+                    "medium",
+                    "Prometheus query API open (metric-data disclosure)", tgt,
+                    detail,
                     f"curl http://{h.ip}:{p.portid}/api/v1/query?query=up",
                     "Gate /api/v1/* behind authentication (reverse-proxy or a "
                     "Prometheus-native auth layer like caddy).",
-                    ["CWE-200"], kind="prom_query_open"))
+                    ["CWE-200"], kind="prom_query_open",
+                    depth_tier=tier))
             # Fingerprint always for report record.
             ver = pr.get("version") or "?"
             out.append(_finding(

@@ -258,6 +258,190 @@ class DebugEndpointsTest(unittest.TestCase):
 
 
 # ------------------------------------------------------------------
+# T2 SAFE PROOF: pprof leak probe pulls goroutine/heap and greps for
+# real Vault token / unseal-key strings that leaked into the runtime dump.
+# ------------------------------------------------------------------
+
+# RFC-shaped Vault token strings (from HashiCorp's token docs) - these are
+# what a compromised goroutine dump actually contains. NOT built via a recce
+# encoder; they are the literal wire shape.
+_LEAK_GOROUTINE_BODY = (
+    b"goroutine 42 [running]:\n"
+    b"vault/sdk/helper/token.Auth\n"
+    b"\tclientToken: s.abcDEF1234567890ghIJKLmnOP\n"
+    b"vault/vault.(*Core).Unseal\n"
+    b"\tunseal_key=aa11bb22cc33dd44ee55ff66\n"
+    b"vault/api.Token(hvs.CAESIAbcdef1234567890ghijklmnopqrstuvwx)\n"
+    b"# stack frame padding to exceed 100 bytes total ------------------\n"
+)
+
+_LEAK_HEAP_BODY = (
+    b"heap profile: 4: 32768 [17: 262144] @ heap/1048576\n"
+    b"# rooTToken=hvr.zzYYxxWWvvUU9988776655443322110\n"
+    b"# padding padding padding padding padding padding padding\n"
+)
+
+_CLEAN_GOROUTINE_BODY = (
+    b"goroutine profile: total 42\n"
+    + b"runtime.gopark+0x1a2\n" * 20
+)
+
+
+class PprofLeakProbeTest(unittest.TestCase):
+    """The T2 promotion: probe pulls goroutine + heap, greps for Vault
+    token / unseal patterns, and reports what it found. Bounded, safe."""
+
+    def _serve_leak(self, goroutine_body, heap_body):
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/sys/seal-status":
+                    self._json(200, _SEAL_STATUS_DEV)
+                elif self.path.startswith("/v1/sys/health"):
+                    self._json(200, _HEALTH_ACTIVE)
+                elif self.path == "/v1/sys/init":
+                    self._json(200, {"initialized": True})
+                elif self.path == "/v1/sys/leader":
+                    self._json(200, _LEADER)
+                elif self.path == "/v1/sys/pprof/goroutine?debug=1":
+                    self._empty(200)
+                    self.wfile.write(goroutine_body)
+                elif self.path == "/v1/sys/pprof/goroutine?debug=2":
+                    self._empty(200)
+                    self.wfile.write(goroutine_body)
+                elif self.path == "/v1/sys/pprof/heap?debug=1":
+                    self._empty(200)
+                    self.wfile.write(heap_body)
+                elif self.path.startswith("/v1/sys/metrics"):
+                    self._empty(404)
+                else:
+                    self._empty(404)
+
+            def do_HEAD(self):
+                self._empty(404)
+
+        srv, _t = _serve(H)
+        return srv
+
+    def test_probe_fires_and_upgrades_tier_when_vulnerable(self):
+        srv = self._serve_leak(_LEAK_GOROUTINE_BODY, _LEAK_HEAP_BODY)
+        try:
+            p = vault.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        self.assertTrue(p["pprof_reachable"])
+        leak = p.get("pprof_leak") or {}
+        self.assertTrue(leak, "leak evidence must be populated")
+        self.assertIn("/v1/sys/pprof/goroutine?debug=2", leak["endpoints"])
+        # At least one legacy s.-token AND one hvs. token AND unseal_key
+        # were seeded; the redactor keeps only the first 8 chars of tokens.
+        joined = " ".join(leak["matches"])
+        self.assertIn("s.abcDEF", joined,
+                      "legacy s. token redacted prefix should appear")
+        self.assertIn("hvs.CAES", joined,
+                      "hvs. token redacted prefix should appear")
+        self.assertTrue(
+            any("unseal" in m.lower() for m in leak["matches"]),
+            "unseal keyword should be flagged")
+        self.assertGreater(leak["bytes"], 100)
+
+        # T1 -> T2 upgrade on the emitted finding, evidence surfaced in output.
+        fs = vault.findings(
+            [_mkhost("127.0.0.1", srv.server_address[1])],
+            probes={("127.0.0.1", srv.server_address[1]): p})
+        dbg = [f for f in fs if f["kind"] == "vault_debug_disclosure"]
+        self.assertEqual(len(dbg), 1)
+        self.assertEqual(dbg[0]["depth_tier"], "t2")
+        self.assertIn("output", dbg[0])
+        self.assertIn("pprof-leak evidence", dbg[0]["output"])
+        # Full raw tokens must NOT appear in the finding output (redaction).
+        self.assertNotIn("s.abcDEF1234567890ghIJKLmnOP", dbg[0]["output"])
+        # Detail should mention the T2 PROOF header so the tester sees it.
+        self.assertIn("T2 PROOF", dbg[0]["detail"])
+
+    def test_probe_quiet_when_pprof_body_contains_no_secret(self):
+        srv = self._serve_leak(_CLEAN_GOROUTINE_BODY, _CLEAN_GOROUTINE_BODY)
+        try:
+            p = vault.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        # pprof endpoint is reachable (T1 still fires) but no leak evidence.
+        self.assertTrue(p["pprof_reachable"])
+        self.assertEqual(p.get("pprof_leak") or {}, {})
+
+        fs = vault.findings(
+            [_mkhost("127.0.0.1", srv.server_address[1])],
+            probes={("127.0.0.1", srv.server_address[1]): p})
+        dbg = [f for f in fs if f["kind"] == "vault_debug_disclosure"]
+        self.assertEqual(len(dbg), 1)
+        # T1 path preserved when the safe probe doesn't fire.
+        self.assertEqual(dbg[0]["depth_tier"], "t1")
+        self.assertNotIn("output", dbg[0])
+        self.assertNotIn("T2 PROOF", dbg[0]["detail"])
+
+    def test_probe_quiet_when_pprof_unreachable(self):
+        # pprof endpoint not exposed at all -> reachable=False, no leak
+        # probe attempted, tier remains t1 on any other debug surface.
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/sys/seal-status":
+                    self._json(200, _SEAL_STATUS_DEV)
+                elif self.path.startswith("/v1/sys/health"):
+                    self._json(200, _HEALTH_ACTIVE)
+                elif self.path == "/v1/sys/init":
+                    self._json(200, {"initialized": True})
+                elif self.path == "/v1/sys/leader":
+                    self._json(200, _LEADER)
+                elif self.path.startswith("/v1/sys/pprof"):
+                    self._empty(403)
+                elif self.path.startswith("/v1/sys/metrics"):
+                    self._empty(200)
+                    self.wfile.write(
+                        b"# HELP vault_core_seal_config Seal config\n"
+                        b"vault_core_seal_config 1\n" * 20)
+                else:
+                    self._empty(404)
+
+            def do_HEAD(self):
+                self._empty(404)
+
+        srv, _t = _serve(H)
+        try:
+            p = vault.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        self.assertFalse(p["pprof_reachable"])
+        self.assertTrue(p["metrics_reachable"])
+        self.assertEqual(p.get("pprof_leak") or {}, {})
+
+        fs = vault.findings(
+            [_mkhost("127.0.0.1", srv.server_address[1])],
+            probes={("127.0.0.1", srv.server_address[1]): p})
+        dbg = [f for f in fs if f["kind"] == "vault_debug_disclosure"]
+        self.assertEqual(len(dbg), 1)
+        self.assertEqual(dbg[0]["depth_tier"], "t1")
+
+    def test_probe_clean_on_timeout(self):
+        # Simulate every pprof-leak endpoint timing out (or connection
+        # refused) by making _http return None for those paths; the probe
+        # must return {} without raising and the module-level state is
+        # unchanged.
+        orig_http = vault._http
+
+        def fake_http(ip, port, method, path, *a, **kw):
+            if "/pprof/" in path:
+                return None
+            return orig_http(ip, port, method, path, *a, **kw)
+
+        vault._http = fake_http
+        try:
+            leak = vault._pprof_leak_probe("127.0.0.1", 1, timeout=0.1,
+                                           prefer=True)
+        finally:
+            vault._http = orig_http
+        self.assertEqual(leak, {})
+
+
+# ------------------------------------------------------------------
 # Authed walk: mounts / auth / KV dump / raft snapshot
 # ------------------------------------------------------------------
 

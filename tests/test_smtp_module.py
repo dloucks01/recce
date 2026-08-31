@@ -246,3 +246,124 @@ def test_findings_emit_expn_alias_leak():
     assert row["severity"] == "medium"
     assert "4 member" in row["detail"]         # 3 + 1
     assert "EXPN all" in row["detail"]
+
+
+# --- T2 promotion: VRFY reply-body evidence capture --------------------------
+#
+# Fixtures are wire-derived: reply bodies mirror what an RFC-compliant MTA
+# actually writes on a VRFY 250 line — either angle-addr form or bare
+# `local@domain`. We do NOT build the wire via any recce encoder.
+
+def _vrfy_evidence_server(cmd: str) -> str:
+    up = cmd.upper()
+    if up.startswith("EHLO"):
+        return "250-mx.corp.local\r\n250 VRFY"
+    if up.startswith("VRFY POSTMASTER"):
+        return "250 Post Master <postmaster@mx.corp.local>"
+    if up.startswith("VRFY ROOT"):
+        return "250 root@mx.corp.local"
+    if up.startswith("VRFY ADMIN"):
+        return "252 Cannot VRFY user, but will accept"   # no resolved addr
+    if up.startswith("VRFY MAILER-DAEMON"):
+        return "550 no such user"
+    if up.startswith("QUIT"):
+        return "221 bye"
+    return "250 OK"
+
+
+def _vrfy_bare_ok_server(cmd: str) -> str:
+    # Server always answers 250 OK but never names a real mailbox. This is
+    # the false-positive class the T2 gate must reject.
+    up = cmd.upper()
+    if up.startswith("EHLO"):
+        return "250-mx.locked\r\n250 VRFY"
+    if up.startswith("VRFY"):
+        return "250 OK"
+    if up.startswith("QUIT"):
+        return "221 bye"
+    return "250 OK"
+
+
+def test_parse_vrfy_reply_extracts_angle_and_bare_forms():
+    assert smtp._parse_vrfy_reply("Post Master <postmaster@x.corp>") == "postmaster@x.corp"
+    assert smtp._parse_vrfy_reply("root@x.corp") == "root@x.corp"
+    # Bare status only — must NOT hallucinate a mailbox.
+    assert smtp._parse_vrfy_reply("OK") == ""
+    assert smtp._parse_vrfy_reply("Cannot VRFY user") == ""
+
+
+def test_probe_vrfy_evidence_captures_resolved_mailboxes():
+    port, srv = _serve(_vrfy_evidence_server)
+    try:
+        ev = smtp.probe_vrfy_evidence("127.0.0.1", port, timeout=4)
+    finally:
+        srv.shutdown()
+    by_user = {e["user"]: e for e in ev}
+    assert by_user["postmaster"]["code"] == 250
+    assert by_user["postmaster"]["resolved"] == "postmaster@mx.corp.local"
+    assert by_user["root"]["resolved"] == "root@mx.corp.local"
+    # 252 = "will accept" but no resolved mailbox -> not T2 evidence.
+    assert by_user["admin"]["code"] == 252
+    assert by_user["admin"]["resolved"] == ""
+    # 550 refusal
+    assert by_user["mailer-daemon"]["code"] == 550
+
+
+def test_probe_vrfy_evidence_bare_ok_yields_no_evidence():
+    port, srv = _serve(_vrfy_bare_ok_server)
+    try:
+        ev = smtp.probe_vrfy_evidence("127.0.0.1", port, timeout=4)
+    finally:
+        srv.shutdown()
+    # All four users reply 250 OK but NONE resolved a mailbox -> stays T1.
+    assert ev, "should still return code entries"
+    assert all(e["resolved"] == "" for e in ev)
+
+
+def test_probe_vrfy_evidence_unreachable_returns_empty():
+    # 127.0.0.1:1 is refused everywhere; probe must fail cleanly.
+    ev = smtp.probe_vrfy_evidence("127.0.0.1", 1, timeout=2)
+    assert ev == []
+
+
+def test_findings_smtp_vrfy_promotes_to_t2_with_evidence():
+    h = Host(ip="10.0.0.5", ports=[Port(portid=25, service="smtp", state="open")])
+    probes = {("10.0.0.5", 25): {
+        "vrfy": True, "starttls": True,
+        "vrfy_evidence": [
+            {"user": "postmaster", "code": 250, "resolved": "postmaster@mx.corp.local"},
+            {"user": "root", "code": 250, "resolved": "root@mx.corp.local"},
+            {"user": "admin", "code": 252, "resolved": ""},
+        ]}}
+    row = next(f for f in smtp.findings([h], probes) if f["kind"] == "smtp_vrfy")
+    assert row["depth_tier"] == "t2"
+    assert row.get("output"), "T2 promotion must attach evidence to output"
+    assert "postmaster@mx.corp.local" in row["output"]
+    assert "root@mx.corp.local" in row["output"]
+    # The admin 252 line has no resolved mailbox -> excluded from evidence.
+    assert "VRFY admin" not in row["output"]
+    # Detail should reflect the chain.
+    assert "CHAINED" in row["detail"]
+
+
+def test_findings_smtp_vrfy_stays_t1_without_evidence():
+    h = Host(ip="10.0.0.5", ports=[Port(portid=25, service="smtp", state="open")])
+    probes = {("10.0.0.5", 25): {"vrfy": True, "starttls": True}}
+    row = next(f for f in smtp.findings([h], probes) if f["kind"] == "smtp_vrfy")
+    assert row["depth_tier"] == "t1"
+    assert "output" not in row
+    assert "CHAINED" not in row["detail"]
+
+
+def test_findings_smtp_vrfy_stays_t1_when_evidence_has_no_resolved():
+    # Probe fired but every response was a bare 250 OK (no mailbox).
+    h = Host(ip="10.0.0.5", ports=[Port(portid=25, service="smtp", state="open")])
+    probes = {("10.0.0.5", 25): {
+        "vrfy": True, "starttls": True,
+        "vrfy_evidence": [
+            {"user": "postmaster", "code": 250, "resolved": ""},
+            {"user": "root", "code": 250, "resolved": ""},
+        ]}}
+    row = next(f for f in smtp.findings([h], probes) if f["kind"] == "smtp_vrfy")
+    assert row["depth_tier"] == "t1"
+    assert "output" not in row

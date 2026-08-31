@@ -133,6 +133,153 @@ class MongoHostInfoDisclosure(unittest.TestCase):
         self.assertEqual(hf["severity"], "medium")
 
 
+class MongoHostInfoT2Corroboration(unittest.TestCase):
+    """T2 SAFE proof-of-exploit: a second controlled read (serverStatus)
+    returns live process state that ties the hostInfo fingerprint to a live
+    mongod on this socket. Promotes depth_tier T1 -> T2."""
+
+    def setUp(self):
+        replies = _base_replies()
+        replies["hostInfo"] = M.bson_doc(
+            _e_doc("system", M.bson_doc(
+                M._e_str("hostname", "prod-db-01.internal.example"),
+                M._e_int32("cpuAddrSize", 64))),
+            _e_doc("os", M.bson_doc(
+                M._e_str("type", "Linux"),
+                M._e_str("name", "Ubuntu"),
+                M._e_str("version", "22.04"))),
+            _e_double("ok", 1.0))
+        # serverStatus reply mirrors what a real mongod 6.x returns for the
+        # slim projection: identity + version + pid + uptime + localTime, all
+        # top-level keys. Values are wire-realistic — FQDN:port host, positive
+        # pid/uptime, ISO-ish localTime string.
+        replies["serverStatus"] = M.bson_doc(
+            M._e_str("host", "prod-db-01.internal.example:27017"),
+            M._e_str("version", "6.0.1"),
+            M._e_str("process", "mongod"),
+            _e_int64("pid", 4271),
+            M._e_int32("uptime", 8642),
+            M._e_str("localTime", "2026-08-30T14:22:07Z"),
+            _e_double("ok", 1.0))
+        self.port = _serve(replies)
+
+    def test_probe_captures_server_status(self):
+        pr = M.probe("127.0.0.1", self.port)
+        self.assertTrue(pr["unauth"])
+        ss = pr["host_info"].get("server_status")
+        self.assertIsInstance(ss, dict)
+        self.assertEqual(ss["host"], "prod-db-01.internal.example:27017")
+        self.assertEqual(ss["process"], "mongod")
+        self.assertEqual(ss["pid"], 4271)
+        self.assertEqual(ss["uptime"], 8642)
+        self.assertEqual(ss["version"], "6.0.1")
+        self.assertEqual(ss["localTime"], "2026-08-30T14:22:07Z")
+
+    def test_finding_promoted_to_t2_with_evidence_in_detail(self):
+        pr = M.probe("127.0.0.1", self.port)
+        fs = M.findings([_host(self.port)], {("127.0.0.1", self.port): pr})
+        hf = [f for f in fs if f["kind"] == "mongo_hostinfo"]
+        self.assertTrue(hf, "hostinfo finding should still emit")
+        f = hf[0]
+        self.assertEqual(f["depth_tier"], "t2")
+        # Title / severity unchanged per the promotion rules.
+        self.assertEqual(f["severity"], "medium")
+        self.assertIn("hostInfo", f["title"])
+        # Corroborating evidence baked into detail so the tester sees WHAT the
+        # T2 probe actually found.
+        self.assertIn("serverStatus", f["detail"])
+        self.assertIn("prod-db-01.internal.example:27017", f["detail"])
+        self.assertIn("mongod", f["detail"])
+        self.assertIn("4271", f["detail"])
+
+
+class MongoHostInfoStaysT1WhenServerStatusDenied(unittest.TestCase):
+    """When hostInfo answers but serverStatus is denied (patched RBAC / lower
+    privilege), the T1 finding still emits and depth_tier stays at t1 — the
+    T2 probe went quiet."""
+
+    def setUp(self):
+        replies = _base_replies()
+        replies["hostInfo"] = M.bson_doc(
+            _e_doc("system", M.bson_doc(
+                M._e_str("hostname", "svr01.corp.local"))),
+            _e_doc("os", M.bson_doc(
+                M._e_str("type", "Linux"),
+                M._e_str("name", "RHEL"))),
+            _e_double("ok", 1.0))
+        replies["serverStatus"] = M.bson_doc(
+            M._e_int32("code", 13),
+            M._e_str("errmsg", "not authorized on admin to execute "
+                     "command { serverStatus: 1 }"),
+            _e_double("ok", 0.0))
+        self.port = _serve(replies)
+
+    def test_server_status_absent_when_denied(self):
+        pr = M.probe("127.0.0.1", self.port)
+        self.assertNotIn("server_status", pr.get("host_info") or {})
+
+    def test_finding_stays_t1(self):
+        pr = M.probe("127.0.0.1", self.port)
+        fs = M.findings([_host(self.port)], {("127.0.0.1", self.port): pr})
+        hf = [f for f in fs if f["kind"] == "mongo_hostinfo"]
+        self.assertTrue(hf, "T1 finding must still emit when T2 probe stays quiet")
+        f = hf[0]
+        self.assertEqual(f["depth_tier"], "t1")
+        self.assertIn("svr01.corp.local", f["detail"])
+        # No corroboration text when the T2 probe didn't fire.
+        self.assertNotIn("serverStatus", f["detail"])
+
+
+class MongoHostInfoT2CleanTimeout(unittest.TestCase):
+    """A hung serverStatus (server accepts hostInfo, then never replies to
+    serverStatus) must time out cleanly: the T1 finding still emits, depth
+    stays t1, and probe() returns without raising."""
+
+    def setUp(self):
+        replies = _base_replies()
+        replies["hostInfo"] = M.bson_doc(
+            _e_doc("system", M.bson_doc(
+                M._e_str("hostname", "slow-node.example"))),
+            _e_doc("os", M.bson_doc(
+                M._e_str("type", "Linux"),
+                M._e_str("name", "Debian"))),
+            _e_double("ok", 1.0))
+        # Custom handler: replies to hello/buildInfo/listDatabases/hostInfo
+        # normally, then goes silent for serverStatus so the socket read hits
+        # the timeout.
+        unknown = M.bson_doc(M._e_str("errmsg", "no such command"),
+                             _e_double("ok", 0.0))
+
+        def handle(conn):
+            while True:
+                hdr = M._recvn(conn, 16)
+                if len(hdr) < 16:
+                    return
+                length = struct.unpack("<i", hdr[:4])[0]
+                rid = struct.unpack("<i", hdr[4:8])[0]
+                body = M._recvn(conn, length - 16)
+                doc, _ = M.bson_parse(hdr + body, 16 + 4 + 1)
+                cmd = next(iter(doc), "")
+                if cmd == "serverStatus":
+                    # Hang: swallow the request, never reply. Client-side
+                    # bounded timeout has to unstick this.
+                    return
+                conn.sendall(M.op_msg(rid, replies.get(cmd, unknown)))
+        self.port = _tcp_once(handle)
+
+    def test_probe_returns_cleanly_and_stays_t1(self):
+        pr = M.probe("127.0.0.1", self.port, timeout=1.0)
+        self.assertIsInstance(pr, dict)
+        self.assertTrue(pr.get("unauth"))
+        # hostInfo evidence is still there; serverStatus corroboration is not.
+        self.assertEqual(pr["host_info"].get("hostname"), "slow-node.example")
+        self.assertNotIn("server_status", pr["host_info"])
+        fs = M.findings([_host(self.port)], {("127.0.0.1", self.port): pr})
+        hf = [f for f in fs if f["kind"] == "mongo_hostinfo"]
+        self.assertTrue(hf)
+        self.assertEqual(hf[0]["depth_tier"], "t1")
+
+
 class MongoStartupWarnings(unittest.TestCase):
     """getLog:'startupWarnings' -> warning lines captured + finding emitted."""
 

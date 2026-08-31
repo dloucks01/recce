@@ -435,3 +435,151 @@ def test_enum_users_via_monkeypatched_socket(monkeypatch):
     result = imap.enum_users("127.0.0.1", 143, users=users, timeout=1)
     assert result["distinguishes"] is True
     assert set(result["existing"]) == valid
+
+
+# --- T2 promotion: plaintext_login_pretls SAFE proof-of-exploit -----------
+#
+# T1 -> T2 upgrade path for `imap_login_plaintext_allowed`:
+#   - probe() captures the exact server response line for the bogus pre-TLS
+#     LOGIN into `pr["plaintext_login_evidence"]`.
+#   - findings() sets depth_tier="t2" when that evidence is present and folds
+#     the captured line into the finding's `detail` so the tester can see the
+#     concrete server-side proof.
+#   - When the evidence field is absent (older cached probe, or server hung
+#     up before responding), the finding falls back to depth_tier="t1".
+
+def test_probe_captures_plaintext_login_evidence_line():
+    """Server accepts the bogus LOGIN pre-TLS -> exact response line captured."""
+    srv = _Server(GREETING_PLAIN_LOGIN, {
+        "CAPABILITY": CAP_MINIMAL,
+        "ID": ID_DOVECOT,
+        # RFC-derived: server processed the LOGIN and answered with a
+        # generic invalid-credentials NO. That's the plaintext auth path.
+        "LOGIN": LOGIN_NO_INVALID,
+        "LOGOUT": b"x1 OK logout\r\n",
+    })
+    try:
+        pr = imap.probe("127.0.0.1", srv.port, timeout=3)
+    finally:
+        srv.close()
+    assert pr["plaintext_login"] == "accepted"
+    # The evidence line is the server's exact tagged response, bounded.
+    ev = pr["plaintext_login_evidence"]
+    assert ev.startswith("rp1 NO")
+    assert "Authentication failed" in ev
+    assert len(ev) <= 200
+
+
+def test_findings_promotes_plaintext_login_to_t2_when_evidence_present():
+    """T2: evidence present -> depth_tier upgraded and folded into detail."""
+    h = _host_at(143)
+    pr = {"reachable": True, "port": 143, "banner": "* OK Dovecot ready",
+          "preauth": False, "capabilities": [], "starttls": False,
+          "logindisabled": False, "sasl": [], "id": {},
+          "product": "", "version": "",
+          "plaintext_login": "accepted",
+          "plaintext_login_evidence": "rp1 NO Authentication failed.",
+          "anonymous": False, "starttls_downgrade": False,
+          "cram_md5_challenge": "", "digest_md5_challenge": ""}
+    fs = imap.findings([h], {("10.0.0.9", 143): pr})
+    hits = [f for f in fs if f["kind"] == "imap_login_plaintext_allowed"]
+    assert hits, "plaintext_allowed finding missing"
+    f = hits[0]
+    assert f["depth_tier"] == "t2"
+    assert f["severity"] == "critical"     # severity is untouched by promotion
+    # The captured evidence line is folded into the finding's detail so the
+    # tester can see WHAT the probe actually pulled from the server.
+    assert "rp1 NO Authentication failed." in f["detail"]
+    assert "T2 proof" in f["detail"]
+
+
+def test_findings_plaintext_login_stays_t1_when_no_evidence_field():
+    """T1 fallback: no evidence field -> depth_tier stays t1 (unchanged)."""
+    h = _host_at(143)
+    pr = {"reachable": True, "port": 143, "banner": "* OK ready",
+          "preauth": False, "capabilities": [], "starttls": False,
+          "logindisabled": False, "sasl": [], "id": {},
+          "product": "", "version": "",
+          "plaintext_login": "accepted",
+          # No 'plaintext_login_evidence' key (e.g., an older cached probe).
+          "anonymous": False, "starttls_downgrade": False,
+          "cram_md5_challenge": "", "digest_md5_challenge": ""}
+    fs = imap.findings([h], {("10.0.0.9", 143): pr})
+    hits = [f for f in fs if f["kind"] == "imap_login_plaintext_allowed"]
+    assert hits and hits[0]["depth_tier"] == "t1"
+    # And no T2 marker leaks into detail when we did not upgrade.
+    assert "T2 proof" not in hits[0]["detail"]
+
+
+def test_probe_stays_quiet_when_server_refuses_pretls_login():
+    """Patched server: NO PRIVACYREQUIRED -> no plaintext finding, no T2 upgrade."""
+    srv = _Server(GREETING_STARTTLS_DISABLED, {
+        "CAPABILITY": CAP_STARTTLS_LOGINDISABLED,
+        "ID": ID_DOVECOT,
+        "LOGIN": LOGIN_NO_TLS_REQUIRED,     # RFC-shaped TLS-required NO
+        "LOGOUT": b"x1 OK logout\r\n",
+    })
+    try:
+        pr = imap.probe("127.0.0.1", srv.port, timeout=3)
+    finally:
+        srv.close()
+    # The server explicitly refused the pre-TLS LOGIN.
+    assert pr["plaintext_login"] == "rejected"
+    # Evidence line still gets captured (it's the exact server response),
+    # but the finding is not emitted at all because the auth path is not open.
+    h = Host(ip="127.0.0.1",
+             ports=[Port(portid=srv.port, service="imap", state="open")])
+    fs = imap.findings([h], {("127.0.0.1", srv.port): pr})
+    assert not any(f["kind"] == "imap_login_plaintext_allowed" for f in fs)
+
+
+def test_probe_plaintext_login_evidence_timeout_is_clean():
+    """Server never answers the LOGIN -> probe returns cleanly, no crash, no T2."""
+
+    class _SilentAfterGreetSock:
+        """Emit the greeting once, then silently drop everything else."""
+
+        def __init__(self):
+            self._buf = (GREETING_PLAIN_LOGIN
+                         + b"* CAPABILITY IMAP4rev1 ID AUTH=PLAIN\r\n"
+                         + b"c1 OK CAPABILITY completed\r\n")
+
+        def settimeout(self, _t): pass
+
+        def sendall(self, data: bytes):
+            # ID gets a synthetic reply so the probe advances; every other
+            # command (LOGIN, LOGOUT, ...) triggers a bounded timeout.
+            up = data.upper()
+            if up.startswith(b"I1 ID"):
+                self._buf += b'* ID NIL\r\ni1 OK ID done\r\n'
+            # LOGIN is deliberately unanswered - simulates a hung server.
+
+        def recv(self, n: int) -> bytes:
+            if not self._buf:
+                import socket as _s
+                raise _s.timeout("simulated read timeout")
+            out, self._buf = self._buf[:n], self._buf[n:]
+            return out
+
+        def close(self): pass
+
+    def fake_open(_ip, _port, _timeout):
+        return _SilentAfterGreetSock()
+
+    import pytest
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(imap, "_open_socket", fake_open)
+    try:
+        pr = imap.probe("127.0.0.1", 143, timeout=1)
+    finally:
+        monkeypatch.undo()
+    # Clean return, no crash.
+    assert pr["reachable"] is True
+    # No LOGIN response was captured -> no evidence, no T2 upgrade.
+    assert pr["plaintext_login"] in ("unknown", "")
+    assert pr["plaintext_login_evidence"] == ""
+    # And the finding does not fire.
+    h = Host(ip="127.0.0.1",
+             ports=[Port(portid=143, service="imap", state="open")])
+    fs = imap.findings([h], {("127.0.0.1", 143): pr})
+    assert not any(f["kind"] == "imap_login_plaintext_allowed" for f in fs)

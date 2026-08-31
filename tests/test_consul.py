@@ -309,5 +309,178 @@ class AgentSelfEnrichmentTest(unittest.TestCase):
         self.assertNotIn("consul_weak_tls", kinds)
 
 
+class KvOpenT2ProofTest(unittest.TestCase):
+    """T2 SAFE proof-of-exploit: /v1/agent/members canary for consul_kv_open."""
+
+    # Wire-shaped members response — matches the shape Consul returns on
+    # GET /v1/agent/members. NOT built via recce encoders.
+    _MEMBERS_WIRE = [
+        {"Name": "srv-1", "Addr": "10.0.0.11", "Port": 8301, "Tags": {},
+         "Status": 1, "ProtocolMin": 1, "ProtocolMax": 5, "ProtocolCur": 2,
+         "DelegateMin": 2, "DelegateMax": 5, "DelegateCur": 4},
+        {"Name": "srv-2", "Addr": "10.0.0.12", "Port": 8301, "Tags": {},
+         "Status": 1},
+        {"Name": "web-1", "Addr": "10.0.0.21", "Port": 8301, "Tags": {},
+         "Status": 1},
+    ]
+
+    def test_probe_captures_members_when_acl_disabled(self):
+        """(a) Vulnerable target: probe fires + tier upgrades to T2."""
+        wire = self._MEMBERS_WIRE
+        saw = {"members_hits": 0}
+
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/agent/self":
+                    body = json.dumps({"Config": {"Version": "1.16.0"},
+                                       "DebugConfig": {"ACLDefaultPolicy": "allow"}}).encode()
+                elif self.path == "/v1/catalog/services":
+                    body = json.dumps({"consul": [], "web": ["prod"]}).encode()
+                elif self.path == "/v1/catalog/nodes":
+                    body = json.dumps([{"Node": "n1"}]).encode()
+                elif self.path.startswith("/v1/kv"):
+                    body = json.dumps([{"Key": "app/x", "Value": _b64("v")}]).encode()
+                elif self.path == "/v1/agent/members":
+                    saw["members_hits"] += 1
+                    body = json.dumps(wire).encode()
+                else:
+                    self.send_response(404); self.end_headers(); return
+                self.send_response(200); self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+
+        srv, _t = _serve(H)
+        try:
+            p = consul.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        self.assertEqual(saw["members_hits"], 1,
+                         "members probe should fire exactly once when vulnerable")
+        ev = p.get("members_evidence")
+        self.assertIsNotNone(ev, "members_evidence should be populated")
+        self.assertEqual(ev["count"], 3)
+        self.assertEqual(ev["endpoint"], "/v1/agent/members")
+        names = {m["name"] for m in ev["sample"]}
+        self.assertIn("srv-1", names)
+        self.assertIn("srv-2", names)
+        # findings should carry depth_tier=t2 with the evidence baked in
+        host = Host(ip="10.0.0.5", ports=[
+            Port(portid=8500, protocol="tcp", service="consul")])
+        pr = dict(p)  # copy
+        probes = {("10.0.0.5", 8500): pr}
+        fs = consul.findings([host], probes)
+        unauth = next(f for f in fs if f["kind"] == "consul_unauth_read")
+        self.assertEqual(unauth["depth_tier"], "t2",
+                         "vulnerable target should upgrade depth_tier to t2")
+        self.assertIn("T2 proof", unauth["detail"])
+        self.assertIn("srv-1", unauth["detail"])
+        self.assertIn("/v1/agent/members", unauth["detail"])
+
+    def test_probe_quiet_and_tier_stays_t1_when_members_forbidden(self):
+        """(b) Patched target: /agent/members 403s -> tier stays T1."""
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/agent/self":
+                    body = json.dumps({"Config": {"Version": "1.16.0"},
+                                       "DebugConfig": {"ACLDefaultPolicy": "allow"}}).encode()
+                elif self.path == "/v1/catalog/services":
+                    body = json.dumps({"web": ["prod"]}).encode()
+                elif self.path == "/v1/catalog/nodes":
+                    body = json.dumps([{"Node": "n1"}]).encode()
+                elif self.path.startswith("/v1/kv"):
+                    body = json.dumps([{"Key": "app/x", "Value": _b64("v")}]).encode()
+                elif self.path == "/v1/agent/members":
+                    self.send_response(403); self.end_headers(); return
+                else:
+                    self.send_response(404); self.end_headers(); return
+                self.send_response(200); self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+
+        srv, _t = _serve(H)
+        try:
+            p = consul.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        self.assertIsNone(p.get("members_evidence"))
+        host = Host(ip="10.0.0.5", ports=[
+            Port(portid=8500, protocol="tcp", service="consul")])
+        fs = consul.findings([host], {("10.0.0.5", 8500): p})
+        unauth = next(f for f in fs if f["kind"] == "consul_unauth_read")
+        self.assertEqual(unauth["depth_tier"], "t1",
+                         "no T2 evidence should keep depth_tier at t1")
+        self.assertNotIn("T2 proof", unauth["detail"])
+
+    def test_probe_skipped_when_acl_enforcing(self):
+        """T2 probe should not even fire when ACL enforces reads."""
+        saw = {"members_hits": 0}
+
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/agent/self":
+                    body = json.dumps({"Config": {"Version": "1.18.0"},
+                                       "DebugConfig": {"ACLDefaultPolicy": "deny"}}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body); return
+                if self.path == "/v1/agent/members":
+                    saw["members_hits"] += 1
+                # everything else returns empty listing
+                self.send_response(200); self.send_header("Content-Length", "2")
+                self.end_headers(); self.wfile.write(b"[]")
+
+        srv, _t = _serve(H)
+        try:
+            p = consul.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        self.assertEqual(saw["members_hits"], 0,
+                         "T2 probe must not fire when ACL enforces")
+        self.assertIsNone(p.get("members_evidence"))
+
+    def test_members_probe_timeout_clean(self):
+        """(c) Timeout is clean — helper returns None, probe stays quiet."""
+        # Route to a closed port on localhost so connect() fails fast.
+        # Explicitly exercises the socket-error path (OSError) of _http().
+        ev = consul._probe_members_canary("127.0.0.1", 1, timeout=1.0)
+        self.assertIsNone(ev)
+
+    def test_members_probe_returns_none_on_malformed_json(self):
+        """Malformed body must not raise; returns None -> no upgrade."""
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/agent/members":
+                    body = b"not-json{{"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body); return
+                self.send_response(404); self.end_headers()
+
+        srv, _t = _serve(H)
+        try:
+            ev = consul._probe_members_canary(
+                "127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        self.assertIsNone(ev)
+
+    def test_members_probe_returns_none_on_empty_list(self):
+        """Empty member list -> no T2 evidence emitted."""
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/agent/members":
+                    body = b"[]"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body); return
+                self.send_response(404); self.end_headers()
+
+        srv, _t = _serve(H)
+        try:
+            ev = consul._probe_members_canary(
+                "127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        self.assertIsNone(ev)
+
+
 if __name__ == "__main__":
     unittest.main()

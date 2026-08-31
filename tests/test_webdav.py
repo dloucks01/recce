@@ -594,5 +594,215 @@ class FullProbeAndFindingsTest(unittest.TestCase):
             m.undo()
 
 
+class DepthInfinityT2ProofTest(unittest.TestCase):
+    """T2 promotion for webdav_directory_enum: an unauthenticated bounded GET
+    on a PROPFIND-classified sensitive href confirms the leaked tree is really
+    readable and returns real config/credential content — not a 404 HTML page.
+    Fixture bodies are copied verbatim from the file formats they represent
+    (git config, OpenSSH id_rsa header, dotenv row) — never built by the
+    module under test."""
+
+    # A real .git/config header — the '[core]' + repositoryformatversion pair
+    # is the deterministic signature of git's on-disk config file (see
+    # git-scm.com Documentation/config).
+    GIT_CONFIG = (
+        b"[core]\n"
+        b"\trepositoryformatversion = 0\n"
+        b"\tfilemode = true\n"
+        b"\tbare = false\n"
+        b"[remote \"origin\"]\n"
+        b"\turl = git@example.com:acme/secrets.git\n")
+
+    # First line of an unencrypted OpenSSH RSA private key — the PEM
+    # "-----BEGIN RSA PRIVATE KEY-----" marker is the exact fingerprint the
+    # T2 gate looks for. (Followed by junk so it's not zero-length.)
+    ID_RSA_HEADER = (b"-----BEGIN RSA PRIVATE KEY-----\n"
+                     b"MIIEpAIBAAKCAQEAtestcapture==\n"
+                     b"-----END RSA PRIVATE KEY-----\n")
+
+    def test_depth_infinity_get_proof_captures_git_config_content(self):
+        """(a) probe fires + upgrades tier when target is vulnerable."""
+        m = _Patch()
+        try:
+            def router(method, path, body, headers):
+                self.assertEqual(method, "GET")
+                if path == "/webdav/.git/config":
+                    return _FakeResponse(200, [], self.GIT_CONFIG)
+                if path == "/webdav/.ssh/id_rsa":
+                    return _FakeResponse(200, [], self.ID_RSA_HEADER)
+                return _FakeResponse(404, [], b"<html>Not Found</html>")
+            _install_router(m, router)
+            proof = webdav.depth_infinity_get_proof(
+                "10.0.0.1", 80, False,
+                ["/webdav/.git/config", "/webdav/.ssh/id_rsa",
+                 "/webdav/normal.txt"])
+            paths = [p["path"] for p in proof]
+            self.assertIn("/webdav/.git/config", paths)
+            self.assertIn("/webdav/.ssh/id_rsa", paths)
+            git_proof = next(p for p in proof
+                             if p["path"] == "/webdav/.git/config")
+            self.assertEqual(git_proof["status"], 200)
+            self.assertIn("[core]", git_proof["excerpt"])
+            key_proof = next(p for p in proof
+                             if p["path"] == "/webdav/.ssh/id_rsa")
+            self.assertIn("PRIVATE KEY", key_proof["excerpt"])
+        finally:
+            m.undo()
+
+    def test_depth_infinity_get_proof_stays_quiet_on_404_html(self):
+        """(b) probe stays quiet when the sensitive hrefs return 404 HTML."""
+        m = _Patch()
+        try:
+            def router(method, path, body, headers):
+                # Every sensitive path returns a soft-404 HTML page — no
+                # sensitive content signature, so the T2 gate must NOT fire.
+                return _FakeResponse(200, [],
+                                     b"<html><body>Not Found</body></html>")
+            _install_router(m, router)
+            proof = webdav.depth_infinity_get_proof(
+                "10.0.0.1", 80, False,
+                ["/webdav/.git/config", "/webdav/.env"])
+            self.assertEqual(proof, [])
+        finally:
+            m.undo()
+
+    def test_depth_infinity_get_proof_clean_on_transport_error(self):
+        """(c) timeout / connect error is clean — no proof, no crash."""
+        m = _Patch()
+        try:
+            def _boom(ip, port, use_tls, timeout):
+                raise OSError("timed out")
+            m.setattr("recce.services.webdav.http_connect", _boom)
+            proof = webdav.depth_infinity_get_proof(
+                "10.0.0.1", 80, False, ["/webdav/.git/config"])
+            self.assertEqual(proof, [])
+        finally:
+            m.undo()
+
+    def test_full_probe_upgrades_directory_enum_finding_to_t2(self):
+        """End-to-end: PROPFIND depth infinity lists /webdav/.git/config, the
+        subsequent GET returns the git config header, and the emitted
+        webdav_directory_enum finding carries depth_tier="t2" plus the
+        excerpt in its output."""
+        m = _Patch()
+        try:
+            deep_multistatus = (
+                b'<?xml version="1.0" encoding="utf-8" ?>\n'
+                b'<D:multistatus xmlns:D="DAV:">\n'
+                b'  <D:response><D:href>/webdav/</D:href></D:response>\n'
+                b'  <D:response><D:href>/webdav/index.html</D:href></D:response>\n'
+                b'  <D:response><D:href>/webdav/.git/config</D:href></D:response>\n'
+                b'</D:multistatus>\n')
+
+            def router(method, path, body, headers):
+                if method == "OPTIONS":
+                    return _FakeResponse(200,
+                                         OPTIONS_HEADERS_APACHE_MOD_DAV, b"")
+                if method == "PROPFIND":
+                    if headers.get("Depth") == "infinity":
+                        return _FakeResponse(207, [], deep_multistatus)
+                    if path == "/webdav/":
+                        return _FakeResponse(207, [], PROPFIND_MULTISTATUS_BODY)
+                    return _FakeResponse(404, [], b"")
+                if method == "GET" and path == "/webdav/.git/config":
+                    return _FakeResponse(200, [],
+                                         DepthInfinityT2ProofTest.GIT_CONFIG)
+                if method == "GET":
+                    return _FakeResponse(404, [], b"")
+                if method in ("MKCOL", "PUT", "COPY", "MOVE"):
+                    return _FakeResponse(201, [], b"")
+                if method == "PROPPATCH":
+                    return _FakeResponse(207, [], b"")
+                if method == "LOCK":
+                    return _FakeResponse(200,
+                                         [("Lock-Token",
+                                           "<opaquelocktoken:t>")], b"")
+                if method == "UNLOCK":
+                    return _FakeResponse(204, [], b"")
+                if method == "DELETE":
+                    return _FakeResponse(204, [], b"")
+                return _FakeResponse(405, [], b"")
+            _install_router(m, router)
+            pr = webdav.probe("10.0.0.1", 80, False, active=True,
+                              upload_shell=False, mounts=("/webdav/",))
+            self.assertIn("depth_infinity", pr)
+            self.assertIn("get_proof", pr["depth_infinity"])
+            proof_paths = [p["path"]
+                           for p in pr["depth_infinity"]["get_proof"]]
+            self.assertIn("/webdav/.git/config", proof_paths)
+
+            host = Host(ip="10.0.0.1",
+                        ports=[Port(portid=80, state="open", service="http")])
+            fs = webdav.findings([host], {("10.0.0.1", 80): pr})
+            enum = [f for f in fs
+                    if f["kind"] == "webdav_directory_enum"]
+            self.assertEqual(len(enum), 1)
+            self.assertEqual(enum[0]["depth_tier"], "t2")
+            self.assertIn(".git/config", enum[0]["detail"])
+            self.assertIn("SAFE proof", enum[0]["detail"])
+            self.assertIn("[core]", enum[0]["detail"])
+        finally:
+            m.undo()
+
+    def test_full_probe_stays_t1_when_get_returns_no_sensitive_content(self):
+        """T1 path unchanged: PROPFIND still leaks the tree, but the sensitive
+        hrefs read back as HTML 404s — the finding fires with depth_tier="t1"
+        and no proof excerpt in the output."""
+        m = _Patch()
+        try:
+            deep_multistatus = (
+                b'<?xml version="1.0" encoding="utf-8" ?>\n'
+                b'<D:multistatus xmlns:D="DAV:">\n'
+                b'  <D:response><D:href>/webdav/</D:href></D:response>\n'
+                b'  <D:response><D:href>/webdav/index.html</D:href></D:response>\n'
+                b'  <D:response><D:href>/webdav/.git/config</D:href></D:response>\n'
+                b'</D:multistatus>\n')
+
+            def router(method, path, body, headers):
+                if method == "OPTIONS":
+                    return _FakeResponse(200,
+                                         OPTIONS_HEADERS_APACHE_MOD_DAV, b"")
+                if method == "PROPFIND":
+                    if headers.get("Depth") == "infinity":
+                        return _FakeResponse(207, [], deep_multistatus)
+                    if path == "/webdav/":
+                        return _FakeResponse(207, [], PROPFIND_MULTISTATUS_BODY)
+                    return _FakeResponse(404, [], b"")
+                if method == "GET":
+                    # Server rewrites all requests to the same 404 page — no
+                    # sensitive content signature is ever returned.
+                    return _FakeResponse(200, [],
+                                         b"<html><body>404</body></html>")
+                if method in ("MKCOL", "PUT", "COPY", "MOVE"):
+                    return _FakeResponse(201, [], b"")
+                if method == "PROPPATCH":
+                    return _FakeResponse(207, [], b"")
+                if method == "LOCK":
+                    return _FakeResponse(200,
+                                         [("Lock-Token",
+                                           "<opaquelocktoken:t>")], b"")
+                if method == "UNLOCK":
+                    return _FakeResponse(204, [], b"")
+                if method == "DELETE":
+                    return _FakeResponse(204, [], b"")
+                return _FakeResponse(405, [], b"")
+            _install_router(m, router)
+            pr = webdav.probe("10.0.0.1", 80, False, active=True,
+                              upload_shell=False, mounts=("/webdav/",))
+            # T1 path: proof list is empty / absent.
+            self.assertFalse(pr.get("depth_infinity", {}).get("get_proof"))
+
+            host = Host(ip="10.0.0.1",
+                        ports=[Port(portid=80, state="open", service="http")])
+            fs = webdav.findings([host], {("10.0.0.1", 80): pr})
+            enum = [f for f in fs
+                    if f["kind"] == "webdav_directory_enum"]
+            self.assertEqual(len(enum), 1)
+            self.assertEqual(enum[0]["depth_tier"], "t1")
+            self.assertNotIn("SAFE proof", enum[0]["detail"])
+        finally:
+            m.undo()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -293,9 +293,14 @@ class ProbeDiscoveryTest(unittest.TestCase):
 
         sock1 = ScriptedSock([login_pdu, text_pdu])
         sock2 = ScriptedSock([normal_login_pdu, inq_pdu, rc_pdu])
+        # The T2 SendTargets verify sweep probes disclosed IQNs beyond the
+        # first. This second disclosed target is on an out-of-scope portal;
+        # a scripted empty response makes the verify return False cleanly
+        # without exercising T2 promotion (that's covered elsewhere).
+        sock3 = ScriptedSock([])
 
         with mock.patch.object(iscsi.socket, "create_connection",
-                               side_effect=[sock1, sock2]):
+                               side_effect=[sock1, sock2, sock3]):
             pr = iscsi.probe("10.0.0.5", 3260, timeout=1.0)
 
         self.assertTrue(pr["reachable"])
@@ -433,6 +438,173 @@ class TargetsSelectionTest(unittest.TestCase):
         targets = iscsi.iscsi_targets([h])
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0]["port"], 3260)
+
+
+class SendTargetsT2PromotionTest(unittest.TestCase):
+    """iscsi_targets_disclosed T1 -> T2 promotion via _verify_normal_login.
+
+    The T2 proof for the SendTargets disclosure is: verify that at least one
+    of the disclosed IQNs actually accepts an unauthenticated Normal-session
+    Login. When the sweep shows real access, tier goes to 't2' and the
+    verified IQN list is baked into `detail`. When the sweep stays quiet, the
+    finding remains T1 unchanged.
+    """
+
+    def _host(self, ip="10.0.0.5"):
+        return Host(ip=ip, ports=[Port(portid=3260, protocol="tcp", state="open",
+                                       service="iscsi")])
+
+    def test_probe_verifies_additional_targets_and_records_full_feature(self):
+        # Discovery Login: AuthMethod=None, T=1, NSG=1.
+        d1 = b"AuthMethod=None\x00"
+        pdu1 = (_login_response_bhs(t=1, csg=0, nsg=1, status_class=0,
+                                    version_active=0, tsih=0x0001,
+                                    dsl=len(d1)) + _pad4(d1))
+        # SendTargets returns THREE targets, all sharing the same portal.
+        td = (b"TargetName=iqn.2001-04.com.example:s1\x00"
+              b"TargetAddress=10.0.0.5:3260,1\x00"
+              b"TargetName=iqn.2001-04.com.example:s2\x00"
+              b"TargetAddress=10.0.0.5:3260,1\x00"
+              b"TargetName=iqn.2001-04.com.example:s3\x00"
+              b"TargetAddress=10.0.0.5:3260,1\x00")
+        pdu2 = _text_response_bhs(f=1, c=0, dsl=len(td)) + _pad4(td)
+
+        # First-target Normal Login on second connection: T=1 NSG=3 straight
+        # to FullFeaturePhase. INQUIRY + READ CAPACITY responses follow.
+        norm1 = _login_response_bhs(t=1, csg=0, nsg=3, status_class=0,
+                                    version_active=0, tsih=0x0002, dsl=0)
+        inq_pdu = (_scsi_data_in_bhs(final=1, dsl=len(_INQUIRY_WIRE))
+                   + _pad4(_INQUIRY_WIRE))
+        rc_pdu = (_scsi_data_in_bhs(final=1, dsl=len(_READCAP10_WIRE))
+                  + _pad4(_READCAP10_WIRE))
+
+        # Verify-only Normal Login for s2 succeeds (T=1 NSG=3, dsl=0).
+        verify_s2 = _login_response_bhs(t=1, csg=0, nsg=3, status_class=0,
+                                        version_active=0, tsih=0x0003, dsl=0)
+        # Verify-only Normal Login for s3 refuses (status_class=2 = initiator
+        # error - a legitimate ACL denial that must NOT count as verified).
+        verify_s3 = _login_response_bhs(t=0, csg=0, nsg=0, status_class=2,
+                                        version_active=0, tsih=0x0000, dsl=0)
+
+        sock1 = ScriptedSock([pdu1, pdu2])                # discovery + sendtargets
+        sock2 = ScriptedSock([norm1, inq_pdu, rc_pdu])    # first-target normal login
+        sock3 = ScriptedSock([verify_s2])                 # verify s2 (success)
+        sock4 = ScriptedSock([verify_s3])                 # verify s3 (denied)
+
+        with mock.patch.object(iscsi.socket, "create_connection",
+                               side_effect=[sock1, sock2, sock3, sock4]):
+            pr = iscsi.probe("10.0.0.5", 3260, timeout=1.0)
+
+        self.assertEqual(len(pr["targets"]), 3)
+        verified = pr["verified_targets"]
+        self.assertEqual(len(verified), 3)
+        self.assertEqual(verified[0]["iqn"], "iqn.2001-04.com.example:s1")
+        self.assertTrue(verified[0]["full_feature"])
+        self.assertEqual(verified[1]["iqn"], "iqn.2001-04.com.example:s2")
+        self.assertTrue(verified[1]["full_feature"])
+        self.assertEqual(verified[2]["iqn"], "iqn.2001-04.com.example:s3")
+        self.assertFalse(verified[2]["full_feature"])
+
+    def test_sendtargets_finding_upgraded_to_t2_when_verified(self):
+        host = self._host()
+        pr = {
+            "is_iscsi": True, "reachable": True,
+            "auth_methods": ["None"], "auth_selected": "None",
+            "discovery_no_auth": True, "operational_reached": True,
+            "targets": [
+                {"iqn": "iqn.2001-04.com.example:s1",
+                 "addresses": [{"ip": "10.0.0.5", "port": 3260,
+                                "portal_group": "1"}]},
+                {"iqn": "iqn.2001-04.com.example:s2",
+                 "addresses": [{"ip": "10.0.0.5", "port": 3260,
+                                "portal_group": "1"}]},
+            ],
+            "op_params": {}, "chap": {}, "chap_one_way": False,
+            "version_max": 0, "version_active": 0, "legacy_version": False,
+            "normal_login": {"security_ok": True, "full_feature": True},
+            "inquiry": {}, "read_capacity": {},
+            "verified_targets": [
+                {"iqn": "iqn.2001-04.com.example:s1", "full_feature": True},
+                {"iqn": "iqn.2001-04.com.example:s2", "full_feature": True},
+            ],
+        }
+        fs = iscsi.findings([host], {("10.0.0.5", 3260): pr},
+                            scope_ips={"10.0.0.5"})
+        sd = [f for f in fs if f["kind"] == "iscsi_targets_disclosed"]
+        self.assertEqual(len(sd), 1)
+        self.assertEqual(sd[0]["depth_tier"], "t2")
+        # Verified IQNs are the T2 evidence baked into detail.
+        self.assertIn("Proof-of-exploit (T2)", sd[0]["detail"])
+        self.assertIn("iqn.2001-04.com.example:s1", sd[0]["detail"])
+        self.assertIn("iqn.2001-04.com.example:s2", sd[0]["detail"])
+        self.assertIn("2/2", sd[0]["detail"])
+
+    def test_sendtargets_finding_stays_t1_when_verify_finds_nothing(self):
+        host = self._host()
+        pr = {
+            "is_iscsi": True, "reachable": True,
+            "auth_methods": ["None"], "auth_selected": "None",
+            "discovery_no_auth": True, "operational_reached": True,
+            "targets": [
+                {"iqn": "iqn.2001-04.com.example:s1",
+                 "addresses": [{"ip": "10.0.0.5", "port": 3260,
+                                "portal_group": "1"}]},
+            ],
+            "op_params": {}, "chap": {}, "chap_one_way": False,
+            "version_max": 0, "version_active": 0, "legacy_version": False,
+            # Discovery succeeded and IQN was disclosed, but the array's ACL
+            # refused Normal Login - the T1 disclosure still lands, no T2.
+            "normal_login": {"security_ok": True},
+            "inquiry": {}, "read_capacity": {},
+            "verified_targets": [
+                {"iqn": "iqn.2001-04.com.example:s1", "full_feature": False},
+            ],
+        }
+        fs = iscsi.findings([host], {("10.0.0.5", 3260): pr},
+                            scope_ips={"10.0.0.5"})
+        sd = [f for f in fs if f["kind"] == "iscsi_targets_disclosed"]
+        self.assertEqual(len(sd), 1)
+        self.assertEqual(sd[0]["depth_tier"], "t1")
+        self.assertNotIn("Proof-of-exploit", sd[0]["detail"])
+
+    def test_verify_normal_login_returns_true_on_full_feature(self):
+        # Login SecNeg -> T=1, NSG=1 (moves to OpNeg); OpNeg response T=1,
+        # NSG=3 (moves to FullFeaturePhase). Real Login Response bytes.
+        pdu1 = _login_response_bhs(t=1, csg=0, nsg=1, status_class=0,
+                                   version_active=0, tsih=0x0001, dsl=0)
+        pdu2 = _login_response_bhs(t=1, csg=1, nsg=3, status_class=0,
+                                   version_active=0, tsih=0x0001, dsl=0)
+        sock = ScriptedSock([pdu1, pdu2])
+        with mock.patch.object(iscsi.socket, "create_connection",
+                               side_effect=[sock]):
+            ok = iscsi._verify_normal_login("10.0.0.5", 3260,
+                                            "iqn.2001-04.com.example:s2", 1.0)
+        self.assertTrue(ok)
+
+    def test_verify_normal_login_returns_false_on_status_class_error(self):
+        # StatusClass=2 (initiator error) - a real ACL denial.
+        pdu = _login_response_bhs(t=0, csg=0, nsg=0, status_class=2,
+                                  version_active=0, tsih=0x0000, dsl=0)
+        sock = ScriptedSock([pdu])
+        with mock.patch.object(iscsi.socket, "create_connection",
+                               side_effect=[sock]):
+            ok = iscsi._verify_normal_login("10.0.0.5", 3260,
+                                            "iqn.2001-04.com.example:s2", 1.0)
+        self.assertFalse(ok)
+
+    def test_verify_normal_login_returns_false_on_socket_timeout(self):
+        def _boom(addr, timeout=None):
+            raise socket_timeout()
+        with mock.patch.object(iscsi.socket, "create_connection",
+                               side_effect=_boom):
+            ok = iscsi._verify_normal_login("10.0.0.5", 3260,
+                                            "iqn.2001-04.com.example:s2", 1.0)
+        self.assertFalse(ok)
+
+
+def socket_timeout():
+    import socket as _s
+    return _s.timeout("verify timeout")
 
 
 if __name__ == "__main__":

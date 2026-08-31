@@ -35,9 +35,17 @@ _DEFAULT_PORT = 9092
 _TIMEOUT = 4.0
 
 # API keys we use
+_API_FETCH = 1
 _API_METADATA = 3
 _API_VERSIONS = 18
 _API_SASL_HANDSHAKE = 17         # KIP-43 SaslHandshakeRequest
+
+# T2 SAFE-PROOF bounds for the Fetch probe. max_wait_ms=100 keeps the broker
+# from parking us if the topic has fewer than min_bytes bytes to serve;
+# max_bytes=1024 caps the transfer at ~1KB even if the topic is hot; single
+# partition, single-shot, offset=0 (no commit ever issued). Non-destructive.
+_FETCH_MAX_WAIT_MS = 100
+_FETCH_MAX_BYTES = 1024
 
 # Any-mechanism string we send in SaslHandshakeRequest solely to elicit the
 # UNSUPPORTED_SASL_MECHANISM path — the broker's response then always contains
@@ -299,6 +307,122 @@ def _parse_sasl_handshake(body: bytes) -> dict | None:
         return None
 
 
+def _build_fetch_v4(topic: str, partition: int = 0,
+                    fetch_offset: int = 0,
+                    max_bytes: int = _FETCH_MAX_BYTES,
+                    correlation_id: int = 3) -> bytes:
+    """FetchRequest v4 (Kafka 0.11+): read ONE partition of ONE topic.
+    KIP-74 added max_bytes overall (v3), KIP-98 added isolation_level (v4).
+    Body:
+      replica_id: int32 = -1 (ordinary consumer)
+      max_wait_ms: int32
+      min_bytes:  int32 = 0  (return whatever's ready — do NOT block)
+      max_bytes:  int32      (KIP-74 overall response cap)
+      isolation_level: int8 = 0 (READ_UNCOMMITTED)
+      topics: [
+        topic: STRING
+        partitions: [{partition: int32, fetch_offset: int64, max_bytes: int32}]
+      ]
+    Bounded and non-destructive: consumer never commits an offset, so no
+    server-side state changes regardless of what the broker returns."""
+    body = struct.pack(">i", -1)                          # replica_id
+    body += struct.pack(">i", _FETCH_MAX_WAIT_MS)
+    body += struct.pack(">i", 0)                          # min_bytes
+    body += struct.pack(">i", max_bytes)                  # overall max_bytes
+    body += struct.pack(">b", 0)                          # isolation_level
+    body += struct.pack(">i", 1)                          # topics count
+    body += _string(topic)
+    body += struct.pack(">i", 1)                          # partitions count
+    body += struct.pack(">i", partition)
+    body += struct.pack(">q", fetch_offset)               # int64
+    body += struct.pack(">i", max_bytes)                  # partition_max_bytes
+    return _build_request(_API_FETCH, 4, correlation_id, body)
+
+
+def _parse_fetch_v4(body: bytes) -> dict | None:
+    """Parse FetchResponse v4 body (post-size):
+      correlation_id: int32
+      throttle_time_ms: int32               (v1+)
+      responses: [
+        topic: STRING
+        partitions: [
+          partition:  int32
+          error_code: int16
+          high_watermark: int64
+          last_stable_offset: int64          (v4+)
+          aborted_transactions: nullable_array of {producer_id: int64,
+                                                   first_offset: int64}  (v4+)
+          record_set: BYTES (int32 length + bytes; -1 = null)
+        ]
+      ]
+    We only ever ask for one (topic, partition), so extract the first pair.
+    Return {"topic","error","high_watermark","records"} or None on failure.
+    error==0 with records=b"" is legitimate (empty topic at offset 0)."""
+    if len(body) < 12:
+        return None
+    try:
+        i = 4                                              # correlation_id
+        i += 4                                             # throttle_time_ms
+        n_topics = struct.unpack(">i", body[i:i + 4])[0]; i += 4
+        if n_topics <= 0:
+            return None
+        topic, i = _parse_string_at(body, i)
+        n_parts = struct.unpack(">i", body[i:i + 4])[0]; i += 4
+        if n_parts <= 0:
+            return {"topic": topic, "error": 0,
+                    "high_watermark": 0, "records": b""}
+        i += 4                                             # partition
+        if i + 18 > len(body):
+            return None
+        err = struct.unpack(">h", body[i:i + 2])[0]; i += 2
+        hwm = struct.unpack(">q", body[i:i + 8])[0]; i += 8
+        i += 8                                             # last_stable_offset
+        if i + 4 > len(body):
+            return None
+        n_ab = struct.unpack(">i", body[i:i + 4])[0]; i += 4
+        if n_ab > 0:
+            skip = n_ab * 16                               # 8 + 8 each
+            if i + skip > len(body):
+                return None
+            i += skip
+        if i + 4 > len(body):
+            return None
+        rec_len = struct.unpack(">i", body[i:i + 4])[0]; i += 4
+        if rec_len <= 0:
+            records = b""
+        else:
+            # Cap what we retain — we only ever need to prove non-zero size,
+            # so keep the first 256 bytes at most for evidence.
+            records = body[i:i + min(rec_len, 256)]
+        return {"topic": topic, "error": err,
+                "high_watermark": hwm, "records": records}
+    except (struct.error, IndexError):
+        return None
+
+
+def _probe_fetch(ip: str, port: int, topic: str,
+                 timeout: float) -> dict | None:
+    """Open a bounded TCP session and issue ONE Fetch v4 for
+    (topic, partition=0, offset=0, max_bytes=1024). Returns the parsed
+    response (even when error_code!=0 — caller decides whether that counts
+    as proof) or None on any transport/parse failure.
+
+    Safety: single connection; ApiVersions handshake + one Fetch; no
+    offset commit; broker-side transaction state untouched."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(_build_api_versions_v0())
+            _read_response(s, timeout)                    # discard: handshake
+            s.sendall(_build_fetch_v4(topic))
+            body = _read_response(s, timeout)
+    except OSError:
+        return None
+    if not body:
+        return None
+    return _parse_fetch_v4(body)
+
+
 def _probe_sasl_mechanisms(ip: str, port: int, timeout: float) -> list[str]:
     """Open a separate short-lived TCP session to <ip:port>, negotiate the
     ApiVersions handshake, then send one SaslHandshakeRequest v1 with a
@@ -328,9 +452,11 @@ def _probe_sasl_mechanisms(ip: str, port: int, timeout: float) -> list[str]:
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
     """Send MetadataRequest v1 and parse the reply. Returns
     {reachable, brokers, topics, api_versions, fingerprint, sasl_mechanisms,
-    error}. brokers/topics empty if the request was dropped or the parse
-    failed; api_versions/fingerprint populated when the ApiVersions handshake
-    reply parsed; sasl_mechanisms populated on SASL-gated brokers only."""
+    fetch, error}. brokers/topics empty if the request was dropped or the
+    parse failed; api_versions/fingerprint populated when the ApiVersions
+    handshake reply parsed; sasl_mechanisms populated on SASL-gated brokers
+    only; fetch populated (as {"topic","error","high_watermark","records"})
+    only when a T2 proof-of-read Fetch v4 completed against a leaked topic."""
     out: dict = {"reachable": False, "brokers": [], "topics": [],
                  "api_versions": {}, "fingerprint": "",
                  "sasl_mechanisms": [], "error": ""}
@@ -372,6 +498,20 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
     out["reachable"] = True
     out["brokers"] = parsed["brokers"]
     out["topics"] = [t["name"] for t in parsed["topics"] if t["name"]]
+    # --- T2 SAFE PROOF -------------------------------------------------
+    # Metadata already proved the broker returns cluster inventory without
+    # auth, which is a T1 fact. To upgrade to T2 we need a proof of the
+    # actual data-plane exposure: one bounded Fetch v4 against the first
+    # non-internal topic (skip Kafka's own `__consumer_offsets` etc). A
+    # successful reply (error_code==0) — with or without record bytes —
+    # confirms unauthenticated data-plane read, non-destructively (single
+    # short-lived connection, single request, no offset commit).
+    user_topics = [t for t in out["topics"] if not t.startswith("__")]
+    fetch_max = out["api_versions"].get(_API_FETCH, (0, 999))[1]
+    if user_topics and fetch_max >= 4:
+        fetch = _probe_fetch(ip, port, user_topics[0], timeout)
+        if fetch is not None:
+            out["fetch"] = fetch
     return out
 
 
@@ -409,14 +549,34 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             if brokers or topics:
                 broker_txt = ", ".join(f"{b['host']}:{b['port']}" for b in brokers[:5])
                 topic_txt = ", ".join(topics[:12])
-                out.append(_finding(
-                    "high", "Kafka broker returns metadata without authentication",
-                    tgt,
-                    f"MetadataRequest v0 succeeded without SASL/mTLS. "
+                detail = (
+                    f"MetadataRequest v1 succeeded without SASL/mTLS. "
                     f"{len(brokers)} broker(s): {broker_txt or 'none'}. "
                     f"{len(topics)} topic(s): {topic_txt or 'none'}"
                     + ("… (truncated)" if len(topics) > 12 else "")
-                    + ". Topic names often disclose data intent (pii, billing, audit).",
+                    + ". Topic names often disclose data intent "
+                    "(pii, billing, audit).")
+                # T2 upgrade: bounded Fetch v4 confirmed data-plane read.
+                # error_code==0 means the broker actually served the fetch;
+                # anything else (auth denied, invalid partition, etc.) is
+                # NOT proof of exploit — stay T1.
+                fetch = pr.get("fetch")
+                depth = "t1"
+                if fetch and fetch.get("error") == 0:
+                    hwm = fetch.get("high_watermark", 0)
+                    rec_bytes = len(fetch.get("records") or b"")
+                    fetched_topic = fetch.get("topic", "?")
+                    detail += (
+                        f" T2 proof-of-read: Fetch v4 against topic "
+                        f"'{fetched_topic}' partition 0 (offset 0) returned "
+                        f"error_code=0, high_watermark={hwm}, {rec_bytes}B "
+                        f"of record data. Data-plane read confirmed without "
+                        f"authentication (single-shot, non-destructive; no "
+                        f"offset committed).")
+                    depth = "t2"
+                out.append(_finding(
+                    "high", "Kafka broker returns metadata without authentication",
+                    tgt, detail,
                     f"kcat -L -b {h.ip}:{p.portid}",
                     "Enable SASL_SSL (SASL_PLAINTEXT at minimum) on the listener; "
                     "disable ANONYMOUS ACLs; bind Kafka to a private interface.",
@@ -425,7 +585,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"kcat -L -b {h.ip}:{p.portid}  ; then: kcat -C -b "
                         f"{h.ip}:{p.portid} -t <leaked-topic> -o beginning "
                         "-c 20  # read messages"),
-                    depth_tier="t1"))
+                    depth_tier=depth))
             else:
                 out.append(_finding(
                     "info", "Kafka endpoint reachable (SASL/mTLS suspected)", tgt,

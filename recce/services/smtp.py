@@ -158,10 +158,13 @@ def smtp_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
-             exploit_note="", depth_tier=""):
-    return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "smtp", "command": cmd, "remediation": rem, "cwes": cwes,
-            "kind": kind, "exploit_note": exploit_note, "depth_tier": depth_tier}
+             exploit_note="", depth_tier="", output=""):
+    f = {"severity": sev, "title": title, "target": target, "detail": detail,
+         "tool": "smtp", "command": cmd, "remediation": rem, "cwes": cwes,
+         "kind": kind, "exploit_note": exploit_note, "depth_tier": depth_tier}
+    if output:
+        f["output"] = output
+    return f
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -193,13 +196,43 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "smtp-open-relay -p25 IP."),
                     depth_tier="t1"))
             if pr.get("vrfy"):
+                # T2 upgrade: the safe-probe helper actually captured the
+                # 250 response body and parsed a resolved mailbox address
+                # (RFC 5321 §3.5.1 requires 250 replies name the mailbox).
+                # A bare `250 OK` or `252 Cannot verify` stays T1 — only
+                # a real resolved <local@domain> proves a live account.
+                ve = pr.get("vrfy_evidence") or []
+                real_hits = [e for e in ve if e.get("resolved")]
+                vrfy_tier = "t2" if real_hits else "t1"
+                vrfy_output = ""
+                if real_hits:
+                    lines = []
+                    for e in real_hits[:8]:
+                        lines.append(
+                            f"VRFY {e['user']} -> {e.get('code','?')} "
+                            f"{e['resolved']}")
+                    vrfy_output = (
+                        "SMTP server confirmed these mailboxes via RFC 5321 "
+                        "§3.5.1 VRFY (250 reply body carried a fully-"
+                        "qualified mailbox). This is server-side evidence "
+                        "of live accounts, not a fingerprint.\n"
+                        + "\n".join(lines))
+                detail = ("VRFY returned a positive response, so valid local "
+                          "usernames can be enumerated over SMTP (feeds "
+                          "password spraying).")
+                if real_hits:
+                    detail += (
+                        f" CHAINED: recce's VRFY probe resolved "
+                        f"{len(real_hits)} mailbox(es): "
+                        + ", ".join(e["resolved"] for e in real_hits[:6])
+                        + ".")
                 out.append(_finding(
                     "low", "SMTP VRFY user enumeration", tgt,
-                    "VRFY returned a positive response, so valid local usernames can be "
-                    "enumerated over SMTP (feeds password spraying).",
+                    detail,
                     f"for u in root admin postmaster; do echo VRFY $u | nc {h.ip} {p.portid}; done",
                     "Disable VRFY/EXPN (disable_vrfy_command = yes).",
-                    ["CWE-200"], kind="smtp_vrfy"))
+                    ["CWE-200"], kind="smtp_vrfy",
+                    depth_tier=vrfy_tier, output=vrfy_output))
             # Enumerated users — merge VRFY/EXPN/RCPT hits, dedup, and
             # report each as a name a spray attack now knows exists on
             # this box. RCPT-based enum in particular still works on
@@ -459,6 +492,77 @@ def _parse_expn_members(msg: bytes | str) -> list[str]:
     return uniq
 
 
+# Well-known accounts every RFC-compliant MTA MUST serve (postmaster: RFC 5321
+# §4.5.1). The other three are the classic first-round enum picks. We keep the
+# T2 probe list this small on purpose — it's a single-shot proof, not a sweep.
+_VRFY_EVIDENCE_USERS = ("postmaster", "root", "admin", "mailer-daemon")
+
+# VRFY 250 reply body per RFC 5321 §3.5.1 is a fully-qualified mailbox, often
+# in angle-addr form ("User Name <user@host>") or bare "user@host". Extract
+# only forms with a `@domain`; a bare local name doesn't distinguish a real
+# resolved mailbox from a generic `250 OK`.
+_VRFY_ADDR_ANGLE = re.compile(r"<([^<>@\s]+@[^<>@\s]+)>")
+_VRFY_ADDR_BARE = re.compile(r"\b([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b")
+
+
+def _parse_vrfy_reply(msg: bytes | str) -> str:
+    """Return the first fully-qualified mailbox found in a VRFY 250 body,
+    or "" when the server returned nothing beyond the bare status text.
+
+    RFC 5321 §3.5.1: a 250 VRFY reply names the resolved mailbox. We only
+    accept the resolved form (`local@domain`) — a bare `250 OK` from a
+    server that always says yes is NOT server-side evidence."""
+    text = msg.decode("utf-8", "replace") if isinstance(msg, bytes) else str(msg)
+    m = _VRFY_ADDR_ANGLE.search(text)
+    if m:
+        return m.group(1).strip()
+    m = _VRFY_ADDR_BARE.search(text)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+def probe_vrfy_evidence(ip: str, port: int, timeout: float = _TIMEOUT,
+                        users: tuple[str, ...] | list[str] | None = None
+                        ) -> list[dict]:
+    """SAFE T2 proof for smtp_vrfy: capture the RFC 5321 §3.5.1 mailbox
+    address from VRFY 250 reply bodies for a small, well-known account
+    list. Non-destructive, single connection, EHLO + N VRFY commands +
+    QUIT — no MAIL/RCPT/DATA, no state change.
+
+    Returns a list of {"user", "code", "resolved"} dicts, one per user
+    whose VRFY reply either resolved to a real mailbox (evidence) or
+    returned a non-250 status (kept for shape parity). Only entries with
+    a non-empty `resolved` count as T2 evidence."""
+    users = tuple(users) if users is not None else _VRFY_EVIDENCE_USERS
+    out: list[dict] = []
+    try:
+        cls = smtplib.SMTP_SSL if port == 465 else smtplib.SMTP
+        srv = cls(timeout=timeout)
+        srv.connect(ip, port)
+    except (OSError, smtplib.SMTPException, socket.timeout):
+        return out
+    try:
+        srv.ehlo("recce-vrfy.local")
+        for u in users:
+            try:
+                code, msg = srv.docmd("VRFY", u)
+            except (smtplib.SMTPException, OSError, socket.timeout):
+                continue
+            resolved = _parse_vrfy_reply(msg) if code == 250 else ""
+            out.append({"user": u, "code": code, "resolved": resolved})
+        try:
+            srv.quit()
+        except (smtplib.SMTPException, OSError, socket.timeout):
+            srv.close()
+    except (OSError, smtplib.SMTPException, socket.timeout):
+        try:
+            srv.close()
+        except Exception:
+            pass
+    return out
+
+
 def expn_aliases(ip: str, port: int, timeout: float = _TIMEOUT,
                  aliases: tuple[str, ...] | list[str] | None = None) -> dict:
     """Probe well-known list aliases via EXPN; return {alias: [members]}.
@@ -540,6 +644,12 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                     pr["enum"] = enum_users(t["ip"], t["port"], users=enum_list)
                     pr["expn_aliases"] = expn_aliases(t["ip"], t["port"])
                     pr["fingerprint"] = _fingerprint(pr.get("banner", ""))
+                    # T2 upgrade for smtp_vrfy: only when VRFY probe reported
+                    # a positive code — otherwise we'd burn commands on a
+                    # server that already refuses the primitive.
+                    if pr.get("vrfy"):
+                        pr["vrfy_evidence"] = probe_vrfy_evidence(
+                            t["ip"], t["port"])
                     # Cross-transport wire: every VRFY / EXPN / RCPT hit lands
                     # on the host as a mail-kind Account so imap.py / pop3.py
                     # can retry it via known_mail_accounts.

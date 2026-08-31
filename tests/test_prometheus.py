@@ -221,6 +221,133 @@ class ProbeTest(unittest.TestCase):
         self.assertIn("prometheus", p["cmdline_sample"].lower())
         self.assertIn("--config.file", p["cmdline_sample"])
 
+    def test_query_topology_parses_up_vector_for_t2(self):
+        # Real /api/v1/query?query=up response shape (Prometheus HTTP API
+        # v1 — https://prometheus.io/docs/prometheus/latest/querying/api/):
+        # {status, data:{resultType:"vector", result:[{metric:{...},
+        # value:[ts,"1"]}, ...]}}. A populated result vector is the
+        # T2 proof — the anonymous query actually returned the inventory.
+        up_body = json.dumps({
+            "status": "success",
+            "data": {
+                "resultType": "vector",
+                "result": [
+                    {"metric": {"__name__": "up",
+                                "instance": "node-a:9100",
+                                "job": "node"},
+                     "value": [1735689600, "1"]},
+                    {"metric": {"__name__": "up",
+                                "instance": "kube-api:6443",
+                                "job": "kubernetes"},
+                     "value": [1735689600, "0"]},
+                ],
+            },
+        }).encode()
+
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/-/healthy":
+                    body = b"Prometheus Server is Healthy.\n"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body); return
+                if self.path == "/api/v1/query?query=up":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(up_body)))
+                    self.end_headers(); self.wfile.write(up_body); return
+                self.send_response(404); self.end_headers()
+            def do_POST(self):
+                self.send_response(404); self.end_headers()
+
+        srv, _t = _serve(H)
+        try:
+            p = prom.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        self.assertTrue(p["query_open"])
+        qt = p["query_topology"]
+        self.assertTrue(qt["success"])
+        self.assertEqual(qt["sample_count"], 2)
+        instances = {s["instance"] for s in qt["samples"]}
+        self.assertEqual(instances, {"node-a:9100", "kube-api:6443"})
+        # Verify the finding lands at t2 with the actual instances quoted.
+        from recce.core.models import Host, Port
+        hosts = [Host(ip="127.0.0.1",
+                      ports=[Port(portid=srv.server_address[1],
+                                  state="open", service="prometheus")])]
+        probes = {("127.0.0.1", srv.server_address[1]):
+                  {"reachable": True, **p}}
+        fs = prom.findings(hosts, probes)
+        q = [f for f in fs if f.get("kind") == "prom_query_open"]
+        self.assertEqual(len(q), 1)
+        self.assertEqual(q[0]["depth_tier"], "t2")
+        self.assertIn("node-a:9100", q[0]["detail"])
+
+    def test_query_topology_empty_vector_stays_t1(self):
+        # /api/v1/query returned status=success but with an empty result
+        # vector — the endpoint is open but no scrape targets responded /
+        # engine gave nothing back. T2 SAFE proof did not fire; T1 holds.
+        up_body = json.dumps({
+            "status": "success",
+            "data": {"resultType": "vector", "result": []},
+        }).encode()
+
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/-/healthy":
+                    body = b"Prometheus Server is Healthy.\n"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body); return
+                if self.path == "/api/v1/query?query=up":
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(up_body)))
+                    self.end_headers(); self.wfile.write(up_body); return
+                self.send_response(404); self.end_headers()
+            def do_POST(self):
+                self.send_response(404); self.end_headers()
+
+        srv, _t = _serve(H)
+        try:
+            p = prom.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        self.assertTrue(p["query_open"])
+        self.assertEqual(p["query_topology"]["sample_count"], 0)
+        self.assertEqual(p["query_topology"]["samples"], [])
+
+    def test_query_topology_timeout_stays_t1(self):
+        # Slow /api/v1/query — probe times out cleanly, query_open stays
+        # false, no topology captured. Confirms the T2 helper honours the
+        # bounded socket timeout without blowing up the rest of the probe.
+        import time as _time
+
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/-/healthy":
+                    body = b"Prometheus Server is Healthy.\n"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body); return
+                if self.path == "/api/v1/query?query=up":
+                    # Sleep past the caller's timeout, then never respond.
+                    _time.sleep(3)
+                    return
+                self.send_response(404); self.end_headers()
+            def do_POST(self):
+                self.send_response(404); self.end_headers()
+
+        srv, _t = _serve(H)
+        try:
+            p = prom.probe("127.0.0.1", srv.server_address[1], timeout=1)
+        finally:
+            srv.shutdown()
+        # Reachability held (via /-/healthy); the T2 probe timed out cleanly.
+        self.assertTrue(p["reachable"])
+        self.assertFalse(p["query_open"])
+        self.assertEqual(p["query_topology"], {})
+
     def test_pprof_absent_404(self):
         class H(_Base):
             def do_GET(self):
@@ -286,6 +413,41 @@ class FindingsTest(unittest.TestCase):
         self.assertEqual(len(pf), 1)
         self.assertEqual(pf[0]["severity"], "critical")
         self.assertIn("--config.file", pf[0]["detail"])
+
+    def test_query_open_stays_t1_when_no_samples(self):
+        # Probe reports query_open=True but query_topology.samples is empty
+        # (patched target — empty vector, or fronted API). Tier must stay t1.
+        hosts, probes = self._host_with_probe(
+            {"query_open": True, "version": "2.48.1",
+             "query_topology": {"success": True, "samples": [],
+                                "sample_count": 0}})
+        fs = prom.findings(hosts, probes)
+        q = [f for f in fs if f.get("kind") == "prom_query_open"]
+        self.assertEqual(len(q), 1)
+        self.assertEqual(q[0]["depth_tier"], "t1")
+        self.assertNotIn("T2 PROOF", q[0]["detail"])
+
+    def test_query_open_promotes_to_t2_with_real_samples(self):
+        # Probe returned actual instance/job/up samples — the query engine
+        # ran and disclosed running-service inventory. Upgrade to t2 and
+        # include the samples in the finding detail as evidence.
+        hosts, probes = self._host_with_probe(
+            {"query_open": True, "version": "2.48.1",
+             "query_topology": {
+                 "success": True,
+                 "sample_count": 2,
+                 "samples": [
+                     {"instance": "node-a:9100", "job": "node", "up": "1"},
+                     {"instance": "kube-api:6443", "job": "kubernetes",
+                      "up": "1"},
+                 ]}})
+        fs = prom.findings(hosts, probes)
+        q = [f for f in fs if f.get("kind") == "prom_query_open"]
+        self.assertEqual(len(q), 1)
+        self.assertEqual(q[0]["depth_tier"], "t2")
+        self.assertIn("T2 PROOF", q[0]["detail"])
+        self.assertIn("node-a:9100", q[0]["detail"])
+        self.assertIn("kube-api:6443", q[0]["detail"])
 
     def test_no_new_findings_when_locked_down(self):
         hosts, probes = self._host_with_probe({"version": "2.48.1"})

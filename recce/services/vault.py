@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import ssl
 
 from ..core import proxy
@@ -42,6 +43,24 @@ _TIMEOUT = 3.0
 _UA = "recce-probe/1.0"
 _MAX_BODY = 500_000
 _KV_DUMP_CAP = 25
+_PPROF_LEAK_MAX = 200_000
+_PPROF_LEAK_MAX_MATCHES = 12
+
+# Pattern derived from Vault's documented token & unseal-share formats:
+#   hvs.<b64url>   (server tokens, >=1.10)
+#   hvb.<b64url>   (batch tokens)
+#   hvr.<b64url>   (recovery tokens)
+#   hva.<b64url>   (agent-wrapped tokens)
+#   s.<24+ char>   (legacy client tokens, pre-1.10)
+# plus the raw literals a goroutine dump exposes for unseal / root keys.
+_PPROF_SECRET_RE = re.compile(
+    rb"hv[abcrs]\.[A-Za-z0-9_-]{24,}"
+    rb"|(?<![A-Za-z0-9])s\.[A-Za-z0-9]{24,}"
+    rb"|unseal[_-]?key(?:s)?"
+    rb"|root[_-]?token"
+    rb"|VAULT_TOKEN",
+    re.IGNORECASE,
+)
 
 
 # Verified Vault CVEs. Only entries whose (min, max) affected range is
@@ -175,6 +194,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         "http_and_tls": False,
         "dev_mode": False, "uninitialized": False,
         "pprof_reachable": False, "metrics_reachable": False,
+        "pprof_leak": {},
         "mounts": [], "auth_backends": [], "auth_used": False,
         "kv_secrets": [], "raft_peers": [], "raft_snapshot_bytes": 0,
         "cves": [],
@@ -284,6 +304,11 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
     if r is not None and r[0] == 200 and b"vault" in r[2][:5000].lower():
         out["metrics_reachable"] = True
 
+    if out["pprof_reachable"]:
+        leak = _pprof_leak_probe(ip, port, timeout, prefer)
+        if leak:
+            out["pprof_leak"] = leak
+
     if out["sealed"] is False and out["storage_type"] == "inmem":
         out["dev_mode"] = True
 
@@ -293,6 +318,57 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
     out["cves"] = _cve_matches(out["version"])
     _extract_facts(out)
     return out
+
+
+def _redact_token(tok: str) -> str:
+    """Show the token prefix only - never the full authenticator in evidence."""
+    if len(tok) <= 8:
+        return tok
+    return tok[:8] + "..."
+
+
+def _pprof_leak_probe(ip: str, port: int, timeout: float,
+                      prefer: bool) -> dict:
+    """T2 SAFE PROOF: pull a bounded goroutine + heap dump from the
+    unauthenticated pprof endpoints and search the body for the RFC-shaped
+    Vault token / unseal-key strings that leak into runtime dumps.
+
+    Non-destructive:
+      * one GET per endpoint, no follow-ups
+      * body clamped at _PPROF_LEAK_MAX bytes
+      * bounded socket timeout (proxy.scaled applied via _http)
+      * captured tokens are redacted before being surfaced
+
+    Returns evidence dict or empty {} when nothing matched / reachable.
+    """
+    evidence = {"endpoints": [], "matches": [], "bytes": 0}
+    for path in ("/v1/sys/pprof/goroutine?debug=2",
+                 "/v1/sys/pprof/heap?debug=1"):
+        r = _http(ip, port, "GET", path, timeout=timeout, prefer_tls=prefer)
+        if r is None or r[0] != 200:
+            continue
+        body = r[2][:_PPROF_LEAK_MAX]
+        if len(body) < 100:
+            continue
+        evidence["endpoints"].append(path)
+        evidence["bytes"] += len(body)
+        for m in _PPROF_SECRET_RE.finditer(body):
+            raw = m.group(0)
+            try:
+                tok = raw.decode("ascii")
+            except UnicodeDecodeError:
+                continue
+            if tok[:2].lower() in ("s.", "hv"):
+                tok = _redact_token(tok)
+            if tok not in evidence["matches"]:
+                evidence["matches"].append(tok)
+            if len(evidence["matches"]) >= _PPROF_LEAK_MAX_MATCHES:
+                break
+        if len(evidence["matches"]) >= _PPROF_LEAK_MAX_MATCHES:
+            break
+    if not evidence["matches"]:
+        return {}
+    return evidence
 
 
 def _authed_walk(ip: str, port: int, token: str, timeout: float,
@@ -600,20 +676,39 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     which.append("/v1/sys/pprof/goroutine")
                 if pr.get("metrics_reachable"):
                     which.append("/v1/sys/metrics?format=prometheus")
-                out.append(_finding(
-                    "medium",
-                    "Vault debug / metrics endpoints reachable unauthenticated",
-                    tgt,
+                leak = pr.get("pprof_leak") or {}
+                leak_matches = leak.get("matches") or []
+                tier = "t2" if leak_matches else "t1"
+                detail = (
                     f"Vault {ver} answered {', '.join(which)} without a token. "
                     f"pprof goroutine dumps have historically leaked in-memory "
                     f"secret material (unseal shares, credentials in flight); "
                     f"prometheus metrics expose cluster-internal counters used "
-                    f"to time attacks against the seal/unseal path.",
+                    f"to time attacks against the seal/unseal path.")
+                if leak_matches:
+                    detail += (
+                        f" T2 PROOF: fetched {leak['bytes']:,} bytes from "
+                        f"{', '.join(leak['endpoints'])} and matched "
+                        f"{len(leak_matches)} in-memory Vault-secret pattern(s) "
+                        f"(sample, redacted): {', '.join(leak_matches[:6])}.")
+                f = _finding(
+                    "medium",
+                    "Vault debug / metrics endpoints reachable unauthenticated",
+                    tgt,
+                    detail,
                     f"curl -sk https://{h.ip}:{p.portid}/v1/sys/pprof/goroutine?debug=1",
                     "Set `unauthenticated_metrics_access = false` and require a "
                     "token for the pprof endpoints (`enable_debug = false` on the "
                     "listener, or wrap them behind an ACL policy).",
-                    ["CWE-200", "CWE-497"], kind="vault_debug_disclosure"))
+                    ["CWE-200", "CWE-497"], kind="vault_debug_disclosure",
+                    depth_tier=tier)
+                if leak_matches:
+                    f["output"] = (
+                        "pprof-leak evidence (redacted); endpoints="
+                        + ",".join(leak["endpoints"])
+                        + f"; bytes={leak['bytes']}"
+                        + "; matches=" + ", ".join(leak_matches[:12]))
+                out.append(f)
 
             if pr.get("auth_used"):
                 out.append(_finding(

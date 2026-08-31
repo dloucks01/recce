@@ -35,6 +35,11 @@ _DEFAULT_PORT = 3260
 _TIMEOUT = 6.0
 _MAX_DATA_SEGMENT = 256 * 1024
 _INITIATOR_NAME = "iqn.2005-03.org.open-iscsi:recce"
+# T2 SendTargets promotion: after the first-target Normal Login already
+# emitted by _emit_auth_none_normal, verify up to this many ADDITIONAL
+# disclosed IQNs actually accept an unauthenticated Normal-session Login.
+# Each verification is a single bounded Login handshake (no SCSI CDBs).
+_MAX_VERIFY_EXTRA = 2
 
 # iSCSI opcodes (RFC 7143 §11).
 _OP_NOP_OUT = 0x00
@@ -371,6 +376,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         "chap": {}, "chap_one_way": False,
         "version_max": 0, "version_active": 0, "legacy_version": False,
         "normal_login": {}, "inquiry": {}, "read_capacity": {},
+        "verified_targets": [],
         "error": "",
     }
     isid = _make_isid()
@@ -506,6 +512,19 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
             out["read_capacity"] = n.get("read_capacity", {})
         except (OSError, socket.timeout, ValueError, struct.error):
             pass
+        # 6. T2 promotion for iscsi_targets_disclosed: verify that the
+        #    disclosed IQNs actually accept an unauthenticated Normal Login.
+        #    Reuse the first-target result (already probed above) and try up
+        #    to `_MAX_VERIFY_EXTRA` more so the SendTargets finding carries
+        #    concrete proof-of-exploit evidence, not just the IQN list.
+        verified: list[dict] = []
+        first_ok = bool(out["normal_login"].get("full_feature"))
+        verified.append({"iqn": first["iqn"], "full_feature": first_ok})
+        for t in out["targets"][1:1 + _MAX_VERIFY_EXTRA]:
+            a = t["addresses"][0] if t["addresses"] else {"ip": ip, "port": port}
+            ok = _verify_normal_login(a["ip"], a["port"], t["iqn"], timeout)
+            verified.append({"iqn": t["iqn"], "full_feature": ok})
+        out["verified_targets"] = verified
     return out
 
 
@@ -609,6 +628,58 @@ def _normal_login_and_inquiry(ip: str, port: int, target_name: str,
         if rc_data:
             out["read_capacity"] = _parse_read_capacity10(rc_data)
     return out
+
+
+def _verify_normal_login(ip: str, port: int, target_name: str,
+                         timeout: float) -> bool:
+    """T2 proof helper: single-shot Normal-session Login attempt against
+    `target_name`. Returns True only when the portal transitions to
+    FullFeaturePhase - real server-side proof that the disclosed IQN is
+    mountable. No SCSI CDBs are issued (login handshake only), bounded socket
+    timeout, and any error is swallowed as False so the T1 finding still
+    lands unchanged. Called once per additional disclosed target."""
+    isid = _make_isid()
+    itt = 0
+    cmdsn = 0
+    try:
+        with socket.create_connection((ip, port),
+                                      timeout=proxy.scaled(timeout)) as sock:
+            sock.settimeout(proxy.scaled(timeout))
+            kvs = {
+                "InitiatorName": _INITIATOR_NAME,
+                "SessionType": "Normal",
+                "TargetName": target_name,
+                "AuthMethod": "None",
+            }
+            resp = _login_send_recv(sock, kvs, isid, 0, itt, cmdsn, 0,
+                                    t=True, csg=_STAGE_SECURITY, nsg=_STAGE_OP)
+            if not resp or resp.get("status_class") != _STATUS_SUCCESS:
+                return False
+            if resp.get("T") and resp.get("nsg") == _STAGE_FULLFEATURE:
+                return True
+            cmdsn += 1
+            itt += 1
+            op_kvs = {
+                "HeaderDigest": "None",
+                "DataDigest": "None",
+                "MaxRecvDataSegmentLength": "8192",
+                "MaxBurstLength": "262144",
+                "FirstBurstLength": "65536",
+                "DefaultTime2Wait": "2",
+                "DefaultTime2Retain": "0",
+                "InitialR2T": "Yes",
+                "ImmediateData": "Yes",
+            }
+            resp2 = _login_send_recv(sock, op_kvs, isid, resp.get("tsih", 0),
+                                     itt, cmdsn, 0,
+                                     t=True, csg=_STAGE_OP,
+                                     nsg=_STAGE_FULLFEATURE)
+            if not resp2 or resp2.get("status_class") != _STATUS_SUCCESS:
+                return False
+            return bool(resp2.get("T")
+                        and resp2.get("nsg") == _STAGE_FULLFEATURE)
+    except (OSError, socket.timeout, ValueError, struct.error):
+        return False
 
 
 def _drain_scsi_response(sock: socket.socket, max_pdus: int = 4) -> bytes:
@@ -757,11 +828,30 @@ def _emit_sendtargets(out, pr, tgt, h, p):
         addrs = ", ".join(f"{a['ip']}:{a['port']}" for a in t.get("addresses", []))
         lines.append(f"  {t['iqn']} -> {addrs or '(no address)'}")
     more = f"\n  ... +{len(targets) - 10} more" if len(targets) > 10 else ""
+    detail = ("SendTargets=All returned "
+              f"{len(targets)} target(s):\n" + "\n".join(lines) + more)
+
+    # T2 promotion: if the per-IQN verify sweep proved at least one disclosed
+    # target actually accepts an unauthenticated Normal-session Login, the
+    # disclosure is not just recon — it is a live proof-of-exploit. Otherwise
+    # the finding stays T1 exactly as before.
+    verified = pr.get("verified_targets") or []
+    mounted = [v["iqn"] for v in verified if v.get("full_feature")]
+    depth_tier = "t2" if mounted else "t1"
+    if mounted:
+        mounted_lines = "\n".join(f"  {iqn}" for iqn in mounted[:5])
+        more_m = (f"\n  ... +{len(mounted) - 5} more"
+                  if len(mounted) > 5 else "")
+        detail += (
+            "\n\nProof-of-exploit (T2): "
+            f"{len(mounted)}/{len(verified)} verified IQN(s) reached "
+            "FullFeaturePhase on an unauthenticated Normal-session Login "
+            "(read-only, no SCSI WRITE):\n" + mounted_lines + more_m)
     out.append(_finding(
         "high",
         "iSCSI portal - unauthenticated SendTargets discloses all IQNs and portal addresses",
         tgt,
-        f"SendTargets=All returned {len(targets)} target(s):\n" + "\n".join(lines) + more,
+        detail,
         "iscsiadm",
         f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid}",
         "Enforce CHAP/KRB5 on the Discovery portal; treat the IQN list and "
@@ -771,7 +861,7 @@ def _emit_sendtargets(out, pr, tgt, h, p):
             "for iqn in $(iscsiadm -m discovery -t sendtargets -p "
             f"{h.ip}:{p.portid} | awk '{{print $2}}'); do iscsiadm -m node "
             f"-T $iqn -p {h.ip}:{p.portid} --login; done"),
-        depth_tier="t1"))
+        depth_tier=depth_tier))
 
 
 def _emit_auth_none_normal(out, pr, tgt, h, p):

