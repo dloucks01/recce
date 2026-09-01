@@ -1220,7 +1220,9 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None,
             upload_shell: bool = False) -> dict:
     from . import svcprobe
+    from ..creds.known_uploaded_shells import record_uploaded_shell
     targets = webdav_targets(hosts)
+    by_ip = {h.ip: h for h in hosts}
     probes_out: dict = {}
     state: dict = {}
     if active:
@@ -1234,6 +1236,31 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["anon_write"] = bool((pr.get("anon_put") or {}).get("proven"))
                 t["rce"] = bool((pr.get("rce") or {}).get("proven"))
                 t["backend"] = (pr.get("backend") or {}).get("product", "")
+                # Post-engagement cleanup surface: every successful PUT
+                # (the anon-PUT canary + the opt-in webshell chain) is
+                # recorded even after the probe's best-effort DELETE, so
+                # a transient cleanup failure isn't lost.
+                host = by_ip.get(t["ip"])
+                if host is not None:
+                    use_tls = bool(t.get("use_tls"))
+                    ap = pr.get("anon_put") or {}
+                    if ap.get("proven") and ap.get("path"):
+                        record_uploaded_shell(host, t["ip"], t["port"],
+                                              ap["path"], "DELETE",
+                                              source="webdav:anon-put",
+                                              use_tls=use_tls)
+                    rce = pr.get("rce") or {}
+                    if rce.get("proven") and rce.get("path"):
+                        record_uploaded_shell(host, t["ip"], t["port"],
+                                              rce["path"], "DELETE",
+                                              source="webdav:put-webshell",
+                                              use_tls=use_tls)
+                    cb = pr.get("copy_bypass") or {}
+                    if cb.get("proven") and cb.get("path"):
+                        record_uploaded_shell(host, t["ip"], t["port"],
+                                              cb["path"], "DELETE",
+                                              source="webdav:copy-bypass",
+                                              use_tls=use_tls)
     fs = findings(hosts, probes_out)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

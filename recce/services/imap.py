@@ -992,6 +992,7 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None, **_ignored) -> dict:
     """Full IMAP analysis. `creds` = {"user", "secret"} for a credentialed pass."""
     from . import svcprobe
+    from ..core.known_ntlm_endpoints import record_ntlm_endpoint
     from ..creds.known_mail_accounts import (_mail_domain_for_host,
                                              record_mail_account)
     targets = imap_targets(hosts)
@@ -1046,6 +1047,11 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             t["preauth"] = pr.get("preauth", False)
             t["starttls"] = pr.get("starttls", False)
             t["anonymous"] = pr.get("anonymous", False)
+            # Cross-service surface: NTLM relay-target endpoint.
+            host = by_ip.get(t["ip"])
+            if host is not None and "NTLM" in (pr.get("sasl") or []):
+                record_ntlm_endpoint(host, t["ip"], t["port"], "imap",
+                                     source="imap:capability-auth")
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

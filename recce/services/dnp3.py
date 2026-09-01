@@ -1012,7 +1012,9 @@ def findings_to_vulns(fs: list[dict]) -> dict:
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None) -> dict:
     from . import svcprobe
+    from ..core.known_ot_assets import record_ot_asset
     targets = dnp3_targets(hosts)
+    by_ip = {h.ip: h for h in hosts}
     probes: dict = {}
     state: dict = {}
     if active:
@@ -1027,6 +1029,14 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["vendor"] = pr.get("vendor", "")
                 t["product"] = pr.get("product", "")
                 t["firmware"] = pr.get("firmware", "")
+                host = by_ip.get(t["ip"])
+                if host is not None and (pr.get("vendor") or pr.get("firmware")):
+                    record_ot_asset(host, "dnp3",
+                                    vendor=pr.get("vendor", ""),
+                                    model=pr.get("product", ""),
+                                    firmware=pr.get("firmware", ""),
+                                    serial=str(pr.get("serial") or ""),
+                                    source="dnp3:g0-device-attrs")
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

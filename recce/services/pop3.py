@@ -1193,7 +1193,10 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             budget: float | None = None, progress=None, **_ignored) -> dict:
     """Full POP3 analysis. `creds` = {"user", "secret"} for a credentialed pass."""
     from . import svcprobe
+    from ..core.known_ntlm_endpoints import record_ntlm_endpoint
+    from ..creds.known_apop_challenges import record_apop_challenge
     targets = pop3_targets(hosts)
+    by_ip = {h.ip: h for h in hosts}
     probes: dict = {}
     state: dict = {}
     if active:
@@ -1230,6 +1233,15 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             t["banner"] = pr.get("banner", "")
             t["stls"] = pr.get("stls", False)
             t["apop"] = bool(pr.get("apop_timestamp"))
+            # Cross-service surfaces: APOP challenge + NTLM relay endpoint.
+            host = by_ip.get(t["ip"])
+            if host is not None:
+                if pr.get("apop_timestamp"):
+                    record_apop_challenge(host, t["ip"], t["port"],
+                                          pr["apop_timestamp"], "pop3")
+                if "NTLM" in (pr.get("sasl") or []):
+                    record_ntlm_endpoint(host, t["ip"], t["port"], "pop3",
+                                         source="pop3:capa-sasl")
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
