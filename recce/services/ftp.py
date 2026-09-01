@@ -21,6 +21,7 @@ import ipaddress
 import re
 import socket
 
+from ..core import proxy
 from ..core.models import Host, Port
 from .svccommon import finding_builder
 
@@ -338,11 +339,30 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         exploit_note=note, depth_tier=tier))
                     break
             if pr.get("anonymous"):
-                out.append(_finding(
-                    "high", "Anonymous FTP login allowed", tgt,
+                # T2 SAFE promotion: when analyze() has already run a single-shot
+                # read-only LIST snapshot against the anonymous session, embed the
+                # captured server-side listing as real evidence and lift the tier to
+                # t2. The T1 path (no snapshot present) stays unchanged.
+                anon_ev = pr.get("anon_list_evidence") or ""
+                anon_entries = pr.get("anon_list_entries") or []
+                anon_total = pr.get("anon_list_total")
+                anon_tier = "t2" if anon_ev else "t1"
+                anon_detail = (
                     "Anonymous login permitted: the server returned a 230 to "
                     "anonymous/PASS during recce's probe. It grants an unauthenticated "
-                    "session to the FTP root.",
+                    "session to the FTP root.")
+                if anon_ev:
+                    shown = len(anon_entries)
+                    total_note = (f" of {anon_total}" if isinstance(anon_total, int)
+                                  and anon_total > shown else "")
+                    anon_detail += (
+                        "\n\nT2 evidence -- server-side LIST snapshot captured after "
+                        f"the anonymous 230 (top {shown}{total_note} entr"
+                        f"{'y' if shown == 1 else 'ies'}, read-only, no writes):\n\n"
+                        + anon_ev)
+                out.append(_finding(
+                    "high", "Anonymous FTP login allowed", tgt,
+                    anon_detail,
                     "ftp / nmap",
                     "ftp <ip>   # user 'anonymous', any password; or nmap --script "
                     "ftp-anon -p21 <ip>",
@@ -352,7 +372,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "wget -m --no-passive ftp://anonymous:recce@IP:21/ ; or "
                         "lftp -u anonymous, ftp://IP -e 'find; quit' -- grep for "
                         "backup.tar, .git, .aws, id_rsa"),
-                    depth_tier="t1"))
+                    depth_tier=anon_tier))
             # PASV response leaks the server-chosen data-channel IP; when it's
             # RFC1918 and differs from the control-channel IP, the server is
             # disclosing internal topology (RFC 959 Sec 4.1.2 / CWE-200).
@@ -525,6 +545,67 @@ def prove_writable(ip: str, port: int = _DEFAULT_PORT, creds: dict | None = None
                     pass
 
 
+# --- T2 anonymous read-foothold snapshot ---------------------------------------
+
+_ANON_LIST_MAX = 20
+
+
+def anon_list_snapshot(ip: str, port: int = _DEFAULT_PORT,
+                       timeout: float = _TIMEOUT,
+                       max_lines: int = _ANON_LIST_MAX) -> dict:
+    """T2 SAFE evidence: after a successful anonymous USER/PASS (as already
+    detected by :func:`probe`), open a single fresh FTP session, log in
+    anonymously, and issue one **LIST** on the top-level directory - capturing
+    the real server-side directory listing as evidence of an unauthenticated
+    read foothold. Read-only, single-shot, bounded timeout - no writes, no
+    state change, no CWD navigation past the login-default directory.
+
+    Returns ``{ok, entries, total, evidence, error}``. On any failure the
+    snapshot degrades to ``ok=False`` and the caller keeps the T1 emission
+    unchanged; recce never elevates the tier without server-side evidence.
+    """
+    import ftplib
+    scaled = proxy.scaled(timeout)
+    lines: list[str] = []
+    log: list[str] = []
+    ftp_client = None
+    try:
+        ftp_client = ftplib.FTP()
+        ftp_client.connect(ip, port, timeout=scaled)
+        welcome = (ftp_client.getwelcome() or "").strip()
+        if welcome:
+            log.append(welcome)
+        login_reply = str(ftp_client.login("anonymous", "recce@example.com"))
+        log.append(login_reply.strip())
+        if not login_reply.lstrip().startswith("230"):
+            return {"ok": False, "entries": [], "total": 0,
+                    "evidence": "\n".join(log),
+                    "error": "anonymous login not accepted"}
+        try:
+            ftp_client.retrlines("LIST", lines.append)
+        except ftplib.all_errors as e:
+            log.append(f"LIST error: {e}")
+        entries = lines[:max_lines]
+        header = (f"LIST (top {len(entries)} of {len(lines)} entries):"
+                  if len(lines) > len(entries)
+                  else f"LIST ({len(entries)} entries):")
+        evidence = "\n".join(log + [header] + entries)
+        return {"ok": True, "entries": entries, "total": len(lines),
+                "evidence": evidence, "error": None}
+    except Exception as e:  # noqa: BLE001 - ftplib.all_errors + socket errors
+        return {"ok": False, "entries": [], "total": 0,
+                "evidence": "\n".join(log), "error": str(e)}
+    finally:
+        if ftp_client is not None:
+            try:
+                ftp_client.quit()
+            except Exception:  # noqa: BLE001
+                try:
+                    ftp_client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+
 def write_proof_finding(ip: str, port: int, proof: dict,
                         creds: dict | None) -> dict | None:
     if not proof.get("writable"):
@@ -595,6 +676,16 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                         record_cleartext_auth(_h, t["port"], "ftp",
                                               "password", source="ftp:probe")
                         break
+                # T2 SAFE promotion for anon_ftp: when the T1 probe already
+                # observed a 230 to anonymous, follow up with one read-only
+                # LIST snapshot for real server-side evidence. Bounded, single
+                # shot, additive - failures leave the T1 tier intact.
+                if pr.get("anonymous"):
+                    snap = anon_list_snapshot(t["ip"], t["port"])
+                    if snap.get("ok"):
+                        pr["anon_list_evidence"] = snap.get("evidence") or ""
+                        pr["anon_list_entries"] = snap.get("entries") or []
+                        pr["anon_list_total"] = snap.get("total") or 0
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": credfree_runbook(t["ip"], t["port"]),

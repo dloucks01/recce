@@ -965,16 +965,32 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     depth_tier="t1"))
 
             # Hostkey fingerprint capture (info-level; correlator).
+            # T2 evidence: K_S was pulled off SSH_MSG_KEXDH_REPLY on a single
+            # controlled connection - no auth attempt, no shell-out - so the
+            # fingerprint is a genuine cryptographic artifact of the server
+            # (not a banner claim). depth_tier is lifted to t2 when the
+            # capture landed; falls back to t1 if only a claimed value was
+            # ever seen (currently unreachable: the field is only populated
+            # by a successful KEXDH_REPLY).
             hk = pr.get("hostkey_capture")
             if hk:
                 out.append(_finding(
                     "info", "SSH host key fingerprint captured", tgt,
-                    f"key_type={hk['key_type']} {hk['fp_sha256']} {hk['fp_md5']}",
+                    f"key_type={hk['key_type']} {hk['fp_sha256']} {hk['fp_md5']}"
+                    f"\n\nT2 proof: the KEXINIT exchange was driven forward "
+                    f"to SSH_MSG_KEXDH_REPLY (RFC 4253 §8) on a single "
+                    f"controlled socket; the server returned a K_S blob of "
+                    f"key_type '{hk['key_type']}' from which the SHA256 and "
+                    f"MD5 fingerprints above were computed with hashlib. "
+                    f"Non-destructive: no userauth, no writes, no state "
+                    f"change on the target - the connection was closed after "
+                    f"K_S was captured.",
                     "openssh",
                     f"ssh-keyscan -p {p.portid} {h.ip} | ssh-keygen -lf -",
                     "Correlate this fingerprint across the estate to detect "
                     "golden-image / clone hosts and MitM baselines.",
-                    [], kind="ssh_hostkey_fingerprint"))
+                    [], kind="ssh_hostkey_fingerprint",
+                    depth_tier="t2"))
 
             # --- auth methods (shell-out, best-effort) -----------------------
             am = auth_probes.get((h.ip, p.portid)) or {}

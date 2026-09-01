@@ -175,6 +175,17 @@ def _oh_g0_range(variation: int) -> bytes:
     return bytes([_G_DEVICE_ATTR, variation, 0x00, 0x00, 0x00])
 
 
+def _oh_g0v0_all() -> bytes:
+    """g0 v0 qualifier 0x06 (all variations of the group, no range field).
+
+    IEEE 1815 §4.4.2 defines variation 0 as "request all variations of this
+    object group"; combined with qualifier 0x06 (no range) it is the standard
+    one-shot enumeration of every device-attribute the outstation carries.
+    Used by the T2 promotion path to pull vendor + model + firmware + serial
+    in a single FC1 Read for evidence, rather than the per-variation walk."""
+    return bytes([_G_DEVICE_ATTR, 0, 0x06])
+
+
 def _build_g60v1_read(dst: int = 1, src: int = 1, app_seq: int = 0,
                       tp_seq: int = 0) -> bytes:
     return _build_read_request(dst, src, app_seq, tp_seq, _oh_g60v1_all())
@@ -183,6 +194,12 @@ def _build_g60v1_read(dst: int = 1, src: int = 1, app_seq: int = 0,
 def _build_g0_read(variation: int, dst: int = 1, src: int = 1,
                    app_seq: int = 0, tp_seq: int = 0) -> bytes:
     return _build_read_request(dst, src, app_seq, tp_seq, _oh_g0_range(variation))
+
+
+def _build_g0v0_read(dst: int = 1, src: int = 1, app_seq: int = 0,
+                     tp_seq: int = 0) -> bytes:
+    """One FC1 Read for g0 v0 q06 — all device-attribute variations at once."""
+    return _build_read_request(dst, src, app_seq, tp_seq, _oh_g0v0_all())
 
 
 def _build_delay_measurement(dst: int = 1, src: int = 1, app_seq: int = 0,
@@ -330,6 +347,47 @@ def _extract_g0_attribute(objects_raw: bytes) -> str:
     return run.decode("ascii", "replace")[:80]
 
 
+def _walk_g0_attribute_set(objects_raw: bytes,
+                           max_attrs: int = 24) -> list[dict]:
+    """Walk a g0v0 aggregated response body and return every attribute the
+    outstation packed in. Layout per attribute (§4.4.3.2, §11.2):
+      g(1)=0  v(1)  q(1)  start(...)  stop(...)  data_type(1)  len(1)  bytes[len]
+    Only qualifier 0x00 (1-byte start/stop) and 0x01 (2-byte start/stop) are
+    read; unknown qualifiers stop the walk rather than mis-advance and mislabel
+    subsequent objects."""
+    out: list[dict] = []
+    off = 0
+    n = len(objects_raw)
+    while off + 5 <= n and len(out) < max_attrs:
+        if objects_raw[off] != _G_DEVICE_ATTR:
+            break
+        var = objects_raw[off + 1]
+        q = objects_raw[off + 2]
+        off += 3
+        if q == 0x00:
+            off += 2
+        elif q == 0x01:
+            off += 4
+        else:
+            break
+        if off + 2 > n:
+            break
+        dtype = objects_raw[off]
+        dlen = objects_raw[off + 1]
+        if off + 2 + dlen > n:
+            break
+        if dtype == 0x01:                            # visible-string (§11.2.1)
+            val = objects_raw[off + 2:off + 2 + dlen].decode("utf-8", "replace")[:80]
+        elif dtype == 0x02 and dlen in (1, 2, 4):    # unsigned integer
+            val = str(int.from_bytes(objects_raw[off + 2:off + 2 + dlen], "little"))
+        else:
+            val = objects_raw[off + 2:off + 2 + dlen].hex()
+        out.append({"variation": var, "value": val,
+                    "name": _G0_ATTR_NAMES.get(var, "")})
+        off += 2 + dlen
+    return out
+
+
 def _count_object_groups(objects_raw: bytes) -> dict:
     """Best-effort walk. Returns {'first_groups': [g,...]} — as far as we can
     advance. Detailed decode of every static-object payload is out of scope;
@@ -459,6 +517,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         "device_name": "", "location": "", "serial": "",
         "broadcast_reachable": False, "unsolicited_seen": False,
         "delay_ms": None, "protocol": protocol,
+        "device_attrs_evidence": None,
     }
     io = _udp_send_recv if protocol == "udp" else _tcp_send_recv
 
@@ -578,7 +637,46 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         if frame and _parse_response(frame):
             out["delay_ms"] = int((time.monotonic() - t0) * 1000)
 
-    # 5) Broadcast-read (0xFFFD, requires app-layer confirmation).
+    # 5-T2) Single-shot FC1 Read of g0 v0 q06 — all device-attribute
+    # variations in one request. When the outstation packs its attribute set
+    # into the reply, capture it as real server-side evidence for the
+    # device-identification finding (T2 upgrade). One frame, bounded timeout,
+    # read-only; qualifier 0x06 means "no range field, all points".
+    t2_timeout = min(timeout, 3.0)
+    pkt = _build_g0v0_read(dst=outstation, src=_MASTER_ADDR,
+                           app_seq=3, tp_seq=3)
+    try:
+        data = io(ip, port, pkt, t2_timeout)
+    except OSError:
+        data = b""
+    if data:
+        frame = _find_frame(data)
+        if frame:
+            resp = _parse_response(frame)
+            if (resp and resp.get("app_fc") == _APP_FC_RESPONSE
+                    and not (resp.get("iin2") or 0) & 0x02
+                    and resp.get("objects_raw")):
+                raw = resp["objects_raw"]
+                attrs = _walk_g0_attribute_set(raw)
+                if attrs:
+                    out["device_attrs_evidence"] = {
+                        "raw_hex": raw[:128].hex(),
+                        "attrs_count": len(attrs),
+                        "attrs": attrs,
+                        "iin1": resp["iin1"], "iin2": resp["iin2"],
+                    }
+                    # Backfill any attribute the per-variation walk missed —
+                    # some outstations only expose the set via g0v0.
+                    attr_map = {"software_version": "firmware",
+                                "vendor": "vendor", "location": "location",
+                                "device_name": "device_name",
+                                "serial": "serial"}
+                    for a in attrs:
+                        name = _G0_ATTR_NAMES.get(a["variation"])
+                        if name and not out.get(attr_map.get(name, "")):
+                            out[attr_map[name]] = a["value"]
+
+    # 6) Broadcast-read (0xFFFD, requires app-layer confirmation).
     pkt = _build_g60v1_read(dst=_BCAST_NEEDS_APP_CONF, src=_MASTER_ADDR,
                             app_seq=2, tp_seq=2)
     try:
@@ -711,17 +809,38 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             ident_bits = [(k, pr.get(k)) for k in
                           ("vendor", "product", "firmware", "device_name",
                            "location", "serial") if pr.get(k)]
-            if ident_bits:
-                bits = "  ".join(f"{k}={v!r}" for k, v in ident_bits)
-                out.append(_finding(
+            attrs_ev = pr.get("device_attrs_evidence") or {}
+            if ident_bits or attrs_ev:
+                bits = "  ".join(f"{k}={v!r}" for k, v in ident_bits) or "(none)"
+                detail = (
+                    f"Group 0 device-attribute read returned: {bits}. This "
+                    f"fingerprint feeds vendor-specific CVE mapping (SEL, GE "
+                    f"Multilin, Schweitzer, Siemens SICAM, Schneider "
+                    f"SCADAPack) and cross-references the outstation identity "
+                    f"across engineering-workstation project files.")
+                depth = "t0"
+                if attrs_ev:
+                    depth = "t2"
+                    attrs_summary = ", ".join(
+                        f"v{a['variation']}"
+                        + (f" ({a['name']})" if a.get("name") else "")
+                        + f"={a['value']!r}"
+                        for a in attrs_ev.get("attrs", []))
+                    detail += (
+                        "\n\nT2 evidence -- one FC1 Read of g0v0 (all "
+                        "device-attribute variations, qualifier 0x06, single "
+                        "controlled request, read-only) returned "
+                        f"{attrs_ev['attrs_count']} attribute object(s) from "
+                        f"the outstation: {attrs_summary}. Raw response body "
+                        f"(first {min(len(attrs_ev.get('raw_hex', ''))//2, 128)}"
+                        f"B hex): {attrs_ev.get('raw_hex', '')}. "
+                        f"IIN1=0x{attrs_ev.get('iin1', 0):02x} "
+                        f"IIN2=0x{attrs_ev.get('iin2', 0):02x}.")
+                finding = _finding(
                     "info",
                     "DNP3 device identification extracted (vendor/product/firmware)",
-                    tgt,
-                    f"Group 0 device-attribute read returned: {bits}. This fingerprint "
-                    f"feeds vendor-specific CVE mapping (SEL, GE Multilin, Schweitzer, "
-                    f"Siemens SICAM, Schneider SCADAPack) and cross-references the "
-                    f"outstation identity across engineering-workstation project files.",
-                    f"# dnp3ctl {h.ip}:{p.portid} read g0 --var 242",
+                    tgt, detail,
+                    f"# dnp3ctl {h.ip}:{p.portid} read g0 --var 0 --qual 0x06",
                     "Informational — pairs with the reachability finding.",
                     [], kind="dnp3_device_id",
                     exploit_note=(
@@ -730,7 +849,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "SICAM); check the RTU's web UI on 80/443 for "
                         "default creds (SEL: 2AC/OTTER, SCADAPack: "
                         "administrator/admin)."),
-                    depth_tier="t0"))
+                    depth_tier=depth)
+                if attrs_ev:
+                    # Capture the wire evidence on the finding output so
+                    # downstream consumers (report renderers, JSON export) can
+                    # pull the raw g0v0 bytes without re-parsing the detail.
+                    finding["evidence"] = attrs_ev
+                out.append(finding)
 
             # Outstation address disclosure — always info when we learned it.
             if addr is not None:

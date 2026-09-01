@@ -246,6 +246,141 @@ class ProbeTest(unittest.TestCase):
         self.assertIsNone(pr)
 
 
+# --- T2 controlled read: RFC 2946 ENCRYPT probe --------------------------------
+
+# RFC 2946: ENCRYPT is option 38 (0x26). IAC WONT = 0xFC, IAC WILL = 0xFB.
+IAC_WONT_ENCRYPT = bytes.fromhex("fffc26")
+IAC_DONT_ENCRYPT = bytes.fromhex("fffe26")
+
+
+class EncryptProbeTest(unittest.TestCase):
+    """The T2 promotion: single-shot DO ENCRYPT + capture the server's reply.
+
+    Each subtest asserts the parser recognised a concrete server-side response
+    (WONT / WILL / DONT ENCRYPT) or the definitive silence case."""
+
+    def test_encrypt_probe_captures_wont_refusal(self):
+        # Server settles the opening negotiation, then answers our DO ENCRYPT
+        # with the definitive IAC WONT ENCRYPT refusal.
+        initial = IAC_WILL_ECHO + b"\r\nlogin: "
+        followup = IAC_WONT_ENCRYPT
+        srv = _FakeTelnetServer(initial, followup=followup)
+        try:
+            ep = telnet.encrypt_probe(srv.host, srv.port, timeout=3)
+        finally:
+            srv.close()
+        self.assertIsNotNone(ep)
+        self.assertTrue(ep["asked"])
+        self.assertTrue(ep["server_wont_encrypt"])
+        self.assertFalse(ep["server_will_encrypt"])
+        self.assertFalse(ep["silent"])
+        self.assertIn("WONT ENCRYPT", ep["evidence"])
+        self.assertIn("fffc26", ep["response_hex"])
+
+    def test_encrypt_probe_captures_will_acceptance(self):
+        # An accepting server: initial silent-ish, replies WILL ENCRYPT.
+        initial = IAC_WILL_ECHO + b"\r\nlogin: "
+        followup = IAC_WILL_ENCRYPT
+        srv = _FakeTelnetServer(initial, followup=followup)
+        try:
+            ep = telnet.encrypt_probe(srv.host, srv.port, timeout=3)
+        finally:
+            srv.close()
+        self.assertIsNotNone(ep)
+        self.assertTrue(ep["server_will_encrypt"])
+        self.assertFalse(ep["server_wont_encrypt"])
+        self.assertIn("WILL ENCRYPT", ep["evidence"])
+
+    def test_encrypt_probe_captures_dont_refusal(self):
+        initial = b"\r\nlogin: "
+        followup = IAC_DONT_ENCRYPT
+        srv = _FakeTelnetServer(initial, followup=followup)
+        try:
+            ep = telnet.encrypt_probe(srv.host, srv.port, timeout=3)
+        finally:
+            srv.close()
+        self.assertIsNotNone(ep)
+        self.assertTrue(ep["server_dont_encrypt"])
+
+    def test_encrypt_probe_silent_server(self):
+        # Server sends only an initial banner and never answers the DO ENCRYPT.
+        initial = IAC_WILL_ECHO + b"\r\nlogin: "
+        srv = _FakeTelnetServer(initial, followup=b"")
+        try:
+            ep = telnet.encrypt_probe(srv.host, srv.port, timeout=2)
+        finally:
+            srv.close()
+        self.assertIsNotNone(ep)
+        self.assertTrue(ep["silent"])
+        self.assertFalse(ep["server_wont_encrypt"])
+        self.assertFalse(ep["server_will_encrypt"])
+
+    def test_encrypt_probe_dead_port_returns_none(self):
+        # Loopback port 1 refuses -> probe returns None (no exception).
+        self.assertIsNone(telnet.encrypt_probe("127.0.0.1", 1, timeout=1))
+
+    def test_encrypt_probe_timeout_bounded(self):
+        # A silent server must not stall the probe beyond the timeout window.
+        srv = _FakeTelnetServer(b"", followup=b"")
+        try:
+            import time as _t
+            t0 = _t.monotonic()
+            ep = telnet.encrypt_probe(srv.host, srv.port, timeout=2)
+            elapsed = _t.monotonic() - t0
+        finally:
+            srv.close()
+        self.assertIsNotNone(ep)
+        self.assertLess(elapsed, 6.0)
+
+
+class EncryptProbeFindingUpgradeTest(unittest.TestCase):
+    """T2 promotion: when encrypt_probe captured a definitive server reply,
+    the telnet_no_encrypt finding upgrades to depth_tier='t2' with the raw
+    wire bytes surfaced as evidence."""
+
+    def test_definitive_wont_upgrades_to_t2(self):
+        h, pr = _host_with_telnet(b"login: ", encrypt=False)
+        pr["encrypt_probe"] = {
+            "asked": True, "response_hex": "fffc26",
+            "server_wont_encrypt": True, "server_will_encrypt": False,
+            "server_dont_encrypt": False, "silent": False,
+            "initial_offered": False,
+            "evidence": "Server replied IAC WONT ENCRYPT (0xFF 0xFC 0x26) — "
+                        "a definitive RFC 2946 refusal.",
+            "elapsed": 0.1,
+        }
+        fs = telnet.findings([h], {(h.ip, 23): pr})
+        f = next(x for x in fs if x["kind"] == "telnet_no_encrypt")
+        self.assertEqual(f["depth_tier"], "t2")
+        self.assertIn("T2 controlled read", f["detail"])
+        self.assertIn("fffc26", f["detail"])
+        self.assertIn("IAC WONT ENCRYPT", f["detail"])
+
+    def test_silent_probe_stays_t0(self):
+        # No definitive server reply -> tier remains t0 (existing behaviour).
+        h, pr = _host_with_telnet(b"login: ", encrypt=False)
+        pr["encrypt_probe"] = {
+            "asked": True, "response_hex": "",
+            "server_wont_encrypt": False, "server_will_encrypt": False,
+            "server_dont_encrypt": False, "silent": True,
+            "initial_offered": False,
+            "evidence": "Server ignored the DO ENCRYPT request entirely.",
+            "elapsed": 0.5,
+        }
+        fs = telnet.findings([h], {(h.ip, 23): pr})
+        f = next(x for x in fs if x["kind"] == "telnet_no_encrypt")
+        self.assertEqual(f["depth_tier"], "t0")
+        self.assertNotIn("T2 controlled read", f["detail"])
+
+    def test_missing_encrypt_probe_stays_t0(self):
+        # T1 path unchanged: no probe -> t0 finding still fires with no crash.
+        h, pr = _host_with_telnet(b"login: ", encrypt=False)
+        self.assertNotIn("encrypt_probe", pr)
+        fs = telnet.findings([h], {(h.ip, 23): pr})
+        f = next(x for x in fs if x["kind"] == "telnet_no_encrypt")
+        self.assertEqual(f["depth_tier"], "t0")
+
+
 # --- known-bad map + findings --------------------------------------------------
 
 def _host_with_telnet(banner_bytes: bytes,

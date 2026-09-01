@@ -773,13 +773,18 @@ def _parse_krbtime_epoch(s: str) -> int:
 def kdc_probe(dc_ip: str, realm: str, user: str = "krbtgt",
               timeout: float = _TIMEOUT) -> dict:
     """One pre-auth-less AS-REQ, mine the KRB-ERROR reply. Returns
-    {reachable, code?, crealm, stime, skew_seconds, has_fast, padata_types}.
+    {reachable, code?, crealm, stime, skew_seconds, has_fast, padata_types,
+     fast_value_hex}.
     'skew_seconds' is (local_wall_time - kdc_stime); 'has_fast' means the KDC
     advertised PA-FX-FAST (136) so pre-auth spraying against this account is
-    armoured."""
+    armoured. 'fast_value_hex' is the hex-encoded PA-FX-FAST padata VALUE
+    octet-string (RFC 6113 §5.4.2 PA-FX-FAST-REPLY, empty when the KDC only
+    advertised the type or FAST is not enforced) — T2 wire evidence that the
+    KDC really runs FAST end-to-end rather than merely listing the code."""
     out: dict = {"reachable": False, "code": None, "crealm": "",
                  "stime": "", "skew_seconds": None,
-                 "has_fast": False, "padata_types": []}
+                 "has_fast": False, "padata_types": [],
+                 "fast_value_hex": ""}
     sent_at = int(time.time())
     reply = _send_recv(dc_ip, build_as_req(user, realm.upper()), timeout)
     if not reply:
@@ -805,9 +810,17 @@ def kdc_probe(dc_ip: str, realm: str, user: str = "krbtgt",
     cr = _ctx_inner(seq, 9)                        # crealm [9] Realm (GeneralString)
     if cr:
         out["crealm"] = cr.decode("utf-8", "replace")
-    types = [t for t, _v in _extract_padata(seq)]
+    pa_entries = _extract_padata(seq)
+    types = [t for t, _v in pa_entries]
     out["padata_types"] = types
     out["has_fast"] = _PADATA_FX_FAST in types
+    # Capture the PA-FX-FAST padata VALUE bytes — RFC 6113 PA-FX-FAST-REPLY.
+    # A non-empty value is strong wire evidence that the KDC actually
+    # implements FAST rather than merely advertising the padata type number.
+    for t, v in pa_entries:
+        if t == _PADATA_FX_FAST and v:
+            out["fast_value_hex"] = v.hex()
+            break
     return out
 
 
@@ -1065,14 +1078,42 @@ def kdc_probe_findings(dc_ip: str, probe: dict,
         return out
     tgt = f"{dc_ip}:88"
     if probe.get("has_fast"):
+        # T2 promotion: if the KRB-ERROR reply carried a non-empty PA-FX-FAST
+        # padata VALUE (RFC 6113 §5.4.2 PA-FX-FAST-REPLY), we have direct wire
+        # evidence the KDC really runs FAST rather than merely advertising the
+        # type number. Fold the first bytes of that octet-string into the
+        # finding's detail and mark the tier accordingly. Absent that value,
+        # the earlier "type 136 seen" observation still holds at T1.
+        fast_hex = probe.get("fast_value_hex", "") or ""
+        if fast_hex:
+            # Trim the on-screen slice so a large FAST cookie does not
+            # dominate the finding; the full value is still available on the
+            # probe dict for downstream tooling.
+            preview = fast_hex[:128] + ("..." if len(fast_hex) > 128 else "")
+            detail = (
+                "The KDC advertised PA-FX-FAST (RFC 6113 padata type 136) "
+                "AND returned a non-empty PA-FX-FAST-REPLY octet-string in "
+                "the KRB-ERROR e-data — direct wire evidence the KDC "
+                "actually runs FAST (armored pre-auth) end-to-end. Pre-auth "
+                "spraying (PA-ENC-TIMESTAMP) is defeated for accounts "
+                "reached this way; AS-REP roasting of DONT_REQ_PREAUTH "
+                "accounts remains the only credential-less path.\n\n"
+                f"PA-FX-FAST value ({len(fast_hex) // 2} bytes, hex): "
+                f"{preview}")
+            tier = "t2"
+        else:
+            detail = (
+                "The KDC advertised PA-FX-FAST (RFC 6113 padata type 136). "
+                "Pre-auth spraying (PA-ENC-TIMESTAMP) is defeated for "
+                "accounts reached this way; AS-REP roasting of "
+                "DONT_REQ_PREAUTH accounts remains the only "
+                "credential-less path.")
+            tier = "t1"
         out.append(_finding(
             "medium",
             "Kerberos KDC enforces FAST (pre-auth armouring)",
             tgt,
-            "The KDC advertised PA-FX-FAST (RFC 6113 padata type 136). "
-            "Pre-auth spraying (PA-ENC-TIMESTAMP) is defeated for accounts "
-            "reached this way; AS-REP roasting of DONT_REQ_PREAUTH accounts "
-            "remains the only credential-less path.",
+            detail,
             "kerbrute", f"kerbrute userenum -d '<realm>' --dc {dc_ip} users.txt",
             "This is defensive posture; no action needed - note the constraint "
             "when planning credential-less attacks against this DC.",
@@ -1081,7 +1122,7 @@ def kdc_probe_findings(dc_ip: str, probe: dict,
                 "None - AS-REP roast of DONT_REQ_PREAUTH accounts is the only "
                 "remaining credless path; run recce kerberos and rely on that "
                 "finding class."),
-            depth_tier="t1"))
+            depth_tier=tier))
     skew = probe.get("skew_seconds")
     if skew is not None and abs(skew) >= skew_threshold:
         out.append(_finding(

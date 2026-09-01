@@ -381,6 +381,11 @@ def _probe_apci_and_startdt(ip: str, port: int, timeout: float,
         "clock_sync_accepted": None, "reset_process_accepted": None,
         "single_command_accepted": None,
         "control_types_reachable": [], "wrote": False,
+        # T2 SAFE evidence — raw bytes of the first ASDU actually returned
+        # after STARTDT + General Interrogation. Captured for concrete
+        # server-side proof beyond an APCI-only handshake. Set only when a
+        # real I-frame reply landed; never on U/S-only conversations.
+        "first_asdu_hex": "", "first_asdu_summary": "",
     }
     try:
         sock = _connect(ip, port, timeout, wrap_tls=wrap_tls)
@@ -436,6 +441,27 @@ def _probe_apci_and_startdt(ip: str, port: int, timeout: float,
                 if not hdr:
                     continue
                 got_reply = True
+                # T2 SAFE proof: freeze the FIRST real I-frame ASDU response.
+                # Even a negative COT (unknown CAA / unknown TypeID) counts —
+                # it proves the responder ran the ASDU state machine, not just
+                # the APCI parser. Never overwritten by later frames.
+                if not out["first_asdu_hex"]:
+                    ti = hdr["type_id"]
+                    cot = hdr["cot"]
+                    caa_r = hdr["caa"]
+                    obj = _first_ioa_value(hdr)
+                    if obj is not None:
+                        summary = (f"TypeID={ti} COT={cot} CAA={caa_r} "
+                                   f"IOA={obj[0]} {obj[1]}")
+                    else:
+                        summary = f"TypeID={ti} COT={cot} CAA={caa_r}"
+                    # Reassemble the exact wire APDU (2-byte APCI header +
+                    # 4 control octets + ASDU) — length capped by the 255-
+                    # byte APDU cap so the finding payload stays bounded.
+                    raw = (bytes([START, f["length"]]) + bytes(f["ctl"])
+                           + f["asdu"])
+                    out["first_asdu_hex"] = raw.hex()
+                    out["first_asdu_summary"] = summary
                 if hdr["cot"] == COT_UNKNOWN_CA:
                     if caa not in out["caa_unknown"]:
                         out["caa_unknown"].append(caa)
@@ -689,15 +715,38 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             if pr.get("testfr_ok"): liveness_bits.append("TESTFR con")
             if pr.get("startdt_ok"): liveness_bits.append("STARTDT con")
             live_txt = f" ({', '.join(liveness_bits)})" if liveness_bits else ""
-            out.append(_finding(
-                "high",
-                "IEC-104 SCADA device on the scanned network", tgt,
+            reachable_detail = (
                 f"IEC 60870-5-104 responder answered a valid APCI on {tgt}"
                 f"{live_txt}. The base protocol has NO authentication and NO "
                 f"encryption — any client that can reach 2404/tcp can enter "
                 f"data-transfer state and enumerate the station's process "
                 f"image. On a corporate/DMZ segment this alone is a "
-                f"segmentation gap.",
+                f"segmentation gap.")
+            # T2 SAFE proof: when the probe captured a real ASDU reply after
+            # STARTDT + General Interrogation (single controlled read, no
+            # writes, bounded by proxy.scaled), promote reachability from T1
+            # (APCI-only handshake) to T2 (station actually spoke the ASDU
+            # state machine). Even a negative COT reply proves the responder
+            # is not just an APCI echo — it's a real IEC-104 stack.
+            reachable_tier = "t1"
+            asdu_hex = pr.get("first_asdu_hex") or ""
+            asdu_sum = pr.get("first_asdu_summary") or ""
+            if asdu_hex and asdu_sum:
+                reachable_tier = "t2"
+                reachable_detail += (
+                    f"\n\nT2 proof — first ASDU response captured after "
+                    f"STARTDT + C_IC_NA_1 General Interrogation (single "
+                    f"controlled read, no writes):\n"
+                    f"    parsed: {asdu_sum}\n"
+                    f"    wire:   {asdu_hex}\n"
+                    f"A real I-frame ASDU reply confirms the responder ran "
+                    f"the IEC 60870-5 application-layer state machine — not "
+                    f"just an APCI echo — so the station is genuinely "
+                    f"speaking IEC-104 without authentication.")
+            out.append(_finding(
+                "high",
+                "IEC-104 SCADA device on the scanned network", tgt,
+                reachable_detail,
                 f"nmap -sT -p {p.portid} --script iec-identify {h.ip}",
                 "Place SCADA gear on an isolated segment. Where 2404/tcp must "
                 "be reachable, front the gateway with an IEC-104-aware "
@@ -708,7 +757,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 exploit_note=(
                     "printf '\\x68\\x04\\x43\\x00\\x00\\x00' | nc <ip> 2404 | "
                     "xxd (TESTFR act); nmap --script iec-identify -p 2404 <ip>."),
-                depth_tier="t1"))
+                depth_tier=reachable_tier))
 
             # STARTDT accepted with no credentials.
             if pr.get("startdt_ok"):

@@ -29,12 +29,33 @@ def _reply(xid: int, results: bytes) -> bytes:
     return struct.pack(">I", 0x80000000 | len(body)) + body
 
 
-def _make_handler(exports, clients, mnt_fh):
+def _pack_fattr3(ftype=2, mode=0o755, nlink=23, uid=0, gid=0,
+                 size=4096, used=4096, fileid=2, mtime=1700000000):
+    """Encode an NFSv3 fattr3 (RFC 1813 sec 2.5): type + mode + nlink + uid +
+    gid + size(hi,lo) + used(hi,lo) + rdev(2) + fsid(2) + fileid(hi,lo) +
+    atime(2) + mtime(2) + ctime(2). Defaults look like a real root DIR."""
+    return struct.pack(
+        ">IIIIIQQIIQQIIIIII",
+        ftype, mode, nlink, uid, gid,
+        size, used,
+        0, 0,                                                 # rdev
+        1234567890,                                           # fsid (u64)
+        fileid,                                               # fileid (u64)
+        1700000000, 0,                                        # atime
+        mtime, 0,                                             # mtime
+        mtime, 0,                                             # ctime
+    )
+
+
+def _make_handler(exports, clients, mnt_fh, nfs_fattr=None):
     """A mountd handler dispatching one RPC per connection over record marking.
     - DUMP (proc 4 on PMAP): advertises mountd on this port.
     - EXPORT (proc 5 on MOUNT): the supplied exports.
     - MNT (proc 1): returns MNT3_OK + fh (if `mnt_fh` set) else MNT3ERR_ACCES=13.
     - DUMP (proc 2 on MOUNT): the supplied client list.
+    - GETATTR (proc 1 on NFS v3): when `nfs_fattr` is bytes returns NFS3_OK +
+      fattr3; when b"" returns nfsstat3=13 (NFS3ERR_ACCES); when None the NFS
+      program is not registered in the pmap DUMP at all (T1-fallback path).
     """
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -47,11 +68,22 @@ def _make_handler(exports, clients, mnt_fh):
             myport = self.server.server_address[1]
             if prog == N._PMAP_PROG and proc == 4:            # portmap DUMP
                 res = b""
-                for pr, ve, po in ((N._MOUNT_PROG, 3, myport),
-                                   (N._NFS_PROG, 3, 2049)):
+                regs = [(N._MOUNT_PROG, 3, myport)]
+                if nfs_fattr is not None:                     # advertise NFS here
+                    regs.append((N._NFS_PROG, 3, myport))
+                else:
+                    regs.append((N._NFS_PROG, 3, 2049))
+                for pr, ve, po in regs:
                     res += struct.pack(">IIIII", 1, pr, ve, N._IPPROTO_TCP, po)
                 res += struct.pack(">I", 0)
                 sock.sendall(_reply(xid, res))
+            elif prog == N._NFS_PROG and proc == 1:           # NFSv3 GETATTR
+                if nfs_fattr:
+                    sock.sendall(_reply(xid, struct.pack(">I", 0) + nfs_fattr))
+                elif nfs_fattr == b"":
+                    sock.sendall(_reply(xid, struct.pack(">I", 13)))  # ERR_ACCES
+                else:
+                    return                                    # silent (no server)
             elif prog == N._MOUNT_PROG and proc == 5:         # mountd EXPORT
                 res = b""
                 for dirp, groups in exports:
@@ -83,9 +115,10 @@ def _make_handler(exports, clients, mnt_fh):
 
 
 class _MockMountd:
-    def __init__(self, exports, clients, mnt_fh):
+    def __init__(self, exports, clients, mnt_fh, nfs_fattr=None):
         self.srv = socketserver.ThreadingTCPServer(
-            ("127.0.0.1", 0), _make_handler(exports, clients, mnt_fh))
+            ("127.0.0.1", 0),
+            _make_handler(exports, clients, mnt_fh, nfs_fattr))
         self.srv.daemon_threads = True
         self.port = self.srv.server_address[1]
 
@@ -206,6 +239,120 @@ class NfsMountDumpAndMntWireTest(unittest.TestCase):
         # No server - a straight connection refusal returns [] (no exception).
         self.assertEqual(N.mount_dump("127.0.0.1", 1, 3, timeout=0.5), [])
         self.assertIsNone(N.mount_mnt("127.0.0.1", 1, "/x", 3, timeout=0.5))
+
+
+class NfsWorldT2PromotionTest(unittest.TestCase):
+    """T2 promotion: NFSv3 GETATTR on the root filehandle a world-mountable
+    export handed back. NFS3_OK + real fattr3 -> nfs_world tier=t2 with the
+    server-side attributes in the finding detail. Failure / no server -> t1."""
+
+    def test_nfs3_getattr_parses_fattr3(self):
+        exports = [("/srv/backups", ["*"])]
+        fattr = _pack_fattr3(ftype=2, mode=0o755, uid=0, gid=0,
+                             size=8192, fileid=64, mtime=1734567890)
+        with _MockMountd(exports, [], _FIXED_FH, nfs_fattr=fattr) as m:
+            r = N.nfs3_getattr("127.0.0.1", m.port, _FIXED_FH, timeout=3.0)
+        self.assertIsNotNone(r)
+        self.assertEqual(r["status"], 0)
+        fa = r["fattr"]
+        self.assertEqual(fa["type"], 2)
+        self.assertEqual(fa["type_name"], "DIR")
+        self.assertEqual(fa["mode"], 0o755)
+        self.assertEqual(fa["uid"], 0)
+        self.assertEqual(fa["size"], 8192)
+        self.assertEqual(fa["fileid"], 64)
+        self.assertEqual(fa["mtime"], 1734567890)
+
+    def test_nfs3_getattr_reports_server_error_without_fattr(self):
+        exports = [("/srv/backups", ["*"])]
+        with _MockMountd(exports, [], _FIXED_FH, nfs_fattr=b"") as m:
+            r = N.nfs3_getattr("127.0.0.1", m.port, _FIXED_FH, timeout=3.0)
+        self.assertIsNotNone(r)
+        self.assertEqual(r["status"], 13)
+        self.assertEqual(r["fattr"], {})
+
+    def test_nfs3_getattr_empty_fh_is_none(self):
+        # Guard: an empty filehandle is never a valid probe input.
+        self.assertIsNone(N.nfs3_getattr("127.0.0.1", 1, b"", timeout=0.5))
+
+    def test_nfs3_getattr_bounded_on_transport_error(self):
+        self.assertIsNone(
+            N.nfs3_getattr("127.0.0.1", 1, _FIXED_FH, timeout=0.5))
+
+    def test_probe_captures_world_getattr(self):
+        exports = [("/srv/backups", ["*"])]
+        fattr = _pack_fattr3(ftype=2, mode=0o755, uid=0, size=4096, fileid=2)
+        with _MockMountd(exports, [], _FIXED_FH, nfs_fattr=fattr) as m:
+            pr = N.probe("127.0.0.1", timeout=3.0, pmport=m.port)
+        wg = pr.get("world_getattr")
+        self.assertIsNotNone(wg)
+        self.assertEqual(wg["dir"], "/srv/backups")
+        self.assertEqual(wg["status"], 0)
+        self.assertEqual(wg["fattr"]["type_name"], "DIR")
+        self.assertEqual(wg["fattr"]["mode"], 0o755)
+
+    def test_probe_skips_getattr_when_no_world_export(self):
+        # A restricted export never triggers the GETATTR probe.
+        exports = [("/srv/backups", ["10.0.0.0/24"])]
+        fattr = _pack_fattr3()
+        with _MockMountd(exports, [], _FIXED_FH, nfs_fattr=fattr) as m:
+            pr = N.probe("127.0.0.1", timeout=3.0, pmport=m.port)
+        self.assertIsNone(pr.get("world_getattr"))
+
+    def test_probe_getattr_is_single_shot(self):
+        # Two world exports both mount OK; GETATTR must fire exactly once (the
+        # first world-mountable one), not per-export.
+        exports = [("/srv/backups", ["*"]), ("/home", ["(everyone)"])]
+        fattr = _pack_fattr3(ftype=2, mode=0o750, uid=0)
+        with _MockMountd(exports, [], _FIXED_FH, nfs_fattr=fattr) as m:
+            pr = N.probe("127.0.0.1", timeout=3.0, pmport=m.port)
+        wg = pr.get("world_getattr")
+        self.assertIsNotNone(wg)
+        # Whichever export won, we captured attributes from exactly one probe.
+        self.assertIn(wg["dir"], {"/srv/backups", "/home"})
+        self.assertEqual(wg["status"], 0)
+
+    def test_findings_nfs_world_promoted_to_t2_with_getattr(self):
+        exports = [("/srv/backups", ["*"])]
+        fattr = _pack_fattr3(ftype=2, mode=0o755, uid=0, gid=0,
+                             size=4096, fileid=2, mtime=1734567890)
+        with _MockMountd(exports, [], _FIXED_FH, nfs_fattr=fattr) as m:
+            pr = {"10.0.8.9": N.probe("127.0.0.1", timeout=3.0, pmport=m.port)}
+        host = Host(ip="10.0.8.9", ports=[
+            Port(portid=2049, service="nfs", state="open"),
+            Port(portid=111, service="rpcbind", state="open")])
+        fs = N.findings([host], pr)
+        world = next(f for f in fs if f["kind"] == "nfs_world")
+        self.assertEqual(world["depth_tier"], "t2")
+        self.assertIn("T2 proof", world["detail"])
+        self.assertIn("NFSv3 GETATTR", world["detail"])
+        self.assertIn("type=DIR", world["detail"])
+        self.assertIn("uid=0", world["detail"])
+
+    def test_findings_nfs_world_stays_t1_when_getattr_denied(self):
+        exports = [("/srv/backups", ["*"])]
+        with _MockMountd(exports, [], _FIXED_FH, nfs_fattr=b"") as m:
+            pr = {"10.0.8.9": N.probe("127.0.0.1", timeout=3.0, pmport=m.port)}
+        host = Host(ip="10.0.8.9", ports=[
+            Port(portid=2049, service="nfs", state="open")])
+        fs = N.findings([host], pr)
+        world = next(f for f in fs if f["kind"] == "nfs_world")
+        self.assertEqual(world["depth_tier"], "t1")
+        self.assertNotIn("T2 proof", world["detail"])
+        # But the operator still sees that NFS responded with an error status.
+        self.assertIn("nfsstat3=13", world["detail"])
+
+    def test_findings_nfs_world_stays_t1_when_no_getattr_server(self):
+        # NFS registration points at unreachable 2049 -> GETATTR transport-fails
+        # -> world_getattr is None -> tier stays t1.
+        exports = [("/srv/backups", ["*"])]
+        with _MockMountd(exports, [], _FIXED_FH, nfs_fattr=None) as m:
+            pr = {"10.0.8.9": N.probe("127.0.0.1", timeout=3.0, pmport=m.port)}
+        host = Host(ip="10.0.8.9", ports=[
+            Port(portid=2049, service="nfs", state="open")])
+        fs = N.findings([host], pr)
+        world = next(f for f in fs if f["kind"] == "nfs_world")
+        self.assertEqual(world["depth_tier"], "t1")
 
 
 if __name__ == "__main__":

@@ -623,5 +623,137 @@ class CredsWiringTest(unittest.TestCase):
         self.assertEqual(result["runbooks"][0]["credentialed"], [])
 
 
+class UnauthReadT2EvidenceTest(unittest.TestCase):
+    """T2 promotion for nomad_unauth_read: the /v1/agent/self body proves
+    ACLs are disabled off the wire, and the counts prove anon reads
+    landed — captured on the emitted finding's `output` field."""
+
+    def test_acl_disabled_probe_captures_wire_evidence(self):
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/agent/self":
+                    body = json.dumps({"config": {
+                        "Version": "1.7.5",
+                        "ACL": {"Enabled": False, "TokenTTL": "30s",
+                                "PolicyTTL": "30s"},
+                    }}).encode()
+                elif self.path == "/v1/jobs":
+                    body = json.dumps([{"ID": "j1", "Name": "j1",
+                                        "Type": "service", "Status": "running"},
+                                       {"ID": "j2", "Name": "j2",
+                                        "Type": "batch", "Status": "dead"}]).encode()
+                elif self.path == "/v1/allocations":
+                    body = json.dumps([{"ID": "a"}]).encode()
+                elif self.path == "/v1/nodes":
+                    body = json.dumps([{"ID": "n1"}, {"ID": "n2"}]).encode()
+                else:
+                    body = b"[]"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+            def do_POST(self):
+                self.send_response(403); self.end_headers()
+
+        srv, _t = _serve(H)
+        try:
+            p = nomad.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        # Evidence line must reflect the real server-returned ACL sub-config
+        # and the real read counts — no synthesised text.
+        ev = p["acl_evidence"]
+        self.assertIn("GET /v1/agent/self -> 200", ev)
+        self.assertIn('"Enabled": false', ev)
+        self.assertIn('"TokenTTL": "30s"', ev)
+        self.assertIn("jobs=2", ev)
+        self.assertIn("allocations=1", ev)
+        self.assertIn("nodes=2", ev)
+        self.assertIn('config.Version="1.7.5"', ev)
+
+    def test_finding_emitted_at_tier_t2_with_output(self):
+        from recce.core.models import Host, Port
+        host = Host(ip="10.7.7.7", ports=[Port(portid=4646, service="nomad")])
+        evidence = ('GET /v1/agent/self -> 200 | config.Version="1.7.5" | '
+                    'config.ACL={"Enabled": false} | '
+                    'anon reads: jobs=1 allocations=0 nodes=1')
+        probes = {("10.7.7.7", 4646): {
+            "reachable": True, "version": "1.7.5", "acl_enabled": False,
+            "jobs": [{"name": "j1", "type": "service", "status": "running"}],
+            "allocations": 0, "nodes": 1, "leader": "",
+            "vault": {}, "consul": {}, "vars": [], "acl_bootstrap_token": "",
+            "job_specs": [], "job_submit": "",
+            "acl_evidence": evidence,
+        }}
+        fs = nomad.findings([host], probes)
+        ur = [f for f in fs if f["kind"] == "nomad_unauth_read"]
+        self.assertEqual(len(ur), 1)
+        self.assertEqual(ur[0]["depth_tier"], "t2")
+        self.assertEqual(ur[0]["output"], evidence)
+        # Backward-compat: legacy fields still populated.
+        self.assertEqual(ur[0]["severity"], "critical")
+        self.assertIn("CWE-306", ur[0]["cwes"])
+
+    def test_acl_enforcing_leaves_evidence_blank(self):
+        """Patched case: ACLs enforcing -> agent/self returns 403, evidence
+        line is not synthesised (no wire proof of anon read)."""
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/status/leader":
+                    body = b'"10.0.0.1:4647"'
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body); return
+                self.send_response(403); self.end_headers()
+            def do_POST(self):
+                self.send_response(400); self.end_headers()
+
+        srv, _t = _serve(H)
+        try:
+            p = nomad.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+        self.assertTrue(p["reachable"])
+        self.assertTrue(p["acl_enabled"])
+        self.assertEqual(p["acl_evidence"], "")
+        # And no nomad_unauth_read finding is emitted in the patched case.
+        from recce.core.models import Host, Port
+        host = Host(ip="127.0.0.1",
+                    ports=[Port(portid=srv.server_address[1], service="nomad")])
+        fs = nomad.findings([host], {("127.0.0.1", srv.server_address[1]): p})
+        self.assertNotIn("nomad_unauth_read", [f["kind"] for f in fs])
+
+    def test_token_supplied_suppresses_evidence(self):
+        """Evidence line only earned by an ANONYMOUS read — supplying a
+        token means we can't claim the anon-read proof."""
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/agent/self":
+                    body = json.dumps({"config": {"Version": "1.7.5",
+                                                  "ACL": {"Enabled": False}}}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body); return
+                body = b"[]"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+            def do_POST(self):
+                self.send_response(403); self.end_headers()
+
+        srv, _t = _serve(H)
+        try:
+            p = nomad.probe("127.0.0.1", srv.server_address[1],
+                            timeout=2, token="tok-abc")
+        finally:
+            srv.shutdown()
+        self.assertEqual(p["acl_evidence"], "")
+
+    def test_timeout_yields_no_evidence(self):
+        """Dead port -> not reachable -> no evidence line."""
+        p = nomad.probe("127.0.0.1", 1, timeout=1)
+        self.assertFalse(p["reachable"])
+        self.assertEqual(p["acl_evidence"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

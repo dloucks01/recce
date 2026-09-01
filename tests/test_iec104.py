@@ -417,6 +417,153 @@ class FindingsEmissionTest(unittest.TestCase):
         self.assertTrue(vulns_by_ip[h.ip])
 
 
+class FirstAsduEvidenceTest(unittest.TestCase):
+    """T2 SAFE proof: the probe must capture the FIRST ASDU response after
+    STARTDT + General Interrogation, and findings() must promote the
+    iec104_reachable finding from T1 -> T2 only when that evidence is
+    present. Vulnerable / patched / timeout cases are covered."""
+
+    def test_probe_captures_first_asdu_wire_bytes(self):
+        # Vulnerable path: fake server answers GI with a real M_ME_NC_1 reply.
+        srv = _Iec104Server(_friendly_responder)
+        try:
+            pr = iec104.probe(srv.host, srv.port, timeout=1.5, caa_list=(1,))
+        finally:
+            srv.close()
+        self.assertTrue(pr["startdt_ok"])
+        # Raw wire bytes captured — the exact M_ME_NC1_REPLY fixture.
+        self.assertEqual(pr["first_asdu_hex"], M_ME_NC1_REPLY.hex())
+        self.assertIn("TypeID=13", pr["first_asdu_summary"])
+        self.assertIn("IOA=100", pr["first_asdu_summary"])
+        self.assertIn("R32=42", pr["first_asdu_summary"])
+
+    def test_probe_captures_evidence_even_on_unknown_caa_reply(self):
+        # Only offers UNKNOWN_CAA_REPLY — proves station ran the ASDU state
+        # machine (negative COT is still a real I-frame reply).
+        def unknown_only(req, state):
+            if req == TESTFR_ACT:
+                return TESTFR_CON
+            if req == STARTDT_ACT:
+                return STARTDT_CON
+            hdr = iec104._parse_apci(req)
+            if hdr and hdr["kind"] == "I":
+                asdu = iec104._parse_asdu_header(hdr["asdu"])
+                if asdu and asdu["type_id"] == iec104.TI_C_IC_NA_1:
+                    return UNKNOWN_CAA_REPLY
+            return None
+
+        srv = _Iec104Server(unknown_only)
+        try:
+            pr = iec104.probe(srv.host, srv.port, timeout=1.5, caa_list=(9,))
+        finally:
+            srv.close()
+        self.assertTrue(pr["startdt_ok"])
+        self.assertTrue(pr["first_asdu_hex"],
+                        "unknown-CAA reply is still real ASDU evidence")
+        self.assertIn(f"COT={iec104.COT_UNKNOWN_CA}", pr["first_asdu_summary"])
+
+    def test_probe_no_asdu_evidence_when_startdt_only(self):
+        # "Patched" path: server acks STARTDT but never emits an I-frame ASDU
+        # in reply to GI. first_asdu_hex must stay empty.
+        def startdt_only(req, state):
+            if req == TESTFR_ACT:
+                return TESTFR_CON
+            if req == STARTDT_ACT:
+                return STARTDT_CON
+            return None
+
+        srv = _Iec104Server(startdt_only)
+        try:
+            pr = iec104.probe(srv.host, srv.port, timeout=0.6, caa_list=(1,))
+        finally:
+            srv.close()
+        self.assertTrue(pr["startdt_ok"])
+        self.assertEqual(pr["first_asdu_hex"], "")
+        self.assertEqual(pr["first_asdu_summary"], "")
+
+    def test_probe_no_asdu_evidence_on_timeout(self):
+        # Dead port: probe returns without evidence, no exception.
+        pr = iec104.probe("127.0.0.1", 1, timeout=0.4)
+        self.assertFalse(pr["reachable"])
+        self.assertEqual(pr.get("first_asdu_hex", ""), "")
+
+    def test_first_asdu_hex_is_capped_by_apdu_length_field(self):
+        # The reassembled wire buffer must equal APCI header + declared
+        # payload — never larger than the 253-byte APDU cap.
+        srv = _Iec104Server(_friendly_responder)
+        try:
+            pr = iec104.probe(srv.host, srv.port, timeout=1.5, caa_list=(1,))
+        finally:
+            srv.close()
+        raw = bytes.fromhex(pr["first_asdu_hex"])
+        self.assertEqual(raw[0], iec104.START)
+        # length octet (raw[1]) + 2 header bytes must equal total bytes.
+        self.assertEqual(len(raw), 2 + raw[1])
+        self.assertLessEqual(len(raw), 2 + iec104.MAX_APDU_LEN)
+
+
+class ReachablePromotionTest(unittest.TestCase):
+    """Findings-level T1 -> T2 promotion for iec104_reachable."""
+
+    def _host(self):
+        return _FakeHost("10.0.0.4", [_FakePort(2404, service="iec-104")])
+
+    def _base_pr(self):
+        return {
+            "reachable": True, "apci_valid": True,
+            "testfr_ok": True, "startdt_ok": True,
+            "interrogation": [], "caa_alive": [1], "caa_unknown": [],
+            "private_type_ids": [], "vendor_hint": "",
+            "control_types_reachable": sorted(iec104._CONTROL_TYPES.keys()),
+            "clock_sync_accepted": None, "reset_process_accepted": None,
+            "single_command_accepted": None, "wrote": False,
+            "tls_handshake": False, "tls_cipher": "",
+            "session_second_accepted": None, "session_first_torn_down": None,
+            "targeted_read_ok": False, "targeted_read_value": "",
+        }
+
+    def _reachable(self, fs):
+        for f in fs:
+            if f["kind"] == "iec104_reachable":
+                return f
+        self.fail("iec104_reachable finding missing")
+
+    def test_reachable_stays_t1_without_first_asdu_evidence(self):
+        pr = self._base_pr()
+        # Explicitly empty evidence fields — "patched" or "APCI-only" peer.
+        pr["first_asdu_hex"] = ""
+        pr["first_asdu_summary"] = ""
+        h = self._host()
+        fs = iec104.findings([h], {(h.ip, 2404): pr})
+        f = self._reachable(fs)
+        self.assertEqual(f["depth_tier"], "t1")
+        self.assertNotIn("T2 proof", f["detail"])
+
+    def test_reachable_promoted_to_t2_with_captured_asdu(self):
+        pr = self._base_pr()
+        pr["first_asdu_hex"] = M_ME_NC1_REPLY.hex()
+        pr["first_asdu_summary"] = "TypeID=13 COT=20 CAA=1 IOA=100 R32=42 QDS=0x00"
+        h = self._host()
+        fs = iec104.findings([h], {(h.ip, 2404): pr})
+        f = self._reachable(fs)
+        self.assertEqual(f["depth_tier"], "t2")
+        # Captured evidence and parsed summary both surface in the detail.
+        self.assertIn("T2 proof", f["detail"])
+        self.assertIn(M_ME_NC1_REPLY.hex(), f["detail"])
+        self.assertIn("IOA=100", f["detail"])
+
+    def test_reachable_stays_t1_when_only_hex_missing(self):
+        # Guard: summary alone (no wire hex) must NOT promote — captured
+        # evidence must include the actual bytes.
+        pr = self._base_pr()
+        pr["first_asdu_hex"] = ""
+        pr["first_asdu_summary"] = "TypeID=13 COT=20 CAA=1"
+        h = self._host()
+        fs = iec104.findings([h], {(h.ip, 2404): pr})
+        f = self._reachable(fs)
+        self.assertEqual(f["depth_tier"], "t1")
+
+
 class TargetFingerprintTest(unittest.TestCase):
     def test_is_iec104_by_port_and_service(self):
         p = _FakePort(2404)

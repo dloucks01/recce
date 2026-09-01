@@ -59,9 +59,13 @@ def _der_gtime(s):
     return _tlv(0x18, s.encode("ascii"))
 
 
-def _krb_error(code, stime="", crealm="", padata_types=()):
+def _krb_error(code, stime="", crealm="", padata_types=(), padata_values=None):
     """Build a KRB-ERROR ([APPLICATION 30]) with optional stime[4], crealm[9],
-    and PA-DATA entries (only padata-type[1] populated - value is empty)."""
+    and PA-DATA entries. `padata_types` is the SEQUENCE of type numbers; by
+    default each carries an empty value. Pass `padata_values` (a dict of
+    type_number -> bytes) to attach non-empty octet-string values to specific
+    entries — used by the FAST T2-evidence tests where the presence of a real
+    PA-FX-FAST-REPLY value must round-trip through kdc_probe."""
     parts = [_der_ctx(0, _der_int(5)),                 # pvno
              _der_ctx(1, _der_int(30))]                # msg-type
     if stime:
@@ -70,9 +74,12 @@ def _krb_error(code, stime="", crealm="", padata_types=()):
     if crealm:
         parts.append(_der_ctx(9, _der_gstr(crealm)))
     if padata_types:
-        method_data = _der_seq(*[_der_seq(_der_ctx(1, _der_int(t)),
-                                          _der_ctx(2, _der_octet(b"")))
-                                 for t in padata_types])
+        vals = dict(padata_values or {})
+        method_data = _der_seq(*[
+            _der_seq(_der_ctx(1, _der_int(t)),
+                     _der_ctx(2, _der_octet(vals.get(t, b""))))
+            for t in padata_types
+        ])
         parts.append(_der_ctx(12, _der_octet(method_data)))
     body = _der_seq(*parts)
     return _tlv(0x7E, body)
@@ -206,6 +213,98 @@ class KerberosKdcProbeTest(unittest.TestCase):
         fs = K.kdc_probe_findings("10.0.0.1", probe)
         kinds = {f["kind"] for f in fs}
         self.assertIn("kerberos_fast_enforced", kinds)
+
+    # --- T2 promotion: real PA-FX-FAST value bytes on the wire ------------
+
+    def test_probe_captures_fast_value_bytes(self):
+        """A KRB-ERROR whose PA-FX-FAST padata carries a real octet-string
+        value round-trips into probe['fast_value_hex']. This is the T2 wire
+        evidence — the KDC actually returned a PA-FX-FAST-REPLY structure,
+        not just an empty type=136 stub."""
+        # Deliberately non-trivial bytes so a hex round-trip is visible.
+        fast_value = bytes.fromhex("30820102a003020101")
+        payload = _krb_error(K.KDC_ERR_PREAUTH_REQUIRED,
+                             padata_types=(K._PADATA_FX_FAST, 19),
+                             padata_values={K._PADATA_FX_FAST: fast_value})
+        _patch_wire(self, payload)
+        r = K.kdc_probe("127.0.0.1", "CORP.LOCAL")
+        self.assertTrue(r["has_fast"])
+        self.assertEqual(r["fast_value_hex"], fast_value.hex())
+
+    def test_probe_fast_value_empty_when_no_value(self):
+        """An advertised-but-empty PA-FX-FAST entry (has_fast True) leaves
+        fast_value_hex empty — the T1 path."""
+        _patch_wire(self, _krb_error(K.KDC_ERR_PREAUTH_REQUIRED,
+                                     padata_types=(K._PADATA_FX_FAST,)))
+        r = K.kdc_probe("127.0.0.1", "CORP.LOCAL")
+        self.assertTrue(r["has_fast"])
+        self.assertEqual(r["fast_value_hex"], "")
+
+    def test_probe_fast_value_absent_when_no_fast(self):
+        """Without PA-FX-FAST at all, fast_value_hex is empty and defaults
+        do not leak from an unrelated padata type."""
+        _patch_wire(self, _krb_error(K.KDC_ERR_PREAUTH_REQUIRED,
+                                     padata_types=(19,),
+                                     padata_values={19: b"\x01\x02\x03"}))
+        r = K.kdc_probe("127.0.0.1", "CORP.LOCAL")
+        self.assertFalse(r["has_fast"])
+        self.assertEqual(r["fast_value_hex"], "")
+
+    def test_probe_fast_value_empty_on_timeout(self):
+        """A timeout / unreachable KDC leaves has_fast False and
+        fast_value_hex empty — no fabricated evidence."""
+        _patch_wire(self, None)
+        r = K.kdc_probe("127.0.0.1", "CORP.LOCAL")
+        self.assertFalse(r["has_fast"])
+        self.assertEqual(r["fast_value_hex"], "")
+
+    def test_fast_finding_promoted_to_t2_with_value_bytes(self):
+        """When probe['fast_value_hex'] is non-empty, the FAST finding is
+        emitted at depth_tier=t2 and the detail carries the hex evidence."""
+        fast_hex = "30820102a003020101"
+        probe = {"reachable": True, "has_fast": True, "skew_seconds": 0,
+                 "stime": "20260101000000Z", "fast_value_hex": fast_hex}
+        fs = K.kdc_probe_findings("10.0.0.1", probe)
+        fast = [f for f in fs if f["kind"] == "kerberos_fast_enforced"]
+        self.assertEqual(len(fast), 1)
+        self.assertEqual(fast[0]["depth_tier"], "t2")
+        self.assertIn(fast_hex, fast[0]["detail"])
+        # Also carries the byte-count preamble so the evidence is legible.
+        self.assertIn(f"{len(fast_hex) // 2} bytes", fast[0]["detail"])
+
+    def test_fast_finding_stays_t1_without_value_bytes(self):
+        """Absent wire evidence, the FAST finding stays at t1 — the audit's
+        'defensive posture, deterministic but nothing more to prove' state."""
+        probe = {"reachable": True, "has_fast": True, "skew_seconds": 0,
+                 "stime": "20260101000000Z", "fast_value_hex": ""}
+        fs = K.kdc_probe_findings("10.0.0.1", probe)
+        fast = [f for f in fs if f["kind"] == "kerberos_fast_enforced"]
+        self.assertEqual(len(fast), 1)
+        self.assertEqual(fast[0]["depth_tier"], "t1")
+
+    def test_fast_finding_stays_t1_when_key_missing(self):
+        """Legacy probe dicts (before fast_value_hex existed) must not crash
+        or spuriously promote — a missing key is treated as 'no evidence'."""
+        probe = {"reachable": True, "has_fast": True, "skew_seconds": 0,
+                 "stime": "20260101000000Z"}
+        fs = K.kdc_probe_findings("10.0.0.1", probe)
+        fast = [f for f in fs if f["kind"] == "kerberos_fast_enforced"]
+        self.assertEqual(len(fast), 1)
+        self.assertEqual(fast[0]["depth_tier"], "t1")
+
+    def test_fast_finding_t2_evidence_slice_bounded(self):
+        """A large FAST-REPLY value is trimmed in the finding detail so it
+        cannot dominate the write-up; the full hex remains available on the
+        probe dict for downstream tooling."""
+        big = ("ab" * 200)                                 # 400-char hex
+        probe = {"reachable": True, "has_fast": True, "skew_seconds": 0,
+                 "stime": "20260101000000Z", "fast_value_hex": big}
+        fs = K.kdc_probe_findings("10.0.0.1", probe)
+        fast = [f for f in fs if f["kind"] == "kerberos_fast_enforced"]
+        self.assertEqual(fast[0]["depth_tier"], "t2")
+        self.assertIn("...", fast[0]["detail"])
+        # The 128-char preview leads with the value's real prefix.
+        self.assertIn(big[:128], fast[0]["detail"])
 
     def test_probe_findings_flag_skew_over_threshold(self):
         probe = {"reachable": True, "has_fast": False, "skew_seconds": 3600,

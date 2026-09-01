@@ -359,6 +359,52 @@ class HostkeyCaptureFindingTest(unittest.TestCase):
         self.assertIn("SHA256:", hits[0]["detail"])
 
 
+class HostkeyFingerprintTierTest(unittest.TestCase):
+    """T2 promotion for ssh_hostkey_fingerprint - the finding depth_tier is
+    lifted to 't2' when hostkey_capture is present (K_S was really pulled
+    off KEXDH_REPLY, so the fingerprint is a genuine crypto artifact, not
+    a banner claim). Absent a capture the finding is not emitted at all."""
+
+    def test_capture_present_upgrades_to_t2_and_records_evidence(self):
+        h = _fake_host_with_port()
+        pr = _make_probe(hostkey_capture={
+            "key_type": "ssh-ed25519",
+            "fp_sha256": "SHA256:AAAA1234deadbeefbase64",
+            "fp_md5": "MD5:aa:bb:cc:dd",
+        })
+        fs = ssh.findings([h], {(h.ip, 22): pr})
+        hits = [f for f in fs if f["kind"] == "ssh_hostkey_fingerprint"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["depth_tier"], "t2")
+        # The T2 evidence text explicitly names the wire message and the
+        # captured key_type so downstream readers can tell the fingerprint
+        # is a live capture and not a banner echo.
+        self.assertIn("KEXDH_REPLY", hits[0]["detail"])
+        self.assertIn("ssh-ed25519", hits[0]["detail"])
+        self.assertIn("SHA256:", hits[0]["detail"])
+
+    def test_capture_absent_emits_no_hostkey_fingerprint_finding(self):
+        h = _fake_host_with_port()
+        pr = _make_probe(hostkey_capture=None)
+        fs = ssh.findings([h], {(h.ip, 22): pr})
+        self.assertFalse(
+            any(f["kind"] == "ssh_hostkey_fingerprint" for f in fs))
+
+    def test_rsa_capture_records_rsa_key_type(self):
+        # Different key_type flows through the evidence text unchanged - a
+        # sanity check that we are not accidentally hardcoding a value.
+        h = _fake_host_with_port()
+        pr = _make_probe(hostkey_capture={
+            "key_type": "ssh-rsa",
+            "fp_sha256": "SHA256:zzzzRSA",
+            "fp_md5": "MD5:11:22",
+        })
+        fs = ssh.findings([h], {(h.ip, 22): pr})
+        hits = [f for f in fs if f["kind"] == "ssh_hostkey_fingerprint"]
+        self.assertEqual(hits[0]["depth_tier"], "t2")
+        self.assertIn("ssh-rsa", hits[0]["detail"])
+
+
 class AuthMethodsFindingTest(unittest.TestCase):
     def test_password_and_root_findings_from_auth_methods(self):
         h = _fake_host_with_port()
@@ -454,6 +500,233 @@ class WeakKexPacketRoundtripTest(unittest.TestCase):
                          "ssh_weak_mac", "ssh_hostkey_posture",
                          "ssh_terrapin", "ssh_algo_inventory"):
             self.assertIn(expected, kinds, f"missing {expected} in {kinds}")
+
+
+# --- T2 promotion: weak-KEX end-to-end completion probe -----------------------
+
+def _kexdh_reply_payload(key_type: str = "ssh-rsa") -> bytes:
+    """Hand-assembled SSH_MSG_KEXDH_REPLY body (RFC 4253 §8):
+      byte    SSH_MSG_KEXDH_REPLY (0x1f)
+      string  K_S   (server host key; a fake 'ssh-rsa'+2 empty mpints suffices)
+      mpint   f     (server's DH public value; opaque bytes here)
+      string  sig   (signature over exchange hash; opaque here)
+    K_S is a well-formed SSH string starting with the key-type name string.
+    We do NOT need real crypto - the T2 probe extracts only the key_type
+    and does not verify the signature (that would require the shared secret).
+    """
+    # K_S = string(key_type) + string(exp) + string(mod) for a fake RSA key.
+    k_s = _string(key_type.encode("ascii")) + _string(b"\x01\x00\x01") + _string(b"\x00" * 64)
+    # f: mpint - one leading zero for positive-int sign guard + a dummy body.
+    f_mp = _string(b"\x00" + b"\xab" * 127)
+    sig = _string(_string(b"ssh-rsa") + _string(b"\x11" * 128))
+    return bytes([0x1f]) + _string(k_s) + f_mp + sig
+
+
+class _FakeSSHWeakKexServer:
+    """Fake sshd that (a) sends ident, (b) accepts client ident + KEXINIT,
+    (c) sends server KEXINIT advertising diffie-hellman-group1-sha1,
+    (d) reads client KEXDH_INIT, (e) sends either KEXDH_REPLY (accept) or
+    SSH_MSG_DISCONNECT (list-but-refuse), depending on `mode`."""
+
+    def __init__(self, mode: str = "accept",
+                 ident: bytes = _IDENT_OPENSSH89_UBUNTU,
+                 offer_group1: bool = True,
+                 key_type: str = "ssh-rsa"):
+        self.mode = mode
+        self._ident = ident
+        self._offer_group1 = offer_group1
+        self._key_type = key_type
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.bind(("127.0.0.1", 0))
+        self._srv.listen(1)
+        self._srv.settimeout(4.0)
+        self.host, self.port = self._srv.getsockname()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _read_packet(self, conn) -> bytes:
+        hdr = b""
+        while len(hdr) < 4:
+            chunk = conn.recv(4 - len(hdr))
+            if not chunk:
+                return b""
+            hdr += chunk
+        (pkt_len,) = struct.unpack(">I", hdr)
+        body = b""
+        while len(body) < pkt_len:
+            chunk = conn.recv(pkt_len - len(body))
+            if not chunk:
+                return b""
+            body += chunk
+        pad = body[0]
+        return body[1:len(body) - pad]
+
+    def _serve(self):
+        try:
+            conn, _ = self._srv.accept()
+        except (socket.timeout, OSError):
+            return
+        try:
+            conn.settimeout(4.0)
+            conn.sendall(self._ident)
+            # Drain client ident line.
+            buf = b""
+            while b"\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+            # Drain client KEXINIT packet.
+            _ = self._read_packet(conn)
+            # Send server KEXINIT.
+            kex_offer = ("diffie-hellman-group1-sha1,curve25519-sha256"
+                         if self._offer_group1 else "curve25519-sha256")
+            server_kexinit = _kexinit_payload(
+                kex_offer, "ssh-rsa,ssh-ed25519",
+                "aes128-ctr,aes128-cbc",
+                "hmac-sha2-256,hmac-sha1")
+            conn.sendall(_wrap_binary(server_kexinit))
+            if self.mode == "disconnect_before_kexdh":
+                # SSH_MSG_DISCONNECT (1) + reason=KEY_EXCHANGE_FAILED(3)
+                #   + string("no matching kex") + string("")
+                dis = (bytes([1]) + _uint32(3)
+                       + _string(b"no matching kex") + _string(b""))
+                conn.sendall(_wrap_binary(dis))
+                return
+            # Read client KEXDH_INIT.
+            _ = self._read_packet(conn)
+            if self.mode == "accept":
+                conn.sendall(_wrap_binary(_kexdh_reply_payload(self._key_type)))
+            elif self.mode == "disconnect_after_kexdh":
+                dis = (bytes([1]) + _uint32(3)
+                       + _string(b"kex refused") + _string(b""))
+                conn.sendall(_wrap_binary(dis))
+            elif self.mode == "silent":
+                # Do nothing; caller expects timeout.
+                try:
+                    conn.settimeout(0.2)
+                    _ = conn.recv(4096)
+                except (socket.timeout, OSError):
+                    pass
+        except (OSError, socket.timeout):
+            pass
+        finally:
+            try: conn.close()
+            except OSError: pass
+
+    def close(self):
+        try: self._srv.close()
+        except OSError: pass
+
+
+class WeakKexCompletionProbeTest(unittest.TestCase):
+    """The T2 promotion probe for ssh_weak_kex - drives a
+    diffie-hellman-group1-sha1 exchange to KEXDH_REPLY."""
+
+    def test_server_accepts_group1_reports_completed(self):
+        srv = _FakeSSHWeakKexServer(mode="accept", key_type="ssh-rsa")
+        try:
+            r = ssh._probe_weak_kex_completion(srv.host, srv.port, timeout=2)
+        finally:
+            srv.close()
+        self.assertTrue(r["attempted"])
+        self.assertTrue(r["completed"], f"completion failed: {r['reason']}")
+        self.assertEqual(r["kex"], "diffie-hellman-group1-sha1")
+        self.assertEqual(r["key_type"], "ssh-rsa")
+
+    def test_server_disconnects_after_kexdh_reports_not_completed(self):
+        srv = _FakeSSHWeakKexServer(mode="disconnect_after_kexdh")
+        try:
+            r = ssh._probe_weak_kex_completion(srv.host, srv.port, timeout=2)
+        finally:
+            srv.close()
+        self.assertTrue(r["attempted"])
+        self.assertFalse(r["completed"])
+        self.assertIn("DISCONNECT", r["reason"])
+
+    def test_server_that_lists_but_does_not_offer_group1(self):
+        srv = _FakeSSHWeakKexServer(mode="accept", offer_group1=False)
+        try:
+            r = ssh._probe_weak_kex_completion(srv.host, srv.port, timeout=2)
+        finally:
+            srv.close()
+        self.assertTrue(r["attempted"])
+        self.assertFalse(r["completed"])
+        self.assertIn("did not offer", r["reason"])
+
+    def test_silent_server_times_out_bounded(self):
+        srv = _FakeSSHWeakKexServer(mode="silent")
+        try:
+            r = ssh._probe_weak_kex_completion(srv.host, srv.port, timeout=1)
+        finally:
+            srv.close()
+        # attempted=True (we sent our KEXINIT) but no completion.
+        self.assertFalse(r["completed"])
+        self.assertTrue(r["reason"])
+
+    def test_dead_port_returns_uncompleted(self):
+        r = ssh._probe_weak_kex_completion("127.0.0.1", 1, timeout=1)
+        self.assertFalse(r["completed"])
+        self.assertFalse(r["attempted"])
+
+
+class WeakKexFindingTierUpgradeTest(unittest.TestCase):
+    """The finding path lifts depth_tier='t1' -> 't2' when the probe result
+    is present in the probe dict as weak_kex_completion."""
+
+    def test_completion_evidence_upgrades_to_t2(self):
+        h = _fake_host_with_port()
+        pr = _make_probe(kex=["diffie-hellman-group1-sha1",
+                              "curve25519-sha256"])
+        pr["weak_kex_completion"] = {
+            "attempted": True, "completed": True,
+            "kex": "diffie-hellman-group1-sha1",
+            "key_type": "ssh-rsa", "reason": "KEXDH_REPLY received"}
+        fs = ssh.findings([h], {(h.ip, 22): pr})
+        wk = [f for f in fs if f["kind"] == "ssh_weak_kex"]
+        self.assertEqual(len(wk), 1)
+        self.assertEqual(wk[0]["depth_tier"], "t2")
+        self.assertIn("KEXDH_REPLY", wk[0]["detail"])
+        self.assertIn("ssh-rsa", wk[0]["detail"])
+
+    def test_completion_probe_missing_stays_t1(self):
+        h = _fake_host_with_port()
+        pr = _make_probe(kex=["diffie-hellman-group1-sha1",
+                              "curve25519-sha256"])
+        fs = ssh.findings([h], {(h.ip, 22): pr})
+        wk = [f for f in fs if f["kind"] == "ssh_weak_kex"]
+        self.assertEqual(len(wk), 1)
+        self.assertEqual(wk[0]["depth_tier"], "t1")
+
+    def test_completion_refused_stays_t1_and_records_reason(self):
+        h = _fake_host_with_port()
+        pr = _make_probe(kex=["diffie-hellman-group1-sha1",
+                              "curve25519-sha256"])
+        pr["weak_kex_completion"] = {
+            "attempted": True, "completed": False,
+            "kex": "diffie-hellman-group1-sha1",
+            "key_type": "", "reason": "server DISCONNECT after KEXDH_INIT"}
+        fs = ssh.findings([h], {(h.ip, 22): pr})
+        wk = [f for f in fs if f["kind"] == "ssh_weak_kex"]
+        self.assertEqual(len(wk), 1)
+        self.assertEqual(wk[0]["depth_tier"], "t1")
+        self.assertIn("DISCONNECT", wk[0]["detail"])
+
+    def test_completion_for_different_kex_family_stays_t1(self):
+        # Probe reported completion of group1-sha1 but the offered list is
+        # only gex-sha1; the tier should not upgrade because the completed
+        # algo is not present in the current weak_k list.
+        h = _fake_host_with_port()
+        pr = _make_probe(kex=["diffie-hellman-group-exchange-sha1",
+                              "curve25519-sha256"])
+        pr["weak_kex_completion"] = {
+            "attempted": True, "completed": True,
+            "kex": "diffie-hellman-group1-sha1",
+            "key_type": "ssh-rsa", "reason": "KEXDH_REPLY received"}
+        fs = ssh.findings([h], {(h.ip, 22): pr})
+        wk = [f for f in fs if f["kind"] == "ssh_weak_kex"]
+        self.assertEqual(len(wk), 1)
+        self.assertEqual(wk[0]["depth_tier"], "t1")
 
 
 if __name__ == "__main__":

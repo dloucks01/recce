@@ -100,6 +100,45 @@ DELAY_REPLY = bytes.fromhex(
 )
 
 
+# g0v0 aggregated device-attribute response — the T2 promotion probe reads
+# every device-attribute variation in one FC1 Read (g0 v0 q06). The reply body
+# packs multiple attribute objects back-to-back:
+#   [g=0 v=242 q=0 s=0 e=0 dtype=0x01 dlen=4 "ACME"]  (vendor, §11.2.242)
+#   [g=0 v=240 q=0 s=0 e=0 dtype=0x01 dlen=3 "1.0"]   (software version)
+#   [g=0 v=252 q=0 s=0 e=0 dtype=0x01 dlen=4 "SN01"]  (serial)
+# CRC-16-DNP block CRCs are computed by dnp3._crc_dnp — same algorithm the
+# CrcTest above cross-validates against the reveng.sourceforge.io check vector,
+# so the trailing CRCs are RFC-derived math, not a tautology of the encoder.
+def _build_g0v0_all_attrs_response() -> bytes:
+    user_data = (
+        b"\xc5"                             # TP: FIR|FIN|seq=5
+        b"\xc5"                             # APP_CTRL: FIR|FIN|seq=5
+        b"\x81"                             # APP_FC Response
+        b"\x00\x00"                         # IIN1/IIN2 clean
+        b"\x00\xf2\x00\x00\x00\x01\x04ACME"   # v242 vendor "ACME"
+        b"\x00\xf0\x00\x00\x00\x01\x031.0"    # v240 firmware "1.0"
+        b"\x00\xfc\x00\x00\x00\x01\x04SN01"   # v252 serial "SN01"
+    )
+    # Outstation->master, primary UNCONFIRMED_UD frame with the aggregated body.
+    return dnp3._build_dl_frame(
+        fc=dnp3._DL_FC_UNCONFIRMED_UD,
+        dst=1, src=4, user_data=user_data,
+        dir_master=False, prm_primary=True,
+    )
+
+
+G0V0_ALL = _build_g0v0_all_attrs_response()
+
+
+# g0v0 reply carrying IIN2.1 "object unknown" (§4.4.1) — outstation refuses
+# the aggregated read even though single-variation reads succeed.
+G0V0_UNKNOWN = dnp3._build_dl_frame(
+    fc=dnp3._DL_FC_UNCONFIRMED_UD, dst=1, src=4,
+    user_data=b"\xc6\xc6\x81\x00\x02",
+    dir_master=False, prm_primary=True,
+)
+
+
 # --- Loopback DNP3 servers ----------------------------------------------------
 class _TcpServer:
     """Answers with `responder(request_bytes)` per accepted connection."""
@@ -199,6 +238,11 @@ def _classify_request(req: bytes) -> str:
         if dst == dnp3._BCAST_NEEDS_APP_CONF:
             return "broadcast"
         if obj_group == dnp3._G_DEVICE_ATTR:
+            # Distinguish the T2 aggregated read (g0 v0 q06) from the per-
+            # variation walk (g0 v240/242/... q00). v0 == "all variations".
+            obj_var = req[10 + 4]
+            if obj_var == 0:
+                return "g0v0_all"
             return "g0_read"
         if obj_group == dnp3._G_CLASS_DATA:
             return "class0"
@@ -253,6 +297,40 @@ class ParserTest(unittest.TestCase):
         self.assertTrue(resp["uns"])
         self.assertEqual(resp["app_fc"], 0x82)
 
+    def test_walk_g0_attribute_set_multi(self):
+        # Feed the walker the objects_raw body of the T2 aggregated fixture.
+        resp = dnp3._parse_response(G0V0_ALL)
+        attrs = dnp3._walk_g0_attribute_set(resp["objects_raw"])
+        self.assertEqual(len(attrs), 3)
+        by_var = {a["variation"]: a["value"] for a in attrs}
+        self.assertEqual(by_var[242], "ACME")
+        self.assertEqual(by_var[240], "1.0")
+        self.assertEqual(by_var[252], "SN01")
+        # Variation name mapping is filled in when known.
+        names = {a["variation"]: a["name"] for a in attrs}
+        self.assertEqual(names[242], "vendor")
+        self.assertEqual(names[240], "software_version")
+
+    def test_walk_g0_attribute_set_empty(self):
+        self.assertEqual(dnp3._walk_g0_attribute_set(b""), [])
+
+    def test_walk_g0_attribute_set_stops_on_non_g0(self):
+        # A non-g0 group byte must stop the walk immediately.
+        self.assertEqual(dnp3._walk_g0_attribute_set(b"\x01\x02\x06\x00\x00"), [])
+
+    def test_build_g0v0_read_frame_shape(self):
+        # Wire shape of the T2 request: FC1 Read with g=0 v=0 q=0x06.
+        pkt = dnp3._build_g0v0_read(dst=4, src=1, app_seq=3, tp_seq=3)
+        self.assertEqual(pkt[:2], b"\x05\x64")
+        # user_data: TP, APP_CTRL, APP_FC(=0x01 Read), obj header g=0 v=0 q=0x06
+        ud = pkt[10:]
+        # Strip block CRC (last 2 bytes).
+        body = ud[:-2]
+        self.assertEqual(body[2], dnp3._APP_FC_READ)
+        self.assertEqual(body[3], dnp3._G_DEVICE_ATTR)
+        self.assertEqual(body[4], 0)                # variation 0 = all
+        self.assertEqual(body[5], 0x06)             # qualifier: no range
+
 
 class DetectionTest(unittest.TestCase):
     def test_is_dnp3_by_port(self):
@@ -268,7 +346,8 @@ class DetectionTest(unittest.TestCase):
 
 class ProbeTest(unittest.TestCase):
     def _make_responder(self, *, unsolicited=False, broadcast=True,
-                        object_unknown_on_first_g0=False):
+                        object_unknown_on_first_g0=False,
+                        g0v0_all=True):
         # Track whether we've served the first g0 read yet (for the
         # "object_unknown" flag flip in one specific test).
         state = {"g0_calls": 0}
@@ -286,6 +365,8 @@ class ProbeTest(unittest.TestCase):
                 if object_unknown_on_first_g0 and state["g0_calls"] == 1:
                     return G0_UNKNOWN
                 return G0_VENDOR
+            if kind == "g0v0_all":
+                return G0V0_ALL if g0v0_all else G0V0_UNKNOWN
             if kind == "broadcast":
                 return BROADCAST_REPLY if broadcast else b""
             if kind == "delay":
@@ -356,6 +437,86 @@ class ProbeTest(unittest.TestCase):
             srv.close()
         self.assertFalse(p["reachable"])
 
+    def test_probe_t2_g0v0_captures_evidence(self):
+        # A responder that answers the T2 aggregated g0v0 read with a real
+        # multi-attribute body. probe() must capture raw wire bytes, list all
+        # three attributes, and backfill fields the per-variation walk missed.
+        srv = _TcpServer(self._make_responder())
+        try:
+            p = dnp3.probe(srv.host, srv.port, timeout=2)
+        finally:
+            srv.close()
+        ev = p["device_attrs_evidence"]
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["attrs_count"], 3)
+        variations = {a["variation"]: a["value"] for a in ev["attrs"]}
+        self.assertEqual(variations[242], "ACME")   # vendor
+        self.assertEqual(variations[240], "1.0")    # software version
+        self.assertEqual(variations[252], "SN01")   # serial
+        # Raw hex captured (visible-string "ACME" appears in the body).
+        self.assertIn("41434d45", ev["raw_hex"])
+
+    def test_probe_t2_g0v0_backfills_missing_attrs(self):
+        # Per-variation walk fails (object_unknown for every variation), but
+        # the aggregated g0v0 read succeeds — backfill must lift vendor /
+        # firmware / serial from the g0v0 attribute set into the flat pr[].
+        def respond(req):
+            kind = _classify_request(req)
+            if kind == "link_status":
+                return STATUS_OF_LINK
+            if kind == "class0":
+                return C0_OK
+            if kind == "g0_read":
+                return G0_UNKNOWN
+            if kind == "g0v0_all":
+                return G0V0_ALL
+            if kind == "delay":
+                return DELAY_REPLY
+            return b""
+        srv = _TcpServer(respond)
+        try:
+            p = dnp3.probe(srv.host, srv.port, timeout=2)
+        finally:
+            srv.close()
+        self.assertEqual(p["vendor"], "ACME")
+        self.assertEqual(p["firmware"], "1.0")
+        self.assertEqual(p["serial"], "SN01")
+
+    def test_probe_t2_g0v0_object_unknown_leaves_no_evidence(self):
+        # Patched / SA-enforced outstations respond to g0v0 with IIN2.1 set.
+        srv = _TcpServer(self._make_responder(g0v0_all=False))
+        try:
+            p = dnp3.probe(srv.host, srv.port, timeout=2)
+        finally:
+            srv.close()
+        self.assertIsNone(p["device_attrs_evidence"])
+        # T1 path unchanged — per-variation walk still populated vendor.
+        self.assertEqual(p["vendor"], "ACME")
+
+    def test_probe_t2_g0v0_timeout_leaves_no_evidence(self):
+        # Server never replies to the g0v0 read. probe() must not crash and
+        # must leave device_attrs_evidence unset; the T1 walk is unaffected.
+        def respond(req):
+            kind = _classify_request(req)
+            if kind == "link_status":
+                return STATUS_OF_LINK
+            if kind == "class0":
+                return C0_OK
+            if kind == "g0_read":
+                return G0_VENDOR
+            if kind == "g0v0_all":
+                return b""                          # silent -> read timeout
+            if kind == "delay":
+                return DELAY_REPLY
+            return b""
+        srv = _TcpServer(respond)
+        try:
+            p = dnp3.probe(srv.host, srv.port, timeout=1)
+        finally:
+            srv.close()
+        self.assertTrue(p["reachable"])
+        self.assertIsNone(p["device_attrs_evidence"])
+
     def test_udp_variant(self):
         srv = _UdpServer(self._make_responder(broadcast=False))
         try:
@@ -395,6 +556,47 @@ class FindingsTest(unittest.TestCase):
         self.assertIn("dnp3_addressing", kinds)
         sa = next(f for f in fs if f["kind"] == "dnp3_no_secure_auth")
         self.assertEqual(sa["severity"], "critical")
+        # No T2 g0v0 evidence supplied → device_id stays t0, no evidence key.
+        did = next(f for f in fs if f["kind"] == "dnp3_device_id")
+        self.assertEqual(did["depth_tier"], "t0")
+        self.assertNotIn("evidence", did)
+
+    def test_device_id_promoted_to_t2_with_g0v0_evidence(self):
+        ev = {
+            "raw_hex": "00f200000001044143 4d45".replace(" ", ""),
+            "attrs_count": 2,
+            "attrs": [
+                {"variation": 242, "value": "ACME", "name": "vendor"},
+                {"variation": 240, "value": "1.0", "name": "software_version"},
+            ],
+            "iin1": 0x00, "iin2": 0x00,
+        }
+        fs = self._mk(device_attrs_evidence=ev)
+        did = next(f for f in fs if f["kind"] == "dnp3_device_id")
+        self.assertEqual(did["depth_tier"], "t2")
+        # Structured evidence attached to the finding for downstream renderers.
+        self.assertEqual(did["evidence"], ev)
+        # Human-readable T2 evidence line embedded in the detail body.
+        self.assertIn("T2 evidence", did["detail"])
+        self.assertIn("g0v0", did["detail"])
+        self.assertIn("ACME", did["detail"])
+        self.assertIn(ev["raw_hex"], did["detail"])
+        # T1 pathway findings unchanged.
+        kinds = [f["kind"] for f in fs]
+        self.assertIn("dnp3_no_secure_auth", kinds)
+        self.assertIn("dnp3_reachable", kinds)
+
+    def test_device_id_emitted_when_only_g0v0_evidence_present(self):
+        # Some outstations only expose attributes via the aggregated read.
+        ev = {"raw_hex": "00fc00000001045a5a5a5a",
+              "attrs_count": 1,
+              "attrs": [{"variation": 252, "value": "ZZZZ", "name": "serial"}],
+              "iin1": 0, "iin2": 0}
+        fs = self._mk(vendor="", product="", firmware="", device_name="",
+                      location="", serial="", device_attrs_evidence=ev)
+        did = next(f for f in fs if f["kind"] == "dnp3_device_id")
+        self.assertEqual(did["depth_tier"], "t2")
+        self.assertEqual(did["evidence"], ev)
 
     def test_iin_state_finding_only_on_interesting_bits(self):
         # No interesting bits → no iin_state finding.

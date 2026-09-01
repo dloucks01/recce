@@ -294,5 +294,137 @@ class DockerProbeAndFindingsGapTest(unittest.TestCase):
         self.assertEqual(_finds("docker_ns_escape", fs), [])
 
 
+# --- T2 promotion: docker_api SAFE-read proof ----------------------------
+
+
+def _routes_with_ping(all_containers=None):
+    """Full routes plus /_ping and /containers/json?all=1.
+
+    The test's shared handler strips ?query when routing, so
+    /containers/json?all=1 dispatches to the /containers/json route. Real
+    /_ping returns text/plain "OK" — a plain str body is fine (the docker
+    module's _get falls back to text when json parse fails)."""
+    routes = _routes_full()
+    routes["/_ping"] = (200, "OK")
+    if all_containers is not None:
+        routes["/containers/json"] = (200, all_containers)
+    return routes
+
+
+class DockerT2EvidenceHelperTest(unittest.TestCase):
+    def test_t2_evidence_captures_ping_and_all_count(self):
+        srv, port = _serve(_routes_with_ping())
+        try:
+            te = docker._t2_evidence("127.0.0.1", port, timeout=3.0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(te["ping"], "OK")
+        # Two containers from the /containers/json route (aaaa/web + bbbb/worker).
+        self.assertEqual(te["all_count"], 2)
+        # Sample names carry container-name(state) preview.
+        self.assertTrue(any("web(running)" == n for n in te["sample_names"]))
+        self.assertTrue(any("worker(running)" == n for n in te["sample_names"]))
+
+    def test_t2_evidence_empty_when_endpoints_absent(self):
+        # Neither /_ping nor /containers/json served — helper returns the
+        # zero-value dict so the finding stays at T1 without crashing.
+        routes = {"/version": (200, {"Version": "24.0.5"}),
+                  "/info": (200, {"ServerVersion": "24.0.5"})}
+        srv, port = _serve(routes)
+        try:
+            te = docker._t2_evidence("127.0.0.1", port, timeout=3.0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(te["ping"], "")
+        self.assertIsNone(te["all_count"])
+        self.assertEqual(te["sample_names"], [])
+
+    def test_t2_evidence_ping_body_hard_capped(self):
+        # A hostile daemon that answers /_ping with a huge blob must not
+        # blow up the finding output — helper trims to at most 64 chars.
+        routes = _routes_with_ping()
+        routes["/_ping"] = (200, "X" * 4096)
+        srv, port = _serve(routes)
+        try:
+            te = docker._t2_evidence("127.0.0.1", port, timeout=3.0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertLessEqual(len(te["ping"]), 64)
+        self.assertTrue(te["ping"].startswith("X"))
+
+
+class DockerT2ProbePopulatesEvidenceTest(unittest.TestCase):
+    def test_probe_attaches_t2_evidence(self):
+        srv, port = _serve(_routes_with_ping())
+        try:
+            pr = docker.probe("127.0.0.1", port, timeout=3.0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertIsNotNone(pr)
+        self.assertIn("t2_evidence", pr)
+        self.assertEqual(pr["t2_evidence"]["ping"], "OK")
+        self.assertEqual(pr["t2_evidence"]["all_count"], 2)
+
+
+class DockerApiT2PromotionTest(unittest.TestCase):
+    def test_docker_api_finding_promoted_to_t2_when_evidence_present(self):
+        srv, port = _serve(_routes_with_ping())
+        try:
+            pr = docker.probe("127.0.0.1", port, timeout=3.0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        fs = docker.findings([_host(port)], {("127.0.0.1", port): pr})
+        api = _finds("docker_api", fs)
+        self.assertEqual(len(api), 1)
+        self.assertEqual(api[0]["depth_tier"], "t2")
+        self.assertIn("T2 proof:", api[0]["detail"])
+        self.assertIn("/_ping", api[0]["detail"])
+        self.assertIn("/containers/json?all=1", api[0]["detail"])
+        # Container preview name is in the detail.
+        self.assertIn("web(running)", api[0]["detail"])
+
+    def test_docker_api_finding_stays_t1_when_no_evidence(self):
+        # Patch the probe result so its t2_evidence is empty — simulates a
+        # daemon that answered /version but refused /_ping (auth wall) or
+        # timed out on /containers/json?all=1.
+        srv, port = _serve(_routes_with_ping())
+        try:
+            pr = docker.probe("127.0.0.1", port, timeout=3.0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        pr["t2_evidence"] = {"ping": "", "all_count": None,
+                             "sample_names": []}
+        fs = docker.findings([_host(port)], {("127.0.0.1", port): pr})
+        api = _finds("docker_api", fs)
+        self.assertEqual(len(api), 1)
+        self.assertEqual(api[0]["depth_tier"], "t1")
+        self.assertNotIn("T2 proof:", api[0]["detail"])
+        # T1 detail body is unchanged (behaviour preserved).
+        self.assertIn("Docker Engine API answered /version and /info WITHOUT",
+                      api[0]["detail"])
+
+    def test_docker_api_finding_t2_with_ping_only(self):
+        # Half-evidence: /_ping answered but /containers/json?all=1 didn't.
+        srv, port = _serve(_routes_with_ping())
+        try:
+            pr = docker.probe("127.0.0.1", port, timeout=3.0)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        pr["t2_evidence"] = {"ping": "OK", "all_count": None,
+                             "sample_names": []}
+        fs = docker.findings([_host(port)], {("127.0.0.1", port): pr})
+        api = _finds("docker_api", fs)
+        self.assertEqual(api[0]["depth_tier"], "t2")
+        self.assertIn("/_ping", api[0]["detail"])
+        self.assertNotIn("/containers/json?all=1", api[0]["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

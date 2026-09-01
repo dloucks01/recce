@@ -260,16 +260,26 @@ def _findall_local(elem, name: str) -> list:
 
 
 def _parse_service_content(body: bytes) -> dict | None:
-    """Extract the AboutInfo fields from a RetrieveServiceContent response."""
+    """Extract the AboutInfo fields from a RetrieveServiceContent response.
+
+    Also extracts the SessionManager managed-object reference when present:
+    ServiceContent exposes it pre-auth, and its MOR value is the ground-truth
+    handle the pre-auth SessionManager.Login (CVE-2021-21985 attack surface)
+    is dispatched against.
+    """
     try:
         root = ET.fromstring(body)
     except ET.ParseError:
         return None
     about = None
+    session_manager_mor = ""
     for c in root.iter():
-        if _local(c.tag) == "about":
+        ln = _local(c.tag)
+        if ln == "about" and about is None:
             about = c
-            break
+        elif ln == "sessionManager" and not session_manager_mor:
+            # <sessionManager type="SessionManager">SessionManager</sessionManager>
+            session_manager_mor = (c.text or "").strip()
     if about is None:
         return None
     out = {
@@ -283,6 +293,7 @@ def _parse_service_content(body: bytes) -> dict | None:
         "instance_uuid": _findtext(about, "instanceUuid"),
         "os_type":      _findtext(about, "osType"),
         "license":      _findtext(about, "licenseProductName"),
+        "session_manager_mor": session_manager_mor,
     }
     return out
 
@@ -390,6 +401,42 @@ def _parse_property_objects(body: bytes) -> list[dict]:
                     entry["props"][name] = val
             out.append(entry)
     return out
+
+
+# --- T2 SessionManager pre-auth reachability probe -----------------------------
+
+# Deliberately synthetic username: no real principal exists at this UPN, so the
+# probe cannot lock a live account. The probe sends ONE Login envelope; a
+# vCenter/ESXi with SessionManager exposed pre-auth answers with a
+# well-formed InvalidLoginFault (proof the RPC is reachable and behaving), and
+# we capture the exact server-side fault reason as evidence.
+_T2_CANARY_USER = "recce-t2-canary@invalid.recce.local"
+
+
+def _sessionmanager_probe(ip: str, port: int,
+                          timeout: float = _TIMEOUT) -> dict | None:
+    """Single-shot pre-auth reachability check for SessionManager.
+
+    Returns None on transport failure. On success returns a dict with:
+      status:        HTTP status from the /sdk POST
+      fault:         True when the body is a SOAP Fault
+      fault_reason:  server-side faultstring text (bounded to 300 chars)
+      canary:        the synthetic username used (audit-trail)
+
+    Safe: single request, bounded timeout, synthetic non-existent principal,
+    no writes, no state change beyond a standard failed-login audit event.
+    """
+    r = _post_soap(ip, port, _login_envelope(_T2_CANARY_USER, ""),
+                   timeout=timeout)
+    if r is None:
+        return None
+    status, body, _cookie = r
+    return {
+        "status": status,
+        "fault": _is_soap_fault(body),
+        "fault_reason": _fault_reason(body),
+        "canary": _T2_CANARY_USER,
+    }
 
 
 # --- CVE / build mapping --------------------------------------------------------
@@ -575,6 +622,16 @@ def probe(ip: str, port: int = 443, timeout: float = _TIMEOUT,
     if sso:
         out["sso_domain"] = sso
 
+    # T2 SessionManager pre-auth reachability proof: one controlled Login with
+    # a synthetic canary user. Real server-side InvalidLogin fault confirms the
+    # SessionManager RPC accepts calls pre-auth (attack surface for -21985 /
+    # anonymous cred spray). Non-destructive; single-shot; bounded timeout.
+    sm_mor = parsed.get("session_manager_mor", "")
+    if sm_mor:
+        sm_probe = _sessionmanager_probe(ip, port, timeout=timeout)
+        if sm_probe is not None:
+            out["sessionmanager_probe"] = sm_probe
+
     if not active_auth:
         return out
 
@@ -744,6 +801,14 @@ _NARRATIVE = {
         "'ESX Admins' to full admin. Widely used by Scattered Spider and "
         "similar ransomware crews to lateral into virtualisation. Patched "
         "builds require the group name to be explicitly configured."),
+    "vsphere_sessionmanager_open": (
+        "The SessionManager RPC is exposed pre-authentication on /sdk — the "
+        "server accepted a Login envelope and returned a real InvalidLoginFault "
+        "for a synthetic user. That confirms the RPC surface (Login, "
+        "SessionIsActive, TerminateSession) is reachable without any credential "
+        "or network gate; it is the same pre-auth surface CVE-2021-21985 and "
+        "credential-spray tooling attack. Recce ONLY tests reachability with a "
+        "non-existent canary account — no real principal is touched."),
     "vsphere_stale_snapshot": (
         "Powered-off VMs with an existing snapshot are revert candidates — "
         "reverting bypasses any post-compromise password rotation, EDR "
@@ -807,6 +872,49 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "--data '<RetrieveServiceContent "
                         "xmlns=\"urn:vim25\"/>'"),
                     depth_tier="t0"))
+
+                # T2: SessionManager pre-auth RPC reachability. Fires only
+                # when both the ServiceContent MOR AND a real server-side
+                # SessionManager response are present — a network-blocked or
+                # unresponsive appliance never trips this.
+                sm_mor = pr.get("session_manager_mor", "")
+                sm_probe = pr.get("sessionmanager_probe") or {}
+                if sm_mor and sm_probe:
+                    reason = (sm_probe.get("fault_reason") or "").strip()
+                    reason_short = reason[:220]
+                    evidence = (
+                        f"RetrieveServiceContent named SessionManager MOR "
+                        f"'{sm_mor}' (apiType={api_type} build={build}). "
+                        f"Follow-up Login with synthetic canary "
+                        f"'{sm_probe.get('canary','')}' returned HTTP "
+                        f"{sm_probe.get('status','?')}; "
+                        f"SOAP fault={sm_probe.get('fault', False)}; "
+                        f"faultstring='{reason_short}'. That is a real "
+                        "server-side response — the SessionManager RPC "
+                        "accepts pre-auth calls without a network gate.")
+                    out.append(_finding(
+                        "medium",
+                        "vSphere SessionManager exposed pre-authentication",
+                        tgt, evidence, "curl",
+                        f"curl -sk -X POST https://{h.ip}:{p.portid}/sdk "
+                        "-H 'Content-Type: text/xml' --data '"
+                        "<soapenv:Envelope xmlns:soapenv=\""
+                        "http://schemas.xmlsoap.org/soap/envelope/\">"
+                        "<soapenv:Body><Login xmlns=\"urn:vim25\">"
+                        "<_this type=\"SessionManager\">SessionManager"
+                        "</_this><userName>probe@invalid</userName>"
+                        "<password></password></Login></soapenv:Body>"
+                        "</soapenv:Envelope>'",
+                        "Restrict /sdk to a dedicated OOB management "
+                        "network; front SessionManager with a jump host or "
+                        "reverse proxy that enforces client-cert auth.",
+                        ["CWE-284", "CWE-306"],
+                        kind="vsphere_sessionmanager_open",
+                        exploit_note=(
+                            f"# Confirm reachability then enumerate creds:\n"
+                            f"curl -sk https://{h.ip}:{p.portid}/sdk … "
+                            "SessionManager.Login <user> <pass>"),
+                        depth_tier="t2"))
 
                 cves = pr.get("cves") or []
                 if cves:

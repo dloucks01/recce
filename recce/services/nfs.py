@@ -22,6 +22,7 @@ import shlex
 import socket
 import struct
 
+from ..core import proxy
 from ..core.models import Host, Port
 from .svccommon import finding_builder, recvn as _recvn
 
@@ -32,12 +33,17 @@ _TIMEOUT = 6.0
 _PMAP_PROG, _PMAP_VERS = 100000, 2
 _MOUNT_PROG = 100005
 _NFS_PROG = 100003
+_NFS_VERS = 3
+_NFS_TCP_PORT = 2049                 # NFS well-known port (fallback if no pmap)
 _IPPROTO_TCP = 6
 _MAX_LIST = 4096                     # cap linked-list walks (hostile server guard)
 _MAX_RECORD = 8 * 1024 * 1024        # cap total RPC record size (memory guard)
 _MAX_FRAGMENTS = 64                  # cap record-marking fragments (loop guard)
 _MAX_MNT_ATTEMPTS = 4                # cap MOUNTPROC_MNT probes per host (budget guard)
 _MAX_AUTH_FLAVORS = 16               # cap auth_flavor list in MNT reply
+
+# NFSv3 file type codes (RFC 1813 sec 2.5).
+_NF3_NAMES = {1: "REG", 2: "DIR", 3: "BLK", 4: "CHR", 5: "LNK", 6: "SOCK", 7: "FIFO"}
 
 
 def is_nfs(port: Port) -> bool:
@@ -337,6 +343,67 @@ def mount_mnt(ip: str, port: int, path: str, vers: int = 3,
             pass
 
 
+def nfs3_getattr(ip: str, port: int, fh: bytes,
+                 timeout: float = _TIMEOUT) -> dict | None:
+    """NFSv3 NFSPROC3_GETATTR (proc 1 on NFS 100003 v3, RFC 1813 sec 3.3.1). A
+    single controlled read of a filehandle's attributes - the smallest NFS op
+    that proves the export is not merely 'listed to *' but that recce can
+    actually speak NFS through it and pull a real server-side answer. Returns
+    {status, fattr:{type,mode,nlink,uid,gid,size,used,fileid,mtime}} on
+    NFS3_OK; {status, fattr:{}} on any nfsstat3 != 0; None on transport/RPC
+    error. Read-only, one round trip, bounded timeout - no writes, no state."""
+    if not fh:
+        return None
+    scaled = proxy.scaled(timeout)
+    try:
+        sock = socket.create_connection((ip, port), timeout=scaled)
+    except OSError:
+        return None
+    try:
+        args = struct.pack(">I", len(fh)) + fh + b"\x00" * ((-len(fh)) & 3)
+        res = _rpc(sock, 0x1006, _NFS_PROG, _NFS_VERS, 1, args, scaled)
+        if res is None or len(res) < 4:
+            return None
+        cur = _Cur(res)
+        try:
+            status = cur.u32()
+        except (ValueError, struct.error):
+            return None
+        if status != 0:                                        # NFS3ERR_*
+            return {"status": status, "fattr": {}}
+        try:
+            ftype = cur.u32()
+            mode = cur.u32()
+            nlink = cur.u32()
+            uid = cur.u32()
+            gid = cur.u32()
+            size_hi, size_lo = cur.u32(), cur.u32()
+            size = (size_hi << 32) | size_lo
+            used_hi, used_lo = cur.u32(), cur.u32()
+            used = (used_hi << 32) | used_lo
+            cur.u32(); cur.u32()                               # rdev major/minor
+            cur.u32(); cur.u32()                               # fsid
+            fid_hi, fid_lo = cur.u32(), cur.u32()
+            fileid = (fid_hi << 32) | fid_lo
+            cur.u32(); cur.u32()                               # atime (skip)
+            mtime_s = cur.u32(); cur.u32()                     # mtime seconds + nsec
+            # ctime deliberately not parsed - we don't need it.
+        except (ValueError, struct.error):
+            return {"status": status, "fattr": {}}
+        return {"status": status, "fattr": {
+            "type": ftype, "type_name": _NF3_NAMES.get(ftype, str(ftype)),
+            "mode": mode, "nlink": nlink, "uid": uid, "gid": gid,
+            "size": size, "used": used, "fileid": fileid, "mtime": mtime_s,
+        }}
+    except (ValueError, struct.error):
+        return None
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def probe(ip: str, timeout: float = _TIMEOUT, pmport: int = 111,
           mount_probe: bool = True) -> dict:
     """Read-only NFS/mountd fingerprint via portmapper + mountd EXPORT. Returns
@@ -346,7 +413,7 @@ def probe(ip: str, timeout: float = _TIMEOUT, pmport: int = 111,
     when True (default) recce attempts MNT for up to `_MAX_MNT_ATTEMPTS`
     exports to prove mountability."""
     out: dict = {"reachable": False, "programs": [], "exports": [],
-                 "mount_clients": [], "mounts": []}
+                 "mount_clients": [], "mounts": [], "world_getattr": None}
     progs = portmap_dump(ip, timeout, pmport)
     if progs:
         out["reachable"] = True
@@ -383,8 +450,34 @@ def probe(ip: str, timeout: float = _TIMEOUT, pmport: int = 111,
                         continue
                     mounts.append({"dir": e["dir"], "status": r["status"],
                                    "fh_len": len(r["fh"]),
+                                   "fh": r["fh"],
                                    "auth_flavors": r["auth_flavors"]})
                 out["mounts"] = mounts
+                # T2 nfs_world promotion: one controlled NFSv3 GETATTR on the
+                # first world-mountable export whose MNT succeeded. Real
+                # server-side attribute bytes prove the export is speakable, not
+                # just enumerable. Single call, read-only, bounded timeout.
+                nfsport = 0
+                for p in progs:
+                    if (p["prog"] == _NFS_PROG and p["prot"] == _IPPROTO_TCP
+                            and p["port"] and p["vers"] == 3):
+                        nfsport = p["port"]
+                        break
+                nfsport = nfsport or _NFS_TCP_PORT
+                world_dirs = {e["dir"] for e in exp
+                              if _is_world(e.get("groups") or [])}
+                for m in mounts:
+                    if m["status"] != 0 or not m.get("fh"):
+                        continue
+                    if m["dir"] not in world_dirs:
+                        continue
+                    ga = nfs3_getattr(ip, nfsport, m["fh"], timeout)
+                    if ga is not None:
+                        out["world_getattr"] = {"dir": m["dir"],
+                                                "nfs_port": nfsport,
+                                                "status": ga["status"],
+                                                "fattr": ga["fattr"]}
+                    break                                       # one shot only
     return out
 
 
@@ -486,11 +579,35 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
         world = [e for e in exports if _is_world(e.get("groups") or [])]
         if world:
             dirs = ", ".join(e["dir"] for e in world[:12])
-            out.append(_finding(
-                "high", "NFS export shared to any host (world-mountable)", tgt,
+            # T2 promotion: an NFSv3 GETATTR that returned NFS3_OK proves the
+            # world export is not merely 'listed to *' but actually speakable
+            # via NFS from an unprivileged client - real server-side attribute
+            # bytes came back over the wire.
+            ga = pr.get("world_getattr") or {}
+            ga_ok = bool(ga and ga.get("status") == 0 and ga.get("fattr"))
+            depth = "t2" if ga_ok else "t1"
+            detail = (
                 f"{len(world)} export(s) are shared with no host restriction / a "
                 f"wildcard: {dirs}. Any machine on the network can mount and read "
-                "them (and write, if root-squash is off).",
+                "them (and write, if root-squash is off).")
+            if ga_ok:
+                fa = ga["fattr"]
+                detail += (
+                    f" T2 proof: NFSv3 GETATTR against {h.ip}:{ga['nfs_port']} "
+                    f"for {ga['dir']} returned NFS3_OK - "
+                    f"type={fa.get('type_name')}, mode=0{fa.get('mode', 0):o}, "
+                    f"uid={fa.get('uid')}, gid={fa.get('gid')}, "
+                    f"size={fa.get('size')}, mtime={fa.get('mtime')}, "
+                    f"fileid={fa.get('fileid')}. NFS is speaking to us "
+                    "unauthenticated; the export is live, not just listed.")
+            elif ga and ga.get("status") not in (None, 0):
+                detail += (
+                    f" NFSv3 GETATTR reached the NFS server on port "
+                    f"{ga['nfs_port']} for {ga['dir']} but returned "
+                    f"nfsstat3={ga['status']} (attributes suppressed).")
+            out.append(_finding(
+                "high", "NFS export shared to any host (world-mountable)", tgt,
+                detail,
                 "showmount / mount",
                 # shlex.quote the server-supplied export path (attacker-controlled).
                 f"showmount -e {h.ip} ; mkdir /mnt/x ; mount -o vers=3 {h.ip}:"
@@ -504,7 +621,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "look for id_rsa, .aws/credentials, /etc/shadow. If "
                     "no_root_squash: cp /bin/bash /mnt/nfs/.bash && chmod +s "
                     "/mnt/nfs/.bash for SUID escalation."),
-                depth_tier="t1"))
+                depth_tier=depth))
         if exports:
             dirs = ", ".join(e["dir"] for e in exports[:12])
             out.append(_finding(

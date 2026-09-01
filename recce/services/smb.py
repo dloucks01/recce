@@ -26,6 +26,7 @@ import shlex
 import socket
 import struct
 
+from ..core import proxy
 from ..core.models import Host, Port
 from .svccommon import finding_builder
 
@@ -322,6 +323,206 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
     return out
 
 
+# --- MS17-010 (EternalBlue) wire signature probe --------------------------------
+#
+# T2 promotion for the SMBv1-enabled finding: after we know SMBv1 answers, replay
+# the exact SMB_COM_TRANSACTION PeekNamedPipe(FID=0) probe that nmap NSE
+# `smb-vuln-ms17-010` uses to distinguish patched vs vulnerable, without ever
+# invoking the SMBv1 heap-overflow itself. Real server-side evidence (the NT
+# status of a single request), one TCP session, no writes, no state change.
+#
+# The transaction handler on an unpatched SMBv1 server returns
+#     STATUS_INSUFF_SERVER_RESOURCES (0xC0000205)  -> VULNERABLE (MS17-010 unpatched)
+# The KB4013389 hardening rewrote the branch to reject the invalid FID cleanly:
+#     STATUS_INVALID_HANDLE          (0xC0000008)  -> PATCHED
+#
+_MS17_VULN_STATUS = 0xC0000205        # STATUS_INSUFF_SERVER_RESOURCES
+_MS17_PATCHED_STATUS = 0xC0000008     # STATUS_INVALID_HANDLE
+
+
+def _smb1_hdr(cmd: int, flags2: int = 0xC843,
+              tid: int = 0, uid: int = 0, mid: int = 0,
+              pid: int = 0xFEFF) -> bytes:
+    """Build a 32-byte SMB1 header. Flags2=0xC843 sets Unicode|NT_STATUS|Long_names
+    |Ext_security — the ordinary Windows client baseline."""
+    return (b"\xffSMB"
+            + bytes([cmd])
+            + b"\x00\x00\x00\x00"                       # NT Status (client-side 0)
+            + b"\x18"                                    # Flags: canonical paths, ci
+            + struct.pack("<H", flags2)
+            + b"\x00\x00"                                # PIDHigh
+            + b"\x00" * 8                                # Signature
+            + b"\x00\x00"                                # Reserved
+            + struct.pack("<HHHH", tid, pid, uid, mid))
+
+
+def _ms17_negotiate() -> bytes:
+    """SMB1 NEGOTIATE offering only NT LM 0.12 — the dialect MS17-010 attacks."""
+    hdr = _smb1_hdr(0x72, mid=0)
+    dialects = b"\x02NT LM 0.12\x00"
+    body = bytes([0]) + struct.pack("<H", len(dialects)) + dialects   # wct=0
+    smb = hdr + body
+    return struct.pack(">I", len(smb)) + smb
+
+
+def _ms17_session_setup() -> bytes:
+    """SMB1 SESSION_SETUP_ANDX (null session — empty user, empty password, empty domain).
+    Word count 13, no AndX chain, no OEM/Unicode password bytes."""
+    hdr = _smb1_hdr(0x73, mid=1)
+    words = struct.pack("<BBHHHHIHHII",
+                        0xFF, 0,        # AndX cmd (none), reserved
+                        0,              # AndX offset
+                        4356,           # MaxBufferSize
+                        10, 1,          # MaxMpxCount, VcNumber
+                        0,              # SessionKey
+                        0, 0,           # OEMPasswordLen, UnicodePasswordLen
+                        0,              # Reserved
+                        0)              # Capabilities
+    # Header(32) + WCT(1) + Words(26) = 59; ByteCount at 59; payload starts at 61 (odd)
+    # so pad one byte before the unicode string block.
+    pad = b"\x00"
+    account = "\x00".encode("utf-16-le")     # empty username, unicode-terminated
+    domain = "\x00".encode("utf-16-le")
+    native_os = "recce\x00".encode("utf-16-le")
+    native_lm = "recce\x00".encode("utf-16-le")
+    bcc = pad + account + domain + native_os + native_lm
+    body = bytes([13]) + words + struct.pack("<H", len(bcc)) + bcc
+    smb = hdr + body
+    return struct.pack(">I", len(smb)) + smb
+
+
+def _ms17_tree_connect(uid: int, ip: str) -> bytes:
+    """SMB1 TREE_CONNECT_ANDX to \\\\<ip>\\IPC$ (unicode path, service '?????' ANSI)."""
+    hdr = _smb1_hdr(0x75, uid=uid, mid=2)
+    words = struct.pack("<BBHHH",
+                        0xFF, 0, 0,     # AndX cmd, reserved, offset
+                        0,              # Flags
+                        1)              # PasswordLength (1 empty byte follows)
+    password = b"\x00"
+    # Header(32)+WCT(1)+Words(8)+BCC(2)+Password(1) = 44 (even) — path is aligned.
+    path_uni = (f"\\\\{ip}\\IPC$" + "\x00").encode("utf-16-le")
+    service = b"?????\x00"
+    bcc = password + path_uni + service
+    body = bytes([4]) + words + struct.pack("<H", len(bcc)) + bcc
+    smb = hdr + body
+    return struct.pack(">I", len(smb)) + smb
+
+
+def _ms17_trans_peek(uid: int, tid: int) -> bytes:
+    """SMB1 SMB_COM_TRANSACTION whose Setup[0]=PeekNamedPipe(0x23), Setup[1]=FID=0
+    (deliberately invalid). Word count 16 = 14 fixed words + 2 setup words."""
+    hdr = _smb1_hdr(0x25, tid=tid, uid=uid, mid=3)
+    words = struct.pack("<HHHHBBHIHHHHHBB",
+                        0,              # TotalParameterCount
+                        0,              # TotalDataCount
+                        0,              # MaxParameterCount
+                        0xFFFF,         # MaxDataCount
+                        0, 0,           # MaxSetupCount, Reserved
+                        0,              # Flags
+                        0,              # Timeout
+                        0,              # Reserved2
+                        0, 0,           # ParameterCount, ParameterOffset
+                        0, 0,           # DataCount, DataOffset
+                        2, 0)           # SetupCount=2, Reserved3
+    setup = struct.pack("<HH", 0x0023, 0x0000)     # PeekNamedPipe, invalid FID
+    name = b"\\PIPE\\\x00"                          # ASCII pipe name
+    body = bytes([16]) + words + setup + struct.pack("<H", len(name)) + name
+    smb = hdr + body
+    return struct.pack(">I", len(smb)) + smb
+
+
+def _parse_smb1_status(data: bytes) -> tuple[int, int, int] | None:
+    """Return (nt_status, uid, tid) from an SMB1 response, or None on shape mismatch."""
+    if not data or len(data) < 4 + 32:
+        return None
+    smb = data[4:]
+    if smb[:4] != b"\xffSMB":
+        return None
+    status = struct.unpack("<I", smb[5:9])[0]
+    tid = struct.unpack("<H", smb[24:26])[0]
+    uid = struct.unpack("<H", smb[28:30])[0]
+    return status, uid, tid
+
+
+def _read_pdu_nb(sock) -> bytes | None:
+    """Read one NetBIOS-framed SMB PDU (4-byte length prefix + payload)."""
+    head = sock.recv(4)
+    if len(head) < 4:
+        return None
+    n = struct.unpack(">I", head)[0] & 0x00FFFFFF
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(min(4096, n - len(buf)))
+        if not chunk:
+            break
+        buf += chunk
+    return head + buf
+
+
+def probe_ms17_010(ip: str, port: int = _DEFAULT_PORT,
+                   timeout: float = _TIMEOUT) -> dict | None:
+    """MS17-010 non-destructive wire check: NEG -> SESSION_SETUP (null) -> TREE
+    IPC$ -> TRANS PeekNamedPipe(FID=0). The final NT status is the differentiator.
+    Returns {vulnerable, status, status_label, phase, evidence} — vulnerable is True
+    (STATUS_INSUFF_SERVER_RESOURCES), False (STATUS_INVALID_HANDLE), or None (any
+    other status: the probe cannot decide). One TCP session, no writes, no exploit."""
+    t = proxy.scaled(timeout)
+    try:
+        with socket.create_connection((ip, port), timeout=t) as s:
+            s.settimeout(t)
+            s.sendall(_ms17_negotiate())
+            neg = _read_pdu_nb(s)
+            if not neg or len(neg) < 4 + 32 or neg[4:8] != b"\xffSMB":
+                return None
+            s.sendall(_ms17_session_setup())
+            sess = _read_pdu_nb(s)
+            r = _parse_smb1_status(sess) if sess else None
+            if not r:
+                return None
+            sess_status, uid, _ = r
+            if sess_status & 0xC0000000:
+                return {"vulnerable": None, "status": sess_status,
+                        "status_label": f"0x{sess_status:08x}",
+                        "phase": "session_setup",
+                        "evidence": f"null-session SESSION_SETUP refused "
+                                    f"(status=0x{sess_status:08x}); cannot reach"
+                                    f" the MS17-010 transaction path without a UID."}
+            s.sendall(_ms17_tree_connect(uid, ip))
+            tc = _read_pdu_nb(s)
+            r = _parse_smb1_status(tc) if tc else None
+            if not r:
+                return None
+            tc_status, _, tid = r
+            if tc_status & 0xC0000000:
+                return {"vulnerable": None, "status": tc_status,
+                        "status_label": f"0x{tc_status:08x}",
+                        "phase": "tree_connect",
+                        "evidence": f"TREE_CONNECT to \\\\{ip}\\IPC$ refused "
+                                    f"(status=0x{tc_status:08x}); MS17-010 differentiator"
+                                    f" not reachable over null session."}
+            s.sendall(_ms17_trans_peek(uid, tid))
+            tr = _read_pdu_nb(s)
+            r = _parse_smb1_status(tr) if tr else None
+            if not r:
+                return None
+            tr_status, _, _ = r
+            if tr_status == _MS17_VULN_STATUS:
+                vuln, label = True, "STATUS_INSUFF_SERVER_RESOURCES"
+            elif tr_status == _MS17_PATCHED_STATUS:
+                vuln, label = False, "STATUS_INVALID_HANDLE"
+            else:
+                vuln, label = None, f"UNKNOWN(0x{tr_status:08x})"
+            ev = (f"SMB1 SMB_COM_TRANSACTION PeekNamedPipe(FID=0) on "
+                  f"\\\\{ip}\\IPC$ returned {label} (0x{tr_status:08x}). "
+                  f"nmap smb-vuln-ms17-010 differentiator: "
+                  f"STATUS_INSUFF_SERVER_RESOURCES=vulnerable, "
+                  f"STATUS_INVALID_HANDLE=patched.")
+            return {"vulnerable": vuln, "status": tr_status,
+                    "status_label": label, "phase": "trans", "evidence": ev}
+    except OSError:
+        return None
+
+
 def smb_targets(hosts: list[Host]) -> list[dict]:
     """One row per open SMB port across the given hosts."""
     out = []
@@ -446,12 +647,45 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             tgt = f"{h.ip}:{p.portid}"
             pr = probes.get((h.ip, p.portid))
             if pr and pr.get("smbv1"):
+                # T2 promotion: PeekNamedPipe(FID=0) wire signature from
+                # nmap smb-vuln-ms17-010. Bumps depth_tier to t2 whenever the
+                # differentiator NT status came back decisive (vulnerable OR
+                # patched — both are real server-side evidence). A vulnerable
+                # verdict also lifts severity to CRITICAL since remote-SYSTEM
+                # RCE is a KB4013389-away, not tester-follow-up territory.
+                ms17 = (pr or {}).get("ms17_010") or {}
+                v = ms17.get("vulnerable")
+                if v is True:
+                    sev = "critical"
+                    title = ("SMBv1 EternalBlue / MS17-010 VULNERABLE "
+                             "(STATUS_INSUFF_SERVER_RESOURCES observed)")
+                    tier = "t2"
+                    extra = ("\n\nT2 wire evidence: " + ms17.get("evidence", ""))
+                elif v is False:
+                    sev = "high"
+                    title = ("SMBv1 enabled but MS17-010 patched "
+                             "(STATUS_INVALID_HANDLE observed)")
+                    tier = "t2"
+                    extra = ("\n\nT2 wire evidence: " + ms17.get("evidence", "")
+                             + " Legacy protocol is still a hardening failure "
+                               "(no signing, downgrade/relay surface) even though "
+                               "the EternalBlue heap-overflow branch is fixed.")
+                else:
+                    sev = "high"
+                    title = ("SMBv1 (legacy protocol) enabled - "
+                             "EternalBlue/MS17-010 surface")
+                    tier = "t1"
+                    extra = ""
+                    if ms17.get("evidence"):
+                        extra = ("\n\nMS17-010 differentiator probe did not "
+                                 "reach a decisive verdict: "
+                                 + ms17["evidence"])
                 out.append(_finding(
-                    "high", "SMBv1 (legacy protocol) enabled - EternalBlue/MS17-010 surface",
-                    tgt,
+                    sev, title, tgt,
                     "The host answered an SMBv1 NEGOTIATE with a selected dialect - the "
                     "deprecated SMBv1 protocol is still enabled (directly observed, not a "
-                    "banner guess). This is the MS17-010 / EternalBlue attack surface.",
+                    "banner guess). This is the MS17-010 / EternalBlue attack surface."
+                    + extra,
                     "nmap",
                     "nmap --script smb-vuln-ms17-010 -p445 <ip>   # non-intrusive: "
                     "VULNERABLE = remotely exploitable now, NOT VULNERABLE = legacy proto "
@@ -463,7 +697,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "nmap --script smb-vuln-ms17-010 -p445 <ip>. If VULNERABLE: "
                         "msf use exploit/windows/smb/ms17_010_eternalblue set RHOSTS "
                         "<ip>; LHOST <you>; check first, exploit only in ROE."),
-                    depth_tier="t1"))
+                    depth_tier=tier))
             # SMB signing is TWO independent flags in the SMB2 NEGOTIATE
             # SecurityMode byte, and conflating them is the difference between
             # "the server can sign if the client asks" and "the server refuses
@@ -948,6 +1182,13 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             info = probe_ntlm_info(t["ip"], t["port"])
             if info:
                 pr["ntlm_info"] = info
+        # T2 promotion for the SMBv1-enabled finding: run the MS17-010 wire
+        # differentiator ONLY when SMBv1 answered (no point otherwise), a single
+        # extra TCP session that reads one NT status. Non-destructive.
+        if pr and pr.get("smbv1"):
+            ms17 = probe_ms17_010(t["ip"], t["port"])
+            if ms17:
+                pr["ms17_010"] = ms17
         return pr
     if active:
         for t, pr in svcprobe.iter_probe(

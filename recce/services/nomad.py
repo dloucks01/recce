@@ -270,7 +270,11 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
     out: dict = {"reachable": False, "version": "", "acl_enabled": None,
                  "jobs": [], "allocations": 0, "nodes": 0, "leader": "",
                  "vault": {}, "consul": {}, "vars": [], "acl_bootstrap_token": "",
-                 "job_specs": [], "job_submit": ""}
+                 "job_specs": [], "job_submit": "",
+                 # T2 evidence: compact server-returned proof line built from
+                 # the same /v1/agent/self read the T1 fingerprint already
+                 # performs — no additional wire traffic, no state change.
+                 "acl_evidence": ""}
 
     r = _http(ip, port, "GET", "/v1/agent/self", timeout=timeout, token=token)
     if r is None:
@@ -290,6 +294,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
             out["acl_bootstrap_token"] = _try_acl_bootstrap(ip, port, timeout)
         return out
     out["reachable"] = True
+    acl_subblob = ""
     try:
         j = json.loads(body.decode("utf-8", "replace"))
         config = j.get("config") or {}
@@ -299,6 +304,15 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         vault_cfg, consul_cfg = _extract_integration_tokens(config)
         out["vault"] = vault_cfg
         out["consul"] = consul_cfg
+        # Serialise the ACL sub-object exactly as the server sent it — the
+        # T2 proof for nomad_unauth_read is that {"Enabled":false,...} came
+        # off the wire, not that recce inferred it.
+        acl_obj = config.get("ACL")
+        if isinstance(acl_obj, dict):
+            try:
+                acl_subblob = json.dumps(acl_obj, sort_keys=True)[:240]
+            except (TypeError, ValueError):
+                acl_subblob = ""
     except (ValueError, UnicodeDecodeError):
         pass
 
@@ -347,6 +361,21 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
     # 'anonymous read' from 'anonymous read + writable API'.
     out["job_submit"] = _probe_job_submit(ip, port, timeout, token=token)
 
+    # Build the T2 evidence line only when reads were actually anonymous
+    # and ACLs were reported disabled — the server-side proof that the
+    # T1 nomad_unauth_read finding is real, captured from the same
+    # /v1/agent/self read the fingerprint already did (no extra traffic).
+    if out["acl_enabled"] is False and not token:
+        parts = ["GET /v1/agent/self -> 200"]
+        if out["version"]:
+            parts.append(f'config.Version="{out["version"]}"')
+        if acl_subblob:
+            parts.append(f"config.ACL={acl_subblob}")
+        parts.append(
+            f"anon reads: jobs={len(out['jobs'])} "
+            f"allocations={out['allocations']} nodes={out['nodes']}")
+        out["acl_evidence"] = " | ".join(parts)[:600]
+
     return out
 
 
@@ -361,11 +390,12 @@ def nomad_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
-             exploit_note="", depth_tier=""):
+             exploit_note="", depth_tier="", output=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": "nomad", "command": cmd, "remediation": rem, "cwes": cwes,
             "kind": kind,
-            "exploit_note": exploit_note, "depth_tier": depth_tier}
+            "exploit_note": exploit_note, "depth_tier": depth_tier,
+            "output": output}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -401,7 +431,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "curl -sX POST http://<ip>:4646/v1/jobs -d @rawexec-job.json "
                         "— with driver=raw_exec and command=/bin/id — runs as root "
                         "on a client node."),
-                    depth_tier="t1"))
+                    # T2 promotion: the emitted finding now carries a wire
+                    # evidence line captured off /v1/agent/self showing the
+                    # ACL sub-config the server returned unauthenticated,
+                    # plus the counts anon reads returned. No writes, no
+                    # extra requests beyond the T1 fingerprint chain.
+                    depth_tier="t2",
+                    output=pr.get("acl_evidence") or ""))
             else:
                 out.append(_finding(
                     "info", "Nomad endpoint reachable (ACL enforcing)", tgt,

@@ -242,6 +242,20 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
                 out["escape_pod_counts"] = {
                     "privileged": privileged, "hostPath": host_mounts,
                     "hostPID": host_pid, "hostNetwork": host_net}
+            # T2 SAFE proof-of-exploit: only fires when we've established that
+            # anon LIST works (the /api/v1/namespaces 200 above). Single
+            # controlled bounded read of /api/v1/pods?limit=10 — server-side
+            # cap keeps the response tiny, we record a handful of pod
+            # names/namespaces/images as real live evidence that anon reads
+            # cross the RBAC boundary. Non-destructive (GET, read-only,
+            # server-side limit), single-shot, capped timeout. Kept distinct
+            # from the full /api/v1/pods read above (which counts escape
+            # configurations across up to 200 pods) — this one is the
+            # evidence-preserving canary that lands in the finding detail.
+            ev = _probe_pods_canary(ip, port, tls,
+                                    timeout=min(timeout, 5.0))
+            if ev is not None:
+                out["pods_evidence"] = ev
         # SelfSubjectRulesReview - one POST answers definitively what verbs the
         # anonymous user actually holds on this cluster; catches create/exec/
         # impersonate perms the LIST-only enumeration above misses. Probed
@@ -286,6 +300,52 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
                                        or "header" in v3[1]))
         return out
     return None
+
+
+def _probe_pods_canary(ip: str, port: int, tls: bool,
+                       timeout: float = 5.0) -> dict | None:
+    """T2 SAFE proof-of-exploit: bounded GET /api/v1/pods?limit=10.
+
+    Returns a compact evidence dict — pod count plus namespace/name/image
+    triples for the first few pods on the live cluster — proving that
+    anonymous LIST returns real workload state (beyond the kind/items shape
+    check on /api/v1/namespaces). Non-destructive: read-only endpoint, no
+    writes, no state change. Bounded: single HTTP request, server-side
+    ?limit=10 cap, bounded response reader, capped timeout, at most five
+    pod entries recorded.
+
+    Returns None on any failure (no upgrade — caller keeps T1)."""
+    r = _get(ip, port, "/api/v1/pods?limit=10", tls=tls, timeout=timeout)
+    if r is None:
+        return None
+    status, body = r
+    if status != 200 or not isinstance(body, dict):
+        return None
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+    sample: list[dict] = []
+    for pod in items[:5]:
+        if not isinstance(pod, dict):
+            continue
+        md = pod.get("metadata") or {}
+        spec = pod.get("spec") or {}
+        conts = spec.get("containers") or []
+        images: list[str] = []
+        for c in conts[:3]:
+            if isinstance(c, dict):
+                img = c.get("image")
+                if isinstance(img, str) and img:
+                    images.append(img[:120])
+        sample.append({
+            "namespace": str(md.get("namespace", ""))[:80],
+            "name": str(md.get("name", ""))[:120],
+            "images": images,
+        })
+    if not sample:
+        return None
+    return {"count": len(items), "sample": sample,
+            "endpoint": "/api/v1/pods?limit=10"}
 
 
 def _is_podlist(body) -> bool:
@@ -525,6 +585,27 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             elif r == "apiserver":
                 if pr.get("anon_list"):
                     sec = pr.get("anon_secrets")
+                    # T2 upgrade: attach concrete pod evidence to the detail
+                    # when the bounded /api/v1/pods?limit=10 canary returned
+                    # real live workload. Additions-only — falls back to T1
+                    # if no evidence.
+                    pods_ev = pr.get("pods_evidence") or {}
+                    proof_tier = "t2" if pods_ev else "t1"
+                    proof_line = ""
+                    if pods_ev:
+                        sample = pods_ev.get("sample") or []
+                        pod_bits: list[str] = []
+                        for m in sample[:3]:
+                            imgs = m.get("images") or []
+                            img_bit = imgs[0] if imgs else "?"
+                            pod_bits.append(
+                                f"{m.get('namespace','?')}/"
+                                f"{m.get('name','?')} ({img_bit})")
+                        proof_line = (
+                            f"  T2 proof — GET {pods_ev.get('endpoint','?')} "
+                            f"returned {pods_ev.get('count','?')} live pod(s): "
+                            + "; ".join(pod_bits)
+                            + ("…" if len(sample) > 3 else "") + ".")
                     out.append(_finding(
                         "critical" if sec else "high",
                         "Kubernetes API allows anonymous resource listing"
@@ -534,7 +615,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         + (" AND secrets - every service-account token and TLS key is "
                            "readable (cluster compromise)" if sec
                            else " - a serious RBAC misconfiguration")
-                        + f".  Server: {pr.get('version', '?')}.",
+                        + f".  Server: {pr.get('version', '?')}."
+                        + proof_line,
                         "kubectl",
                         "kubectl --server https://<ip>:<port> --insecure-skip-tls-verify "
                         "get secrets -A -o yaml   # dump every secret (ROE)",
@@ -548,7 +630,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             "-r '.items[] | select(.type==\"kubernetes.io/"
                             "service-account-token\") | .data.token' | base64 -d — "
                             "use each token as a bearer for further kubectl calls."),
-                        depth_tier="t1"))
+                        depth_tier=proof_tier))
                     # Additional anonymous-readable resources on the apiserver.
                     extra_reads = []
                     if pr.get("anon_configmaps"): extra_reads.append("configmaps (often store secrets in plaintext)")
@@ -742,7 +824,7 @@ def analyze(hosts: list[Host], active: bool = True,
                 for k in ("anon_pods", "anon_list", "anon_secrets", "v2_readable",
                           "v3_readable", "version", "etcd_version", "pod_count",
                           "anon_status", "anon_logs_dir", "anon_ssrr_rules",
-                          "anon_ssrr_verbs"):
+                          "anon_ssrr_verbs", "pods_evidence"):
                     if k in pr:
                         t[k] = pr[k]
     fs = findings(hosts, probes)

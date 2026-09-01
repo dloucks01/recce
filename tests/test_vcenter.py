@@ -349,6 +349,11 @@ class ProbeTests(unittest.TestCase):
             calls.append({"body": body, "cookie": cookie})
             if b"RetrieveServiceContent" in body:
                 return 200, sc_body, ""
+            # T2 SessionManager pre-auth reachability probe: identified by the
+            # synthetic canary UPN. Auto-answer so scripted queues stay aligned
+            # with the credentialed calls the tests care about.
+            if vsphere._T2_CANARY_USER.encode() in body:
+                return 200, LOGIN_FAIL, ""
             if not queue:
                 return None
             return queue.pop(0)
@@ -723,6 +728,160 @@ class StaleSnapshotTests(unittest.TestCase):
         }
         fs = vsphere.findings([h], {(h.ip, 443): pr})
         self.assertNotIn("vsphere_stale_snapshot", {f["kind"] for f in fs})
+
+
+# --- T2: vsphere_sessionmanager_open (pre-auth SessionManager reachability) ---
+
+
+class SessionManagerT2Tests(unittest.TestCase):
+    """SessionManager MOR extraction + single-shot pre-auth reachability probe."""
+
+    def test_sessionmanager_mor_parsed_from_vcenter_service_content(self):
+        parsed = vsphere._parse_service_content(VCENTER_SC)
+        self.assertEqual(parsed["session_manager_mor"], "SessionManager")
+
+    def test_sessionmanager_mor_missing_on_esxi_fixture(self):
+        # ESXi fixture doesn't carry a <sessionManager> element — the field
+        # must default to empty string, never None, and never break parsing.
+        parsed = vsphere._parse_service_content(ESXI_SC)
+        self.assertEqual(parsed["session_manager_mor"], "")
+
+    def test_sessionmanager_probe_returns_fault_reason(self):
+        # Vulnerable/patched vCenter alike answers pre-auth Login with an
+        # InvalidLoginFault. Probe must capture the real server-side reason.
+        def fake_post(ip, port, body, action="", timeout=vsphere._TIMEOUT,
+                      cookie=""):
+            self.assertIn(b"<Login ", body)
+            # Canary user must be the synthetic one, never a real principal.
+            self.assertIn(vsphere._T2_CANARY_USER.encode(), body)
+            return 200, LOGIN_FAIL, ""
+
+        with mock.patch.object(vsphere, "_post_soap", fake_post):
+            res = vsphere._sessionmanager_probe("10.0.0.5", 443)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["status"], 200)
+        self.assertTrue(res["fault"])
+        self.assertIn("incorrect", res["fault_reason"].lower())
+        self.assertEqual(res["canary"], vsphere._T2_CANARY_USER)
+
+    def test_sessionmanager_probe_returns_none_on_transport_failure(self):
+        # A blocked/unresponsive appliance must yield None (finding suppressed).
+        with mock.patch.object(vsphere, "_post_soap", return_value=None):
+            self.assertIsNone(vsphere._sessionmanager_probe("10.0.0.5", 443))
+
+    def test_probe_populates_sessionmanager_probe_field(self):
+        # End-to-end: ServiceContent -> SessionManager MOR -> probe -> field
+        # in the probe() output. Timeout scaled through proxy.scaled.
+        def fake_post(ip, port, body, action="", timeout=vsphere._TIMEOUT,
+                      cookie=""):
+            if b"RetrieveServiceContent" in body:
+                return 200, VCENTER_SC, ""
+            if b"<Login " in body:
+                return 200, LOGIN_FAIL, ""
+            return None
+
+        with mock.patch.object(vsphere, "_post_soap", fake_post), \
+             mock.patch.object(vsphere, "_http_get", return_value=None), \
+             mock.patch.object(vsphere, "_cert_san",
+                               return_value={"cn": "", "sans": []}):
+            out = vsphere.probe("10.0.0.5", 443, active_auth=False)
+        self.assertEqual(out["session_manager_mor"], "SessionManager")
+        sm = out.get("sessionmanager_probe")
+        self.assertIsNotNone(sm)
+        self.assertTrue(sm["fault"])
+        self.assertEqual(sm["canary"], vsphere._T2_CANARY_USER)
+
+    def test_probe_skips_sessionmanager_probe_when_no_mor(self):
+        # ESXi ServiceContent doesn't advertise SessionManager MOR in our
+        # fixture; the probe must NOT fire (guardrail: only when MOR present).
+        calls = []
+
+        def fake_post(ip, port, body, action="", timeout=vsphere._TIMEOUT,
+                      cookie=""):
+            calls.append(body)
+            if b"RetrieveServiceContent" in body:
+                return 200, ESXI_SC, ""
+            return None
+
+        with mock.patch.object(vsphere, "_post_soap", fake_post), \
+             mock.patch.object(vsphere, "_http_get", return_value=None), \
+             mock.patch.object(vsphere, "_cert_san",
+                               return_value={"cn": "", "sans": []}):
+            out = vsphere.probe("10.0.0.5", 443, active_auth=False)
+        # No sessionmanager_probe field surfaces.
+        self.assertNotIn("sessionmanager_probe", out)
+        # Only one POST fired (the ServiceContent fingerprint).
+        self.assertEqual(len(calls), 1)
+
+    def test_finding_emitted_when_sessionmanager_reachable(self):
+        h = Host(ip="10.0.0.5")
+        h.ports.append(Port(portid=443, state="open", service="https"))
+        pr = {
+            "ip": h.ip, "port": 443, "role": "sdk", "reachable": True,
+            "sdk": True, "api_type": "VirtualCenter", "version": "8.0.2",
+            "build": "22385740", "full_name": "VMware vCenter 8.0.2",
+            "instance_uuid": "u", "cves": [],
+            "cert": {"cn": "", "sans": []},
+            "session_manager_mor": "SessionManager",
+            "sessionmanager_probe": {
+                "status": 200, "fault": True,
+                "fault_reason": "Cannot complete login due to an incorrect "
+                                "user name or password.",
+                "canary": vsphere._T2_CANARY_USER,
+            },
+        }
+        fs = vsphere.findings([h], {(h.ip, 443): pr})
+        kinds = {f["kind"] for f in fs}
+        self.assertIn("vsphere_sessionmanager_open", kinds)
+        row = next(f for f in fs if f["kind"] == "vsphere_sessionmanager_open")
+        self.assertEqual(row["depth_tier"], "t2")
+        self.assertEqual(row["severity"], "medium")
+        # Evidence carries the real server-side fault reason + MOR + build.
+        self.assertIn("SessionManager", row["detail"])
+        self.assertIn("22385740", row["detail"])
+        self.assertIn("incorrect user name", row["detail"])
+        self.assertIn(vsphere._T2_CANARY_USER, row["detail"])
+        self.assertIn("CWE-284", row["cwes"])
+
+    def test_finding_suppressed_when_probe_missing(self):
+        # Timed-out/blocked appliances: no probe result -> no T2 finding, and
+        # the T0/T1 findings (fingerprint, outdated_build) must still emit.
+        h = Host(ip="10.0.0.5")
+        h.ports.append(Port(portid=443, state="open", service="https"))
+        pr = {
+            "ip": h.ip, "port": 443, "role": "sdk", "reachable": True,
+            "sdk": True, "api_type": "VirtualCenter", "version": "7.0.3",
+            "build": "19717403",
+            "cves": vsphere.build_cves("VirtualCenter", "7.0.3", "19717403"),
+            "cert": {"cn": "", "sans": []},
+            "session_manager_mor": "SessionManager",
+            # No sessionmanager_probe key.
+        }
+        fs = vsphere.findings([h], {(h.ip, 443): pr})
+        kinds = {f["kind"] for f in fs}
+        self.assertNotIn("vsphere_sessionmanager_open", kinds)
+        # T1 path untouched.
+        self.assertIn("vsphere_outdated_build", kinds)
+        self.assertIn("vsphere_fingerprint", kinds)
+
+    def test_finding_suppressed_when_mor_missing(self):
+        # No SessionManager MOR (e.g., ESXi-style fixture) -> no T2 finding
+        # even if a probe result was somehow present.
+        h = Host(ip="10.0.0.5")
+        h.ports.append(Port(portid=443, state="open", service="https"))
+        pr = {
+            "ip": h.ip, "port": 443, "role": "sdk", "reachable": True,
+            "sdk": True, "api_type": "HostAgent", "version": "7.0.3",
+            "build": "19193900", "cves": [],
+            "cert": {"cn": "", "sans": []},
+            "session_manager_mor": "",
+            "sessionmanager_probe": {"status": 200, "fault": True,
+                                     "fault_reason": "x",
+                                     "canary": vsphere._T2_CANARY_USER},
+        }
+        fs = vsphere.findings([h], {(h.ip, 443): pr})
+        self.assertNotIn("vsphere_sessionmanager_open",
+                         {f["kind"] for f in fs})
 
 
 if __name__ == "__main__":

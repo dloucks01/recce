@@ -209,6 +209,43 @@ def _get(ip: str, port: int, path: str, timeout: float = _TIMEOUT):
                 pass
 
 
+def _t2_evidence(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
+    """T2 SAFE proof: two additional read-only calls returning real server-side
+    evidence that the unauthenticated Docker Engine API accepts arbitrary reads
+    beyond the /version banner already used at T1.
+
+    - GET /_ping is the daemon's liveness endpoint; a plain "OK" body proves
+      this is an actual Docker daemon (not a middlebox banner-spoofing /version).
+    - GET /containers/json?all=1 is a stronger workload disclosure than the T1
+      running-only inventory because it returns STOPPED containers too, i.e. the
+      historical workload state.
+
+    Non-destructive: no /containers/create, no /images/create, no exec, no
+    /containers/start — read-only endpoints only. Bounded per _TIMEOUT (6s) and
+    the shared _READ_CAP body cap on _get."""
+    out: dict = {"ping": "", "all_count": None, "sample_names": []}
+    p = _get(ip, port, "/_ping", timeout)
+    if p and p[0] == 200:
+        # /_ping returns text/plain "OK" on modern daemons; _get returns the
+        # raw string when json parsing fails.
+        body = p[1] if isinstance(p[1], str) else json.dumps(p[1])
+        out["ping"] = body.strip()[:64]
+    ca = _get(ip, port, "/containers/json?all=1", timeout)
+    if ca and ca[0] == 200 and isinstance(ca[1], list):
+        out["all_count"] = len(ca[1])
+        names: list[str] = []
+        for c in ca[1][:5]:
+            if not isinstance(c, dict):
+                continue
+            n = (c.get("Names") or [""])[0]
+            n = n.lstrip("/") if isinstance(n, str) else ""
+            st = c.get("State", "") if isinstance(c.get("State", ""), str) else ""
+            if n:
+                names.append(f"{n}({st})" if st else n)
+        out["sample_names"] = names
+    return out
+
+
 def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
     """Read the Docker API unauthenticated. Returns a dict with `exposed` True when
     /version or /info answered 200 with JSON, else None."""
@@ -241,6 +278,11 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
     # parse a semver out - never guessed.
     out["engine_cves"] = _engine_cves(out.get("server_version") or out.get("version", ""))
     out["runc_cves"] = _runc_cves(out.get("runc_id", ""))
+    # T2 SAFE-read proof: single controlled /_ping + /containers/json?all=1 pair
+    # that returns real server-side evidence the unauth API accepts arbitrary
+    # reads (not just the /version banner already fetched at T1). Additive only;
+    # T1 path continues to emit even when this call yields nothing.
+    out["t2_evidence"] = _t2_evidence(ip, port, timeout)
     # Running containers + images (best-effort enrichment).
     cj = _get(ip, port, "/containers/json", timeout)
     if cj and cj[0] == 200 and isinstance(cj[1], list):
@@ -439,6 +481,23 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                       + (f", {cnt} container(s), {img} image(s)" if cnt is not None else "")
                       + f", host '{pr.get('name', '?')}'). The daemon runs as root, so "
                       "this is remote root RCE on the host via a host-mounted container.")
+            # T2 promotion: fresh /_ping + /containers/json?all=1 pair returning
+            # real server-side evidence the daemon accepts arbitrary unauth reads
+            # (safe: read-only, no create/exec/pull). Detail appended, depth_tier
+            # upgraded to "t2" when the evidence pair actually came back.
+            te = pr.get("t2_evidence") or {}
+            t2_ok = bool(te.get("ping")) or te.get("all_count") is not None
+            docker_api_depth = "t2" if t2_ok else "t1"
+            if t2_ok:
+                parts: list[str] = []
+                if te.get("ping"):
+                    parts.append(f"/_ping returned {te['ping']!r}")
+                if te.get("all_count") is not None:
+                    preview = ", ".join(te.get("sample_names") or [])
+                    parts.append(
+                        f"/containers/json?all=1 returned {te['all_count']} "
+                        f"container(s)" + (f" [{preview}]" if preview else ""))
+                detail += " T2 proof: " + "; ".join(parts) + "."
             out.append(_finding(
                 "critical", "Docker Engine API exposed without authentication", tgt,
                 detail, "docker CLI",
@@ -453,7 +512,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "/host sh — root shell on host. Or curl -s http://<ip>:2375/"
                     "containers/json to enumerate then POST /containers/create with a "
                     "bind for a full escape."),
-                depth_tier="t1"))
+                depth_tier=docker_api_depth))
             running = pr.get("running") or []
             tags = pr.get("image_tags") or []
             if running or tags:

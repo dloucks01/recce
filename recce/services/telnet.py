@@ -539,6 +539,115 @@ _PROMPT_RX = re.compile(rb"([$#>]\s*$|[a-zA-Z0-9._-]+[#>]\s*$)")
 _FAIL_RX = re.compile(rb"(?i)incorrect|failure|denied|invalid")
 
 
+# --- T2 controlled read: RFC 2946 ENCRYPT server-side evidence ------------------
+#
+# The T0 telnet_no_encrypt finding fires on "ENCRYPT was not in the initial
+# IAC WILL/DO stream". A stronger, T2-grade proof asks the server directly:
+# send `IAC DO ENCRYPT` (per RFC 2946 §3.1 — the client asking the server to
+# enable encryption on its side) and capture the server's reply within one
+# bounded read window. A `WONT ENCRYPT` reply is a definitive server-side
+# refusal (the wire evidence, not an absence-of-evidence guess); a silent
+# server that never mentioned ENCRYPT is also a real answer. No credentials
+# are ever sent, no state is changed, and the socket is closed immediately
+# after the single request/response.
+def encrypt_probe(ip: str, port: int = _DEFAULT_PORT,
+                  timeout: float = _TIMEOUT,
+                  use_tls: bool = False) -> dict | None:
+    """Single-shot RFC 2946 ENCRYPT capability probe.
+
+    Sends one `IAC DO ENCRYPT` after the initial IAC negotiation settles and
+    returns whatever the server said in reply. Returns None on connect failure.
+    On success returns a dict of the form::
+
+        {"asked": True,
+         "response_hex": "fffc26",          # raw bytes we captured after DO
+         "server_wont_encrypt": bool,       # IAC WONT 0x26 seen (definitive)
+         "server_will_encrypt": bool,       # IAC WILL 0x26 seen (accepted)
+         "server_dont_encrypt": bool,       # IAC DONT 0x26 seen
+         "silent": bool,                    # no ENCRYPT-related reply at all
+         "initial_offered": bool,           # ENCRYPT already in first stream?
+         "evidence": "<summary>",
+         "elapsed": float}
+    """
+    t = proxy.scaled(timeout)
+    started = time.monotonic()
+    try:
+        raw = socket.create_connection((ip, port), timeout=t)
+    except OSError:
+        return None
+    sock: socket.socket
+    try:
+        if use_tls:
+            try:
+                ctx = ssl._create_unverified_context()
+                ctx.check_hostname = False
+                sock = ctx.wrap_socket(raw, server_hostname=ip)
+            except (ssl.SSLError, OSError, ValueError):
+                raw.close()
+                return None
+        else:
+            sock = raw
+        # One controlled request: ask the server to WILL ENCRYPT (RFC 2946
+        # §3.1). Sent immediately so the read window can capture the reply
+        # regardless of whether the server volunteers WONT/WILL ENCRYPT in
+        # its opening stream or waits for a client prompt.
+        try:
+            sock.sendall(bytes([IAC, DO, OPT_ENCRYPT]))
+        except OSError:
+            return {"asked": False, "response_hex": "",
+                    "server_wont_encrypt": False,
+                    "server_will_encrypt": False,
+                    "server_dont_encrypt": False,
+                    "silent": True, "initial_offered": False,
+                    "evidence": "send failed after connect",
+                    "elapsed": time.monotonic() - started}
+        # Bounded read window: gather everything the server says in reply,
+        # then close. No writes, no state change, no follow-through on any
+        # ENCRYPT sub-negotiation.
+        deadline = time.monotonic() + min(_READ_WINDOW, t)
+        second = _read_negotiation(sock, deadline)
+        second_parsed = _iac_parse(second)
+        wont = OPT_ENCRYPT in second_parsed["wont"]
+        will = OPT_ENCRYPT in second_parsed["will"]
+        dont = OPT_ENCRYPT in second_parsed["dont"]
+        initial_offered = (OPT_ENCRYPT in second_parsed["will"]
+                           or OPT_ENCRYPT in second_parsed["do"])
+        silent = not (wont or will or dont)
+        if wont:
+            evidence = ("Server replied IAC WONT ENCRYPT (0xFF 0xFC 0x26) — a "
+                        "definitive RFC 2946 refusal.")
+        elif dont:
+            evidence = ("Server replied IAC DONT ENCRYPT (0xFF 0xFE 0x26) — "
+                        "server refused encryption on the client side.")
+        elif will:
+            evidence = ("Server replied IAC WILL ENCRYPT (0xFF 0xFB 0x26) — "
+                        "encryption is negotiable but recce did not follow "
+                        "through with the ENCRYPT sub-negotiation.")
+        elif initial_offered:
+            evidence = ("Server did not answer the DO ENCRYPT probe but had "
+                        "advertised ENCRYPT in the initial IAC stream.")
+        else:
+            evidence = ("Server ignored the DO ENCRYPT request entirely — "
+                        "no WILL/WONT/DONT response within the read window.")
+        return {"asked": True,
+                "response_hex": second[:64].hex() if second else "",
+                "server_wont_encrypt": wont,
+                "server_will_encrypt": will,
+                "server_dont_encrypt": dont,
+                "silent": silent,
+                "initial_offered": initial_offered,
+                "evidence": evidence,
+                "elapsed": time.monotonic() - started}
+    finally:
+        try:
+            sock.close()  # type: ignore[has-type]
+        except Exception:  # noqa: BLE001
+            try:
+                raw.close()
+            except OSError:
+                pass
+
+
 def try_login(ip: str, port: int, username: str, password: str,
               timeout: float = 6.0) -> dict:
     """Attempt one login. Returns
@@ -822,12 +931,31 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                              else " AUTHENTICATION (RFC 2941) IS offered — an "
                              "unencrypted-but-authenticated login is still a "
                              "Kerberos password oracle.")
+                # T2 promotion: if the follow-up ENCRYPT probe captured a
+                # definitive server-side refusal (WONT/DONT ENCRYPT) or an
+                # accept (WILL ENCRYPT that recce did not follow through on),
+                # that is real wire evidence, not just "was not in the initial
+                # WILL/DO stream". Upgrade the finding tier and surface the
+                # captured bytes as evidence.
+                ep = pr.get("encrypt_probe") or {}
+                definitive = bool(ep.get("server_wont_encrypt")
+                                  or ep.get("server_dont_encrypt")
+                                  or ep.get("server_will_encrypt"))
+                if definitive:
+                    tier = "t2"
+                    proof = (
+                        "\n\nT2 controlled read: sent IAC DO ENCRYPT (0xFF "
+                        f"0xFD 0x26), server replied 0x{ep.get('response_hex','')} "
+                        f"— {ep.get('evidence','')}")
+                else:
+                    tier = "t0"
+                    proof = ""
                 out.append(_finding(
                     "medium",
                     "Telnet ENCRYPT option (RFC 2946) not offered", tgt,
                     "The server never advertised WILL/DO ENCRYPT during IAC "
                     "negotiation, so the channel cannot be encrypted even by "
-                    "a client that asked for it." + auth_note,
+                    "a client that asked for it." + auth_note + proof,
                     "wireshark / tcpdump",
                     f"tcpdump -i <iface> -A 'tcp port {p.portid} and host "
                     f"{h.ip}'",
@@ -838,7 +966,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     exploit_note=(
                         "wireshark on segment during login -- every keystroke "
                         "visible in clear."),
-                    depth_tier="t0"))
+                    depth_tier=tier))
 
             # 4) ENVIRON leak
             leak = pr.get("environ_leak") or {}
@@ -1108,6 +1236,15 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             pr = probe(t["ip"], t["port"], use_tls=bool(t.get("tls")))
             if not pr:
                 return None
+            # T2 controlled read: when the initial stream did NOT advertise
+            # ENCRYPT, run a single-shot DO ENCRYPT probe on a fresh socket to
+            # capture the server-side refusal as concrete wire evidence. Safe
+            # to run without active_attacks — read-only, no credentials.
+            if pr.get("looks_like_telnet") and not pr.get("encrypt_offered"):
+                ep = encrypt_probe(t["ip"], t["port"],
+                                   use_tls=bool(t.get("tls")))
+                if ep:
+                    pr["encrypt_probe"] = ep
             if active_attacks is True or _active_gate():
                 vendor = pr.get("vendor", "unknown")
                 pr["default_creds"] = default_cred_sweep(
