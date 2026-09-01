@@ -1,14 +1,18 @@
-// Phase D — AD attack chain walkthrough.
+// Phase D — AD attack chain walkthrough (+ shared ChainView used by the
+// Cloud and Web sibling chains).
 //
-// A single narrative that walks a tester through the whole AD compromise
-// with current engagement state visible at each step. Every step reads
-// from the same shared-surface unions the KnownAssets tab uses, plus
-// per-service finding kinds (null_session, ldap_anon_read, asrep_roast,
-// msrpc_coercion, kerberos_spray_success, adcs-esc*). Where Phase C
-// showed exploitation per-finding, this view shows the story per-chain.
+// A single narrative that walks a tester through a compromise with current
+// engagement state visible at each step. Every step reads from the same
+// shared-surface unions the KnownAssets tab uses, plus per-service finding
+// kinds. Where the Exploit tab shows exploitation per-finding, this view
+// shows the story per-chain.
+//
+// This module exports both the AD-specific `AttackChain` component (default
+// entry for the "AD Chain" tab) and the reusable `ChainView` — the Cloud
+// and Web tabs consume `ChainView` directly with their own fetcher + title.
 import { useEffect, useState } from "react";
 import {
-  getAttackChainAd, AttackChainAdResponse, AttackChainStep,
+  getAttackChainAd, AttackChainResponse, AttackChainStep,
   AttackChainStepStatus,
 } from "../api";
 
@@ -171,6 +175,21 @@ function StepCard({ step, n, onOpenHost, isLast }: StepCardProps) {
                 ))}
               </div>
             )}
+            {step.contributing_hosts && step.contributing_hosts.length > 0 && (
+              <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>
+                Contributing hosts:{" "}
+                {step.contributing_hosts.map((ip, i) => (
+                  <span key={ip}>
+                    {i > 0 && ", "}
+                    <a href="#" className="mono"
+                       style={{ fontSize: 11 }}
+                       onClick={(ev) => { ev.preventDefault(); onOpenHost(ip); }}>
+                      {ip}
+                    </a>
+                  </span>
+                ))}
+              </div>
+            )}
 
             {step.evidence.length > 0 ? (
               <div style={{ marginTop: 6 }}>
@@ -232,26 +251,33 @@ function StepCard({ step, n, onOpenHost, isLast }: StepCardProps) {
   );
 }
 
-interface Props {
+// Shared chain view — one hero card (progress bar + next_action) plus the
+// timeline of step cards. Used by the AD, Cloud, and Web chain tabs; each
+// tab passes its own `title`, fetcher, and end-of-chain `allProvenMessage`.
+export interface ChainViewProps {
+  title: string;                                  // hero card headline label
+  fetcher: () => Promise<AttackChainResponse>;    // /api/attack-chain/<id>
+  loadingLabel: string;                           // "Loading AD attack chain…"
+  allProvenMessage: string;                       // shown when nothing pending
   onOpenHost?: (ip: string) => void;
 }
-export function AttackChain({ onOpenHost }: Props = {}) {
-  const [data, setData] = useState<AttackChainAdResponse | null>(null);
+export function ChainView(p: ChainViewProps) {
+  const [data, setData] = useState<AttackChainResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true); setErr(null);
-    getAttackChainAd()
+    p.fetcher()
       .then((d) => { if (!cancelled) { setData(d); setLoading(false); } })
       .catch((e) => { if (!cancelled) { setErr(String(e)); setLoading(false); } });
     return () => { cancelled = true; };
-  }, []);
+  }, [p.fetcher]);
 
-  const openHost = onOpenHost || ((_ip: string) => { /* no-op fallback */ });
+  const openHost = p.onOpenHost || ((_ip: string) => { /* no-op fallback */ });
 
-  if (loading) return <div className="loading">Loading AD attack chain…</div>;
+  if (loading) return <div className="loading">{p.loadingLabel}</div>;
   if (err) return <div className="err">{err}</div>;
   if (!data) return null;
 
@@ -265,7 +291,7 @@ export function AttackChain({ onOpenHost }: Props = {}) {
       <section className="panel" style={{ borderLeft: "3px solid var(--accent)" }}>
         <div className="panel-h">
           <h3>
-            AD chain — {summary.proven} of {summary.total} steps proven
+            {p.title} — {summary.proven} of {summary.total} steps proven
           </h3>
           <span className="muted">
             {summary.pending} pending
@@ -299,9 +325,7 @@ export function AttackChain({ onOpenHost }: Props = {}) {
               )}
             </>
           ) : (
-            <div className="muted">
-              Every step is proven — full AD compromise reachable end-to-end.
-            </div>
+            <div className="muted">{p.allProvenMessage}</div>
           )}
         </div>
       </section>
@@ -316,5 +340,20 @@ export function AttackChain({ onOpenHost }: Props = {}) {
         </div>
       </section>
     </div>
+  );
+}
+
+interface Props {
+  onOpenHost?: (ip: string) => void;
+}
+export function AttackChain({ onOpenHost }: Props = {}) {
+  return (
+    <ChainView
+      title="AD chain"
+      fetcher={getAttackChainAd}
+      loadingLabel="Loading AD attack chain…"
+      allProvenMessage="Every step is proven — full AD compromise reachable end-to-end."
+      onOpenHost={onOpenHost}
+    />
   );
 }

@@ -8,6 +8,8 @@ import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbo
 import { KnownAssets } from "./views/KnownAssets";
 import { ExploitSurface, ExploitSurfaceCallout } from "./views/ExploitSurface";
 import { AttackChain } from "./views/AttackChain";
+import { AttackChainCloud } from "./views/AttackChainCloud";
+import { AttackChainWeb } from "./views/AttackChainWeb";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
 import { TabBar, TabId } from "./TabBar";
@@ -93,7 +95,7 @@ function cycleDensity(cur: Density): Density {
 }
 
 // Main App
-const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology", "sessions", "timeline", "report", "plan", "exploit", "ad-chain", "credentials", "playbook", "assets"];
+const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology", "sessions", "timeline", "report", "plan", "exploit", "ad-chain", "cloud-chain", "web-chain", "credentials", "playbook", "assets"];
 const isTab = (t: string): t is TabId => (VALID_TABS as string[]).includes(t);
 
 // Read the initial UI state from the URL once, so a shared link opens in
@@ -308,6 +310,8 @@ export default function App() {
     plan: undefined,
     exploit: undefined,
     "ad-chain": undefined,
+    "cloud-chain": undefined,
+    "web-chain": undefined,
     credentials: undefined,
     playbook: undefined,
     assets: undefined,
@@ -418,6 +422,8 @@ export default function App() {
           {tab === "plan" && <Exploitation nav={nav} />}
           {tab === "exploit" && <ExploitSurface onOpenHost={(ip) => setDrawerIp(ip)} />}
           {tab === "ad-chain" && <AttackChain onOpenHost={(ip) => setDrawerIp(ip)} />}
+          {tab === "cloud-chain" && <AttackChainCloud onOpenHost={(ip) => setDrawerIp(ip)} />}
+          {tab === "web-chain" && <AttackChainWeb onOpenHost={(ip) => setDrawerIp(ip)} />}
           {tab === "credentials" && <Credentials nav={nav} />}
           {tab === "playbook" && <Playbook pb={pb} nav={nav} />}
           {tab === "assets" && <KnownAssets />}

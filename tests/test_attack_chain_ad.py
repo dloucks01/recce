@@ -13,7 +13,7 @@ import pathlib
 from fastapi.testclient import TestClient
 
 from recce.cli import _open_paths
-from recce.core.models import Account, Credential, Host, Port, Vuln
+from recce.core.models import Credential, Host, Port, Vuln
 from recce.core.store import Store
 from recce.webui.app import create_app
 
@@ -95,6 +95,13 @@ def test_attack_chain_anon_ldap_reachable(tmp_path: pathlib.Path) -> None:
     # Evidence carries the excerpt each step needs.
     ns_ev = steps["null_session"]["evidence"]
     assert ns_ev and "shares:" in ns_ev[0]["output_excerpt"]
+    # P1-4 — contributing_hosts is present on every step and dedups the
+    # evidence IPs (the DC's 10.20.0.10 only appears once).
+    for s in data["steps"]:
+        assert "contributing_hosts" in s, s
+        assert len(s["contributing_hosts"]) == len(set(s["contributing_hosts"]))
+    assert steps["null_session"]["contributing_hosts"] == ["10.20.0.10"]
+    assert steps["discover_dc"]["contributing_hosts"] == ["10.20.0.10"]
 
     # user_enum: only 0 known users (accounts weren't seeded) → pending.
     assert steps["user_enum"]["status"] == "pending"

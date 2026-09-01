@@ -1,6 +1,6 @@
 import { Fragment, useState, useEffect, useRef } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "plan" | "exploit" | "ad-chain" | "credentials" | "playbook" | "assets";
+export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "plan" | "exploit" | "ad-chain" | "cloud-chain" | "web-chain" | "credentials" | "playbook" | "assets";
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
@@ -24,6 +24,11 @@ const TAB_LABELS: Record<TabId, string> = {
   // Phase D — end-to-end AD attack-chain walkthrough. Default-visible so
   // a tester on an AD engagement lands one click from the whole story.
   "ad-chain": "AD Chain",
+  // P1-5 / P1-6 — sibling chain walkthroughs. Both default-visible next
+  // to AD Chain so a tester lands one click from whichever compromise
+  // story matches the engagement.
+  "cloud-chain": "Cloud Chain",
+  "web-chain": "Web Chain",
   credentials: "Creds",
   playbook: "Playbook",
   // Power-user surface (Phase 7b): unions of everything recce learned across
@@ -44,16 +49,19 @@ const TAB_LABELS: Record<TabId, string> = {
 //
 // Testers can still drag-and-drop within the visible set to reorder.
 const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                           "exploit", "ad-chain", "plan", "sessions", "credentials", "report",
+                           "exploit", "ad-chain", "cloud-chain", "web-chain",
+                           "plan", "sessions", "credentials", "report",
                            "playbook", "timeline", "assets"];
 // The DEFAULT visible set. Everything after "report" is optional.
 // `exploit` (Phase C — proven-exploitable + next-move surface) sits between
 // findings/hosts and the ATTACK group so a fresh tester lands one click
 // from "what should I do next".
-// `ad-chain` (Phase D — AD attack-chain walkthrough) sits next to Exploit —
-// the tester who's on an AD engagement lands on the whole compromise story.
+// `ad-chain` / `cloud-chain` / `web-chain` are the three sibling attack-chain
+// walkthroughs (Phase D + P1-5 + P1-6) — grouped together so a tester lands
+// one click from whichever compromise story matches the engagement.
 const DEFAULT_VISIBLE: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                                   "exploit", "ad-chain", "plan", "sessions", "credentials", "report"];
+                                   "exploit", "ad-chain", "cloud-chain", "web-chain",
+                                   "plan", "sessions", "credentials", "report"];
 
 // Visual group boundaries — a divider is inserted BEFORE these tab ids
 // when they appear in the visible set. Purely presentational — no

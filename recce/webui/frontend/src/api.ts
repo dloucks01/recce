@@ -731,10 +731,12 @@ export type ExploitSurfaceResponse = {
 export const getExploitSurface = () =>
   getJSON<ExploitSurfaceResponse>("/api/exploit-surface");
 
-// --- Phase D — AD attack-chain walkthrough -----------------------------------
-// The AD compromise modelled as an ordered 11-step chain. Every step
-// reports current engagement state (proven / pending / blocked) plus per-step
-// evidence + the "your next move" advisory to run when it's not yet proven.
+// --- Phase D + P1 — attack-chain walkthroughs --------------------------------
+// Three sibling narratives — AD (11 steps), Cloud pivot (6 steps), Web n-day
+// (6 steps) — that share one payload shape. Every step reports current
+// engagement state (proven / pending / blocked) plus per-step evidence,
+// contributing_hosts (deduped IPs across the evidence rows), and the "your
+// next move" advisory to run when the step is not yet proven.
 export type AttackChainStepStatus = "proven" | "pending" | "blocked" | "skipped";
 export type AttackChainEvidence = {
   finding_kind: string;
@@ -750,8 +752,11 @@ export type AttackChainStep = {
   next_step: string;
   depends_on: string[];
   shared_surfaces_read: string[];
+  // P1-4 — deduped IP list across this step's evidence rows. Empty when
+  // every evidence row is union-derived (e.g. known_users).
+  contributing_hosts: string[];
 };
-export type AttackChainAdResponse = {
+export type AttackChainResponse = {
   steps: AttackChainStep[];
   summary: {
     proven: number;
@@ -763,5 +768,11 @@ export type AttackChainAdResponse = {
     step_ids: string[];
   };
 };
+// Historical alias — the AD chain shipped alone in Phase D under this name.
+export type AttackChainAdResponse = AttackChainResponse;
 export const getAttackChainAd = () =>
-  getJSON<AttackChainAdResponse>("/api/attack-chain/ad");
+  getJSON<AttackChainResponse>("/api/attack-chain/ad");
+export const getAttackChainCloud = () =>
+  getJSON<AttackChainResponse>("/api/attack-chain/cloud");
+export const getAttackChainWeb = () =>
+  getJSON<AttackChainResponse>("/api/attack-chain/web");

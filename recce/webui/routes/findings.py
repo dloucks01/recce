@@ -13,6 +13,81 @@ from ..services import findings as findings_svc
 from ..services import loot as loot_svc
 
 
+# ---- shared /api/attack-chain/* step assembly -------------------------------
+# All three chain endpoints (AD / Cloud / Web) build a raw step tuple list
+# and hand it to `_assemble_chain`, which computes proven/blocked/pending,
+# the per-step `contributing_hosts` dedup, and the hero summary. Keeps the
+# three endpoints from re-implementing the same reduction three ways.
+#
+# Raw tuple shape:
+#   (id, title, proven_bool, evidence_list, deps, next_step_str, surfaces)
+def _assemble_chain(raw_steps: list) -> dict:
+    step_ids = [s[0] for s in raw_steps]
+    proven_flags = [bool(t[2]) for t in raw_steps]
+    steps_out: list[dict] = []
+    for i, (sid, title, _p, ev, deps, next_step, surfaces) in enumerate(
+            raw_steps):
+        if proven_flags[i]:
+            status = "proven"
+        elif any(proven_flags[j] for j in range(i + 1, len(raw_steps))):
+            # An upstream / later step already proved — this leg was skipped
+            # past. Mark it blocked so the walkthrough highlights the gap.
+            status = "blocked"
+        else:
+            status = "pending"
+        # contributing_hosts: dedup IPs across this step's evidence rows,
+        # preserving first-seen order. Rows with no ip (union-derived
+        # evidence like "known_users") don't contribute.
+        seen_hosts: list[str] = []
+        for e in ev:
+            ip = (e.get("ip") or "").strip()
+            if ip and ip not in seen_hosts:
+                seen_hosts.append(ip)
+        steps_out.append({
+            "id": sid,
+            "title": title,
+            "status": status,
+            "evidence": ev,
+            "next_step": "" if status == "proven" else next_step,
+            "depends_on": list(deps),
+            "shared_surfaces_read": list(surfaces),
+            "contributing_hosts": seen_hosts,
+        })
+
+    proven_n = sum(1 for s in steps_out if s["status"] == "proven")
+    pending_n = sum(1 for s in steps_out if s["status"] == "pending")
+    blocked_n = sum(1 for s in steps_out if s["status"] == "blocked")
+    highest = ""
+    for s in steps_out:
+        if s["status"] == "proven":
+            highest = s["id"]
+    # Next action: blocked first (names the skipped-past prereq), then the
+    # first pending step in declared order.
+    next_action = ""
+    for s in steps_out:
+        if s["status"] == "blocked":
+            next_action = s["next_step"]
+            break
+    if not next_action:
+        for s in steps_out:
+            if s["status"] == "pending":
+                next_action = s["next_step"]
+                break
+
+    return {
+        "steps": steps_out,
+        "summary": {
+            "proven": proven_n,
+            "pending": pending_n,
+            "blocked": blocked_n,
+            "total": len(steps_out),
+            "highest_reached": highest,
+            "next_action": next_action,
+            "step_ids": step_ids,
+        },
+    }
+
+
 def register_findings_routes(app: FastAPI, ctx) -> None:
     db_path = ctx.db_path
     broker = ctx.broker
@@ -822,67 +897,312 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
              ["known_users", "known_hashes"]),
         ]
 
-        step_ids = [s[0] for s in raw_steps]
-        # First pass: proven vs. not-proven per step's own evidence.
-        proven_flags = [bool(t[2]) for t in raw_steps]
-        # Second pass: an unproven step is "blocked" when the tester has
-        # already proven a LATER step in the chain — the walkthrough marks
-        # the leg they skipped past so it stands out as backfill work.
-        # In the empty engagement no step is proven so nothing is blocked.
-        steps_out: list[dict] = []
-        for i, (sid, title, _p, ev, deps, next_step, surfaces) in enumerate(
-                raw_steps):
-            if proven_flags[i]:
-                status = "proven"
-            elif any(proven_flags[j] for j in range(i + 1, len(raw_steps))):
-                status = "blocked"
-            else:
-                status = "pending"
-            steps_out.append({
-                "id": sid,
-                "title": title,
-                "status": status,
-                "evidence": ev,
-                "next_step": "" if status == "proven" else next_step,
-                "depends_on": list(deps),
-                "shared_surfaces_read": list(surfaces),
-            })
+        return _assemble_chain(raw_steps)
 
-        # Summary: counts + furthest proven step (in the declared order) +
-        # single next_action string for the hero card.
-        proven_n = sum(1 for s in steps_out if s["status"] == "proven")
-        pending_n = sum(1 for s in steps_out if s["status"] == "pending")
-        blocked_n = sum(1 for s in steps_out if s["status"] == "blocked")
-        highest = ""
-        for s in steps_out:
-            if s["status"] == "proven":
-                highest = s["id"]
-        # Next action: pick the first blocked-or-pending step in declared
-        # order — that's the leg the tester should actually work on next.
-        # Blocked comes first because it names the skipped-past prereq.
-        next_action = ""
-        for s in steps_out:
-            if s["status"] == "blocked":
-                next_action = s["next_step"]
-                break
-        if not next_action:
-            for s in steps_out:
-                if s["status"] == "pending":
-                    next_action = s["next_step"]
-                    break
+    # ---- /api/attack-chain/cloud — P1-5 cloud pivot chain --------------------
+    # Six-step story: IMDS reachable → v1 open → IAM role disclosed → STS
+    # creds extracted → object storage listed → secrets manager read.
+    # Same step shape as the AD chain; contributing_hosts / next_action /
+    # summary are computed by the shared _assemble_chain helper.
+    @app.get("/api/attack-chain/cloud")
+    def attack_chain_cloud():
+        from ...core.store import Store
 
-        return {
-            "steps": steps_out,
-            "summary": {
-                "proven": proven_n,
-                "pending": pending_n,
-                "blocked": blocked_n,
-                "total": len(steps_out),
-                "highest_reached": highest,
-                "next_action": next_action,
-                "step_ids": step_ids,
-            },
-        }
+        with Store(db_path) as st:
+            hosts = st.all_hosts()
+            creds = st.all_credentials()
+
+        # 1. imds_reachable — a cloud_metadata source finding whose kind
+        #    contains "reachable" (e.g. imds_reachable). The name is the
+        #    signal — the module writes the finding when the endpoint
+        #    responded at least once.
+        imds_reach_ev: list[dict] = []
+        for h in hosts:
+            for v in h.vulns:
+                src = (v.source or "").lower()
+                sid = (v.script_id or "").lower()
+                ttl = (v.title or "").lower()
+                if src == "cloud_metadata" and (
+                        "reachable" in sid or "reachable" in ttl):
+                    imds_reach_ev.append({
+                        "finding_kind": v.script_id or v.title or "imds",
+                        "ip": h.ip, "port": v.port,
+                        "output_excerpt": (v.output or "")[:240],
+                    })
+
+        # 2. imds_v1_present — v1 endpoint responds without a token (the
+        #    module emits `imds_v1_enabled`).
+        imds_v1_ev: list[dict] = []
+        for h in hosts:
+            for v in h.vulns:
+                sid = (v.script_id or "").lower()
+                ttl = (v.title or "").lower()
+                if "imds_v1_enabled" in sid or "imds v1" in ttl \
+                        or "imdsv1" in sid or "imdsv1" in ttl:
+                    imds_v1_ev.append({
+                        "finding_kind": v.script_id or v.title or "imds_v1",
+                        "ip": h.ip, "port": v.port,
+                        "output_excerpt": (v.output or "")[:240],
+                    })
+
+        # 3. iam_role_disclosed — finding kind, title, or exploit_note names
+        #    IAM / STS / a role. Broad match — cloud modules label these many
+        #    ways depending on which provider surfaced.
+        iam_ev: list[dict] = []
+        for h in hosts:
+            for v in h.vulns:
+                sid = (v.script_id or "").lower()
+                ttl = (v.title or "").lower()
+                note = (getattr(v, "exploit_note", "") or "").lower()
+                text = f" {sid} {ttl} {note} "
+                if any(m in text for m in
+                       (" iam", "iam_", " sts", "sts_", "assume-role",
+                        "assume_role", " role ", "role_")):
+                    iam_ev.append({
+                        "finding_kind": v.script_id or v.title or "iam",
+                        "ip": h.ip, "port": v.port,
+                        "output_excerpt": (v.output or "")[:240],
+                    })
+
+        # 4. sts_creds_extracted (T3 gate) — a Credential(source='imds') proves
+        #    the tester grabbed STS session creds and pulled them into the
+        #    engagement store.
+        imds_creds = [c for c in creds if (c.source or "").lower() == "imds"]
+        sts_ev = [{
+            "finding_kind": f"credential:{c.kind}",
+            "ip": c.origin_ip, "port": None,
+            "output_excerpt": f"{c.label} — {c.kind} from IMDS",
+        } for c in imds_creds[:8]]
+
+        # 5. s3_buckets_listed — any finding whose kind/title names S3 / GCS /
+        #    Azure blob listing. We match "bucket" or a provider marker plus a
+        #    listing verb (list / public / readable / enum).
+        buckets_ev: list[dict] = []
+        for h in hosts:
+            for v in h.vulns:
+                sid = (v.script_id or "").lower()
+                ttl = (v.title or "").lower()
+                text = f" {sid} {ttl} "
+                has_target = ("bucket" in text or "s3_" in text
+                              or " s3 " in text or "gcs" in text
+                              or "gs://" in text or "azure_blob" in text
+                              or "azblob" in text)
+                has_verb = ("list" in text or "public" in text
+                            or "readable" in text or "enum" in text
+                            or "world" in text)
+                if has_target and has_verb:
+                    buckets_ev.append({
+                        "finding_kind": v.script_id or v.title or "bucket",
+                        "ip": h.ip, "port": v.port,
+                        "output_excerpt": (v.output or "")[:240],
+                    })
+
+        # 6. secrets_manager_read — Vault or SecretsManager style finding
+        #    kinds indicating a secret was pulled from a managed vault.
+        secrets_ev: list[dict] = []
+        for h in hosts:
+            for v in h.vulns:
+                sid = (v.script_id or "").lower()
+                ttl = (v.title or "").lower()
+                text = f" {sid} {ttl} "
+                if any(m in text for m in
+                       ("vault_read", "vault_secret", "secretsmanager",
+                        "secrets_manager", "kv_read", "kv-read",
+                        "keyvault", "key_vault")):
+                    secrets_ev.append({
+                        "finding_kind": v.script_id or v.title or "vault",
+                        "ip": h.ip, "port": v.port,
+                        "output_excerpt": (v.output or "")[:240],
+                    })
+
+        raw_steps = [
+            ("imds_reachable", "IMDS endpoint reachable",
+             bool(imds_reach_ev), imds_reach_ev, [],
+             "curl -s -m 2 http://169.254.169.254/latest/meta-data/  # from a "
+             "compromised host or SSRF primitive; GCP uses "
+             "metadata.google.internal, Azure 169.254.169.254 with a Metadata "
+             "header.",
+             []),
+            ("imds_v1_present", "IMDSv1 accessible (no token required)",
+             bool(imds_v1_ev), imds_v1_ev, ["imds_reachable"],
+             "curl -sSf http://169.254.169.254/latest/meta-data/  # if this "
+             "returns 200 without an X-aws-ec2-metadata-token header, IMDSv1 "
+             "is enabled and SSRF is enough to pivot.",
+             []),
+            ("iam_role_disclosed", "IAM role attached + name disclosed",
+             bool(iam_ev), iam_ev, ["imds_v1_present"],
+             "curl -s http://169.254.169.254/latest/meta-data/iam/info | jq  "
+             "# then list the role's inline + attached policies with aws iam "
+             "list-attached-role-policies / get-role-policy.",
+             []),
+            ("sts_creds_extracted", "STS session credentials extracted",
+             bool(sts_ev), sts_ev, ["iam_role_disclosed"],
+             "curl -s http://169.254.169.254/latest/meta-data/iam/"
+             "security-credentials/<role>  # export "
+             "AccessKeyId/SecretAccessKey/Token and confirm with aws sts "
+             "get-caller-identity.",
+             []),
+            ("s3_buckets_listed", "Cloud object storage enumerated",
+             bool(buckets_ev), buckets_ev, ["sts_creds_extracted"],
+             "aws s3 ls  # then aws s3api list-objects --bucket <b>. GCP: "
+             "gsutil ls gs://; Azure: az storage container list.",
+             []),
+            ("secrets_manager_read", "Secrets manager / vault read",
+             bool(secrets_ev), secrets_ev, ["sts_creds_extracted"],
+             "aws secretsmanager list-secrets && aws secretsmanager "
+             "get-secret-value --secret-id <arn>  # Vault: vault kv list "
+             "secret/; GCP: gcloud secrets versions access latest --secret=<n>.",
+             []),
+        ]
+        return _assemble_chain(raw_steps)
+
+    # ---- /api/attack-chain/web — P1-6 web n-day chain -----------------------
+    # Six-step story: fingerprint → pinned versions → KEV match → safe
+    # verify (T2) → OOB callback → authenticated session.
+    @app.get("/api/attack-chain/web")
+    def attack_chain_web():
+        from ...core.store import Store
+
+        WEB_SOURCES = {"http", "web", "webdav", "api"}
+
+        with Store(db_path) as st:
+            hosts = st.all_hosts()
+            creds = st.all_credentials()
+
+        # 1. web_surface_fingerprinted — any open http/web port that has
+        #    both product AND version set. Nmap version-scan is what
+        #    populates these; a bare "http" service with no product is not
+        #    enough.
+        fp_ev: list[dict] = []
+        for h in hosts:
+            for p in h.ports:
+                if p.state != "open":
+                    continue
+                svc = (p.service or "").lower()
+                product = getattr(p, "product", "") or ""
+                version = getattr(p, "version", "") or ""
+                if ("http" in svc or "web" in svc) and product and version:
+                    fp_ev.append({
+                        "finding_kind": "web_fingerprint",
+                        "ip": h.ip, "port": p.portid,
+                        "output_excerpt": f"{product} {version}".strip(),
+                    })
+
+        # 2. product_version_pinned — >1 distinct (endpoint, banner) pairs.
+        #    A single vhost gets you one n-day at best; two or more means
+        #    the attack surface is real.
+        pinned_uniq = {(e["ip"], e["port"], e["output_excerpt"]) for e in fp_ev}
+        pinned_proven = len(pinned_uniq) > 1
+        pinned_ev = fp_ev if pinned_proven else []
+
+        # 3. kev_matched — a web-source Vuln flagged kev=True.
+        kev_ev: list[dict] = []
+        for h in hosts:
+            for v in h.vulns:
+                src = (v.source or "").lower()
+                if src in WEB_SOURCES and bool(getattr(v, "kev", False)):
+                    cves = ", ".join(list(getattr(v, "ids", []) or [])[:3])
+                    excerpt = (cves + " — " + (v.title or "")).strip(" —")
+                    kev_ev.append({
+                        "finding_kind": v.script_id or v.title or "kev",
+                        "ip": h.ip, "port": v.port,
+                        "output_excerpt": excerpt[:240],
+                    })
+
+        # 4. poc_safe_verify_fires — T2 proof: any web-source Vuln whose
+        #    depth_tier == "t2" (a controlled payload proved the exploit
+        #    primitive).
+        t2_ev: list[dict] = []
+        for h in hosts:
+            for v in h.vulns:
+                src = (v.source or "").lower()
+                tier = (getattr(v, "depth_tier", "") or "").lower()
+                if src in WEB_SOURCES and tier == "t2":
+                    t2_ev.append({
+                        "finding_kind": v.script_id or v.title or "t2_proof",
+                        "ip": h.ip, "port": v.port,
+                        "output_excerpt": (v.output or "")[:240],
+                    })
+
+        # 5. oob_callback_triggered (T3 gate) — a specific OOB-callback
+        #    finding kind. This is a manual step in most workflows
+        #    (interactsh / Burp collaborator) so the kind is what proves it.
+        oob_ev: list[dict] = []
+        for h in hosts:
+            for v in h.vulns:
+                sid = (v.script_id or "").lower()
+                ttl = (v.title or "").lower()
+                text = f" {sid} {ttl} "
+                if any(m in text for m in
+                       ("oob_callback", "oob-callback",
+                        "out-of-band callback", "dns_callback",
+                        "interactsh", "collaborator_hit")):
+                    oob_ev.append({
+                        "finding_kind": v.script_id or v.title or "oob",
+                        "ip": h.ip, "port": v.port,
+                        "output_excerpt": (v.output or "")[:240],
+                    })
+
+        # 6. session_established — a Credential(source in {cracked,
+        #    spray-validated}) proves the tester walked from n-day to an
+        #    authenticated primitive. We accept any credential whose source
+        #    field carries "crack" / "spray" as the marker.
+        sess_ev: list[dict] = []
+        for c in creds:
+            src = (c.source or "").lower()
+            if "crack" in src or "spray" in src or "validated" in src:
+                sess_ev.append({
+                    "finding_kind": f"credential:{c.kind}",
+                    "ip": c.origin_ip, "port": None,
+                    "output_excerpt": f"{c.label} — {c.kind} from "
+                                      f"{src or 'source'}",
+                })
+
+        raw_steps = [
+            ("web_surface_fingerprinted",
+             "Web surface fingerprinted (product + version)",
+             bool(fp_ev), fp_ev, [],
+             "whatweb -a3 https://<target>/  # or nmap -sV -p "
+             "80,443,8080,8443 <target>; feed the banner into searchsploit "
+             "and https://vulners.com/.",
+             []),
+            ("product_version_pinned",
+             "Multiple products / versions pinned to specific endpoints",
+             pinned_proven, pinned_ev, ["web_surface_fingerprinted"],
+             "For every distinct product+version cluster map to a KEV/EDB "
+             "entry (searchsploit <product> <version>; cve.org / "
+             "nvd.nist.gov).",
+             []),
+            ("kev_matched",
+             "KEV-listed n-day matches the surface",
+             bool(kev_ev), kev_ev, ["product_version_pinned"],
+             "Pull the KEV row from CISA + confirm the fingerprint is in the "
+             "affected range; queue a T1 safe-verify probe before firing any "
+             "PoC.",
+             []),
+            ("poc_safe_verify_fires",
+             "PoC safe-verify probe fires (T2 proof)",
+             bool(t2_ev), t2_ev, ["kev_matched"],
+             "Run the passive / deterministic verifier per the CVE playbook "
+             "(curl-based probe or a nuclei template). Do NOT chain to full "
+             "exploit until safe-verify hits.",
+             []),
+            ("oob_callback_triggered",
+             "Out-of-band callback triggered (manual step)",
+             bool(oob_ev), oob_ev, ["poc_safe_verify_fires"],
+             "Stand up an OOB listener (interactsh-client or a namespaced "
+             "Burp collaborator) and fire the marker payload; wait for the "
+             "DNS / HTTP callback to prove blind exec.",
+             []),
+            ("session_established",
+             "Authenticated session established",
+             bool(sess_ev), sess_ev, ["oob_callback_triggered"],
+             "curl -b <cookie> https://<target>/admin/  # or run the "
+             "exploit's post-login primitive (RCE / file read / SSRF chain) "
+             "via the acquired session.",
+             []),
+        ]
+        return _assemble_chain(raw_steps)
 
     @app.get("/api/hashloot/categories")
     def hashloot_categories():
