@@ -686,7 +686,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"rpcinfo -p {h.ip}",
                 "Firewall rpcbind (111) to management hosts; disable ypserv "
                 "if the site has migrated to LDAP/Kerberos.",
-                ["CWE-200"], kind="nis_rpc_names"))
+                ["CWE-200"], kind="nis_rpc_names",
+                exploit_note=(
+                    "rpcinfo -p <ip>; note ports for 100004 (ypserv) and "
+                    "100009 (yppasswdd); recce auto-continues to domain "
+                    "guess."),
+                depth_tier="t0"))
 
         # yppasswdd / ypupdated presence.
         if "yppasswdd" in named:
@@ -700,7 +705,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"yppasswd -h {h.ip} <user>   # do NOT run without ROE",
                 "Disable yppasswdd if password changes are handled elsewhere; "
                 "patch to a version past CVE-2001-0779 / CVE-2015-1391.",
-                ["CWE-284", "CWE-306"], kind="nis_yppasswdd"))
+                ["CWE-284", "CWE-306"], kind="nis_yppasswdd",
+                exploit_note=(
+                    "rpcinfo -p <ip>; searchsploit yppasswdd; PoC only in "
+                    "a lab: metasploit auxiliary/dos/rpc/yppasswdd "
+                    "(crashes it)."),
+                depth_tier="t0"))
         if "ypupdated" in named:
             out.append(_finding(
                 "high",
@@ -739,7 +749,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "ypcat",
                 f"ypcat -d {domain} -h {h.ip} passwd",
                 "Restrict ypserv with /var/yp/securenets; migrate off NIS.",
-                ["CWE-200"], kind="nis_maplist"))
+                ["CWE-200"], kind="nis_maplist",
+                exploit_note=(
+                    "ypcat -d <domain> -h <ip> -x; then per-map: ypcat -d "
+                    "<domain> -h <ip> <map>."),
+                depth_tier="t1"))
 
         # Critical: passwd hashes.
         if hashes:
@@ -785,7 +799,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"hashcat -m 1500 loot/nis-{domain}.pw wordlist.txt",
                     "Retire the EOL OS or force an OS-side reset onto a "
                     "modern crypt scheme.",
-                    ["CWE-327", "CWE-1104"], kind="nis_hash_age"))
+                    ["CWE-327", "CWE-1104"], kind="nis_hash_age",
+                    exploit_note=(
+                        "hashcat -m 1500 -a 0 loot/nis-des.pw rockyou.txt "
+                        "-O -w 4  # DES cracks in minutes."),
+                    depth_tier="t1"))
 
         # Group + netgroup.
         group_recs = (pr.get("records") or {}).get("group.byname", [])
@@ -854,7 +872,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "ypcat",
                 f"ypcat -d {domain} -h {h.ip} hosts",
                 "Restrict ypserv (securenets); migrate topology data off NIS.",
-                ["CWE-200"], kind="nis_topology_leak"))
+                ["CWE-200"], kind="nis_topology_leak",
+                exploit_note=(
+                    "ypcat -d <domain> -h <ip> ypservers; then re-run "
+                    "nisyp probe against each slave server — may bypass "
+                    "securenets ACL of the master."),
+                depth_tier="t1"))
 
         # securenets partial hardening.
         if pr.get("securenets"):
@@ -872,7 +895,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "Complete the hardening — restrict YPPROC_DOMAIN as well "
                 "(ypserv -i / securenets ACL on the ypbind side) so the "
                 "domain name itself does not leak.",
-                ["CWE-306"], kind="nis_domain_leak"))
+                ["CWE-306"], kind="nis_domain_leak",
+                exploit_note=(
+                    "After foothold on any in-range client: ssh <client> "
+                    "'ypcat -d <domain> passwd'  # may succeed where "
+                    "direct scan failed."),
+                depth_tier="t1"))
     return out
 
 

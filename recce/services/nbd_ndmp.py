@@ -1051,7 +1051,11 @@ def _nbd_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             "confirms cleartext",
             "Enable NBD over TLS (NBD_OPT_STARTTLS) with a peer certificate; "
             "reject NBD_OPT_LIST until TLS is up.",
-            ["CWE-319"], kind="nbd_cleartext"))
+            ["CWE-319"], kind="nbd_cleartext",
+            exploit_note=(
+                f"openssl s_client -connect {ip}:{port}  # if NBDMAGIC banner "
+                "instead of TLS ServerHello, plaintext confirmed"),
+            depth_tier="t0"))
     return out
 
 
@@ -1184,7 +1188,10 @@ def _ndmp_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             "ndmp", f"# recce negotiated v{pr['version']} on {ip}:{port}",
             "Upgrade the NDMP server to a v4-capable implementation and "
             "reject legacy versions.",
-            ["CWE-1104", "CWE-1188"], kind="ndmp_legacy_version"))
+            ["CWE-1104", "CWE-1188"], kind="ndmp_legacy_version",
+            exploit_note=(
+                "note version in report; pair with vendor advisory review"),
+            depth_tier="t0"))
     # Session-hijack surface: we always report this once for any live NDMP
     # endpoint, since MOVER/DATA channels are unauth by design in the spec.
     if pr.get("reachable"):

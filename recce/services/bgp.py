@@ -579,7 +579,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "If TCP-MD5 / TCP-AO is required, add the neighbor "
                         "password on both peers. If the ACL should permit this "
                         "source, correct the neighbor statement.",
-                        ["CWE-306"], kind="bgp_md5_hint"))
+                        ["CWE-306"], kind="bgp_md5_hint",
+                        exploit_note=(
+                            "sudo tcpdump -ni any 'host <ip> and tcp port "
+                            "179'; retry with 'ip xfrm policy' + TCP-MD5 "
+                            "configured to disambiguate."),
+                        depth_tier="t0"))
                 continue
 
             op = pr.get("open") or {}
@@ -657,7 +662,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "sec. 4.2; RFC 6793 for the 4-octet AS capability).",
                     f"nmap --script bgp-info -p {p.portid} {h.ip}",
                     "Informational — pairs with bgp_reachable.",
-                    ["CWE-200"], kind="bgp_peer_id"))
+                    ["CWE-200"], kind="bgp_peer_id",
+                    exploit_note=(
+                        "whois -h whois.arin.net 'a AS<peer_asn>'; check "
+                        "bgp.tools/<peer_asn> for peering graph."),
+                    depth_tier="t0"))
 
             # bgp_router_id_pivot — new host address from Router-ID.
             router_id = (op.get("router_id") or "").strip()
@@ -675,7 +684,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Ensure loopback / management interfaces of routing "
                     "infrastructure are on a dedicated management network "
                     "unreachable from tenant segments.",
-                    ["CWE-200"], kind="bgp_router_id_pivot"))
+                    ["CWE-200"], kind="bgp_router_id_pivot",
+                    exploit_note=(
+                        "nmap -Pn -sS -p- <router_id>; then nxc ssh "
+                        "<router_id> -u 'admin,cisco,root' -p "
+                        "'admin,cisco,Cisco123,<vendor-defaults>'."),
+                    depth_tier="t0"))
 
             # bgp_capabilities — one info finding summarising the set.
             caps = op.get("capabilities") or []
@@ -687,7 +701,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     + "; ".join(f"code {c['code']} — {c['name']}" for c in caps),
                     f"nmap --script bgp-info -p {p.portid} {h.ip}",
                     "Informational — narrows product/vendor fingerprint.",
-                    [], kind="bgp_capabilities"))
+                    [], kind="bgp_capabilities",
+                    exploit_note=(
+                        "nmap --script bgp-info -p 179 <ip>; compare cap "
+                        "set against vendor stacks (Cisco IOS-XR advertises "
+                        "Enhanced Route Refresh; FRR advertises LLGR)."),
+                    depth_tier="t0"))
 
             # bgp_afi_safi — role tag (edge vs PE vs EVPN leaf).
             if op.get("afi_safis"):
@@ -699,7 +718,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "fabric leaf', not an edge router.",
                     f"nmap --script bgp-info -p {p.portid} {h.ip}",
                     "Informational — role fingerprint for the graph.",
-                    ["CWE-200"], kind="bgp_afi_safi"))
+                    ["CWE-200"], kind="bgp_afi_safi",
+                    exploit_note=(
+                        "nmap --script bgp-info -p 179 <ip>; if EVPN "
+                        "present, scan for L2/L3 tenant boundary bypass "
+                        "with e.g. VXLAN scanner."),
+                    depth_tier="t0"))
 
             # bgp_graceful_restart — production-vs-lab hint.
             gr = op.get("graceful_restart")
@@ -715,7 +739,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "production infrastructure rather than a lab rig.",
                     f"nmap --script bgp-info -p {p.portid} {h.ip}",
                     "Informational.",
-                    [], kind="bgp_graceful_restart"))
+                    [], kind="bgp_graceful_restart",
+                    exploit_note=(
+                        "nmap --script bgp-info -p 179 <ip>  # note "
+                        "restart_time; large value = production."),
+                    depth_tier="t0"))
 
             # bgp_route_refresh — fingerprint.
             if op.get("has_route_refresh"):
@@ -728,7 +756,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "code.",
                     f"nmap --script bgp-info -p {p.portid} {h.ip}",
                     "Informational.",
-                    [], kind="bgp_route_refresh"))
+                    [], kind="bgp_route_refresh",
+                    exploit_note="nmap --script bgp-info -p 179 <ip>.",
+                    depth_tier="t0"))
 
             # bgp_notification_leak — decoded NOTIFICATION disclosure.
             if n:
@@ -746,7 +776,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Consider whether the NOTIFICATION data payload needs "
                     "to be populated on eBGP sessions with untrusted peers "
                     "(some implementations allow suppressing it).",
-                    ["CWE-209", "CWE-200"], kind="bgp_notification_leak"))
+                    ["CWE-209", "CWE-200"], kind="bgp_notification_leak",
+                    exploit_note=(
+                        "Parse leaked value from finding; use in "
+                        "bgp_expected_as_disclosed follow-up."),
+                    depth_tier="t1"))
 
             # bgp_expected_as_disclosed — peer's configured neighbor AS.
             if pr.get("expected_as"):
@@ -785,7 +819,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"— the peer follows RFC 4271 sec. 6.2 verbatim.",
                     f"nmap --script bgp-info -p {p.portid} {h.ip}",
                     "Informational.",
-                    ["CWE-200"], kind="bgp_version_probe"))
+                    ["CWE-200"], kind="bgp_version_probe",
+                    exploit_note="Included in probe automatically.",
+                    depth_tier="t0"))
     return out
 
 

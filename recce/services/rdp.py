@@ -444,7 +444,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"|  standard_rdp_accepted={pr.get('standard_rdp_accepted')}",
                 f"xfreerdp /v:{h.ip}:{p.portid}",
                 "Restrict RDP to a jump host / VPN. Log connection attempts.",
-                [], kind="rdp_fingerprint"))
+                [], kind="rdp_fingerprint",
+                exploit_note=(
+                    "nmap -p <port> --script rdp-enum-encryption,rdp-ntlm-info <ip>."),
+                depth_tier="t0"))
             # CredSSP NTLM CHALLENGE info leak — NetBIOS/DNS name, AD domain,
             # forest, OS build. Same wire-shape intel as nmap rdp-ntlm-info; no
             # credentials sent.
@@ -475,7 +478,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Default Windows RDS behavior when CredSSP is enabled; "
                         "network-restrict RDP and disable NTLM where feasible "
                         "(Kerberos-only) to reduce the identity leak surface.",
-                        ["CWE-200"], kind="rdp_ntlm_info"))
+                        ["CWE-200"], kind="rdp_ntlm_info",
+                        exploit_note=(
+                            "nmap -p <port> --script rdp-ntlm-info <ip>; then feed "
+                            "dns_domain into kerberos + os_version into CVE search."),
+                        depth_tier="t1"))
                 # CredSSP TSRequest version <=2 == pre-March-2018 patch level =
                 # CVE-2018-0886 (CredSSP logon-cred injection RCE).
                 cver = info.get("credssp_version")
@@ -493,7 +500,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Install the March-2018 CredSSP update on both server "
                         "and clients (KB4093120 family; Group Policy: 'Encryption "
                         "Oracle Remediation' = Force updated clients).",
-                        ["CWE-287", "CWE-346"], kind="rdp_credssp_unpatched"))
+                        ["CWE-287", "CWE-346"], kind="rdp_credssp_unpatched",
+                        exploit_note=(
+                            "Metasploit auxiliary/scanner/rdp/cve_2019_0708_bluekeep "
+                            "(safe check) - but for CVE-2018-0886 exploitation "
+                            "requires MitM position and controlled credentials; not "
+                            "typically exploited on internal without additional access."),
+                        depth_tier="t1"))
     return out
 
 

@@ -1048,7 +1048,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Informational — feeds CPE / CVE mapping and correlates the "
                     "facility name across services (SNMP sysLocation, HTTP page "
                     "title on the vendor web UI).",
-                    ["CWE-200"], kind="bacnet_device_identity"))
+                    ["CWE-200"], kind="bacnet_device_identity",
+                    exploit_note=(
+                        "Cross-reference vendor/model against ICSA-* BAS "
+                        "advisories; check the corresponding web UI on "
+                        "80/443/8080 for default creds — Siemens Desigo: "
+                        "admin/admin, JCI Metasys: MetasysSysAgent/"
+                        "MetasysSysAgent."),
+                    depth_tier="t0"))
 
             # 3. Object list.
             olist = pr.get("object_list") or []
@@ -1065,7 +1072,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"bacwi -1 -p {p.portid} {h.ip}",
                     "Same containment as bacnet_reachable — the base protocol has no "
                     "auth to add here.",
-                    ["CWE-200"], kind="bacnet_object_inventory"))
+                    ["CWE-200"], kind="bacnet_object_inventory",
+                    exploit_note=(
+                        "bacwi -1 <ip>; for each analog-value: bacrp <ip> "
+                        "analog-value <inst> present-value; identify "
+                        "high-value points (chillers, dampers, door-strikes) "
+                        "by object-name field."),
+                    depth_tier="t1"))
 
             # 4. BBMD BDT.
             bdt = pr.get("bdt") or []
@@ -1129,7 +1142,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"bvlc read-fdt {h.ip}:{p.portid}",
                     "Restrict Foreign-Device registration to allow-listed source IPs; disable "
                     "it entirely on Internet-reachable BBMDs.",
-                    ["CWE-200"], kind="bacnet_fdt_disclosure"))
+                    ["CWE-200"], kind="bacnet_fdt_disclosure",
+                    exploit_note=(
+                        "For each FDT entry, nmap -sV -p 80,443,8080,47808 "
+                        "<peer_ip>; often the peer is an engineer's Windows "
+                        "workstation with SMB/RDP open."),
+                    depth_tier="t1"))
 
             # 6. Foreign-Device registration accepted.
             fr = pr.get("foreign_reg") or {}
@@ -1170,7 +1188,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Do not expose 47808/udp to the Internet. Where segment reachability "
                     "is required, filter inbound Who-Is at the perimeter or rate-limit "
                     "responses at the BBMD.",
-                    ["CWE-406"], kind="bacnet_amplification_reflector"))
+                    ["CWE-406"], kind="bacnet_amplification_reflector",
+                    exploit_note=(
+                        "hping3 -1 --spoof <victim> <ip> -d 12 -c 1 (with a "
+                        "Who-Is payload) — DO NOT run at Internet scale; "
+                        "corroborate the ratio only."),
+                    depth_tier="t1"))
 
             # 8. Unauthenticated WriteProperty.
             wd = pr.get("write_dryrun") or {}
@@ -1258,7 +1281,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"bacnet-atomic-read -p {p.portid} {h.ip} 10 <instance> 0 64",
                     "Restrict AtomicReadFile at a BACnet firewall; on the controller, "
                     "delete or ACL File objects that carry configuration or logs.",
-                    ["CWE-200", "CWE-306"], kind="bacnet_atomic_file_read"))
+                    ["CWE-200", "CWE-306"], kind="bacnet_atomic_file_read",
+                    exploit_note=(
+                        "bacnet-atomic-read -p 47808 <ip> 10 <file_inst> 0 "
+                        "65535; save to disk and strings/hex it — look for "
+                        "admin creds, WPA keys, BMS API keys embedded in "
+                        "config backups."),
+                    depth_tier="t2"))
 
             # 12. Stack fingerprint (segmentation + max APDU).
             seg = identity.get("segmentation")
@@ -1273,7 +1302,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"bacepics -p {p.portid} {h.ip}",
                     "Track the concrete vendor / firmware against the vendor CVE feed; "
                     "apply firmware updates where available.",
-                    ["CWE-200"], kind="bacnet_stack_fingerprint"))
+                    ["CWE-200"], kind="bacnet_stack_fingerprint",
+                    exploit_note=(
+                        "Correlate small max-APDU + segmented-both against "
+                        "BACnet-stack DoS CVEs — e.g. Trane/SmartX / "
+                        "Cimetrics / Delta Controls parser bugs; do NOT fuzz "
+                        "against production."),
+                    depth_tier="t0"))
 
             # 13. BACnet/SC downgrade path.
             if _has_bacnet_sc(h):
@@ -1288,7 +1323,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"nmap -p 47820,{p.portid} {h.ip}",
                     "Disable the plaintext BACnet/IP port on the controller once BACnet/SC "
                     "is in production; require /SC end-to-end.",
-                    ["CWE-757", "CWE-319"], kind="bacnet_sc_downgrade"))
+                    ["CWE-757", "CWE-319"], kind="bacnet_sc_downgrade",
+                    exploit_note=(
+                        "nmap -p 47820,47808 <ip>; confirm both open then "
+                        "talk plaintext to 47808 to prove downgrade works "
+                        "even though /SC exists on 47820."),
+                    depth_tier="t1"))
     return out
 
 

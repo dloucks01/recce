@@ -621,7 +621,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Confirm asset ownership; if this is a genuine PLC, keep "
                     "legacy S7COMM disabled and monitor for unauthorised "
                     "protocol negotiation.",
-                    ["CWE-200"], kind="s7_cotp_reachable"))
+                    ["CWE-200"], kind="s7_cotp_reachable",
+                    exploit_note=(
+                        "for tsap in 0100 0200 0201 0300 4c01 4c02 1000; do "
+                        "python -c \"import snap7; c=snap7.client.Client(); "
+                        "c.set_connection_params('<ip>',0x0100,int('$tsap',16)); "
+                        "c.connect_tsap()\"; done"),
+                    depth_tier="t0"))
 
             if pr.get("s7_plus"):
                 out.append(_finding(
@@ -637,7 +643,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Segmentation stance stands — even S7COMM-PLUS CPUs should "
                     "not be reachable from IT. Track firmware against Siemens "
                     "ProductCERT advisories SSA-434534 and SSA-568427.",
-                    ["CWE-200"], kind="s7_plus_detected"))
+                    ["CWE-200"], kind="s7_plus_detected",
+                    exploit_note=(
+                        "snap7-plus-cli connect <ip>; check firmware via TIA "
+                        "Portal Online-Diagnostics; correlate with SSA-434534 "
+                        "and SSA-568427."),
+                    depth_tier="t0"))
 
             if pr.get("s7_stack"):
                 out.append(_finding(
@@ -650,7 +661,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"plcscan -p {p.portid} {h.ip}",
                     "Confirm PUT/GET is disabled on 1200/1500 CPUs; on "
                     "300/400 the protocol has no authentication.",
-                    ["CWE-306"], kind="s7_stack_confirmed"))
+                    ["CWE-306"], kind="s7_stack_confirmed",
+                    exploit_note=(
+                        "snap7-client -h <ip> -c connect -R 0 -S 2 && "
+                        "snap7-client -h <ip> -c szl -i 0x0011"),
+                    depth_tier="t1"))
 
             tsaps = pr.get("tsaps_confirmed") or []
             if len(tsaps) >= 1:
@@ -665,7 +680,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"plcscan {h.ip}",
                     "Informational — pairs with the module identification "
                     "finding.",
-                    ["CWE-200"], kind="s7_tsap_enumerated"))
+                    ["CWE-200"], kind="s7_tsap_enumerated",
+                    exploit_note=(
+                        "Try each confirmed TSAP with snap7-client "
+                        "set_connection_params — one may reach a CP343-1/"
+                        "CP443-1 with different protection level than the CPU."),
+                    depth_tier="t0"))
 
             if pr.get("order_code"):
                 fw = pr.get("fw_version") or "?"
@@ -702,7 +722,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"snap7-client -h {h.ip} -c szl -i 0x001C",
                     "This information is protocol-exposed by design; the "
                     "control is network segmentation, not per-field redaction.",
-                    ["CWE-200"], kind="s7_component_identification"))
+                    ["CWE-200"], kind="s7_component_identification",
+                    exploit_note=(
+                        "Record plant_designation / location — often names "
+                        "the physical process/site. Correlate serial against "
+                        "vendor RMA / engineering-station project files if "
+                        "reachable."),
+                    depth_tier="t0"))
 
             if pr.get("put_get_enabled"):
                 # T2 promotion: when the FC 0x04 probe against M0.0 succeeded,
@@ -864,7 +890,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"snap7-client -h {h.ip} -c listblocks",
                     "Segment the CPU; block-list disclosure is inherent to "
                     "the protocol and cannot be disabled per-field.",
-                    ["CWE-200"], kind="s7_block_list"))
+                    ["CWE-200"], kind="s7_block_list",
+                    exploit_note=(
+                        "For each DB in blocks: snap7-client -h <ip> -c "
+                        "blockget -t DB -n <num>; write raw to disk and "
+                        "disassemble with plctool/snap7 to recover "
+                        "engineering IP."),
+                    depth_tier="t1"))
 
             for m in pr.get("cve_matches") or []:
                 out.append(_finding(

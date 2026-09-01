@@ -665,7 +665,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "docker CLI",
                     f"docker -H {_scheme(p.portid)}://<ip>:{p.portid} volume ls",
                     "Informational — pairs with the api-exposed finding above.",
-                    [], kind="docker_volumes"))
+                    [], kind="docker_volumes",
+                    exploit_note=(
+                        "docker -H ... volume ls; docker -H ... run --rm -v "
+                        "<vol>:/loot alpine find /loot -type f — look for "
+                        "id_rsa, credentials, .env."),
+                    depth_tier="t0"))
     return out
 
 

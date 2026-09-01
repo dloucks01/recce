@@ -482,7 +482,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "curl",
                     f"curl -s http://{h.ip}:{p.portid}/",
                     "Upgrade to a supported Elasticsearch release.",
-                    ["CWE-1104"], kind="es_version"))
+                    ["CWE-1104"], kind="es_version",
+                    exploit_note=(
+                        "curl -s -XPOST 'http://<ip>:<port>/_search?pretty' -d "
+                        "'{\"script_fields\":{\"a\":{\"script\":\"1+1\"}}}' - a "
+                        "returned 2 confirms scripting enabled; then swap in the "
+                        "CVE-2015-1427 sandbox escape (in-scope only)."),
+                    depth_tier="t0"))
     return out
 
 

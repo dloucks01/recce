@@ -328,7 +328,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"echo wchs | nc {h.ip} {p.portid}",
                     "Whitelist only what monitoring needs. Never leave wchc/wchp "
                     "reachable from an untrusted network.",
-                    ["CWE-200"], kind="zk_admin_4lw"))
+                    ["CWE-200"], kind="zk_admin_4lw",
+                    exploit_note=(
+                        f"echo wchs | nc {h.ip} {p.portid}  ; echo wchc | "
+                        f"nc {h.ip} {p.portid}  # session-to-path map"),
+                    depth_tier="t1"))
 
             # Info-level fingerprint always emitted so the report reflects
             # what recce could actually see.
@@ -339,7 +343,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"{', '.join(safe) or 'none'} · total 4LW accepted: {len(exposed)}",
                 f"echo srvr | nc {h.ip} {p.portid}",
                 "Informational — pairs with any dump/admin finding above.",
-                [], kind="zk_fingerprint"))
+                [], kind="zk_fingerprint",
+                exploit_note=(f"echo srvr | nc {h.ip} {p.portid}"),
+                depth_tier="t0"))
     return out
 
 

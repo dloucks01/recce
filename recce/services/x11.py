@@ -262,7 +262,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"DISPLAY={h.ip}{display} xdpyinfo   # will fail without a cookie",
                     "Restrict 6000-6009/tcp to trusted networks; if not required, "
                     "prefer -nolisten tcp.",
-                    ["CWE-200"], kind="x11_present"))
+                    ["CWE-200"], kind="x11_present",
+                    exploit_note=(
+                        "nmap -sU -p 177 --script xdmcp-discover <ip>; and: "
+                        "DISPLAY=<ip>:<display> xhost + 2>&1   "
+                        "# test if the operator left xhost + on at some point"),
+                    depth_tier="t0"))
     return out
 
 

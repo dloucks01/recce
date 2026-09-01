@@ -401,7 +401,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "tnscmd", f"tnscmd10g version -h {h.ip} -p {p.portid}",
                     "Restrict listener admin to local OS auth; set ADMIN_RESTRICTIONS_"
                     "<listener>=ON; firewall the port.",
-                    ["CWE-200"], kind="oracle_version_leak"))
+                    ["CWE-200"], kind="oracle_version_leak",
+                    exploit_note=(
+                        f"tnscmd10g version -h {h.ip} -p {p.portid} — "
+                        "confirm; then apply CVE-map findings."),
+                    depth_tier="t1"))
             # NEW: version -> CVE mapping (offline; each entry a separate finding).
             for cve in pr.get("known_cves") or []:
                 out.append(_finding(
@@ -462,7 +466,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Front-end the SCAN listener with a firewall / NAT that does not "
                     "leak internal cluster addresses; use REMOTE_LISTENER only inside "
                     "the trusted cluster network.",
-                    ["CWE-200"], kind="oracle_rac_internal_endpoint_leak"))
+                    ["CWE-200"], kind="oracle_rac_internal_endpoint_leak",
+                    exploit_note=(
+                        f"tnscmd10g services -h {h.ip} -p {p.portid}; then "
+                        "oracle probe against the disclosed internal HOST:PORT "
+                        "— repeat until you find the true instance host."),
+                    depth_tier="t1"))
     return out
 
 

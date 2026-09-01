@@ -781,7 +781,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Confirm the CAA list matches the intended substation "
                     "population; retire stale CAAs and log every "
                     "interrogation at the gateway.",
-                    ["CWE-200"], kind="iec104_station_addresses"))
+                    ["CWE-200"], kind="iec104_station_addresses",
+                    exploit_note=(
+                        "For each caa in caa_alive: iec104ctl <ip>:2404 "
+                        "interrogation --caa <caa> --limit 1000 — reveals "
+                        "each substation's full point list."),
+                    depth_tier="t1"))
 
             # Control-type surface (paired with STARTDT accepted).
             if pr.get("startdt_ok") and pr.get("control_types_reachable"):
@@ -875,7 +880,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Enable IEC 62351-3 on the RTU/gateway and require TLS "
                     "on 2404/tcp. Provision per-master client certificates; "
                     "disable plaintext IEC-104 after the transition.",
-                    ["CWE-319", "CWE-311"], kind="iec104_no_tls"))
+                    ["CWE-319", "CWE-311"], kind="iec104_no_tls",
+                    exploit_note=(
+                        "tcpdump -w /tmp/104.pcap 'host <ip> and port 2404'; "
+                        "capture a legit master session to prove "
+                        "interrogation/control content is readable on the "
+                        "wire."),
+                    depth_tier="t1"))
             else:
                 out.append(_finding(
                     "info",
@@ -887,7 +898,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"name-only.",
                     f"openssl s_client -connect {h.ip}:{p.portid} -showcerts",
                     "Verify mutual authentication is enforced (IEC 62351-3 "
-                    "§5).", [], kind="iec104_tls_present"))
+                    "§5).", [], kind="iec104_tls_present",
+                    exploit_note=(
+                        "openssl s_client -connect <ip>:2404 -showcerts (no "
+                        "client cert); if it completes, the peer accepts any "
+                        "client — IEC 62351-3 §5 mutual auth is not "
+                        "enforced."),
+                    depth_tier="t0"))
 
             # Vendor fingerprint from private TypeIDs.
             if pr.get("private_type_ids"):
@@ -904,7 +921,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "the device.",
                     f"# iec104ctl {h.ip}:{p.portid} fingerprint",
                     "Informational — pairs with the reachability finding.",
-                    [], kind="iec104_vendor_identified"))
+                    [], kind="iec104_vendor_identified",
+                    exploit_note=(
+                        "Correlate against Siemens/ABB/GE/SEL/Schneider "
+                        "IEC-104 advisories; check the RTU's web UI on "
+                        "80/443 for default creds (SICAM: admin/100, "
+                        "RTU5xx: admin/admin)."),
+                    depth_tier="t0"))
 
             # Targeted read (medium-severity capability).
             if pr.get("targeted_read_ok"):
@@ -919,7 +942,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"a tester can point at any known point.",
                     f"# iec104ctl {h.ip}:{p.portid} read --ioa <n>",
                     "Restrict source of 2404/tcp; enforce IEC 62351-3.",
-                    ["CWE-306"], kind="iec104_ioa_read_ok"))
+                    ["CWE-306"], kind="iec104_ioa_read_ok",
+                    exploit_note=(
+                        "iec104ctl <ip>:2404 read --caa <caa> --ioa <n>; "
+                        "loop over the IOA-list from interrogation for "
+                        "continuous per-object monitoring."),
+                    depth_tier="t2"))
 
             # Session-singleton.
             if pr.get("session_second_accepted") is True and \
@@ -939,7 +967,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "required (IEC 60870-5-104 Annex A), enforce network-"
                     "layer source restriction so no unauthorised host can "
                     "open the displacing second session.",
-                    ["CWE-287"], kind="iec104_session_hijack"))
+                    ["CWE-287"], kind="iec104_session_hijack",
+                    exploit_note=(
+                        "LAB ONLY: open two concurrent iec104ctl sessions; "
+                        "while the second is live, issue interrogation/"
+                        "control from it while the operator's HMI sees "
+                        "connection drop then reconnect. Never on "
+                        "production."),
+                    depth_tier="t2"))
     return out
 
 

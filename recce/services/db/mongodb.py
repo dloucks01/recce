@@ -861,7 +861,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "'db.adminCommand({getShardMap:1})'",
                     "Bind the cluster interfaces to a trusted network; require "
                     "authentication on every shard and config server.",
-                    ["CWE-200"], kind="mongo_shard_topology"))
+                    ["CWE-200"], kind="mongo_shard_topology",
+                    exploit_note=(
+                        "for h in <shard_hosts>; do mongosh mongodb://$h/ --eval "
+                        "'db.adminCommand({listDatabases:1})'; done"),
+                    depth_tier="t1"))
             inv = pr.get("collection_inventory") or {}
             if inv:
                 sample = []
@@ -883,7 +887,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict listCollections at the RBAC layer (revoke "
                     "listCollections from the app role); bind to a trusted "
                     "interface.",
-                    ["CWE-200"], kind="mongo_collection_inventory"))
+                    ["CWE-200"], kind="mongo_collection_inventory",
+                    exploit_note=(
+                        "mongosh mongodb://<ip>:<port>/<db> --eval "
+                        "'db.<coll>.find().limit(20)' for each interesting collection "
+                        "name in the inventory."),
+                    depth_tier="t1"))
             hinfo = pr.get("host_info") or {}
             if hinfo and (hinfo.get("hostname") or hinfo.get("os_name")):
                 bits = []
@@ -933,7 +942,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "'db.adminCommand({hostInfo:1})'",
                     "Restrict the hostInfo command to trusted roles "
                     "(hostManager/clusterMonitor) and remove any unauth exposure.",
-                    ["CWE-200"], kind="mongo_hostinfo", depth_tier=tier))
+                    ["CWE-200"], kind="mongo_hostinfo",
+                    exploit_note=(
+                        "mongosh mongodb://<ip>:<port>/ --eval "
+                        "'db.adminCommand({hostInfo:1})' ; then use the hostname/OS "
+                        "pair for SMB spraying or Kerberos ASREPRoast."),
+                    depth_tier=tier))
             warns = pr.get("startup_warnings") or []
             if warns:
                 # De-dupe by 'msg' body; startup log lines often include a
@@ -959,7 +973,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Remediate each listed warning (enable auth, bind to a "
                     "trusted interface, drop deprecated storage engines, fix "
                     "TLS / ulimit / THP settings).",
-                    ["CWE-532", "CWE-16"], kind="mongo_startup_warnings"))
+                    ["CWE-532", "CWE-16"], kind="mongo_startup_warnings",
+                    exploit_note=(
+                        "mongosh mongodb://<ip>:<port>/ --eval "
+                        "'db.adminCommand({getLog:\"startupWarnings\"})"
+                        ".log.forEach(printjson)'"),
+                    depth_tier="t1"))
             cks = pr.get("cluster_keys") or []
             if cks:
                 sample = cks[0]
@@ -1028,7 +1047,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "mongosh",
                     f"mongosh mongodb://{h.ip}:{p.portid}/ --eval 'db.version()'",
                     "Upgrade to a supported MongoDB release.",
-                    ["CWE-1104"], kind="mongo_version"))
+                    ["CWE-1104"], kind="mongo_version",
+                    exploit_note=(
+                        "mongosh mongodb://<ip>:<port>/ --eval 'db.version()' - "
+                        "cross-reference against MongoDB security advisories."),
+                    depth_tier="t0"))
     return out
 
 

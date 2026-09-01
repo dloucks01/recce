@@ -255,7 +255,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"rsync rsync://{h.ip}:{p.portid}/",
                     "Set 'list = false' and restrict access with 'hosts allow' / a "
                     "firewall.",
-                    ["CWE-200"], kind="rsync_list"))
+                    ["CWE-200"], kind="rsync_list",
+                    exploit_note=(
+                        f"rsync rsync://{h.ip}:{p.portid}/ -- grep for backups, "
+                        "home, srv, web, www; each hit is a candidate for the "
+                        "next-step per-module probe."),
+                    depth_tier="t1"))
     return out
 
 

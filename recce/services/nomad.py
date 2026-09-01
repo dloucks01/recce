@@ -410,7 +410,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"target this endpoint.",
                     f"curl http://{h.ip}:{p.portid}/v1/status/leader",
                     "Ensure ACLs stay enforcing; rotate compromised tokens promptly.",
-                    [], kind="nomad_authed"))
+                    [], kind="nomad_authed",
+                    exploit_note=(
+                        "curl -sX POST http://<ip>:4646/v1/acl/bootstrap — if "
+                        "200, cluster management token in response."),
+                    depth_tier="t0"))
 
             if pr.get("acl_bootstrap_token"):
                 sid = pr["acl_bootstrap_token"]

@@ -65,6 +65,21 @@ _DH_GROUP14_P_HEX = (
 _DH_GROUP14_P = int(_DH_GROUP14_P_HEX.replace(" ", ""), 16)
 _DH_GROUP14_G = 2
 
+# RFC 2409 §6.2 - 1024-bit MODP "Second Oakley Group" (SSH group1). Used
+# only by the T2 weak-KEX completion probe below to actually drive a
+# diffie-hellman-group1-sha1 handshake to KEXDH_REPLY when the initial
+# KEXINIT enumeration advertised it.
+_DH_GROUP1_P_HEX = (
+    "FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1"
+    "29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD"
+    "EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245"
+    "E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED"
+    "EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE65381"
+    "FFFFFFFF FFFFFFFF"
+)
+_DH_GROUP1_P = int(_DH_GROUP1_P_HEX.replace(" ", ""), 16)
+_DH_GROUP1_G = 2
+
 
 # --- posture tables (used by findings()) ----------------------------------------
 
@@ -333,6 +348,155 @@ def _capture_hostkey(rd: _Reader, sock: socket.socket, server_kex: list[str],
     return {"key_type": key_type, "blob": k_s,
             "fp_md5": f"MD5:{fp_md5}", "fp_sha256": fp_sha256,
             "hostkey_offered": server_hostkey}
+
+
+# --- T2 proof: weak-KEX end-to-end completion -----------------------------------
+
+_WEAK_KEX_T2_ALGO = "diffie-hellman-group1-sha1"
+
+
+def _build_restricted_kexinit(kex_name: str) -> bytes:
+    """KEXINIT restricted to a single kex_algorithms name, with broad
+    hostkey/cipher/MAC lists so the ONLY negotiation constraint is the
+    kex - used by _probe_weak_kex_completion to force the server to
+    either accept the weak KEX or send DISCONNECT."""
+    cookie = os.urandom(16)
+    payload = bytes([SSH_MSG_KEXINIT]) + cookie
+    payload += _pack_namelist([kex_name])
+    payload += _pack_namelist([
+        "rsa-sha2-256", "rsa-sha2-512", "ssh-rsa",
+        "ecdsa-sha2-nistp256", "ssh-ed25519", "ssh-dss",
+    ])
+    ciphers = ["aes128-ctr", "aes256-ctr", "aes128-cbc", "3des-cbc",
+               "aes128-gcm@openssh.com", "chacha20-poly1305@openssh.com"]
+    payload += _pack_namelist(ciphers)
+    payload += _pack_namelist(ciphers)
+    macs = ["hmac-sha2-256", "hmac-sha1", "hmac-md5", "hmac-sha1-96"]
+    payload += _pack_namelist(macs)
+    payload += _pack_namelist(macs)
+    payload += _pack_namelist(["none"])
+    payload += _pack_namelist(["none"])
+    payload += _pack_namelist([])
+    payload += _pack_namelist([])
+    payload += bytes([0])
+    payload += b"\x00\x00\x00\x00"
+    return payload
+
+
+def _probe_weak_kex_completion(ip: str, port: int = _DEFAULT_PORT,
+                               timeout: float = _TIMEOUT) -> dict:
+    """T2 proof for ssh_weak_kex.
+
+    Opens a fresh, second connection whose client KEXINIT offers ONLY
+    diffie-hellman-group1-sha1 for kex_algorithms and drives the exchange
+    all the way to KEXDH_REPLY. A server that merely *lists* the weak
+    method but refuses it at negotiation time answers with SSH_MSG_DISCONNECT
+    reason KEY_EXCHANGE_FAILED (RFC 4253 §11.1). A server that really
+    accepts it returns SSH_MSG_KEXDH_REPLY carrying the K_S blob - that
+    packet is the T2 evidence: the negotiation succeeded end-to-end, not
+    merely on paper.
+
+    Single roundtrip on a single controlled socket, bounded by
+    proxy.scaled(timeout). No shell-out, no state change, connection is
+    closed immediately after evidence is captured.
+
+    Returns {"attempted", "completed", "kex", "key_type", "reason"}.
+    """
+    out: dict = {"attempted": False, "completed": False,
+                 "kex": _WEAK_KEX_T2_ALGO,
+                 "key_type": "", "reason": ""}
+    t = proxy.scaled(timeout)
+    try:
+        sock = socket.create_connection((ip, port), timeout=t)
+    except OSError as exc:
+        out["reason"] = f"connect: {exc!r}"
+        return out
+    try:
+        rd = _Reader(sock, t)
+        try:
+            _ = _read_ident(rd)
+        except (EOFError, ValueError, OSError) as exc:
+            out["reason"] = f"ident: {exc!r}"
+            return out
+        try:
+            sock.sendall(_CLIENT_IDENT)
+            sock.sendall(_wrap_packet(
+                _build_restricted_kexinit(_WEAK_KEX_T2_ALGO)))
+        except OSError as exc:
+            out["reason"] = f"send-kexinit: {exc!r}"
+            return out
+        out["attempted"] = True
+
+        # Server KEXINIT (or DISCONNECT if it refuses ident-level).
+        server_kex: list[str] = []
+        for _ in range(4):
+            try:
+                payload = _read_packet(rd)
+            except (EOFError, OSError, ValueError, struct.error) as exc:
+                out["reason"] = f"read-kexinit: {exc!r}"
+                return out
+            if not payload:
+                continue
+            if payload[0] == SSH_MSG_DISCONNECT:
+                out["reason"] = "server DISCONNECT before KEXDH"
+                return out
+            if payload[0] == SSH_MSG_KEXINIT:
+                server_kex = _parse_kexinit(payload).get("kex", [])
+                break
+        else:
+            out["reason"] = "no server KEXINIT"
+            return out
+
+        if _WEAK_KEX_T2_ALGO not in server_kex:
+            out["reason"] = f"server did not offer {_WEAK_KEX_T2_ALGO}"
+            return out
+
+        # KEXDH_INIT: e = g^x mod p (group1 1024-bit MODP).
+        x = int.from_bytes(os.urandom(64), "big") | 1
+        e = pow(_DH_GROUP1_G, x, _DH_GROUP1_P)
+        try:
+            sock.sendall(_wrap_packet(
+                bytes([SSH_MSG_KEXDH_INIT]) + _pack_mpint(e)))
+        except OSError as exc:
+            out["reason"] = f"send-kexdh_init: {exc!r}"
+            return out
+
+        # KEXDH_REPLY (or DISCONNECT if the server refuses at this point).
+        for _ in range(4):
+            try:
+                payload = _read_packet(rd)
+            except (EOFError, OSError, ValueError, struct.error) as exc:
+                out["reason"] = f"read-kexdh_reply: {exc!r}"
+                return out
+            if not payload:
+                continue
+            if payload[0] == SSH_MSG_DISCONNECT:
+                out["reason"] = "server DISCONNECT after KEXDH_INIT"
+                return out
+            if payload[0] == SSH_MSG_KEXDH_REPLY:
+                if len(payload) < 5:
+                    out["reason"] = "KEXDH_REPLY too short"
+                    return out
+                (ks_len,) = struct.unpack_from(">I", payload, 1)
+                if ks_len == 0 or 5 + ks_len > len(payload):
+                    out["reason"] = "KEXDH_REPLY K_S length invalid"
+                    return out
+                k_s = payload[5:5 + ks_len]
+                if len(k_s) >= 4:
+                    (kt_len,) = struct.unpack_from(">I", k_s, 0)
+                    if 4 + kt_len <= len(k_s):
+                        out["key_type"] = k_s[4:4 + kt_len].decode(
+                            "ascii", "replace")
+                out["completed"] = True
+                out["reason"] = "KEXDH_REPLY received"
+                return out
+        out["reason"] = "no KEXDH_REPLY"
+        return out
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 # --- detection ------------------------------------------------------------------
@@ -676,11 +840,30 @@ def findings(hosts: list[Host], probes: dict | None = None,
             if weak_k:
                 worst = max((_WEAK_KEX[k][0] for k in weak_k),
                             key=lambda s: ("low", "medium", "high").index(s))
+                weak_kex_detail = (
+                    "Server-offered kex_algorithms includes deprecated methods: "
+                    + "; ".join(f"{k} - {_WEAK_KEX[k][1]}" for k in weak_k))
+                # T2 promotion: if the second-connection completion probe
+                # drove KEXDH group1-sha1 all the way to KEXDH_REPLY, the
+                # server proved end-to-end acceptance (not just advertisement).
+                wkc = pr.get("weak_kex_completion") or {}
+                weak_kex_tier = "t1"
+                if wkc.get("completed") and wkc.get("kex") in weak_k:
+                    weak_kex_tier = "t2"
+                    weak_kex_detail += (
+                        f"\n\nT2 proof: a second controlled connection whose "
+                        f"KEXINIT offered only '{wkc['kex']}' drove the exchange "
+                        f"to SSH_MSG_KEXDH_REPLY - the server returned a K_S of "
+                        f"type '{wkc.get('key_type') or '?'}'. Negotiation "
+                        "succeeded end-to-end, not merely on paper.")
+                elif wkc.get("attempted") and wkc.get("reason"):
+                    weak_kex_detail += (
+                        f"\n\nT2 completion probe attempted "
+                        f"({wkc['kex']}): not completed - {wkc['reason']}.")
                 out.append(_finding(
                     worst,
                     f"SSH weak key exchange offered: {', '.join(weak_k)}", tgt,
-                    "Server-offered kex_algorithms includes deprecated methods: "
-                    + "; ".join(f"{k} - {_WEAK_KEX[k][1]}" for k in weak_k),
+                    weak_kex_detail,
                     "openssh", f"ssh -oKexAlgorithms={weak_k[0]} -p {p.portid} {h.ip}",
                     "Remove weak KEX methods from sshd_config KexAlgorithms; "
                     "prefer curve25519-sha256 and diffie-hellman-group16-sha512+.",
@@ -689,7 +872,7 @@ def findings(hosts: list[Host], probes: dict | None = None,
                         "ssh -oKexAlgorithms=diffie-hellman-group1-sha1 "
                         "-oHostKeyAlgorithms=+ssh-rsa -vv -p <port> "
                         "nobody@<ip> 2>&1 | grep 'kex: algorithm'"),
-                    depth_tier="t1"))
+                    depth_tier=weak_kex_tier))
 
             # Weak ciphers (union of s->c and c->s to cover asymmetric offers).
             weak_c = sorted({c for c in cipher_sc + cipher_cs
@@ -915,6 +1098,16 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["softversion"] = pr.get("softversion", "")
                 hk_cap = pr.get("hostkey_capture") or {}
                 t["hostkey_fp"] = hk_cap.get("fp_sha256", "")
+                # T2 promotion for ssh_weak_kex: if the initial KEXINIT
+                # enumeration advertised diffie-hellman-group1-sha1, run one
+                # controlled second-connection completion probe.
+                if _WEAK_KEX_T2_ALGO in (pr.get("kex") or []):
+                    try:
+                        wkc = _probe_weak_kex_completion(t["ip"], t["port"])
+                    except OSError:
+                        wkc = None
+                    if wkc:
+                        pr["weak_kex_completion"] = wkc
                 # Feed the cross-service correlator so a fingerprint
                 # observed here can be spotted on other IPs (clone / MitM).
                 if hk_cap.get("fp_sha256"):

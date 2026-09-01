@@ -731,7 +731,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"dig SRV _ldap._tcp.{z} @{h.ip}; dig SRV _kerberos._tcp.{z} @{h.ip}",
                         "Not a defect on its own; verify these SRV records are meant "
                         "to be publicly visible and that the exposed DCs are hardened.",
-                        ["CWE-200"], kind="dns_ad_srv"))
+                        ["CWE-200"], kind="dns_ad_srv",
+                        exploit_note=(
+                            "kerbrute userenum -d <zone> --dc <dc_target> "
+                            "users.txt; ldapsearch -x -H ldap://<dc> "
+                            "-b DC=<zone_dc>,DC=<tld> '(objectClass=user)' "
+                            "sAMAccountName."),
+                        depth_tier="t0"))
             # NSEC walk — signed-zone enumeration without needing AXFR.
             for z, walk in (pr.get("nsec") or {}).items():
                 names = walk.get("names") or []
@@ -757,7 +763,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "count on public zones; better, use NSEC3 white-lies (RFC "
                     "7129 §5.5) or DNSSEC minimal-cover to answer 'no such name' "
                     "without disclosing neighbours.",
-                    ["CWE-200"], kind="dns_nsec_walk"))
+                    ["CWE-200"], kind="dns_nsec_walk",
+                    exploit_note=(
+                        "ldns-walk <zone> @<ip>; for NSEC3: nsec3walker "
+                        "<zone> then hashcat -m 8300 nsec3.hashes "
+                        "rockyou.txt to recover the hashed labels."),
+                    depth_tier="t1"))
             if pr.get("version") and "bind" in (pr.get("version") or "").lower():
                 out.append(_finding(
                     "low", "DNS server version disclosed (version.bind)", tgt,
@@ -765,7 +776,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "aids targeting.",
                     f"dig CH TXT version.bind @{h.ip}",
                     "Hide the version (options { version \"\"; }).",
-                    ["CWE-200"], kind="dns_version"))
+                    ["CWE-200"], kind="dns_version",
+                    exploit_note=(
+                        "dig CH TXT version.bind @<ip>; compare against ISC "
+                        "BIND security advisories; if <9.11.35 test with "
+                        "'nmap --script dns-cache-snoop' for CVE-2020-8617."),
+                    depth_tier="t0"))
             # Email-security posture per zone: SPF/DMARC absence or weakness
             # lets any external sender spoof mail from these domains.
             for z, es in (pr.get("email_sec") or {}).items():
@@ -778,7 +794,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"this domain — anyone can spoof From:.",
                         f"dig TXT {z} @{h.ip}",
                         "Publish SPF: 'v=spf1 <sources> -all' (or ~all for soft-fail).",
-                        ["CWE-290", "CWE-346"], kind="dns_missing_spf"))
+                        ["CWE-290", "CWE-346"], kind="dns_missing_spf",
+                        exploit_note=(
+                            "swaks --to test@<zone> --from ceo@<zone> "
+                            "--server <mx> --header 'Subject: spoof test'  "
+                            "# proves receiving MTA accepts unsigned "
+                            "spoofed mail."),
+                        depth_tier="t1"))
                 elif re.search(r"[+?]all\b", es["spf"], re.I):
                     # Weak SPF — +all = pass everything; ?all = neutral.
                     out.append(_finding(
@@ -787,7 +809,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "passes. Effectively equivalent to no SPF for spoofing purposes.",
                         f"dig TXT {z} @{h.ip}",
                         "Change the SPF terminator to -all (fail) or ~all (softfail).",
-                        ["CWE-290"], kind="dns_weak_spf"))
+                        ["CWE-290"], kind="dns_weak_spf",
+                        exploit_note=(
+                            "swaks --to test@<zone> --from spoof@<zone> "
+                            "--server <mx>; check whether SPF-failing mail "
+                            "lands in Inbox."),
+                        depth_tier="t1"))
                 if not es.get("dmarc"):
                     out.append(_finding(
                         "medium", f"DMARC record missing for {z}", tgt,
@@ -797,7 +824,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"dig TXT _dmarc.{z} @{h.ip}",
                         "Publish DMARC starting with 'v=DMARC1; p=none; rua=mailto:...' "
                         "for monitoring, then move to p=quarantine and p=reject.",
-                        ["CWE-290", "CWE-346"], kind="dns_missing_dmarc"))
+                        ["CWE-290", "CWE-346"], kind="dns_missing_dmarc",
+                        exploit_note=(
+                            "swaks --to victim@<zone> --from ceo@<zone> "
+                            "--server <mx>  # DMARC absent => spoofed "
+                            "From: passes end-to-end."),
+                        depth_tier="t1"))
                 elif "p=none" in es["dmarc"].lower():
                     out.append(_finding(
                         "low", f"DMARC in monitor-only mode for {z} (p=none)", tgt,
@@ -805,7 +837,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "still deliver it. Effective for reporting, not enforcement.",
                         f"dig TXT _dmarc.{z} @{h.ip}",
                         "Advance policy to p=quarantine (bulk-folder) then p=reject.",
-                        ["CWE-290"], kind="dns_dmarc_monitor"))
+                        ["CWE-290"], kind="dns_dmarc_monitor",
+                        exploit_note=(
+                            "swaks --to victim@<zone> --from cfo@<zone> "
+                            "--server <mx>; delivery to Inbox proves "
+                            "monitor-only enforcement."),
+                        depth_tier="t1"))
                 # DKIM: presence is informational — its absence isn't a bug
                 # per se (DMARC allows either SPF or DKIM to pass), so no
                 # finding emitted, but the selectors are surfaced for the report.

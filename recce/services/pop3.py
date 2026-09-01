@@ -877,7 +877,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"openssl s_client -connect {h.ip}:{p.portid}   # then CAPA",
                     "Trim IMPLEMENTATION to a bare product name (Dovecot: "
                     "pop3_implementation = pop3d; Cyrus: hide version).",
-                    ["CWE-200"], kind="pop3_implementation"))
+                    ["CWE-200"], kind="pop3_implementation",
+                    exploit_note=(
+                        "nc IP 110 ; CAPA ; note IMPLEMENTATION line and "
+                        "cross-check offline CVE DB"),
+                    depth_tier="t0"))
 
             # APOP timestamp disclosure.
             apop = pr.get("apop_timestamp") or ""
@@ -894,7 +898,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Configure the daemon to synthesise the APOP token from a "
                     "generic name (Dovecot: pop3_apop_username = ...), or "
                     "disable APOP entirely if unused.",
-                    ["CWE-200"], kind="pop3_apop_timestamp"))
+                    ["CWE-200"], kind="pop3_apop_timestamp",
+                    exploit_note=(
+                        "nc IP 110 ; note @hostname in first line ; add to "
+                        "/etc/hosts or feed the AD reader for cross-service "
+                        "correlation"),
+                    depth_tier="t1"))
                 out.append(_finding(
                     "high",
                     "POP3 APOP transcripts are offline-crackable (md5(challenge||pass))",
@@ -967,7 +976,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Drop PLAIN/LOGIN from the SASL mech list inside TLS; "
                     "require SCRAM-SHA-256 (or Kerberos) for authenticated "
                     "connections.",
-                    ["CWE-757"], kind="pop3_stls_broken"))
+                    ["CWE-757"], kind="pop3_stls_broken",
+                    exploit_note=(
+                        "openssl s_client -starttls pop3 -connect IP:110 ; "
+                        "type CAPA post-TLS - note PLAIN/LOGIN still "
+                        "present"),
+                    depth_tier="t1"))
 
             # SASL mechanism inventory.
             for mech in pr.get("sasl") or []:
@@ -1054,7 +1068,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"openssl s_client -connect {h.ip}:{p.portid}",
                         "Issue a CA-trusted certificate whose SAN covers the "
                         "service name; automate renewal.",
-                        ["CWE-295", "CWE-298"], kind="pop3s_cert"))
+                        ["CWE-295", "CWE-298"], kind="pop3s_cert",
+                        exploit_note=(
+                            "openssl s_client -connect IP:995 ; grab "
+                            "CN/SAN; use in mitmproxy --certs to MITM a "
+                            "client that doesn't verify."),
+                        depth_tier="t0"))
 
             # Banner / product-version match against the known-bad table.
             banner = pr.get("banner") or ""

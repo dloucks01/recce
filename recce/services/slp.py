@@ -528,7 +528,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"slptool -u {h.ip} findsrvtypes",
                 "Restrict SLP to the management network; disable on public "
                 "interfaces if not required.",
-                [], kind="slp_reachable"))
+                [], kind="slp_reachable",
+                exploit_note="slptool -u <ip> findsrvtypes.",
+                depth_tier="t0"))
 
             types = pr.get("types") or []
             if types:
@@ -566,7 +568,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "SMB/NFS/LDAP/wbem/cimom).",
                     f"slptool -u {h.ip} findsrvs service:service-agent",
                     "Restrict SLP to trusted networks.",
-                    ["CWE-200"], kind="slp_url_disclosure"))
+                    ["CWE-200"], kind="slp_url_disclosure",
+                    exploit_note=(
+                        "slptool -u <ip> findsrvs service:service-agent; "
+                        "parse each URL and enqueue for the matching "
+                        "service module (HTTP/CIFS/NFS/etc.)."),
+                    depth_tier="t1"))
 
             attrs = pr.get("attrs") or {}
             if attrs:
@@ -587,7 +594,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "service:VMwareInfrastructure",
                     "Restrict SLP to the management network. Disable SLP on "
                     "ESXi if unused: esxcli system slp set --enable false.",
-                    ["CWE-200"], kind="slp_attribute_disclosure"))
+                    ["CWE-200"], kind="slp_attribute_disclosure",
+                    exploit_note=(
+                        "slptool -u <ip> findattrs "
+                        "service:VMwareInfrastructure  # look for uuid, "
+                        "managementserver, product, version, build."),
+                    depth_tier="t1"))
 
             # UDP amplifier — RFC 2608 §5 UDP replies with no source
             # validation. Any 427/udp responder qualifies.
@@ -632,7 +644,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"slptool -u {h.ip} findsrvs service:directory-agent",
                     "Restrict DA discovery to trusted networks; if a DA is "
                     "public it multiplies the disclosure surface.",
-                    ["CWE-200"], kind="slp_directory_agent"))
+                    ["CWE-200"], kind="slp_directory_agent",
+                    exploit_note=(
+                        "slptool -u <da_ip> findsrvs service:  # empty "
+                        "type = all SAs registered with the DA."),
+                    depth_tier="t0"))
 
             # ESXi build-gated CVE (the version-gate is what avoids a false
             # positive on a patched ESXi that still answers SLP).
@@ -675,7 +691,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"slptool -u {h.ip} findattrs "
                     "service:VMwareInfrastructure",
                     "Continue restricting SLP to the management network.",
-                    [], kind="slp_esxi_patched"))
+                    [], kind="slp_esxi_patched",
+                    exploit_note=(
+                        "Continue restricting SLP to management network."),
+                    depth_tier="t0"))
             elif any("vmware" in (u["url"] or "").lower()
                      or "wbem" in (u["url"] or "").lower()
                      or "cimom" in (u["url"] or "").lower() for u in urls):
@@ -711,7 +730,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "routinely encode site / environment segmentation.",
                     f"slptool -u {h.ip} findscopes",
                     "Use generic scope names on public segments.",
-                    ["CWE-200"], kind="slp_scope_disclosure"))
+                    ["CWE-200"], kind="slp_scope_disclosure",
+                    exploit_note="slptool -u <ip> findscopes.",
+                    depth_tier="t0"))
 
             if pr.get("auth_blocks_seen"):
                 out.append(_finding(
@@ -722,7 +743,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "SLP deployment.",
                     f"slptool -u {h.ip} findsrvs service:service-agent",
                     "No action.",
-                    [], kind="slp_auth_present"))
+                    [], kind="slp_auth_present",
+                    exploit_note="No action.",
+                    depth_tier="t0"))
             else:
                 out.append(_finding(
                     "low",
@@ -732,7 +755,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "disclosure findings above are not gated by SPI.",
                     f"slptool -u {h.ip} findsrvs service:service-agent",
                     "Restrict SLP to trusted networks.",
-                    [], kind="slp_no_auth"))
+                    [], kind="slp_no_auth",
+                    exploit_note="Restrict SLP to trusted networks.",
+                    depth_tier="t1"))
 
             if pr.get("openslp"):
                 out.append(_finding(
@@ -744,7 +769,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"slptool -u {h.ip} findattrs service:service-agent",
                     "Track the OpenSLP version alongside the vendor's "
                     "patch matrix.",
-                    [], kind="slp_openslp_fingerprint"))
+                    [], kind="slp_openslp_fingerprint",
+                    exploit_note=(
+                        "slptool -u <ip> findattrs service:service-agent  "
+                        "# grep for version; compare to OpenSLP release "
+                        "notes."),
+                    depth_tier="t0"))
     return out
 
 

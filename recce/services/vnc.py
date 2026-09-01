@@ -163,14 +163,26 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"vncviewer {h.ip}::{p.portid}",
                     "Move to a TLS/VeNCrypt-wrapping VNC variant (TigerVNC + VeNCrypt "
                     "+ x509plain). Tunnel over SSH as an alternative.",
-                    ["CWE-326", "CWE-916"], kind="vnc_des_only"))
+                    ["CWE-326", "CWE-916"], kind="vnc_des_only",
+                    exploit_note=(
+                        "python3 -c 'import socket,struct; "
+                        "s=socket.create_connection((\"<ip>\",<port>));"
+                        "s.recv(12);s.send(b\"RFB 003.008\\n\");"
+                        "n=s.recv(1)[0];t=s.recv(n);s.send(b\"\\x02\");"
+                        "chal=s.recv(16);print(chal.hex())'  ->  "
+                        "hashcat -m 11600 <chal>:<known_response>"),
+                    depth_tier="t1"))
             out.append(_finding(
                 "info", "VNC endpoint fingerprint", tgt,
                 f"RFB {pr.get('version','?')} · security types: "
                 f"{', '.join(pr.get('security_types') or [])}",
                 f"vncviewer {h.ip}::{p.portid}",
                 "Restrict VNC access; log connection attempts.",
-                [], kind="vnc_fingerprint"))
+                [], kind="vnc_fingerprint",
+                exploit_note=(
+                    "nmap -p <port> --script vnc-info,realvnc-auth-bypass <ip>   "
+                    "# covers RealVNC CVE-2006-2369 auth-bypass among others."),
+                depth_tier="t0"))
     return out
 
 

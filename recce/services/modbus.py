@@ -326,7 +326,15 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"credentials for HMI/PLC firmware.",
                     f"modpoll -m tcp -a 1 {h.ip}",
                     "Informational — pairs with the modbus_reachable finding above.",
-                    [], kind="modbus_device_id"))
+                    [], kind="modbus_device_id",
+                    exploit_note=(
+                        "Feed vendor/product into a local CVE map (Schneider "
+                        "Modicon M340 / Siemens SIMATIC ET200 / AB MicroLogix "
+                        "defaults) and check hxxps://www.cisa.gov/news-events/"
+                        "ics-advisories; try default web UI creds admin/admin, "
+                        "admin/(blank), Administrator/Administrator on port "
+                        "80/443 of the same host."),
+                    depth_tier="t0"))
             units = pr.get("units") or []
             if len(units) > 1:
                 # Multiple responding unit IDs on one TCP endpoint → almost

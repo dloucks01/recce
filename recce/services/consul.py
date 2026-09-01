@@ -394,7 +394,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Any looted Consul token would target this endpoint.",
                     f"curl http://{h.ip}:{p.portid}/v1/status/leader",
                     "Ensure ACLs stay enforcing; rotate compromised tokens promptly.",
-                    [], kind="consul_authed"))
+                    [], kind="consul_authed",
+                    exploit_note=(
+                        "curl -X PUT http://<ip>:8500/v1/acl/bootstrap — if "
+                        "200, JSON contains the initial management token "
+                        "(cluster-god); if 403 the system is already bootstrapped."),
+                    depth_tier="t0"))
 
             hits = pr.get("kv_secrets") or []
             if hits:
@@ -449,7 +454,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"curl -sk http://{h.ip}:{p.portid}/v1/agent/self "
                     "| jq .DebugConfig.TLSMinVersion",
                     "Set tls.defaults.tls_min_version = tls12 (or tls13) in consul HCL.",
-                    ["CWE-327"], kind="consul_weak_tls"))
+                    ["CWE-327"], kind="consul_weak_tls",
+                    exploit_note=(
+                        "openssl s_client -connect <ip>:8501 -tls1 -quiet — "
+                        "if handshake succeeds, TLS 1.0 is enabled on the wire."),
+                    depth_tier="t0"))
     return out
 
 

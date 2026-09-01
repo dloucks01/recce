@@ -701,6 +701,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "token for the pprof endpoints (`enable_debug = false` on the "
                     "listener, or wrap them behind an ACL policy).",
                     ["CWE-200", "CWE-497"], kind="vault_debug_disclosure",
+                    exploit_note=(
+                        "curl -sk 'https://<ip>:8200/v1/sys/pprof/goroutine?debug=2' "
+                        "-o goroutine.txt; grep -aiE 'unseal|token|secret|password|"
+                        "s\\.[A-Za-z0-9]{24,}' goroutine.txt; also fetch "
+                        "/v1/sys/pprof/heap."),
                     depth_tier=tier)
                 if leak_matches:
                     f["output"] = (
@@ -729,7 +734,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"https://{h.ip}:{p.portid}/v1/sys/mounts",
                     "Audit the policy attached to any token in use; tokens "
                     "usually need only a small subset of mounts.",
-                    ["CWE-200"], kind="vault_authed_mounts"))
+                    ["CWE-200"], kind="vault_authed_mounts",
+                    exploit_note=(
+                        "VAULT_ADDR=https://<ip>:8200 VAULT_TOKEN=<t> vault token "
+                        "lookup; vault policy list; vault auth list; then vault kv "
+                        "list on each kv mount."),
+                    depth_tier="t2"))
 
             if pr.get("kv_secrets"):
                 sample = ", ".join(
@@ -823,7 +833,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"TLS: {'yes' if pr.get('tls_enabled') else 'no'}.",
                 f"curl -sk https://{h.ip}:{p.portid}/v1/sys/seal-status",
                 "Any looted VAULT_TOKEN can be tried against this endpoint.",
-                [], kind="vault_reachable"))
+                [], kind="vault_reachable",
+                exploit_note=(
+                    "curl -sk https://<ip>:8200/v1/sys/seal-status; note version "
+                    "-> check HCSEC bulletins."),
+                depth_tier="t0"))
     return out
 
 

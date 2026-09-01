@@ -800,7 +800,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "--data '<RetrieveServiceContent .../>'",
                     "Restrict management-plane access to a dedicated OOB "
                     "network; monitor /sdk for unexpected clients.",
-                    ["CWE-200"], kind="vsphere_fingerprint"))
+                    ["CWE-200"], kind="vsphere_fingerprint",
+                    exploit_note=(
+                        f"curl -sk -X POST https://{h.ip}:{p.portid}/sdk "
+                        "-H 'Content-Type: text/xml' "
+                        "--data '<RetrieveServiceContent "
+                        "xmlns=\"urn:vim25\"/>'"),
+                    depth_tier="t0"))
 
                 cves = pr.get("cves") or []
                 if cves:
@@ -911,7 +917,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "-servername " + (cert.get("cn") or h.ip)
                         + " </dev/null 2>/dev/null | openssl x509 -text",
                         "N/A — informational; feeds cross-service surfaces.",
-                        [], kind="vsphere_cert"))
+                        [], kind="vsphere_cert",
+                        exploit_note=(
+                            f"openssl s_client -connect {h.ip}:{p.portid} "
+                            "-servername <cn> </dev/null | openssl x509 "
+                            "-text | grep -i dns"),
+                        depth_tier="t0"))
 
             login = pr.get("login") or {}
             if login.get("success"):
@@ -1055,7 +1066,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "curl", f"curl -sk https://{h.ip}:5480/",
                     "Restrict VAMI to the OOB management network; rotate the "
                     "appliance root password.",
-                    ["CWE-284"], kind="vsphere_vami"))
+                    ["CWE-284"], kind="vsphere_vami",
+                    exploit_note=(
+                        f"curl -sk -u root:vmware https://{h.ip}:5480/rest/"
+                        "appliance/access/consolecli"),
+                    depth_tier="t0"))
     return out
 
 

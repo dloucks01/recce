@@ -509,7 +509,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"'IOXIDResolver ServerAlive2' against {h.ip}:135",
                     "Restrict 135/tcp to management networks; the OXID resolver cannot "
                     "be disabled independently of DCOM.",
-                    ["CWE-200"], kind="msrpc_ioxid"))
+                    ["CWE-200"], kind="msrpc_ioxid",
+                    exploit_note=(
+                        "impacket-rpcmap ncacn_ip_tcp:<ip>; then for each new "
+                        "address returned, add to nmap scope: nmap -sT -p "
+                        "445,88,389,3389 <newly-discovered-ips>."),
+                    depth_tier="t1"))
 
             coercion = pr.get("coercion") or []
             if coercion:
@@ -548,7 +553,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "impacket-rpcmap",
                     f"impacket-rpcmap ncacn_ip_tcp:{h.ip}",
                     "Restrict 135/tcp and the dynamic RPC range to management hosts.",
-                    ["CWE-200"], kind="msrpc_epm"))
+                    ["CWE-200"], kind="msrpc_epm",
+                    exploit_note=(
+                        "impacket-rpcmap ncacn_ip_tcp:<ip>; then targeted "
+                        "per-interface: rpcclient -U '' -N <ip> for samr "
+                        "enumdomusers; impacket-lookupsid <ip>/-; "
+                        "impacket-wmiquery for wmi."),
+                    depth_tier="t1"))
 
             # High-value interfaces (Netlogon / BKRP): recognised, not probed.
             # A distinct finding so downstream Netlogon / DPAPI checks have a
@@ -569,7 +580,15 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict 135/tcp to management networks; on DCs, apply the "
                     "Netlogon secure-channel enforcement and DPAPI hardening "
                     "guidance for the relevant advisories.",
-                    ["CWE-200", "CWE-287"], kind="msrpc_high_value_iface"))
+                    ["CWE-200", "CWE-287"], kind="msrpc_high_value_iface",
+                    exploit_note=(
+                        "nmap -p 445 --script smb-vuln-cve-2020-1472 <dc-ip>; "
+                        "or CVE-2020-1472-checker.py (SecuraBV) - runs 2000 "
+                        "NetrServerAuthenticate3 attempts and detects a "
+                        "vulnerable KDC without setting the machine password "
+                        "to empty. Do NOT run the full exploit without a "
+                        "saved secure-channel backup."),
+                    depth_tier="t1"))
 
             # Dynamic-port map: EPM towers with an ncacn_ip_tcp floor tell us
             # which UUID lives on which 49152-65535 port. Downstream services
@@ -592,7 +611,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"impacket-rpcdump {h.ip}",
                     "Restrict the dynamic RPC range (49152-65535) to "
                     "management hosts at the network layer.",
-                    ["CWE-200"], kind="msrpc_dynport_map"))
+                    ["CWE-200"], kind="msrpc_dynport_map",
+                    exploit_note=(
+                        "impacket-rpcdump <ip>; then direct-connect on the "
+                        "dynamic port: e.g. impacket-samrdump ncacn_ip_tcp:"
+                        "<ip>[<samr-port>]."),
+                    depth_tier="t1"))
     return out
 
 

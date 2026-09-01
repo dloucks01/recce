@@ -661,7 +661,11 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
             out.append(_finding(
                 "info", f"Cloud provider identified: {p}", tgt,
                 f"Metadata dialect answered as {p}.",
-                "-", "-", [], kind="cloud_provider_identified"))
+                "-", "-", [], kind="cloud_provider_identified",
+                exploit_note=(
+                    "n/a - informational label used to steer per-provider "
+                    "probes"),
+                depth_tier="t0"))
 
     aws = probe_result.get("aws") or {}
     if aws.get("reachable"):
@@ -734,7 +738,11 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "instance-identity/document",
                 "The document itself is not sensitive by design, but the "
                 "accountId enables targeted phishing/enum against the tenant.",
-                ["CWE-200"], kind="instance_identity_disclosed"))
+                ["CWE-200"], kind="instance_identity_disclosed",
+                exploit_note=(
+                    "curl -s http://169.254.169.254/latest/dynamic/"
+                    "instance-identity/document"),
+                depth_tier="t0"))
         if aws.get("ssh_public_keys"):
             out.append(_finding(
                 "low", "AWS instance SSH public keys disclosed via IMDS", tgt,
@@ -746,7 +754,12 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "Public keys are low-severity on their own; the risk is "
                 "correlation. Prefer AWS Systems Manager Session Manager or "
                 "short-lived certificates over baked-in SSH keys.",
-                ["CWE-200"], kind="imds_ssh_public_keys_disclosed"))
+                ["CWE-200"], kind="imds_ssh_public_keys_disclosed",
+                exploit_note=(
+                    "curl -s http://169.254.169.254/latest/meta-data/"
+                    "public-keys/0/openssh-key ; then grep across engagement "
+                    "authorized_keys mines"),
+                depth_tier="t0"))
 
     gcp = probe_result.get("gcp") or {}
     if gcp.get("reachable"):
@@ -784,7 +797,12 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "/computeMetadata/v1/project/project-id",
                 "Metadata disclosure is by design on GCE; treat project-id as "
                 "public-facing and rely on IAM for actual access control.",
-                ["CWE-200"], kind="instance_identity_disclosed"))
+                ["CWE-200"], kind="instance_identity_disclosed",
+                exploit_note=(
+                    "curl -s -H 'Metadata-Flavor: Google' "
+                    "http://metadata.google.internal/computeMetadata/v1/"
+                    "project/project-id"),
+                depth_tier="t0"))
 
     az = probe_result.get("azure") or {}
     if az.get("reachable"):
@@ -825,7 +843,12 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "Restrict who can enumerate the subscription; treat "
                 "subscriptionId + resourceGroup as engagement-sensitive pivot "
                 "identifiers.",
-                ["CWE-200"], kind="instance_identity_disclosed"))
+                ["CWE-200"], kind="instance_identity_disclosed",
+                exploit_note=(
+                    "curl -s -H 'Metadata: true' "
+                    "'http://169.254.169.254/metadata/instance?api-version="
+                    "2021-02-01'"),
+                depth_tier="t0"))
 
     ali = probe_result.get("alibaba") or {}
     if ali.get("reachable"):
@@ -891,7 +914,11 @@ def findings(probe_result: dict, target_label: str = "imds") -> list[dict]:
                 "curl -s http://169.254.169.254/metadata/v1.json",
                 "Metadata is unauthenticated by design on DO; treat any "
                 "workload reach to /metadata as a foothold indicator.",
-                ["CWE-200"], kind="instance_identity_disclosed"))
+                ["CWE-200"], kind="instance_identity_disclosed",
+                exploit_note=(
+                    "curl -s http://169.254.169.254/metadata/v1.json  "
+                    "# droplet id + region + hostname pivot"),
+                depth_tier="t0"))
     return out
 
 

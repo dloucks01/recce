@@ -404,6 +404,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Gate /api/v1/* behind authentication (reverse-proxy or a "
                     "Prometheus-native auth layer like caddy).",
                     ["CWE-200"], kind="prom_query_open",
+                    exploit_note=(
+                        "curl -sG http://<ip>:9090/api/v1/query --data-urlencode "
+                        "'query=node_uname_info' | jq '.data.result[].metric' — "
+                        "enumerate hostnames/kernels/architectures for target "
+                        "selection."),
                     depth_tier=tier))
             # Fingerprint always for report record.
             ver = pr.get("version") or "?"
@@ -415,7 +420,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"pprof_cmdline={pr.get('pprof_cmdline')}",
                 f"curl http://{h.ip}:{p.portid}/-/healthy",
                 "Restrict to management interface.",
-                [], kind="prom_fingerprint"))
+                [], kind="prom_fingerprint",
+                exploit_note=(
+                    "curl -sk http://<ip>:9090/api/v1/status/buildinfo — record "
+                    "version for CVE mapping."),
+                depth_tier="t0"))
     return out
 
 

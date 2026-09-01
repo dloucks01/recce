@@ -929,7 +929,12 @@ def findings(dc_ip: str, realm: str, results: list[dict],
             "Username enumeration via Kerberos pre-auth is largely inherent; minimise "
             "predictable names, monitor AS-REQ volume, and alert on pre-auth-disabled "
             "accounts.",
-            ["CWE-204"], kind="user_enum"))
+            ["CWE-204"], kind="user_enum",
+            exploit_note=(
+                "impacket-GetNPUsers <REALM>/ -no-pass -usersfile users.txt "
+                "-dc-ip <ip>; then kerbrute passwordspray -d <realm> --dc <ip> "
+                "users.txt 'Winter2025!' (or run recce's spray)."),
+            depth_tier="t1"))
     return out
 
 
@@ -1071,7 +1076,12 @@ def kdc_probe_findings(dc_ip: str, probe: dict,
             "kerbrute", f"kerbrute userenum -d '<realm>' --dc {dc_ip} users.txt",
             "This is defensive posture; no action needed - note the constraint "
             "when planning credential-less attacks against this DC.",
-            ["CWE-693"], kind="kerberos_fast_enforced"))
+            ["CWE-693"], kind="kerberos_fast_enforced",
+            exploit_note=(
+                "None - AS-REP roast of DONT_REQ_PREAUTH accounts is the only "
+                "remaining credless path; run recce kerberos and rely on that "
+                "finding class."),
+            depth_tier="t1"))
     skew = probe.get("skew_seconds")
     if skew is not None and abs(skew) >= skew_threshold:
         out.append(_finding(
@@ -1085,5 +1095,9 @@ def kdc_probe_findings(dc_ip: str, probe: dict,
             "ntpdate / w32tm",
             f"w32tm /monitor /computers:{dc_ip}",
             "Verify the DC's NTP source and monitor time-service events.",
-            ["CWE-200", "CWE-208"], kind="kdc_time_skew"))
+            ["CWE-200", "CWE-208"], kind="kdc_time_skew",
+            exploit_note=(
+                "sudo ntpdate <dc-ip> (sync to DC clock); or use faketime for the "
+                "impacket call: faketime '<kdc-stime>' impacket-getTGT ..."),
+            depth_tier="t1"))
     return out

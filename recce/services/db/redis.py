@@ -554,7 +554,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Enforce authentication so ACL commands are not reachable "
                     "unauthenticated, restrict ACL to admin users, and rotate any "
                     "exposed account passwords.",
-                    ["CWE-200", "CWE-916"], kind="redis_acl_users"))
+                    ["CWE-200", "CWE-916"], kind="redis_acl_users",
+                    exploit_note=(
+                        "echo '<sha256>' | hashcat -m 1400 rockyou.txt --username "
+                        "<user> ; cracked pair -> redis-cli -h <other> AUTH <user> "
+                        "<pw>; also try the same pw at OS."),
+                    depth_tier="t3"))
             if ver and _old_version(ver):
                 out.append(_finding(
                     "medium", "Redis end-of-life / legacy build", tgt,
@@ -563,7 +568,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "redis-cli",
                     f"redis-cli -h {h.ip} -p {p.portid} INFO server",
                     "Upgrade to a supported Redis release.",
-                    ["CWE-1104"], kind="redis_version"))
+                    ["CWE-1104"], kind="redis_version",
+                    exploit_note=(
+                        "redis-cli -h <ip> -p <port> INFO server ; cross-reference "
+                        "redis.io/topics/security advisories."),
+                    depth_tier="t0"))
     return out
 
 

@@ -797,7 +797,11 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         f"lpq -P lp -h {h.ip}",
                         "Restrict 515/tcp to trusted print sources; enforce a "
                         "peer allow-list (/etc/hosts.lpd on BSD lpd).",
-                        ["CWE-200", "CWE-306"], kind="lpd_queue_open"))
+                        ["CWE-200", "CWE-306"], kind="lpd_queue_open",
+                        exploit_note=(
+                            f"lpq -P lp -h {h.ip}  "
+                            "# empty now, but leaks on the next job"),
+                        depth_tier="t1"))
 
                 # Fingerprint + CVE cross-reference. Only cite CVEs when the
                 # fingerprint actually matches; unsure -> CWE only.
@@ -912,7 +916,11 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         "Populate /etc/hosts.lpd (or the LPRng equivalent "
                         "lpd.perms) with the specific print clients; block "
                         "515/tcp at the perimeter.",
-                        ["CWE-306", "CWE-77"], kind="lpd_acl_open"))
+                        ["CWE-306", "CWE-77"], kind="lpd_acl_open",
+                        exploit_note=(
+                            "review /etc/hosts.lpd on the target manually; "
+                            "do not send op 02 without ROE"),
+                        depth_tier="t1"))
 
             # --- IPP / CUPS extensions -------------------------------------
             if p.portid == _IPP_PORT and p.protocol == "tcp":
@@ -1029,7 +1037,9 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                             f"class of attack is unchanged; only this "
                             f"specific chain is patched.",
                             "review", "", "Keep patching cadence.",
-                            [], kind="cups_foomatic_patched"))
+                            [], kind="cups_foomatic_patched",
+                            exploit_note="n/a - patched",
+                            depth_tier="t0"))
 
                 # /admin log-endpoint auth check.
                 ar = admin_probes.get((h.ip, p.portid))
@@ -1097,7 +1107,13 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                             f"{ar['auth_required'][0]}",
                             "Set strong unique credentials on the CUPS "
                             "admin group; restrict the /admin Location.",
-                            ["CWE-284", "CWE-521"], kind="cups_admin_auth"))
+                            ["CWE-284", "CWE-521"], kind="cups_admin_auth",
+                            exploit_note=(
+                                f"curl -u cups:cups http://{h.ip}:"
+                                f"{p.portid}/admin ; hydra -l cups -P "
+                                "/usr/share/wordlists/rockyou.txt "
+                                f"http-get://{h.ip}:{p.portid}/admin"),
+                            depth_tier="t0"))
 
                 # URI hostname harvest (info-only finding; the values also
                 # feed known_hostnames / known_domains via analyze()).
@@ -1119,7 +1135,11 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                         "Configure cupsd BrowseLocalProtocols to none on "
                         "non-print hosts; do not advertise internal FQDNs "
                         "in printer share names.",
-                        ["CWE-200"], kind="ipp_uri_harvest"))
+                        ["CWE-200"], kind="ipp_uri_harvest",
+                        exploit_note=(
+                            f"ipptool -tv ipp://{h.ip}:{p.portid}/ "
+                            "get-printer-attributes.test"),
+                        depth_tier="t0"))
 
             # --- Printer-stack correlation ---------------------------------
             if p.portid == 515 and printer_ports.get(h.ip, set()) >= {515, 631, 9100}:
@@ -1137,7 +1157,11 @@ def findings(hosts: list[Host], lpd_probes: dict | None = None,
                     f"if/when a 9100 analyzer lands",
                     "Segregate print appliances onto a management VLAN; "
                     "disable unused print protocols on the device.",
-                    [], kind="printer_stack_correlation"))
+                    [], kind="printer_stack_correlation",
+                    exploit_note=(
+                        f"printf '@PJL INFO ID\\r\\n' | nc {h.ip} 9100  "
+                        "; # firmware + PJL support"),
+                    depth_tier="t0"))
     return out
 
 

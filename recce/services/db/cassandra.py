@@ -304,7 +304,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "cqlsh", f"cqlsh {h.ip} {p.portid} -e \"SELECT release_version FROM "
                     "system.local\"",
                     "Upgrade Cassandra (3.0.26 / 3.11.12 / 4.0.2+) and restrict UDF perms.",
-                    ["CWE-94"], kind="cassandra_version"))
+                    ["CWE-94"], kind="cassandra_version",
+                    exploit_note=(
+                        "cqlsh <ip> <port> -e \"SELECT * FROM system_views.settings "
+                        "WHERE name IN ('enable_user_defined_functions',"
+                        "'enable_scripted_user_defined_functions') ALLOW FILTERING\" ; "
+                        "if both true, PoC per Apache advisory CVE-2021-44521 "
+                        "(test-scope only)."),
+                    depth_tier="t0"))
     return out
 
 

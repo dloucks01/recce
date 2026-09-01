@@ -481,7 +481,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "integer-overflow RCE bugs (CVE-2016-8704/8705/8706).",
                     "ncat", f"printf 'version\\r\\n' | ncat {h.ip} {p.portid}",
                     "Upgrade memcached to a supported release (>= 1.6).",
-                    ["CWE-1104", "CWE-190"], kind="memcached_version"))
+                    ["CWE-1104", "CWE-190"], kind="memcached_version",
+                    exploit_note=(
+                        "printf 'version\\r\\n' | ncat <ip> <port> ; compare against "
+                        "1.4.32 / 1.6.x advisories."),
+                    depth_tier="t0"))
             # Value-retrieval proof - upgrades unauth-key-names to unauth-values.
             vals = pr.get("sample_values") or []
             if vals:

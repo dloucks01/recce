@@ -334,10 +334,12 @@ def sip_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -371,7 +373,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 "alwaysauthreject=yes (RFC-3261 §22 recommends the same reply "
                 "for existing vs missing extensions) so extension enumeration "
                 "cannot distinguish valid users.",
-                ["CWE-200"], kind="sip_fingerprint"))
+                ["CWE-200"], kind="sip_fingerprint",
+                exploit_note=(
+                    "svmap.py <ip>:<port>; searchsploit <vendor> <version>"),
+                depth_tier="t0"))
 
             # Extension enumeration signals:
             #   existing[] populated -> the server distinguishes 401/407 vs 404,
@@ -403,7 +408,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "return the same reply for existing vs missing extensions. "
                     "Require authentication on REGISTER even for extensions "
                     "that historically accepted anonymous registrations.",
-                    ["CWE-200", "CWE-306"], kind="sip_ext_enum"))
+                    ["CWE-200", "CWE-306"], kind="sip_ext_enum",
+                    exploit_note=(
+                        "svcrack.py -u <ext> -d rockyou.txt <ip>:<port>; on "
+                        "hit hydra -l <ext> -P wordlist sip://<ip>. For "
+                        "seen_ok=200 branches, register a soft-phone "
+                        "(linphone --sip <ext>@<ip>) and try an outbound "
+                        "call to a controlled number."),
+                    depth_tier="t2"))
 
             # Internal-IP disclosure via Via received= or Contact URI. Only
             # fire when the leaked address is a) RFC1918/private and b) DIFFERENT
@@ -436,7 +448,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "nathelper (fix_contact / fix_nated_contact), on Asterisk set "
                     "externaddr / localnet so the PBX advertises its routable "
                     "address instead of the internal one.",
-                    ["CWE-200"], kind="sip_internal_ip_disclosure"))
+                    ["CWE-200"], kind="sip_internal_ip_disclosure",
+                    exploit_note=(
+                        "sipsak -vv -s sip:<ip>:<port>; feed the leaked "
+                        "internal IP to arp/scan (once inside)."),
+                    depth_tier="t1"))
 
             # Digest algorithm advertisement (RFC 3261 §22.4 + RFC 8760). The
             # base spec only requires MD5; RFC 8760 (2020) added SHA-256 and
@@ -468,7 +484,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "(Kamailio auth_db config, Asterisk res_pjsip auth "
                         "algorithms) and remove MD5 from the offered set once "
                         "endpoints support the upgrade.",
-                        ["CWE-327", "CWE-916"], kind="sip_digest_md5_only"))
+                        ["CWE-327", "CWE-916"], kind="sip_digest_md5_only",
+                        exploit_note=(
+                            "tcpdump -i <iface> 'udp port 5060' -A | tee "
+                            "sip.log; grep -A20 'REGISTER sip' sip.log | "
+                            "grep -oE 'response=\"[a-f0-9]+\"'; assemble "
+                            "$sip$***realm***nonce***md5***user***uri***"
+                            "qop***response and feed hashcat -m 11400."),
+                        depth_tier="t0"))
     return out
 
 

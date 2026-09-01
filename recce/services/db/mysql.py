@@ -563,15 +563,18 @@ _MYSQL_CVE_MAP: list[tuple[str, tuple[int, int, int], str, str, str, str, str]] 
      "general_log=1; INSERT trigger crafted [malloc_lib] block; check /proc for mysqld_safe.",
      "t0"),
     # CVE-2021-2154 — partitioning DoS (post-auth). MySQL 5.7 <5.7.34, 8.0 <8.0.23.
-    # Medium — no exploit_note/depth_tier wired (deferred to a future audit pass).
     ("mysql", (5, 7, 33), "CVE-2021-2154", "medium",
      "Server: DML partitioning DoS — a post-auth attacker crashes the server. "
      "Fixed in 5.7.34.",
-     "", ""),
+     "Do NOT auto-run. Consult Oracle CPU April 2021 advisory + MySQL "
+     "5.7.34/8.0.23 changelog for the partitioning DML PoC.",
+     "t0"),
     ("mysql", (8, 0, 22), "CVE-2021-2154", "medium",
      "Server: DML partitioning DoS — a post-auth attacker crashes the server. "
      "Fixed in 8.0.23.",
-     "", ""),
+     "Do NOT auto-run. Consult Oracle CPU April 2021 advisory + MySQL "
+     "5.7.34/8.0.23 changelog for the partitioning DML PoC.",
+     "t0"),
 ]
 
 
@@ -722,7 +725,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "-e \"LOAD DATA LOCAL INFILE '/etc/passwd' INTO TABLE t\"",
                     "Set local_infile=0 in my.cnf (MySQL 8.0 default). Configure "
                     "app-side clients to disable local_infile in the driver.",
-                    ["CWE-269", "CWE-284"], kind="mysql_local_infile"))
+                    ["CWE-269", "CWE-284"], kind="mysql_local_infile",
+                    exploit_note=(
+                        "python3 rogue-mysql-server.py -f /etc/passwd; then "
+                        "coerce any client (SQLi in app that uses this DB) to "
+                        "connect with local_infile=1; captured file lands in "
+                        "your rogue server output."),
+                    depth_tier="t1"))
 
             # FILE privilege -> arbitrary file read/write, and (with a writable plugin
             # dir) UDF OS command execution as the mysql service account.
@@ -834,7 +843,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "\"SELECT name, dl FROM mysql.func\"",
                     "Audit each UDF against the vendor's signed catalogue; remove "
                     "unused UDFs; restrict CREATE/DROP FUNCTION to admins.",
-                    ["CWE-250"], kind="mysql_udf_inventory"))
+                    ["CWE-250"], kind="mysql_udf_inventory",
+                    exploit_note=(
+                        "mysql> SELECT name,dl FROM mysql.func; ldd on the .so "
+                        "on the DB host; grep for exec/system/popen — otherwise "
+                        "treat as informational."),
+                    depth_tier="t0"))
             # Version → CVE correlation on the already-parsed server_version string.
             if pr.get("reachable") and pr.get("version"):
                 out.extend(_cve_findings(tgt, pr["version"]))
@@ -849,7 +863,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"mysql -h {h.ip} -P {p.portid} --ssl-mode=REQUIRED   # fails = no TLS",
                     "Enable TLS (require_secure_transport=ON) and install a server "
                     "certificate; bind to a trusted interface.",
-                    ["CWE-319"], kind="mysql_no_tls"))
+                    ["CWE-319"], kind="mysql_no_tls",
+                    exploit_note=(
+                        "On-path sniff of native_password scramble; capture "
+                        "with tcpdump + mysql_scramble cracker "
+                        "(hashcat -m 11200)."),
+                    depth_tier="t1"))
     return out
 
 

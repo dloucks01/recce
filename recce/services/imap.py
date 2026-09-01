@@ -758,7 +758,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"nc {h.ip} {p.portid}   # a1 CAPABILITY; a2 LOGIN <u> <p>",
                     "Return BAD (protocol error) or NO with a TLS-required message "
                     "for LOGIN / AUTHENTICATE in the pre-TLS state (RFC 3501 §11.1).",
-                    ["CWE-757", "CWE-319"], kind="imap_starttls_downgrade"))
+                    ["CWE-757", "CWE-319"], kind="imap_starttls_downgrade",
+                    exploit_note=(
+                        "openssl s_client -connect IP:143 (raw) ; a1 "
+                        "CAPABILITY ; a2 LOGIN user password ; note "
+                        "LOGINDISABLED was advertised but LOGIN worked"),
+                    depth_tier="t1"))
 
             # SASL mechanism inventory.
             for mech in pr.get("sasl") or []:
@@ -835,7 +840,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"# sniff a client's {mech} response, then: hashcat -m {mode} <hash> wordlist.txt",
                     f"Disable {mech} in the SASL mech list; require SCRAM-SHA-256 "
                     "or Kerberos.",
-                    ["CWE-327", "CWE-916"], kind="imap_offline_crack_channel"))
+                    ["CWE-327", "CWE-916"], kind="imap_offline_crack_channel",
+                    exploit_note=(
+                        "arpspoof + tcpdump 'tcp port 143' to capture a "
+                        "real AUTHENTICATE CRAM-MD5 response, then: "
+                        "hashcat -m 10200 '$cram_md5$<b64_chal>$<b64_resp>' "
+                        "rockyou.txt"),
+                    depth_tier="t2"))
 
             # RFC 2971 ID banner leak.
             id_map = pr.get("id") or {}
@@ -849,7 +860,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"openssl s_client -connect {h.ip}:{p.portid}   # then a1 ID NIL",
                     "Strip the ID response's product/version/os fields (Dovecot: "
                     "imap_id_send = name * ; Cyrus: hide server details).",
-                    ["CWE-200"], kind="imap_id_disclosure"))
+                    ["CWE-200"], kind="imap_id_disclosure",
+                    exploit_note=(
+                        "openssl s_client -connect IP:PORT ; a1 ID NIL - "
+                        "read version/os/vendor fields and grep CVE DB"),
+                    depth_tier="t0"))
 
             # Banner / product-version match against the known-bad table.
             banner = pr.get("banner") or ""
@@ -885,7 +900,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"hydra -L users.txt -p '<pass>' imap://{h.ip}:{p.portid}",
                     "Return an identical NO response (and identical timing) for "
                     "every failed LOGIN regardless of user existence.",
-                    ["CWE-203", "CWE-204"], kind="imap_user_enum"))
+                    ["CWE-203", "CWE-204"], kind="imap_user_enum",
+                    exploit_note=(
+                        "hydra -L imap_enum_users.txt -P rockyou.txt -t 4 "
+                        "-f imap://IP:143 ; add -e nsr to try no-password, "
+                        "same-as-user, reversed."),
+                    depth_tier="t2"))
 
             # Credentialed follow-up.
             cred = pr.get("credentialed") or {}

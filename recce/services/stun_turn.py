@@ -584,7 +584,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict TURN to authenticated clients; the REALM leak is inherent "
                     "to RFC 8656 §7.2 — mitigate by placing TURN behind an ACL, or by "
                     "returning a generic realm that does not name the org.",
-                    ["CWE-200"], kind="turn_realm_disclosure"))
+                    ["CWE-200"], kind="turn_realm_disclosure",
+                    exploit_note=(
+                        "python3 -c \"import socket,os;s=socket.socket(2,2);"
+                        "s.sendto(bytes.fromhex('000300082112a442')+"
+                        "os.urandom(12)+bytes.fromhex('0019000411000000'),"
+                        f"('{h.ip}',{p.portid}));"
+                        "print(s.recvfrom(4096)[0])\""),
+                    depth_tier="t1"))
 
             if pr.get("turn_open_relay"):
                 relayed = pr.get("turn_relayed_address") or "unknown"
@@ -668,7 +675,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Configure the TURN daemon to omit the SOFTWARE attribute (coturn: "
                     "`no-software-attribute`); it has no protocol function beyond "
                     "identification.",
-                    ["CWE-200"], kind="stun_version_disclosure"))
+                    ["CWE-200"], kind="stun_version_disclosure",
+                    exploit_note=(
+                        f"nmap -sU -p3478 --script stun-version {h.ip}"),
+                    depth_tier="t0"))
 
             if pr.get("external_mapping"):
                 out.append(_finding(
@@ -682,7 +692,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Informational; STUN Binding is designed to return this. Restrict "
                     "3478 to the WebRTC signaling network if disclosure to arbitrary "
                     "clients is not required.",
-                    [], kind="stun_external_mapping"))
+                    [], kind="stun_external_mapping",
+                    exploit_note="n/a - informational",
+                    depth_tier="t0"))
 
             if pr.get("classic_stun"):
                 out.append(_finding(
@@ -702,7 +714,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"('{h.ip}',{p.portid}));print(s.recvfrom(4096)[0].hex())\"",
                     "Upgrade to a current STUN/TURN implementation (coturn 4.5+, "
                     "eturnal, restund); disable RFC 3489 compatibility mode.",
-                    ["CWE-1104"], kind="stun_legacy_rfc3489"))
+                    ["CWE-1104"], kind="stun_legacy_rfc3489",
+                    exploit_note=(
+                        "raw RFC 3489 probe (no magic cookie); confirm plain "
+                        "MAPPED-ADDRESS"),
+                    depth_tier="t0"))
 
             if pr.get("other_address"):
                 out.append(_finding(
@@ -716,7 +732,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"nmap -sU -p{p.portid} --script stun-info {h.ip}",
                     "Restrict RFC 5780 NAT-behavior-discovery responses; do not "
                     "expose secondary interfaces on Internet-facing STUN servers.",
-                    ["CWE-200"], kind="stun_second_address_disclosure"))
+                    ["CWE-200"], kind="stun_second_address_disclosure",
+                    exploit_note=(
+                        "nmap -sU -p3478 <other-address-ip>  # portscan the "
+                        "second STUN interface"),
+                    depth_tier="t0"))
 
             amp = pr.get("turn_amplification") or pr.get("amplification") or 0
             if amp >= 4.0:
@@ -735,7 +755,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Rate-limit STUN/TURN responses; restrict 3478 to authenticated "
                     "clients or the signaling network so the reflector cannot be "
                     "reached by arbitrary sources.",
-                    ["CWE-406"], kind="stun_amplification"))
+                    ["CWE-406"], kind="stun_amplification",
+                    exploit_note=(
+                        "n/a - DDoS proof would be unsafe; report the ratio "
+                        "only"),
+                    depth_tier="t1"))
 
             # TURNS TLS posture on 5349.
             tls_meta = pr.get("tls_meta") or {}
@@ -760,7 +784,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Require TLS 1.2+ (prefer 1.3), disable RC4/3DES/CBC-SHA, and "
                         "issue a certificate from a trusted CA whose SAN covers the "
                         "signaling hostname.",
-                        ["CWE-295", "CWE-326"], kind="turns_tls_weak"))
+                        ["CWE-295", "CWE-326"], kind="turns_tls_weak",
+                        exploit_note=(
+                            f"openssl s_client -connect {h.ip}:{p.portid} "
+                            "-showcerts"),
+                        depth_tier="t0"))
 
             out.append(_finding(
                 "info", "STUN/TURN endpoint reachable", tgt,
@@ -772,7 +800,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"nmap -sU -p{p.portid} --script stun-info,stun-version {h.ip}",
                 "Restrict STUN/TURN to the signaling network when not required "
                 "externally.",
-                [], kind="stun_fingerprint"))
+                [], kind="stun_fingerprint",
+                exploit_note=(
+                    f"nmap -sU -p{p.portid} --script stun-info,stun-version "
+                    f"{h.ip}"),
+                depth_tier="t0"))
     return out
 
 

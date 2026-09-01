@@ -723,7 +723,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"outstation identity across engineering-workstation project files.",
                     f"# dnp3ctl {h.ip}:{p.portid} read g0 --var 242",
                     "Informational — pairs with the reachability finding.",
-                    [], kind="dnp3_device_id"))
+                    [], kind="dnp3_device_id",
+                    exploit_note=(
+                        "Cross-reference vendor+firmware against ICSA feed "
+                        "(SEL RTAC, GE D400, Schneider SCADAPack, Siemens "
+                        "SICAM); check the RTU's web UI on 80/443 for "
+                        "default creds (SEL: 2AC/OTTER, SCADAPack: "
+                        "administrator/admin)."),
+                    depth_tier="t0"))
 
             # Outstation address disclosure — always info when we learned it.
             if addr is not None:
@@ -738,7 +745,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"that trusts it.",
                     f"# dnp3ctl {h.ip}:{p.portid} link-status --dst {addr}",
                     "Informational.",
-                    [], kind="dnp3_addressing"))
+                    [], kind="dnp3_addressing",
+                    exploit_note=(
+                        "Use the disclosed source address as --dst on every "
+                        "subsequent dnp3ctl call; correlate address across "
+                        "scans to identify the same substation on a moved "
+                        "IP."),
+                    depth_tier="t0"))
 
             # IIN flags — surface the interesting ones as one finding.
             flags = pr.get("iin_flags") or []
@@ -762,7 +775,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"# clear via master only: dnp3ctl {h.ip}:{p.portid} clear-iin",
                     "Investigate uptime with the site engineer; if unexpected, "
                     "audit control-message logs for FC13/14/15 and rotate SA keys.",
-                    ["CWE-778"], kind="dnp3_iin_state"))
+                    ["CWE-778"], kind="dnp3_iin_state",
+                    exploit_note=(
+                        "If device_restart set unexpectedly, ask the site "
+                        "engineer for the last commanded restart timestamp; "
+                        "if the bit predates that, someone else sent FC13/14 "
+                        "— pull SIEM logs."),
+                    depth_tier="t1"))
 
             # Broadcast responsiveness.
             if pr.get("broadcast_reachable"):
@@ -778,7 +797,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Configure the outstation to ignore broadcast reads. IEEE 1815 "
                     "§10.2.3 permits this — broadcast is only required for time "
                     "synchronisation in most deployments.",
-                    ["CWE-200"], kind="dnp3_broadcast_reachable"))
+                    ["CWE-200"], kind="dnp3_broadcast_reachable",
+                    exploit_note=(
+                        "dnp3ctl <ip>:20000 read g60v1 --dst 0xFFFD — "
+                        "confirms; then work with engineer to disable "
+                        "broadcast-answer in the outstation config."),
+                    depth_tier="t1"))
 
             # Unsolicited leak.
             if pr.get("unsolicited_seen"):
@@ -795,7 +819,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Configure the correct master destination for unsolicited "
                     "responses, or disable them entirely on outstations that do not "
                     "need to push events.",
-                    ["CWE-200"], kind="dnp3_unsolicited_leak"))
+                    ["CWE-200"], kind="dnp3_unsolicited_leak",
+                    exploit_note=(
+                        "nc -l -k -p 20000 & then tcpdump -i any -w "
+                        "/tmp/dnp3.pcap 'port 20000'; parse with Wireshark "
+                        "DNP3 dissector; extract analog values / SOE events "
+                        "over time — full process visibility."),
+                    depth_tier="t2"))
 
             # UDP variant.
             if proto == "udp":
@@ -810,7 +840,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Where DNP3/UDP is not required, block 20000/udp at the segment "
                     "boundary. Where it is, front it with a stateful DNP3-aware "
                     "gateway that enforces SA per source.",
-                    ["CWE-306", "CWE-284"], kind="dnp3_udp_reachable"))
+                    ["CWE-306", "CWE-284"], kind="dnp3_udp_reachable",
+                    exploit_note=(
+                        "nmap -sU -p 20000 --script dnp3-info <ip>; craft "
+                        "spoofed-source UDP frames from an authorised source "
+                        "IP (lab only) to prove no-state-tracking."),
+                    depth_tier="t1"))
 
             # Delay measurement — informational.
             if pr.get("delay_ms") is not None:
@@ -821,7 +856,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"a spare or newly-commissioned device.",
                     f"# dnp3ctl {h.ip}:{p.portid} delay-measurement --dst {addr or 1}",
                     "Informational.",
-                    [], kind="dnp3_delay_measured"))
+                    [], kind="dnp3_delay_measured",
+                    exploit_note=(
+                        "Compare delay_ms across scans to detect network "
+                        "path changes or under-provisioned SCADA links."),
+                    depth_tier="t0"))
     return out
 
 

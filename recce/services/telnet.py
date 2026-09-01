@@ -809,7 +809,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"{banner[:200] or '(silent)'}",
                 "telnet", f"telnet {h.ip} {p.portid}",
                 "N/A — informational fingerprint used by other findings.",
-                ["CWE-200"], kind="telnet_iac_fingerprint"))
+                ["CWE-200"], kind="telnet_iac_fingerprint",
+                exploit_note=(
+                    "telnet IP 23 ; observe IAC options; use for "
+                    "vendor-specific follow-up."),
+                depth_tier="t0"))
 
             # 3) ENCRYPT absent (confirmed by direct observation)
             if pr.get("looks_like_telnet") and not pr.get("encrypt_offered"):
@@ -830,7 +834,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Replace telnet with SSH; if the appliance vendor supports "
                     "it, enable RFC 2946 ENCRYPT and require a client that "
                     "negotiates it.", ["CWE-319", "CWE-311"],
-                    kind="telnet_no_encrypt"))
+                    kind="telnet_no_encrypt",
+                    exploit_note=(
+                        "wireshark on segment during login -- every keystroke "
+                        "visible in clear."),
+                    depth_tier="t0"))
 
             # 4) ENVIRON leak
             leak = pr.get("environ_leak") or {}
@@ -921,7 +929,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "openssl s_client",
                     f"openssl s_client -connect {h.ip}:{p.portid}",
                     "Prefer SSH over telnet-in-TLS wherever the endpoint "
-                    "supports it.", ["CWE-200"], kind="telnet_over_tls"))
+                    "supports it.", ["CWE-200"], kind="telnet_over_tls",
+                    exploit_note=(
+                        "openssl s_client -connect IP:992 -- then interact as "
+                        "normal telnet."),
+                    depth_tier="t0"))
 
             # 9) AYT liveness (info-only)
             if pr.get("ayt_ok"):
@@ -931,7 +943,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "speaks telnet and is not a raw-banner squatter.",
                     "telnet", f"telnet {h.ip} {p.portid}   # ^] send ayt",
                     "N/A — disambiguation only.", ["CWE-200"],
-                    kind="telnet_ayt_liveness"))
+                    kind="telnet_ayt_liveness",
+                    exploit_note=(
+                        "telnet IP 23 ; ^] ; send ayt -- expect a text "
+                        "response"),
+                    depth_tier="t0"))
 
             # 10) sniff runbook (chain finding, always fires for open telnet)
             out.append(_finding(
@@ -1026,7 +1042,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "invalid-user path timing (a dummy hash compare on missing "
                     "users). Better: replace telnet with SSH and disable this "
                     "channel entirely.", ["CWE-208", "CWE-203"],
-                    kind="telnet_user_enum_timing"))
+                    kind="telnet_user_enum_timing",
+                    exploit_note=(
+                        "Call recce.services.telnet.timing_user_enum manually "
+                        "with a candidate list; feed valid= users to "
+                        "hydra -L <file> -P rockyou.txt telnet://IP."),
+                    depth_tier="t1"))
     return out
 
 

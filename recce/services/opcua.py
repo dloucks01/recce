@@ -1276,7 +1276,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"opcua-client get-endpoints opc.tcp://{h.ip}:{p.portid}",
                     "Informational — reduce the endpoint surface to only the "
                     "security policies/modes required by the deployed clients.",
-                    ["CWE-200"], kind="opcua_endpoints_enumerated"))
+                    ["CWE-200"], kind="opcua_endpoints_enumerated",
+                    exploit_note=(
+                        "For each endpoint URL, opcua-client connect "
+                        "--security-mode None --user-anonymous <endpoint>; "
+                        "then Browse RootFolder recursively."),
+                    depth_tier="t0"))
 
             # Anonymous / SecurityMode None / cleartext creds / deprecated policy
             # are all read from the same EndpointDescription array.
@@ -1410,7 +1415,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"opcua-client get-endpoints opc.tcp://{h.ip}:{p.portid}",
                     "Restrict endpoints to Basic256Sha256, Aes128_Sha256_RsaOaep, "
                     "or Aes256_Sha256_RsaPss.",
-                    ["CWE-327", "CWE-326"], kind="opcua_deprecated_policy"))
+                    ["CWE-327", "CWE-326"], kind="opcua_deprecated_policy",
+                    exploit_note=(
+                        "Confirm the deprecated policy is actually usable by "
+                        "opening a channel with it: opcua-client connect "
+                        "--policy Basic128Rsa15 opc.tcp://<ip>:4840."),
+                    depth_tier="t1"))
 
             # Application identity (vendor fingerprint).
             first_server = None
@@ -1433,7 +1443,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"productUri pins the target to a specific vendor CVE feed.",
                     f"opcua-client get-endpoints opc.tcp://{h.ip}:{p.portid}",
                     "Informational — feeds vendor/product CVE matching.",
-                    ["CWE-200"], kind="opcua_application_id"))
+                    ["CWE-200"], kind="opcua_application_id",
+                    exploit_note=(
+                        "Correlate productUri against CVE feed; e.g. "
+                        "open62541 CVE-2021-46882, ProSys UA SDK advisories. "
+                        "Check the vendor's web UI on 80/443 for default "
+                        "creds."),
+                    depth_tier="t0"))
 
             # Server certificate parse.
             for ep in endpoints:
@@ -1468,7 +1484,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "rotate self-signed factory certs; require RSA-2048+ or "
                     "ECC P-256 key sizes.",
                     ["CWE-295", "CWE-326", "CWE-298"],
-                    kind="opcua_server_certificate"))
+                    kind="opcua_server_certificate",
+                    exploit_note=(
+                        "openssl x509 -in server.der -inform DER -noout "
+                        "-text; check for shared factory-default cert (hash "
+                        "collision across many devices in engagement)."),
+                    depth_tier="t1"))
                 break                          # one cert finding per host
 
             # FindServers — sibling discovery.
@@ -1490,7 +1511,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict FindServers to a trusted management network; do "
                     "not register internal-only OT hosts with an Internet-"
                     "reachable Discovery Server.",
-                    ["CWE-200"], kind="opcua_find_servers"))
+                    ["CWE-200"], kind="opcua_find_servers",
+                    exploit_note=(
+                        "For each url returned: opcua-client discover <url>; "
+                        "enumerate the sibling."),
+                    depth_tier="t1"))
 
             # FindServersOnNetwork (LDS-ME).
             on_network = pr.get("on_network") or []
@@ -1507,7 +1532,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Restrict access to the LDS-ME to a trusted management "
                     "segment; disable Multicast Extension where the mDNS "
                     "registry is not required.",
-                    ["CWE-200"], kind="opcua_lds_me_inventory"))
+                    ["CWE-200"], kind="opcua_lds_me_inventory",
+                    exploit_note=(
+                        "For each record's discovery_url: opcua-client "
+                        "get-endpoints <url> to build the site-wide OPC UA "
+                        "inventory."),
+                    depth_tier="t1"))
 
             # RegisterServer open-registration.
             reg = pr.get("register_server") or {}
@@ -1551,7 +1581,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Suppress SDK / build details from the ERR reason field "
                     "at the server (many stacks expose this as a build option); "
                     "restrict Discovery access to management hosts.",
-                    ["CWE-209", "CWE-200"], kind="opcua_error_banner"))
+                    ["CWE-209", "CWE-200"], kind="opcua_error_banner",
+                    exploit_note=(
+                        "printf '\\x48\\x45\\x4cF' | nc <ip> 4840 | xxd; "
+                        "correlate the reason string with open62541 / "
+                        "UA-.NETStandard / Softing SDK CVE feed."),
+                    depth_tier="t0"))
     return out
 
 

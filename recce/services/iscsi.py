@@ -796,7 +796,10 @@ def _emit_reachable(out, pr, tgt, h, p):
         f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid}",
         "Restrict 3260/tcp to initiator IPs; require CHAP or KRB5 on Discovery "
         "and Normal sessions.",
-        ["CWE-200"], kind="iscsi_reachable"))
+        ["CWE-200"], kind="iscsi_reachable",
+        exploit_note=(
+            f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid}"),
+        depth_tier="t0"))
 
 
 def _emit_auth_none_discovery(out, pr, tgt, h, p):
@@ -963,7 +966,11 @@ def _emit_chap(out, pr, tgt, h, p):
             f"iscsiadm -m node -T <iqn> -p {h.ip}:{p.portid} -o show | grep -i chap",
             "Configure mutual CHAP (node.session.auth.username_in / password_in "
             "on the initiator AND per-initiator credentials on the target).",
-            ["CWE-287", "CWE-300"], kind="iscsi_chap_one_way"))
+            ["CWE-287", "CWE-300"], kind="iscsi_chap_one_way",
+            exploit_note=(
+                f"iscsiadm -m node -T <iqn> -p {h.ip}:{p.portid} -o show "
+                "| grep -i chap"),
+            depth_tier="t0"))
 
 
 def _emit_op_params(out, pr, tgt, h, p):
@@ -981,7 +988,11 @@ def _emit_op_params(out, pr, tgt, h, p):
             f"iscsiadm -m node -T <iqn> -p {h.ip}:{p.portid} -o show | grep -i digest",
             "Set node.conn[0].iscsi.HeaderDigest=CRC32C and "
             "DataDigest=CRC32C on both ends.",
-            ["CWE-353"], kind="iscsi_no_digest"))
+            ["CWE-353"], kind="iscsi_no_digest",
+            exploit_note=(
+                f"iscsiadm -m node -T <iqn> -p {h.ip}:{p.portid} -o show "
+                "| grep -i digest"),
+            depth_tier="t0"))
 
 
 def _emit_legacy_version(out, pr, tgt, h, p):
@@ -996,7 +1007,10 @@ def _emit_legacy_version(out, pr, tgt, h, p):
         "iscsiadm",
         f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid} -d 8",
         "Upgrade the target firmware to a vendor build that pins Version-Active=0.",
-        ["CWE-1104"], kind="iscsi_legacy_version"))
+        ["CWE-1104"], kind="iscsi_legacy_version",
+        exploit_note=(
+            f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid} -d 8"),
+        depth_tier="t0"))
 
 
 def _emit_iqn_hints(out, pr, tgt, h, p):
@@ -1021,7 +1035,10 @@ def _emit_iqn_hints(out, pr, tgt, h, p):
         "iscsiadm",
         f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid}",
         "Consider generic IQNs that do not embed a hostname or reversed FQDN.",
-        ["CWE-200"], kind="iscsi_iqn_hostinfo"))
+        ["CWE-200"], kind="iscsi_iqn_hostinfo",
+        exploit_note=(
+            f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid}"),
+        depth_tier="t0"))
 
 
 def _emit_pivots(out, pr, tgt, h, p, scope_ips):
@@ -1046,7 +1063,11 @@ def _emit_pivots(out, pr, tgt, h, p, scope_ips):
         "nmap -Pn -p 3260 " + " ".join(sorted({pv['ip'] for pv in pivots[:10]})),
         "Segment the storage network so a compromised host in the initiator "
         "VLAN cannot reach the storage-array management plane.",
-        ["CWE-200"], kind="iscsi_pivot_portal"))
+        ["CWE-200"], kind="iscsi_pivot_portal",
+        exploit_note=(
+            "nmap -Pn -p 3260 <pivot-ips> ; then iscsiadm -m discovery "
+            "-t sendtargets -p <pivot-ip>"),
+        depth_tier="t0"))
 
 
 # --- runbook + proof + analyze -------------------------------------------------

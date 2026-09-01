@@ -329,7 +329,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"or peer token from other hosts would target this endpoint.",
                     f"curl http://{h.ip}:{p.portid}/version",
                     "Ensure etcd continues to require client-cert or RBAC auth.",
-                    [], kind="etcd_authed"))
+                    [], kind="etcd_authed",
+                    exploit_note=(
+                        "curl http://<ip>:2379/version — record version for "
+                        "CVE lookup; try client certs from any looted ~/.etcd/ dir."),
+                    depth_tier="t0"))
             # Snapshot download is separately-gated from kv/range on many
             # deployments — emit even when kv/range failed. Independent finding
             # because the primitive (full bbolt dump, including uncompacted

@@ -792,7 +792,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"--address {h.ip}",
                     "Segmentation stance from the reachable finding applies; "
                     "the fingerprint itself cannot be redacted per-field.",
-                    ["CWE-200"], kind="enip_identity_detailed"))
+                    ["CWE-200"], kind="enip_identity_detailed",
+                    exploit_note=(
+                        "Look up vendor_id + product_code + revision on the "
+                        "Rockwell/Schneider/Omron support portals for "
+                        "firmware CVE bands."),
+                    depth_tier="t0"))
 
             # Unauthenticated session — cornerstone finding.
             if pr.get("session_registered"):
@@ -892,7 +897,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "protocol-exposed by design. Rename devices with "
                     "labels that do not reveal plant location and keep "
                     "internal DNS off the OT network.",
-                    ["CWE-200"], kind="enip_tcpip_disclosure"))
+                    ["CWE-200"], kind="enip_tcpip_disclosure",
+                    exploit_note=(
+                        "python -m cpppo.server.enip.client --address <ip> "
+                        "--print '@0xF5/1'; dig ANY <domain_name> "
+                        "@<name_server_1>; identify AD forest / internal "
+                        "namespace exposed to OT."),
+                    depth_tier="t1"))
 
             # Ethernet Link disclosure — MAC address for correlation.
             eth = pr.get("ethlink") or {}
@@ -908,7 +919,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"python -m cpppo.server.enip.client --print "
                     f"--address {h.ip} '@0xF6/1'",
                     "Informational — pairs with the identity finding.",
-                    ["CWE-200"], kind="enip_mac_disclosure"))
+                    ["CWE-200"], kind="enip_mac_disclosure",
+                    exploit_note=(
+                        "Cross-reference MAC OUI against IEEE registry "
+                        "(Rockwell 00:00:BC / Siemens 00:1B:1B / etc); "
+                        "correlate with ARP/DHCP scans on the same "
+                        "segment."),
+                    depth_tier="t0"))
 
             # List Services enumeration.
             if pr.get("list_services"):
@@ -925,7 +942,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"nmap -p {p.portid} --script enip-info {h.ip}",
                     "Informational — feeds the reachable / unauth-session "
                     "findings above.",
-                    ["CWE-200"], kind="enip_list_services"))
+                    ["CWE-200"], kind="enip_list_services",
+                    exploit_note=(
+                        "Note the cip_encapsulation flag — if clear, "
+                        "RegisterSession will fail even though the port "
+                        "answered."),
+                    depth_tier="t0"))
 
             # List Interfaces — bridge / gateway indicator.
             if pr.get("list_interfaces"):
@@ -947,7 +969,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "bridge is legitimate, ensure the isolated OT segment "
                     "behind it has its own segmentation controls — do not "
                     "rely on obscurity of the routing paths.",
-                    ["CWE-200", "CWE-923"], kind="enip_bridge_detected"))
+                    ["CWE-200", "CWE-923"], kind="enip_bridge_detected",
+                    exploit_note=(
+                        "python -m cpppo.server.enip.client --address <ip> "
+                        "--route-path 1/0 --print (slot 0 CPU); repeat with "
+                        "--route-path 1/1, 1/2, ... to enumerate every "
+                        "module on the chassis backplane."),
+                    depth_tier="t1"))
 
             # Connection Manager present — routing capable.
             if pr.get("conn_mgr_supported"):

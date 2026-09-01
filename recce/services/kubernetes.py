@@ -620,7 +620,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "auth can-i --list --as=system:anonymous",
                         "Disable anonymous auth (--anonymous-auth=false) unless a health "
                         "endpoint requires it.",
-                        ["CWE-306"], kind="api_anon_open"))
+                        ["CWE-306"], kind="api_anon_open",
+                        exploit_note=(
+                            "kubectl --server https://<ip>:<port> "
+                            "--insecure-skip-tls-verify auth can-i --list "
+                            "--as=system:anonymous — enumerate verbs anon holds."),
+                        depth_tier="t0"))
                 if pr.get("anon_ssrr_rules"):
                     verbs = pr.get("anon_ssrr_verbs") or []
                     dangerous = sorted(v for v in verbs if v in _SSRR_DANGEROUS)

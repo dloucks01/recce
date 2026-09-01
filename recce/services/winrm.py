@@ -288,7 +288,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"evil-winrm -i {h.ip} -u USER -p 'PASS'",
                 "Restrict WinRM to management networks; disable Basic; require "
                 "HTTPS on 5986 with a valid certificate.",
-                ["CWE-284"], kind="winrm_reachable"))
+                ["CWE-284"], kind="winrm_reachable",
+                exploit_note=(
+                    "nxc winrm <ip> -u '' -p '' (auth null check); nxc winrm "
+                    "<ip> -u <user> -p <pass>; evil-winrm -i <ip> -u <user> -p "
+                    "<pass> for interactive shell if creds land."),
+                depth_tier="t0"))
 
             if "Basic" in auth and not tls:
                 out.append(_finding(
@@ -321,7 +326,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"and reused. Auth mechanisms advertised: {', '.join(auth)}.",
                     "review", "curl -kv https://{ip}:5986/wsman -H 'Authorization: Basic ...'",
                     "Prefer Negotiate/Kerberos so the password never leaves the "
-                    "client.", ["CWE-522"], kind="winrm_basic"))
+                    "client.", ["CWE-522"], kind="winrm_basic",
+                    exploit_note=(
+                        "curl -kv -u USER:PASS https://<ip>:5986/wsman -H "
+                        "'Content-Type: application/soap+xml' -d '<Identify/>' "
+                        "to test."),
+                    depth_tier="t1"))
 
             # NTLM Type-2 CHALLENGE_MESSAGE info disclosure (MS-NLMP §2.2.1.2).
             # One extra POST unlocks NetBIOS/DNS names, AD domain/forest, server
@@ -361,7 +371,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "disabling NTLM entirely (Kerberos-only WinRM) or "
                         "restricting the listener to trusted management "
                         "networks so unauthenticated attackers cannot reach it.",
-                        ["CWE-200"], kind="winrm_ntlm_info"))
+                        ["CWE-200"], kind="winrm_ntlm_info",
+                        exploit_note=(
+                            "curl -kv -X POST http://<ip>:5985/wsman -H "
+                            "'Authorization: Negotiate TlRMTVNTUAABAAAAB4IIogAA"
+                            "AAAAAAAAAAAAAAAAAAA=' and base64-decode the "
+                            "WWW-Authenticate to inspect the CHALLENGE."),
+                        depth_tier="t1"))
 
             # Relay-target emission. A WinRM listener advertising Negotiate
             # (NTLM fallback) over plain HTTP is the canonical impacket
@@ -404,7 +420,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable CredSSP unless a specific workflow requires it "
                     "(Disable-WSManCredSSP Server); if kept, restrict which "
                     "clients may delegate.",
-                    ["CWE-522"], kind="winrm_credssp"))
+                    ["CWE-522"], kind="winrm_credssp",
+                    exploit_note=(
+                        "Once on the host: mimikatz # sekurlsa::logonpasswords; "
+                        "or nxc winrm <ip> -u <admin> -p <p> -M lsassy for "
+                        "remote LSASS dump (needs local admin)."),
+                    depth_tier="t1"))
     return out
 
 

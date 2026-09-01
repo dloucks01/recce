@@ -594,7 +594,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"SASL_SSL — any looted credential targets this endpoint.",
                     f"kcat -L -b {h.ip}:{p.portid} -X security.protocol=SASL_SSL",
                     "Ensure SASL/mTLS enforcement stays on.",
-                    [], kind="kafka_saslgated"))
+                    [], kind="kafka_saslgated",
+                    exploit_note=(
+                        f"kcat -L -b {h.ip}:{p.portid} -X security.protocol="
+                        "SASL_SSL -X sasl.mechanisms=PLAIN -X sasl.username="
+                        "<user> -X sasl.password=<pw>"),
+                    depth_tier="t0"))
             # ApiVersions release-line fingerprint (informational, always emit
             # when the handshake reply parsed cleanly enough to derive one).
             fp = pr.get("fingerprint") or ""
@@ -608,7 +613,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"kcat -L -b {h.ip}:{p.portid}",
                     "Fingerprint alone is not a vulnerability; feed it to the "
                     "version-DB pass to enumerate patched vs affected releases.",
-                    ["CWE-200"], kind="kafka_version_fingerprint"))
+                    ["CWE-200"], kind="kafka_version_fingerprint",
+                    exploit_note=(
+                        f"kcat -L -b {h.ip}:{p.portid} ; correlate release "
+                        "with KEV/CVE database"),
+                    depth_tier="t0"))
             # SaslHandshake enumeration — attempted only on SASL-gated brokers
             # (probe() gates the second connection there). Non-empty means the
             # broker told us exactly which mechanisms are enabled, which is the
@@ -634,7 +643,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "mitigation is to strip PLAIN unless the listener is "
                     "TLS-wrapped and to restrict which listeners advertise "
                     "SASL at all (private-network listeners only).",
-                    ["CWE-200"], kind="kafka_sasl_mechanisms_enumerated"))
+                    ["CWE-200"], kind="kafka_sasl_mechanisms_enumerated",
+                    exploit_note=(
+                        f"kcat -L -b {h.ip}:{p.portid} "
+                        "-X security.protocol=SASL_PLAINTEXT "
+                        "-X sasl.mechanism=<from-list> "
+                        "-X sasl.username=<user> -X sasl.password=<pw>"),
+                    depth_tier="t1"))
     return out
 
 

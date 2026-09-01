@@ -544,7 +544,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Mojang exposes no server-side toggle to suppress the "
                     "sample list; plugins like SamplePermission on Paper can "
                     "hide it. Restrict SLP to trusted networks.",
-                    ["CWE-200"], kind="minecraft_player_roster"))
+                    ["CWE-200"], kind="minecraft_player_roster",
+                    exploit_note=(
+                        f"mcstatus {h.ip}:{p.portid} status  # then for each "
+                        "username: kerbrute userenum against corp KDC"),
+                    depth_tier="t1"))
 
             motd = (pr.get("motd_text") or "").strip()
             fqdns = sorted({m.group(1).lower() for m in _FQDN_TOKEN_RE.finditer(motd)})
@@ -560,7 +564,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"mcstatus {h.ip}:{p.portid} status",
                     "Remove environment / hostname references from the server "
                     "MOTD; put contact/help URLs on a public-only domain.",
-                    ["CWE-200"], kind="minecraft_motd_hostnames"))
+                    ["CWE-200"], kind="minecraft_motd_hostnames",
+                    exploit_note=(
+                        f"mcstatus {h.ip}:{p.portid} status  ; resolve any "
+                        "FQDN tokens against internal DNS"),
+                    depth_tier="t1"))
 
             rc = pr.get("rcon") or {}
             if rc.get("reachable") and rc.get("speaks_rcon"):
@@ -602,7 +610,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"nmap -sV -p {_RCON_DEFAULT_PORT} {h.ip}",
                         "Restrict RCON to management-only networks; require "
                         "a strong `rcon.password` in server.properties.",
-                        ["CWE-521"], kind="minecraft_rcon_exposed"))
+                        ["CWE-521"], kind="minecraft_rcon_exposed",
+                        exploit_note=(
+                            "for pw in '' minecraft admin changeme rcon; do "
+                            f"mcrcon -H {h.ip} -p \"$pw\" -P "
+                            f"{_RCON_DEFAULT_PORT} list && echo HIT $pw; "
+                            "done"),
+                        depth_tier="t0"))
 
             pk = pr.get("proxy_kind") or ""
             if pk:
@@ -620,7 +634,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"cat /opt/{pk}/velocity.toml 2>/dev/null",
                     "Firewall the backend segment so the proxy is the only "
                     "reachable path; require ip-forwarding auth (proxy secret).",
-                    [], kind="minecraft_proxy"))
+                    [], kind="minecraft_proxy",
+                    exploit_note=(
+                        "# from a session on the proxy host: cat "
+                        "/opt/bungeecord/config.yml or "
+                        "/opt/velocity/velocity.toml"),
+                    depth_tier="t0"))
 
             mods = pr.get("forge_mods") or []
             if mods:
@@ -637,7 +656,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"mapper — many mods have their own CVE histories.",
                     f"mcstatus {h.ip}:{p.portid} json",
                     "n/a (informational).",
-                    [], kind="minecraft_mods"))
+                    [], kind="minecraft_mods",
+                    exploit_note=(
+                        f"mcstatus {h.ip}:{p.portid} json  ; correlate each "
+                        "mod id + version against known modded-MC CVEs"),
+                    depth_tier="t0"))
 
             fav_sha = pr.get("favicon_sha256") or ""
             dims = pr.get("favicon_dims")
@@ -654,7 +677,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"mcstatus {h.ip}:{p.portid} status",
                 "Restrict SLP to trusted networks if the server is not "
                 "intended to be publicly listed.",
-                [], kind="minecraft_fingerprint"))
+                [], kind="minecraft_fingerprint",
+                exploit_note=(f"mcstatus {h.ip}:{p.portid} status"),
+                depth_tier="t0"))
     return out
 
 

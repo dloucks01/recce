@@ -794,7 +794,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"ipmitool -H {h.ip} -I lan -U root -a channel authcap 14 4",
                     "Disable MD2 and MD5 auth types on the BMC; require the strongest "
                     "supported cipher (typically RAKP-HMAC-SHA256).",
-                    ["CWE-327", "CWE-916"], kind="ipmi_weak_auth"))
+                    ["CWE-327", "CWE-916"], kind="ipmi_weak_auth",
+                    exploit_note=(
+                        "review GCAC output; MD5 hash is captured via "
+                        "ipmi_rakp_hash separately"),
+                    depth_tier="t0"))
             # RAKP hash capture (CVE-2013-4805 class — the design of RMCP+ leaks
             # a crackable HMAC to any client that starts the exchange). Fires
             # only when recce actually captured a hash — every real IPMI 2.0
@@ -873,7 +877,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "and missing users (vendor-specific: iDRAC 'lockdown', "
                         "iLO 'user account privacy'). Restricting IPMI to the "
                         "management network remains the primary control.",
-                        ["CWE-204", "CWE-200"], kind="ipmi_user_enum"))
+                        ["CWE-204", "CWE-200"], kind="ipmi_user_enum",
+                        exploit_note=(
+                            "Extend probe with --rakp-users <big-list>; feed "
+                            "valid users to hashcat crack loop focused on "
+                            "those accounts."),
+                        depth_tier="t1"))
 
             # --- Auth Status posture bits (parsed but previously silent) ---
             # Bit 4: per-message auth disabled — once a session is open, any
@@ -937,7 +946,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "specific: ipmitool lan set <chan> cipher_privs / racadm "
                     "config -g cfgIpmiLan -o cfgIpmiLanEncryptionKey).",
                     ["CWE-1391"],
-                    kind="ipmi_kg_key_status"))
+                    kind="ipmi_kg_key_status",
+                    exploit_note=(
+                        "note in report; combine with any captured RAKP hash"),
+                    depth_tier="t0"))
             # --- Get Device ID (vendor + firmware fingerprint) --------------
             # Info-level fact so the operator can eyeball the BMC vendor and
             # cross-reference against vendor advisories out-of-band. No CVEs
@@ -960,7 +972,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"ipmitool -H {h.ip} -I lan mc info",
                     "Keep BMC firmware current with the vendor's release "
                     "cadence; restrict IPMI to a dedicated OOB network.",
-                    ["CWE-200"], kind="ipmi_device_id"))
+                    ["CWE-200"], kind="ipmi_device_id",
+                    exploit_note=(
+                        f"ipmitool -H {h.ip} -I lan mc info  "
+                        "# cross-check the same fields"),
+                    depth_tier="t0"))
             # Always emit an info-level fingerprint so IPMI presence is in the report.
             out.append(_finding(
                 "info", "IPMI endpoint reachable", tgt,
@@ -969,7 +985,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"anonymous={pr.get('anonymous_login')}",
                 f"ipmitool -H {h.ip} -I lan channel info",
                 "Restrict IPMI to a dedicated management network.",
-                [], kind="ipmi_fingerprint"))
+                [], kind="ipmi_fingerprint",
+                exploit_note=(f"ipmitool -H {h.ip} -I lan channel info"),
+                depth_tier="t0"))
     return out
 
 

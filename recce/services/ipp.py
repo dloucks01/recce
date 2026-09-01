@@ -359,7 +359,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"CUPS-Get-Printers.test",
                     "Restrict IPP to trusted networks; disable cups-browsed if "
                     "not required; require authentication on the /admin path.",
-                    ["CWE-200"], kind="ipp_printers"))
+                    ["CWE-200"], kind="ipp_printers",
+                    exploit_note=(
+                        f"ipptool -tv ipp://{h.ip}:{p.portid}/printers/ "
+                        "CUPS-Get-Printers.test"),
+                    depth_tier="t1"))
 
             if pr.get("is_cups"):
                 version = pr.get("cups_version") or "unknown"
@@ -422,7 +426,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         f"curl -sSI http://{h.ip}:{p.portid}/   # confirm "
                         f"the Server header still names CUPS/{version}",
                         "Keep patching cadence; segregate print servers.",
-                        [], kind="ipp_cups_patched"))
+                        [], kind="ipp_cups_patched",
+                        exploit_note="n/a - patched",
+                        depth_tier="t0"))
     return out
 
 

@@ -147,10 +147,12 @@ def netbios_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
+def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
+             exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,
             "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind}
+            "cwes": cwes, "kind": kind,
+            "exploit_note": exploit_note, "depth_tier": depth_tier}
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -189,7 +191,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"nbtscan -v {h.ip}   # or: nmap -sU --script nbstat -p137 {h.ip}",
                 "Disable NetBIOS over TCP/IP on interfaces not required by legacy "
                 "clients; block 137/udp at the perimeter.",
-                ["CWE-200"], kind="netbios_disclosure"))
+                ["CWE-200"], kind="netbios_disclosure",
+                exploit_note=(
+                    "nbtscan -v <ip>; then use disclosed hostname: "
+                    "rpcclient -U '' -N <ip>; if suffix 0x1C present: "
+                    "kerbrute userenum -d <domain> --dc <ip> users.txt."),
+                depth_tier="t1"))
     return out
 
 

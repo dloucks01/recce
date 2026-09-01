@@ -232,6 +232,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"for u in root admin postmaster; do echo VRFY $u | nc {h.ip} {p.portid}; done",
                     "Disable VRFY/EXPN (disable_vrfy_command = yes).",
                     ["CWE-200"], kind="smtp_vrfy",
+                    exploit_note=(
+                        "smtp-user-enum -M VRFY -U /usr/share/seclists/"
+                        "Usernames/top-usernames-shortlist.txt -t IP -p 25"),
                     depth_tier=vrfy_tier, output=vrfy_output))
             # Enumerated users — merge VRFY/EXPN/RCPT hits, dedup, and
             # report each as a name a spray attack now knows exists on
@@ -258,7 +261,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "same 250 response for any RCPT regardless of user existence "
                     "(smtpd_reject_unlisted_recipient = no on some MTAs) or accept "
                     "and drop non-existent recipients.",
-                    ["CWE-200", "CWE-203"], kind="smtp_user_enum"))
+                    ["CWE-200", "CWE-203"], kind="smtp_user_enum",
+                    exploit_note=(
+                        "hydra -L users_from_recce.txt -P /usr/share/"
+                        "wordlists/rockyou.txt imap://IP -t 4 -f ; also try "
+                        "pop3://IP and ssh://IP with same list"),
+                    depth_tier="t2"))
             if not pr.get("starttls") and p.portid in (25, 587):
                 out.append(_finding(
                     "low", "SMTP without STARTTLS (cleartext)", tgt,
@@ -266,7 +274,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "AUTH credentials cross the wire in cleartext.",
                     f"openssl s_client -starttls smtp -connect {h.ip}:{p.portid}",
                     "Offer/require STARTTLS; require TLS before AUTH.",
-                    ["CWE-319"], kind="smtp_cleartext"))
+                    ["CWE-319"], kind="smtp_cleartext",
+                    exploit_note=(
+                        "openssl s_client -starttls smtp -connect IP:25 "
+                        "(expect connection refusal); tcpdump -A 'tcp port "
+                        "25 and host IP' on a bridge to capture real client "
+                        "AUTH."),
+                    depth_tier="t0"))
             # AUTH mech deep-parse: RFC 4954 §4 forbids AUTH before STARTTLS
             # (credential-in-cleartext), and RFC 6409 §4.3 sharpens that on
             # the submission port (587). Also flag deprecated / offline-
@@ -285,7 +299,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Require STARTTLS and only advertise AUTH after a TLS session "
                     "is established (smtpd_tls_auth_only = yes on Postfix; "
                     "REQUIRETLS on submission).",
-                    ["CWE-319", "CWE-522"], kind="smtp_auth_before_tls"))
+                    ["CWE-319", "CWE-522"], kind="smtp_auth_before_tls",
+                    exploit_note=(
+                        "swaks --server IP:PORT --auth PLAIN --auth-user "
+                        "recce_canary --auth-password recce_pw ; a 535 "
+                        "processes the auth path (proves cleartext channel "
+                        "is live)"),
+                    depth_tier="t1"))
             weak = [m for m in mechs if m in _WEAK_AUTH_MECHS
                     and m not in ("PLAIN", "LOGIN")]
             if weak:
@@ -298,7 +318,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"openssl s_client -starttls smtp -connect {h.ip}:{p.portid}",
                     "Disable CRAM-MD5 / DIGEST-MD5; require SCRAM-SHA-256 or "
                     "AUTH PLAIN over TLS.",
-                    ["CWE-327", "CWE-916"], kind="smtp_auth_weak_mech"))
+                    ["CWE-327", "CWE-916"], kind="smtp_auth_weak_mech",
+                    exploit_note=(
+                        "openssl s_client -starttls smtp -connect IP:PORT ; "
+                        "type: AUTH CRAM-MD5 ; base64-decode the challenge; "
+                        "sniff a real client's response and: hashcat -m "
+                        "10200 challenge:response wordlist.txt"),
+                    depth_tier="t0"))
             leaky = [m for m in mechs if m in _LEAKY_AUTH_MECHS]
             if leaky:
                 out.append(_finding(
@@ -311,7 +337,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"nmap -p{p.portid} --script smtp-ntlm-info {h.ip}",
                     "Restrict AUTH NTLM to internal network segments; prefer AUTH "
                     "PLAIN/EXTERNAL over TLS.",
-                    ["CWE-200"], kind="smtp_auth_ntlm_leak"))
+                    ["CWE-200"], kind="smtp_auth_ntlm_leak",
+                    exploit_note=(
+                        "nmap -p25,587 --script smtp-ntlm-info IP ; the "
+                        "script's Target_Name and NetBIOS_Domain_Name are "
+                        "the AD-anchor for further pivot."),
+                    depth_tier="t0"))
             # Banner fingerprint -> product + version-gated CVEs.
             fp = pr.get("fingerprint") or {}
             for c in (fp.get("cves") or []):
@@ -357,7 +388,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "Disable EXPN (disable_vrfy_command = yes on Postfix "
                     "also blocks EXPN; smtpd_discard_ehlo_keywords = expn), "
                     "or return 550 for list aliases.",
-                    ["CWE-200"], kind="smtp_expn_alias_leak"))
+                    ["CWE-200"], kind="smtp_expn_alias_leak",
+                    exploit_note=(
+                        "for a in all everyone staff wheel abuse ; do echo "
+                        "EXPN $a | nc IP 25 ; done ; feed harvest to hydra "
+                        "-L users.txt -P rockyou.txt imap://IP"),
+                    depth_tier="t2"))
     return out
 
 

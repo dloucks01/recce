@@ -375,7 +375,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Rewrite PASV replies at the NAT/edge or bind the server so "
                         "it returns the routable address (e.g. vsftpd "
                         "'pasv_address', ProFTPD 'MasqueradeAddress').",
-                        ["CWE-200"], kind="ftp_pasv_internal_ip"))
+                        ["CWE-200"], kind="ftp_pasv_internal_ip",
+                        exploit_note=(
+                            "Add leaked IP to scan sweep: nmap -sT -p- "
+                            "<internal_ip> from a foothold; also consult ipam "
+                            "DB with the leaked subnet."),
+                        depth_tier="t2"))
             # HELP / SITE HELP dangerous-verb fingerprint. CPFR/CPTO -> mod_copy
             # (CVE-2015-3306 / CVE-2019-12815 primitive, exposed regardless of what
             # the 220 banner claims). EXEC/CHMOD/INDEX -> wu-ftpd / ProFTPD
@@ -405,7 +410,15 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "wu-ftpd: disable SITE EXEC).",
                     ["CWE-200", "CWE-78"] if copy_exposed else ["CWE-200"],
                     kind="ftp_site_copy_exposed" if copy_exposed
-                    else "ftp_extra_commands_disclosed"))
+                    else "ftp_extra_commands_disclosed",
+                    exploit_note=(
+                        "ftp IP ; anonymous / any ; quote SITE CPFR /etc/passwd ; "
+                        "quote SITE CPTO /tmp/recce_probe ; get /tmp/recce_probe "
+                        "/tmp/local_probe -- verify contents."
+                        if copy_exposed else
+                        "ftp IP ; USER u/PASS p ; quote SITE EXEC /bin/id -- "
+                        "wu-ftpd runs the command as the daemon UID."),
+                    depth_tier="t1" if copy_exposed else "t0"))
             # Not gated on anonymous: an auth-REQUIRED server with no AUTH TLS is the
             # common cleartext-credential case and must still raise this finding.
             if pr.get("auth_tls") is False:
@@ -416,7 +429,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "sniffable.", "wireshark / tcpdump",
                     "tcpdump -i <iface> 'tcp port 21'   # USER/PASS appear in clear",
                     "Require FTPS (explicit AUTH TLS) or replace FTP with SFTP/SCP.",
-                    ["CWE-319"], kind="cleartext_ftp"))
+                    ["CWE-319"], kind="cleartext_ftp",
+                    exploit_note=(
+                        "tcpdump -i any -A 'tcp port 21 and host IP' -- grep "
+                        "'PASS '"),
+                    depth_tier="t0"))
     return out
 
 
