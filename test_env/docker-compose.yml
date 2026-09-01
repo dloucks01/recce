@@ -41,8 +41,6 @@
 #   sharphound-corp.zip  — feed via ImportModal or `recce ad <path>` (3 findings)
 #   certipy-corp.json    — feed via ImportModal or `recce ad <path>`   (4 findings)
 
-version: "3.8"
-
 networks:
   recce-testnet:
     driver: bridge

@@ -41,3 +41,13 @@ recce/webui/frontend/node_modules/
 
 # Test cache
 .pytest_cache/
+
+# Session-internal artifacts under .recce-plan/ that are not durable
+# reference material:
+#   * hooks/         — extracted integration-hook payloads from workflow
+#                      agents; consumed once during wire-up, not needed
+#                      after commit lands.
+#   * */plan_raw.jsonl — raw workflow agent transcripts; the readable
+#                      summaries live in the sibling *.md / *.json files.
+.recce-plan/hooks/
+.recce-plan/*/plan_raw.jsonl

@@ -374,12 +374,19 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
                 mod = importlib.import_module(path)
             except ImportError:
                 continue
-            # Only public `*_targets` functions — a `_rbcd_targets` helper
-            # inside ldap.py shouldn't shadow the module's own `ldap_targets`
-            # just because it sorts first alphabetically.
-            fn = next((getattr(mod, n) for n in dir(mod)
-                       if n.endswith("_targets") and not n.startswith("_")
-                       and callable(getattr(mod, n))), None)
+            # Prefer the canonical `<slug>_targets(hosts)` naming (e.g.
+            # `ldap_targets` for cmd "ldap") so a helper named the same
+            # way — even a class-scoped one — never shadows the module's
+            # own targets fn. Fall back to any public `*_targets` for
+            # services whose slug and function name genuinely diverge.
+            canonical = cmd.replace("-", "_") + "_targets"
+            fn = None
+            if hasattr(mod, canonical) and callable(getattr(mod, canonical)):
+                fn = getattr(mod, canonical)
+            else:
+                fn = next((getattr(mod, n) for n in dir(mod)
+                           if n.endswith("_targets") and not n.startswith("_")
+                           and callable(getattr(mod, n))), None)
             if fn is None:
                 continue                     # web/api are HTTP-wide; handled below
             try:
