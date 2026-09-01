@@ -16,7 +16,7 @@ import re
 from .helpers import *  # noqa: F401,F403 — wildcard so private _* helpers resolve
 
 
-__all__ = ['cmd_bloodhound', 'cmd_kerberos']
+__all__ = ['cmd_bloodhound', 'cmd_bloodhound_push', 'cmd_kerberos']
 
 
 
@@ -232,6 +232,37 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     return 0
 
 
+
+
+def cmd_bloodhound_push(args: argparse.Namespace) -> int:
+    """Emit a BloodHound-CE-compatible zip from the engagement so an operator can
+    overlay recce's own scan intel (cracked-owner marks, ADCS ESC edges, the
+    user/computer/group/domain nodes recce discovered) on their BloodHound
+    instance. Read-only against the store; never mutates it."""
+    from ..ad import bloodhound_push as bhp
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run an enum/import first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    try:
+        hosts = store.all_hosts()
+        creds = store.all_credentials()
+        zip_path, summary = bhp.build_zip(hosts, creds, args.output_dir,
+                                          overwrite=bool(getattr(args, "overwrite", False)))
+    finally:
+        store.close()
+    counts = summary["counts"]
+    print(f"[+] BloodHound push written: {zip_path}")
+    print(f"    -> users={counts['users']} computers={counts['computers']} "
+          f"groups={counts['groups']} domains={counts['domains']} "
+          f"(gpos={counts['gpos']} ous={counts['ous']} containers={counts['containers']})")
+    if summary["owned"] or summary["adcs_edges"]:
+        print(f"    -> {summary['owned']} node(s) marked Owned; "
+              f"{summary['adcs_edges']} ADCS edge(s) emitted.")
+    return 0
 
 
 def cmd_kerberos(args: argparse.Namespace) -> int:

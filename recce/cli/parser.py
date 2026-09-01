@@ -729,6 +729,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_io(bhp)
     bhp.set_defaults(func=_h("bloodhound"))
 
+    # Push recce's scan intel BACK to BloodHound: a CE-compatible ingest zip
+    # (users/computers/groups/domains/gpos/ous/containers) built from the
+    # engagement's stored hosts + credentials + ADCS findings.
+    bhpush = sub.add_parser("bloodhound-push",
+                            help="write a BloodHound-CE-compatible zip that "
+                                 "overlays recce's discovered accounts + "
+                                 "cracked-owner marks + ADCS ESC edges")
+    bhpush.add_argument("--overwrite", action="store_true",
+                        help="rewrite the zip in place if a file with the "
+                             "same name is already present (default: append "
+                             "a numeric suffix to avoid clobbering)")
+    _add_io(bhpush)
+    bhpush.set_defaults(func=_h("bloodhound_push"))
+
     # MSSQL offensive enumeration + attack chain.
     ms = sub.add_parser("mssql",
                         help="MSSQL: pre-auth probes + (with creds) nxc access/priv "
