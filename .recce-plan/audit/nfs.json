@@ -1,0 +1,216 @@
+{
+  "service": "nfs",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/nfs.py"
+  ],
+  "existing_capabilities": [
+    "ONC RPC/TCP with record-marking + bounded XDR cursor",
+    "portmap PMAPPROC_DUMP (proc 4) over TCP/111 (AUTH_NULL)",
+    "portmap PMAPPROC_GETPORT (proc 3)",
+    "mountd MOUNTPROC_EXPORT (proc 5) with v3->v1 fallback",
+    "world-mountable classification (bare wildcards / no restriction)",
+    "Findings: nfs_world (high), nfs_export (medium), nfs_rpc (low)",
+    "Runbook (rpcinfo/showmount/mount/no_root_squash) + prove HTML"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "MOUNTPROC_MNT (proc 1) mount attempt + filehandle capture",
+      "kind": "active",
+      "description": "RFC 1813 sec 5.2.1. Never issues MNT, so cannot prove mountability, cannot obtain root filehandle for NFSv3 chain, cannot test root_squash. This is the primitive that separates 'showmount says *' from 'I hold /'.",
+      "value": "critical",
+      "cwe": [
+        "CWE-284",
+        "CWE-732"
+      ],
+      "protocol_reference": "RFC 1813 sec 5.2.1 MOUNTPROC3_MNT",
+      "finding_kind": "nfs_mnt_open"
+    },
+    {
+      "name": "NFSv3 GETATTR/READDIR/READDIRPLUS/LOOKUP/READ (procs 1/16/17/3/6)",
+      "kind": "active",
+      "description": "With handle from MNT, READDIR + GETATTR enumerates tree, owners (UIDs), modes, sizes without a mount() syscall. GETATTR of /root/.ssh or /etc/shadow returning UID=0 world-r is a critical finding. Owner UIDs feed known_users.",
+      "value": "critical",
+      "cwe": [
+        "CWE-200",
+        "CWE-732"
+      ],
+      "protocol_reference": "RFC 1813 sec 3.3",
+      "finding_kind": "nfs_content_leak"
+    },
+    {
+      "name": "NFSv4 (bound to 2049 directly, no portmap) COMPOUND{PUTROOTFH,GETATTR,READDIR}",
+      "kind": "active",
+      "description": "Ganesha and modern Linux nfsd frequently ship NFSv4-only with 111 firewalled. probe() short-circuits when portmap DUMP is empty. NFSv4 pseudo-fs enumeration yields every export without mountd at all. Whole-class blind spot.",
+      "value": "critical",
+      "cwe": [
+        "CWE-284",
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 7530 / RFC 8881 sec 15",
+      "finding_kind": "nfs_v4_pseudofs"
+    },
+    {
+      "name": "AUTH_UNIX credential (spoof UID for squash policy tests)",
+      "kind": "auth",
+      "description": "Hard-coded AUTH_NULL cred+verf. Cannot test all_squash/root_squash policy, cannot present spoofed UIDs \u2014 the entire 'mount as UID 0/1000' attack requires AUTH_UNIX. Narrative already talks about no_root_squash but tool cannot verify.",
+      "value": "high",
+      "cwe": [
+        "CWE-284",
+        "CWE-287"
+      ],
+      "protocol_reference": "RFC 5531 sec 8.2 AUTH_SYS",
+      "finding_kind": "nfs_no_root_squash"
+    },
+    {
+      "name": "rpcbind v3/v4 DUMP (universal-address form)",
+      "kind": "passive",
+      "description": "Only PMAP v2 is spoken. v3/v4 uaddr strings reveal the bind interface (0.0.0.0 vs a specific one) which materially changes exposure classification. Modern rpcbind can be configured to hide from v2.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1833 sec 3 (rpcbind v3/v4)",
+      "finding_kind": "nfs_rpcbind_v4"
+    },
+    {
+      "name": "MOUNTPROC_DUMP (proc 2) \u2014 showmount -a \u2014 client list",
+      "kind": "passive",
+      "description": "Returns currently-mounted client hostnames/IPs. Directly feeds hostnames/known_hosts and relay_targets for lateral movement. One RPC, huge recon value.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1813 sec 5.2.2",
+      "finding_kind": "nfs_mount_clients"
+    },
+    {
+      "name": "NIS/ypserv (RPC 100004) explicit detection + passwd map hooks",
+      "kind": "active",
+      "description": "If portmap DUMP lists ypserv, ypcat passwd.byname yields /etc/passwd hashes. Currently swallowed into generic nfs_rpc low. Should be its own high finding and feed known_users + hashes cross-service.",
+      "value": "high",
+      "cwe": [
+        "CWE-522",
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1057 + Sun NIS",
+      "finding_kind": "nis_yp_exposed"
+    },
+    {
+      "name": "rpc.statd (100024) / nlockmgr (100021) / rquotad (100011) explicit detection",
+      "kind": "passive",
+      "description": "Long CVE tail (CVE-2000-0666 statd fmtstr, multiple lockd DoS). Currently swallowed into nfs_rpc; should be per-program findings so CVE mapping can attach.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200",
+        "CWE-134"
+      ],
+      "protocol_reference": "portmap program numbers 100024/100021/100011",
+      "finding_kind": "nfs_side_prog"
+    },
+    {
+      "name": "UDP portmap DUMP (UDP/111)",
+      "kind": "passive",
+      "description": "TCP-only today. Misses UDP-only portmap hosts and the reflection/amplification advisory (portmap DUMP amp).",
+      "value": "medium",
+      "cwe": [
+        "CWE-406"
+      ],
+      "protocol_reference": "RFC 1057 App A / CVE-2015-8779-era portmap reflection",
+      "finding_kind": "nfs_udp_pmap"
+    },
+    {
+      "name": "PMAPPROC_CALLIT (proc 5) filter-bypass probe",
+      "kind": "active",
+      "description": "Portmapper forwards arbitrary RPCs from its source port, bypassing ACLs that only permit 111. Historic bypass primitive; not tested/flagged.",
+      "value": "medium",
+      "cwe": [
+        "CWE-441"
+      ],
+      "protocol_reference": "RFC 1057 App A.1 CALLIT",
+      "finding_kind": "pmap_callit"
+    },
+    {
+      "name": "NFS server implementation fingerprint",
+      "kind": "passive",
+      "description": "Linux knfsd vs NFS-Ganesha vs Solaris/Illumos vs BSD nfsd vs NetApp differ on GETATTR/FSINFO edge cases and unhandled procs. Drives CVE mapping (Ganesha CVE-2020-10753 / CVE-2023-34320, knfsd CVE-2022-24448, CVE-2017-7895 short-RPC OOB read, rpcbind CVE-2017-8779 rpcbomb, CVE-2018-5729).",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "impl-specific responses to NFSv3/v4 GETATTR/FSINFO",
+      "finding_kind": "nfs_impl_fp"
+    },
+    {
+      "name": "NFSv4 owner@domain idmap disclosure",
+      "kind": "passive",
+      "description": "GETATTR of fattr4_owner returns 'user@domain' \u2014 reveals AD/Kerberos realm or NFSv4 domain even when no other service leaks it. Zero-cost domain discovery.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 8881 sec 5.9 (fattr4_owner)",
+      "finding_kind": "nfs_idmap_domain"
+    },
+    {
+      "name": "Reserved-port / 'insecure' export flag probe",
+      "kind": "active",
+      "description": "Some servers accept non-privileged source ports (multi-tenant / container escape primitive). Testable by MNT from high source port vs reserved.",
+      "value": "medium",
+      "cwe": [
+        "CWE-284"
+      ],
+      "protocol_reference": "exports(5) 'secure/insecure' + BSD reserved-port convention",
+      "finding_kind": "nfs_insecure_port"
+    },
+    {
+      "name": "Filehandle predictability / cross-export guessing",
+      "kind": "passive",
+      "description": "Old Linux and some appliances derive fh from (dev,ino,gen) predictably \u2014 a handle from one export can be mutated to reach unexported ones.",
+      "value": "low",
+      "cwe": [
+        "CWE-330",
+        "CWE-284"
+      ],
+      "protocol_reference": "NFSv3 fh opacity vs implementation",
+      "finding_kind": "nfs_fh_predictable"
+    },
+    {
+      "name": "_EVERYONE classifier expansion",
+      "kind": "passive",
+      "description": "Misses '0.0.0.0', '0/0', '::0/0', '@*', '0.0.0.0/32' typos \u2014 narrows nfs_world detection.",
+      "value": "low",
+      "cwe": [
+        "CWE-284"
+      ],
+      "protocol_reference": "exports(5) client list forms",
+      "finding_kind": "nfs_world"
+    },
+    {
+      "name": "Persistent-socket RPC session (chain multiple procs on one TCP)",
+      "kind": "passive",
+      "description": "Every op opens a fresh TCP. Additions above (MNT + READDIR + NFSv4 COMPOUND) need a session pattern to stay within budget.",
+      "value": "low",
+      "cwe": [],
+      "protocol_reference": "RFC 5531 record-marking",
+      "finding_kind": "nfs_perf"
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "hostnames / known_hosts <- MOUNTPROC_DUMP client list (G6)",
+    "known_users <- NFSv3/v4 GETATTR owner UIDs (G2) and NIS passwd map (G7)",
+    "hashes <- ypserv passwd.byname when NIS registered (G7)",
+    "domains <- NFSv4 fattr4_owner 'user@domain' idmap string (G13)",
+    "filehandles / open_shares <- MNT root fh corpus for chain steps (G1)",
+    "relay_targets <- mounted client IPs from showmount -a (G6)"
+  ],
+  "priority_gaps": [
+    "G1 MOUNTPROC_MNT \u2014 root fh capture, proves mountability, unlocks NFSv3 chain",
+    "G2 NFSv3 READDIR/GETATTR/READ \u2014 actual content + owner-UID leak, root_squash proof",
+    "G3 NFSv4 COMPOUND on 2049 \u2014 entire NFSv4-only host class currently invisible",
+    "G4 AUTH_UNIX credential \u2014 required to validate the module's own root_squash narrative",
+    "G6 MOUNTPROC_DUMP \u2014 one RPC, feeds known_hosts + relay_targets cross-service",
+    "G7 NIS/ypserv passwd map \u2014 feeds known_users + hashes"
+  ],
+  "summary": "Module speaks portmap v2 DUMP/GETPORT + mountd EXPORT over TCP only with AUTH_NULL and stops there. It never issues MNT (no filehandle, no root_squash proof), never speaks NFSv3 ops, never speaks NFSv4 (misses every NFSv4-only host since NFSv4 skips portmap), never uses AUTH_UNIX, never reads MOUNTPROC_DUMP client lists, and lumps ypserv/statd/lockd/rquotad into a single low finding \u2014 losing high-value cross-service feeds (known_hosts, known_users, hashes, domains, filehandles). No implementation fingerprint, so recent NFS-Ganesha/knfsd/rpcbind CVEs cannot be mapped. No tests exist for the module itself.",
+  "notes": "Audit only \u2014 no code changes. No tests/test_nfs*.py exists; test corpora mention 'nfs' only in generic pipeline/CWE/mock fixtures."
+}

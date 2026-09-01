@@ -1,0 +1,277 @@
+{
+  "service": "smb",
+  "existing_capabilities": [
+    "credfree SMB2 NEGOTIATE probe (dialects 0x0202..0x0302; deliberately excludes 0x0311 to sidestep negotiate-context requirements)",
+    "credfree SMB1 NEGOTIATE probe (detects legacy protocol answered)",
+    "signing posture split into SIGN_ENABLED (0x01) vs SIGN_REQUIRED (0x02)",
+    "SMB1-answered -> MS17-010/EternalBlue surface finding",
+    "signing-not-required -> NTLM relay-target finding",
+    "shells out to nxc/netexec for null/guest/creds enumeration (shares, users, pass-pol)",
+    "enum_best_session ladder: null -> guest -> creds fallback for locked-down hosts",
+    "share spidering via smbclient recursive ls with pattern-based secret file flagging (unattend.xml, GPP Groups.xml, web.config, KeePass, private keys, dotfiles, backups)",
+    "reversible writable-share proof (put/list/del + explicit cleanup) with put-line-based verdict to avoid false negatives from create-not-delete shares",
+    "null_session_findings and readable_share findings from parsed nxc output",
+    "credfree/credentialed runbook builders (nmap NSE, enum4linux-ng, nxc, secretsdump, ntlmrelayx)",
+    "proof_html reuse from mssql for terminal-transcript screenshots",
+    "findings_to_vulns folding into main severity totals + SMB workbook tab"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "SMB2 SESSION_SETUP NTLMSSP CHALLENGE harvest",
+      "kind": "passive",
+      "description": "The probe stops at NEGOTIATE. A follow-up SESSION_SETUP carrying an NTLMSSP NEGOTIATE_MESSAGE (MS-NLMP 2.2.1.1) forces the server to return an NTLMSSP CHALLENGE_MESSAGE (MS-NLMP 2.2.1.2) whose TargetInfo AV_PAIR list (MsvAvNbComputerName, MsvAvNbDomainName, MsvAvDnsComputerName, MsvAvDnsDomainName, MsvAvDnsTreeName, MsvAvTimestamp) plus the Version field (ProductMajor/Minor/Build, NTLMRevision) leak the machine's NetBIOS name, primary domain, DNS FQDN, AD tree name, exact OS build, and server clock -- all pre-auth, stdlib, no creds. This is the highest-value info-disclosure that SMB gives away and the module currently gets none of it.",
+      "value": "critical",
+      "protocol_reference": "MS-NLMP 2.2.1.2, MS-SMB2 2.2.5",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Cross-service wiring: known_users / known_hostnames / known_domains / relay_targets feed",
+      "kind": "chain",
+      "description": "creds/known_users.py, core/known_domains.py, and the relay_targets pattern used by mssql/vault all exist and explicitly cite SMB as a source, but smb.py does not populate any of them. SAMR user list, CHALLENGE hostnames/domains, and every signing_required=False target should be exported so ldap/mssql/vsphere/ntlmrelayx planning consumes them. The module is a producer of cross-service intel that today drops that intel on the floor.",
+      "value": "critical",
+      "protocol_reference": "recce/creds/known_users.py:3-12; recce/core/known_domains.py:8",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "CVE-2020-0796 SMBGhost detection (SMB 3.1.1 compression)",
+      "kind": "active",
+      "description": "The probe explicitly refuses to offer dialect 0x0311, so SMBGhost is unreachable. A 3.1.1 NEGOTIATE with a SMB2_COMPRESSION_CAPABILITIES negotiate context (MS-SMB2 2.2.3.1.3) advertising LZ77/LZ77+Huffman/LZNT1 and PATTERN_V1 that comes back with a mirrored context on Windows 10 1903/1909 identifies the pre-auth wormable SYSTEM RCE. Also enables the sibling CVE-2020-1206 SMBleed check.",
+      "value": "critical",
+      "protocol_reference": "MS-SMB2 2.2.3.1.3, 3.3.5.4",
+      "cwe": [
+        "CWE-119",
+        "CWE-787"
+      ]
+    },
+    {
+      "name": "Coerced-authentication reachability (PetitPotam / PrinterBug / DFSCoerce / MS-EFSR)",
+      "kind": "active",
+      "description": "The signing-not-required finding tells operators about relay landing, but nothing tests whether the relay-source primitives are reachable. A null-session tree_connect to IPC$ and NamedPipeOpen against \\PIPE\\efsrpc (MS-EFSR 3.1.4 - PetitPotam), \\PIPE\\spoolss (MS-RPRN 3.1.4.1.9 - PrinterBug), \\PIPE\\netdfs (MS-DFSNM 3.1.4.1.1 - DFSCoerce), and \\PIPE\\lsarpc (MS-LSAD - CVE-2022-26925 PetitPotam-LSA) turns \"could be relayed\" into \"here is the exact coercion primitive that answers unauthenticated\". These are the standard chains and the module names them in narratives without ever probing them.",
+      "value": "critical",
+      "protocol_reference": "MS-EFSR 3.1.4; MS-RPRN 3.1.4.1.9; MS-DFSNM 3.1.4.1.1; MS-LSAD",
+      "cwe": [
+        "CWE-306",
+        "CWE-918"
+      ]
+    },
+    {
+      "name": "SMB2 native null-session tree_connect + SESSION_FLAGS parsing (IS_GUEST / IS_NULL)",
+      "kind": "active",
+      "description": "Guest fallback and null fallback are detected only via nxc-parse output. MS-SMB2 2.2.6 SESSION_SETUP Response SessionFlags directly encodes SMB2_SESSION_FLAG_IS_GUEST (0x0001) and SMB2_SESSION_FLAG_IS_NULL (0x0002); sending a session_setup with garbage credentials and observing the returned SessionFlags is the canonical stdlib guest-fallback test (\"any credential logs in as GUEST\"). Currently the tool is a hard dependency for something the wire tells us for free.",
+      "value": "high",
+      "protocol_reference": "MS-SMB2 2.2.6",
+      "cwe": [
+        "CWE-287",
+        "CWE-1390"
+      ]
+    },
+    {
+      "name": "SAMR / LSA / MS-SRVS null-session RPC enumeration (native)",
+      "kind": "active",
+      "description": "The credfree layer emits an enum4linux-ng runbook step but does no RPC itself. Direct MS-SAMR (SamrConnect/SamrEnumerateDomainsInSamServer/SamrOpenDomain/SamrEnumerateUsersInDomain, 3.1.5), MS-LSAT (LsarLookupSids, 3.1.4), and MS-SRVS (NetrShareEnum, 3.1.4.8) calls over \\PIPE\\samr / \\PIPE\\lsarpc / \\PIPE\\srvsvc pull the domain SID, RID list, group memberships, share list, and session list credential-free on hosts where RestrictAnonymous!=1. This is also the primary feed for known_users and known_domains.",
+      "value": "high",
+      "protocol_reference": "MS-SAMR 3.1.5; MS-LSAT 3.1.4; MS-SRVS 3.1.4.8",
+      "cwe": [
+        "CWE-306",
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "RID cycling (SamrLookupIdsInDomain 500..~1500)",
+      "kind": "active",
+      "description": "Even without SamrEnumerateUsersInDomain, MS-SAMR SamrLookupIdsInDomain by RID (500=Administrator, 501=Guest, 502=krbtgt, 512=Domain Admins, then 1000+) returns the account name for each RID against many misconfigured hosts (esp. older Samba, and Windows with lsass anonymous restrictions off). Feeds known_users; the runbook mentions no equivalent primitive.",
+      "value": "high",
+      "protocol_reference": "MS-SAMR 3.1.5.7",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "SMB3 encryption posture (SMB2_ENCRYPTION_CAPABILITIES)",
+      "kind": "passive",
+      "description": "Only the signing byte is inspected. On an SMB 3.x server the negotiate response's Capabilities.GLOBAL_CAP_ENCRYPTION and 3.1.1's SMB2_ENCRYPTION_CAPABILITIES context (AES-128-CCM/AES-128-GCM/AES-256-CCM/AES-256-GCM; MS-SMB2 2.2.3.1.2) determine whether the wire is confidentiality-protected. A 3.x server with encryption off is a hardening finding (and a plaintext-loot surface for man-in-the-middle plus SMB signing relay chains).",
+      "value": "medium",
+      "protocol_reference": "MS-SMB2 2.2.3.1.2, 3.3.5.4",
+      "cwe": [
+        "CWE-311",
+        "CWE-319"
+      ]
+    },
+    {
+      "name": "NTLMv1 downgrade detection (LMCompatibilityLevel < 3)",
+      "kind": "active",
+      "description": "No probe determines whether the server accepts NTLMv1 responses. Sending a SESSION_SETUP with an NTLMSSP AUTHENTICATE using only NtChallengeResponse (24-byte NTLMv1) vs NTLMv2 blob and observing STATUS_NOT_SUPPORTED vs STATUS_LOGON_FAILURE reveals LmCompatibilityLevel <= 2 -- crackable to plaintext with rainbow tables (~$20 crack.sh) and the trigger for MS-KILE downgrade attacks.",
+      "value": "high",
+      "protocol_reference": "MS-NLMP 3.3.1; MS-SMB2 3.3.5.5",
+      "cwe": [
+        "CWE-327"
+      ]
+    },
+    {
+      "name": "SambaCry / CVE-2017-7494 fingerprint",
+      "kind": "active",
+      "description": "Writable-share proof already exists; combined with a Samba banner (from CHALLENGE Version 0/OS string on Samba, or nxc smb Samba-detection) it is one probe away from flagging CVE-2017-7494 (is_known_pipename() writable-share -> shared-object load -> unauth RCE against Samba 3.5.0-4.6.4/4.5.10/4.4.14).",
+      "value": "high",
+      "protocol_reference": "CVE-2017-7494",
+      "cwe": [
+        "CWE-20",
+        "CWE-434"
+      ]
+    },
+    {
+      "name": "CVE-2022-38023 / MS-NRPC signing bypass detection",
+      "kind": "active",
+      "description": "Zerologon-era Netlogon RPC signing weakness. A NetrServerAuthenticate3 handshake test against \\PIPE\\netlogon (MS-NRPC 3.1.4.3) with signing disabled reveals the unpatched Netlogon RC4 / integrity-check bypass, and the same pipe surface still hosts CVE-2020-1472 Zerologon on missing August-2020 patches.",
+      "value": "high",
+      "protocol_reference": "MS-NRPC 3.1.4.3",
+      "cwe": [
+        "CWE-330",
+        "CWE-287"
+      ]
+    },
+    {
+      "name": "NetBIOS Name Service (UDP/137) nbstat",
+      "kind": "passive",
+      "description": "Recce hits TCP/445+139 only. A single UDP/137 NBSTAT query (RFC 1002 4.2.18) returns the workstation NetBIOS name, workgroup/domain, logged-on user (unique-name 03 record), and MAC address (statistics record) with no session and no TCP. Feeds known_hostnames/known_users/known_domains for the entire scan. Free and definitive on any pre-Windows-11-hardening host.",
+      "value": "high",
+      "protocol_reference": "RFC 1002 4.2.18",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Named-pipe attack-surface enumeration on IPC$",
+      "kind": "active",
+      "description": "Once a tree_connect to IPC$ succeeds (null or with creds), CREATE against \\PIPE\\svcctl (MS-SCMR service install -> RCE), \\PIPE\\atsvc (MS-TSCH scheduled task -> RCE), \\PIPE\\winreg (MS-RRP HKLM\\SAM/SECURITY -> secretsdump precondition), \\PIPE\\eventlog, \\PIPE\\wkssvc all report reachable-or-not per principal. Each hit is either a lateral-movement primitive or a hash-dump precondition -- currently the module opens no named pipes at all.",
+      "value": "high",
+      "protocol_reference": "MS-SCMR 3.1.4; MS-TSCH 3.2.5; MS-RRP 3.1.5",
+      "cwe": [
+        "CWE-284",
+        "CWE-306"
+      ]
+    },
+    {
+      "name": "Native MS17-010 tree_connect state-machine check",
+      "kind": "active",
+      "description": "The finding today is \"SMBv1 answered\" and defers exploitability to an operator-run nmap NSE. The nmap check itself is a short SMBv1 TREE_CONNECT/TRANSACTION2 sequence testing STATUS_INSUFF_SERVER_RESOURCES vs STATUS_ACCESS_DENIED; porting it inline turns a maybe into a CONFIRMED CVE-2017-0143/0144 finding without shelling out.",
+      "value": "high",
+      "protocol_reference": "MS17-010; MS-CIFS 2.2.4.7",
+      "cwe": [
+        "CWE-119",
+        "CWE-787"
+      ]
+    },
+    {
+      "name": "SMB1 extended-negotiate ServerName/Domain/OS/Timezone/Encryption-Key harvest",
+      "kind": "passive",
+      "description": "The SMB1 probe returns only the boolean \"answered\". The extended SMB_COM_NEGOTIATE response also carries SecurityMode, EncryptionKey (challenge that reveals LMv1/NTLMv1 flow), ServerTime/TimeZone, and the trailing OEM/UNICODE ServerDomain\\ServerName -- credential-free hostname/domain/time-skew intel from every host that still speaks SMBv1.",
+      "value": "medium",
+      "protocol_reference": "MS-CIFS 2.2.4.52",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Preauth-integrity algorithm reporting (SMB2_PREAUTH_INTEGRITY_CAPABILITIES)",
+      "kind": "passive",
+      "description": "SMB 3.1.1's preauth-integrity context (MS-SMB2 2.2.3.1.1) reveals whether the server negotiates SHA-512, which gates downgrade-detection. Absent 3.1.1 offer entirely (the code path today), a scanner cannot report on preauth posture or the fixed dialect-downgrade class of attacks in the pre-3.1.1 era.",
+      "value": "medium",
+      "protocol_reference": "MS-SMB2 2.2.3.1.1",
+      "cwe": [
+        "CWE-757"
+      ]
+    },
+    {
+      "name": "Kerberos ticket / SMB2 KerberosAP session_setup path",
+      "kind": "auth",
+      "description": "enum_session always uses NTLMSSP-in-SMB2. When the target is domain-joined and creds include a Kerberos ticket (KRB5CCNAME) or an AS-REP-roastable target is present, an AP-REQ session setup via GSS-Krb5 (RFC 4121; MS-SMB2 3.3.5.5) is the correct auth. Missing this path means Kerberos-only environments and pass-the-ticket workflows are invisible to this module.",
+      "value": "medium",
+      "protocol_reference": "RFC 4121; MS-SMB2 3.3.5.5",
+      "cwe": [
+        "CWE-287"
+      ]
+    },
+    {
+      "name": "SMB1-writable-share NTLM-coercion payload (.SCF / desktop.ini) auto-drop with Responder handoff",
+      "kind": "exploit",
+      "description": "The writable-share narrative names the .SCF/.URL/.LNK/desktop.ini poisoned-icon primitive; the prove_writable path only drops recce_smb_probe.txt. A safe operator-opt-in \"drop poisoned icon file pointing at <listener>\" primitive turns the finding into a captured NetNTLMv2 hash feeding known_hashes -- and CVE-2024-43451 (NTLM hash disclosure via .URL) is an in-scope 2024 detection surface here.",
+      "value": "high",
+      "protocol_reference": "CVE-2024-43451",
+      "cwe": [
+        "CWE-522"
+      ]
+    },
+    {
+      "name": "SMB CVE roll (2022-24491/24500 uninit read/leak, 2023-21752 EFS EoP surface via SMB share, 2023-32233 Nftables not-SMB but 2023-23397 Outlook UNC coercion via SMB listener)",
+      "kind": "active",
+      "description": "The module reports no SMB CVE beyond MS17-010. At minimum, banner/build derived from the CHALLENGE Version field can flag missing patch levels for CVE-2022-24491, CVE-2022-24500, CVE-2022-32230, CVE-2023-21752, and CVE-2024-26169-related surfaces without any additional traffic.",
+      "value": "medium",
+      "protocol_reference": "MSRC advisories 2022-2024",
+      "cwe": [
+        "CWE-1104",
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Password-policy extraction (SamrQueryInformationDomain) fed to spray planner",
+      "kind": "passive",
+      "description": "nxc --pass-pol output is captured but only rendered; the numeric MinPasswordLength/LockoutThreshold/LockoutDuration are not parsed into a structured object that a spray planner (owning the spray budget: attempts < LockoutThreshold-1 per window) can consume. This is what determines whether spray is safe -- the module surfaces the raw text and leaves it there.",
+      "value": "medium",
+      "protocol_reference": "MS-SAMR 3.1.5.5.1",
+      "cwe": [
+        "CWE-521"
+      ]
+    },
+    {
+      "name": "Signing-required=True but Encryption=off distinction",
+      "kind": "passive",
+      "description": "The 'good' side of signing (SIGN_REQUIRED=True) is treated as clean, but on SMB 3.x a signed-yet-unencrypted session still exposes filenames, share names, and every read/write payload to a wire tap. An 'encryption disabled while signed' finding at low/medium is the right hardening surface -- currently invisible.",
+      "value": "low",
+      "protocol_reference": "MS-SMB2 3.3.4.1.4",
+      "cwe": [
+        "CWE-311"
+      ]
+    },
+    {
+      "name": "SMBv1 signing-required flag parsing",
+      "kind": "passive",
+      "description": "The SMB1 SecurityMode byte carries SIGNING_ENABLED (0x04) and SIGNING_REQUIRED (0x08) independently of the SMB2 posture. A dual-stack host can be SMB2-signing-required and still accept unsigned SMB1 (or vice versa on Samba) -- the module does not currently parse this from parse_smb1_negotiate.",
+      "value": "low",
+      "protocol_reference": "MS-CIFS 2.2.4.52.2",
+      "cwe": [
+        "CWE-287"
+      ]
+    }
+  ],
+  "priority_gaps": [
+    "NTLMSSP CHALLENGE harvest via SESSION_SETUP -- one extra credfree round-trip yields NetBIOS name, DNS FQDN, AD domain/tree, OS build, server time; feeds known_hostnames/known_domains for the whole scan",
+    "Cross-service wiring: emit relay_targets (every signing_required=False host), known_users (SAMR), known_hostnames/known_domains (CHALLENGE + nbstat) so ldap/mssql/vsphere/vault/ntlmrelayx planning consumes SMB intel -- infrastructure exists in creds/known_users.py + core/known_domains.py and is currently unused by smb.py",
+    "CVE-2020-0796 SMBGhost detection: the deliberate 0x0311 avoidance closes off the only path to detecting SMBGhost and SMBleed; a properly-formed 3.1.1 NEGOTIATE with SMB2_COMPRESSION_CAPABILITIES/SMB2_PREAUTH_INTEGRITY_CAPABILITIES contexts is required",
+    "Coerced-auth primitive reachability: null-tree_connect + NamedPipeOpen against \\PIPE\\efsrpc, \\PIPE\\spoolss, \\PIPE\\netdfs, \\PIPE\\lsarpc to flag which of PetitPotam/PrinterBug/DFSCoerce/MS-EFSR-LSA actually answers unauth (converts the abstract relay narrative into a specific relay chain per host)",
+    "Native null-session SAMR/LSA/SRVS RPC enumeration (users, groups, SID, share list, sessions) instead of pure nxc dependency -- also the required feed for RID cycling and known_users",
+    "NBSTAT UDP/137 credfree name/user/MAC harvest -- the module ignores port 137 entirely; single-packet enrichment",
+    "MS17-010 native tree_connect state-machine check to promote 'SMBv1 answered' from surface finding to CONFIRMED CVE without shelling out to nmap NSE",
+    "NTLMv1 acceptance test (LMCompatibilityLevel <=2 crack.sh surface) via crafted SESSION_SETUP",
+    "SMB2 SESSION_SETUP SessionFlags parsing to detect guest-fallback (IS_GUEST 0x0001) natively without nxc",
+    "Password-policy structured extraction (MS-SAMR SamrQueryInformationDomain) so a spray planner can honor LockoutThreshold instead of the operator eyeballing raw --pass-pol text"
+  ],
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/smb.py",
+    "/home/kali/Desktop/projects/recce/tests/test_smb_coverage.py"
+  ],
+  "cross_service_wire_gaps": [
+    "known_hostnames: no feed from NTLMSSP CHALLENGE MsvAvNbComputerName/MsvAvDnsComputerName/MsvAvDnsTreeName or from NBSTAT unique-name records",
+    "known_domains: no feed from NTLMSSP CHALLENGE MsvAvNbDomainName/MsvAvDnsDomainName or SMB1 extended-negotiate ServerDomain -- core/known_domains.py already advertises SMB as its expected source",
+    "known_users: no feed from SAMR SamrEnumerateUsersInDomain / SamrLookupIdsInDomain (RID cycle) or from nxc --users parsed output; creds/known_users.py explicitly names SMB SAMR as the expected source",
+    "relay_targets: every signing_required=False host is a relay landing spot that ntlmrelayx (and the AD-CS/ESC8 chain) should consume -- mssql.py has relay_targets(); smb.py does not export one despite being the canonical producer",
+    "known_hashes: writable-share poisoned-icon (.SCF/.URL/desktop.ini) -> Responder capture flow is described in narratives but no automated hand-off populates known_hashes",
+    "machine_accounts / DC list: no export of ADMIN$/SYSVOL-observed DCs or DC-role signing_required=True hosts so downstream Kerberos/AD modules cannot key on them",
+    "server clock skew: NTLMSSP CHALLENGE MsvAvTimestamp gives the AD-authoritative time -- required for KRB5 skew tolerance in downstream Kerberoast/AS-REP paths and currently not harvested"
+  ],
+  "notes": "The module is deep on the two credfree postures it already covers (SMBv1-on and signing-not-required) and clean on the live layer (null->guest->creds ladder, reversible write proof, secret-file spidering), but it stops at NEGOTIATE and delegates almost everything richer to nxc/enum4linux-ng. The two highest-ROI gaps are (1) taking one more credfree round-trip -- SESSION_SETUP with an NTLMSSP NEGOTIATE -- to harvest the CHALLENGE AV_PAIR intel that every SMB server hands out for free, and (2) actually wiring the SMB module into the cross-service known_users / known_hostnames / known_domains / relay_targets surfaces that other modules (mssql/vault/vsphere/ipmi/telnet) already produce or consume. After that, SMBGhost (the deliberate 0x0311 exclusion), the coerced-auth pipe-reachability matrix (PetitPotam/PrinterBug/DFSCoerce), and native SAMR enumeration are the next tier.",
+  "summary": "SMB module has strong credfree posture detection (SMBv1, signing SIGN_ENABLED vs SIGN_REQUIRED split) and a solid live layer (nxc-driven null/guest/creds ladder, reversible writable-share proof, share spidering), but it stops at SMB2 NEGOTIATE and does no SESSION_SETUP, no NTLMSSP CHALLENGE harvest, no coerced-auth pipe reachability, no native SAMR/LSA/SRVS RPC, no NBSTAT, no 3.1.1 negotiate contexts (so no SMBGhost / preauth-integrity / encryption posture), and does not feed known_users / known_hostnames / known_domains / relay_targets despite being the canonical producer named by those surfaces."
+}

@@ -1,0 +1,230 @@
+{
+  "service": "Jenkins JNLP (agent-controller channel)",
+  "summary": "Recce currently has ZERO Jenkins-JNLP coverage on the raw TCP agent-listener channel. Port 50000/tcp is already claimed by services/db/db2.py (Db2 LUW default) and svcdetect.py contains no JNLP signature \u2014 a Jenkins controller answering on 50000 will therefore be mis-fingerprinted as Db2 (or left \"unknown\" when DRDA EXCSAT fails). HTTP-side Jenkins is well-covered in services/web/checks.py and services/http.py (Groovy Script Console, /jenkins fingerprint, X-Jenkins header, CVE-2024-23897 CLI file-read advisory, act/exploitplan.py Metasploit mapping) but none of that reaches the agent port, and the agent port is the deserialization-RCE surface (CLI2-connect, CVE-2017-1000353) plus the agent-secret relay surface. A new services/jenkins_jnlp.py is needed, plus a Db2/JNLP disambiguator (send a text nudge, JNLP replies \"Protocol:\" ASCII while Db2/DRDA replies with a binary DSS 0xD0 frame). This module has strong cross-service value: it produces agent NODE NAMES (feed known_users/known_hostnames), the controller's RSA X-Instance-Identity fingerprint (new shared surface for correlating one Jenkins across multiple hosts/ports), and captured HMAC-SHA-256 challenges from JNLP2/3 negotiation (feed known_hashes for hashcat mode 1450). It also consumes the HTTP-side finding stream \u2014 if web/checks.py already tagged a host as Jenkins, this module confirms and links the agent port; if this module finds JNLP first, web/checks.py should probe /tcpSlaveAgentListener/ and /instance-identity on the sibling HTTP port to close the loop.",
+  "default_ports": [
+    "50000/tcp (default, configurable via Configure Global Security -> TCP port for inbound agents)",
+    "any port advertised by X-Jenkins-CLI-Port / X-Hudson-CLI-Port response header from the HTTP controller",
+    "randomized high port when 'Random' is selected in the controller UI \u2014 must be discovered via /tcpSlaveAgentListener/ on the HTTP port"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [
+      "recce/services/db/db2.py (owns 50000/tcp for Db2 LUW \u2014 DIRECT CONFLICT; JNLP will be mis-fingerprinted or lost when EXCSAT fails)",
+      "recce/services/svcdetect.py (no JNLP signature in _SIGNATURES; no PORT_NAMES entry hinting at Jenkins agents; 50000 is not listed here at all so falls through to Db2's module claim)",
+      "recce/services/serviceenum.py (no jenkins/jnlp entry in _NAME or _PORT \u2014 the recce-service.sh driver has no jenkins-agent script to route to)",
+      "recce/services/web/checks.py:185-189 (Jenkins Script Console groovy RCE \u2014 HTTP side only)",
+      "recce/services/http.py:199-200,373,701 (Jenkins path/header fingerprint, admin:admin default cred \u2014 HTTP side only)",
+      "recce/services/web/http.py:227-228 (X-Jenkins header product/version \u2014 HTTP side only, never referenced from the agent port)",
+      "recce/vuln/vulndb.py:361-371 (Jenkins <2.319 RCE + CVE-2024-23897 CLI file-read advisory \u2014 HTTP-version-keyed, no agent-port CVEs like CVE-2017-1000353 or CVE-2024-43044)",
+      "recce/act/exploitplan.py:87-89,329-335 (jenkins_cred_recovery Metasploit hint + Script-Console proof \u2014 nothing about jnlp_command_execution or CLI2 deserialization)"
+    ],
+    "notes": "Genuinely uncovered. The Db2 module is the only thing that will fire on 50000 today, and its is_db2() returns True for ANY port==50000 without protocol confirmation, so a Jenkins controller on 50000 currently produces a false Db2 finding and no JNLP work. Fixing this is a two-part change: (a) a new jenkins_jnlp.py module, and (b) tightening db2.is_db2()/probe() to REQUIRE the DRDA DSS 0xD0 magic before claiming the port, so JNLP wins when its ASCII 'Protocol:' greeting comes back."
+  },
+  "capabilities": [
+    {
+      "name": "is-jenkins-jnlp",
+      "kind": "passive",
+      "description": "Port/service classifier: portid==50000, or servicefp/banner contains 'PROTOCOL_JNLP' / 'Jenkins' / 'jenkins-agent', or nmap named it 'jnlp-agent'/'jenkins'. Mirrors the shape of db2.is_db2()/zk.is_zookeeper(). Must NOT return True on port==50000 alone \u2014 see jnlp-vs-db2 disambiguator below.",
+      "value": "high",
+      "cwe": []
+    },
+    {
+      "name": "jnlp-vs-db2-disambiguator",
+      "kind": "active",
+      "description": "Resolve the 50000/tcp collision with services/db/db2.py: open TCP, send b'\\r\\n', read up to 128 bytes. JNLP controller replies with ASCII 'Protocol:<name> not understood' or lists supported protocols starting with 'PROTOCOL_JNLP'; Db2/DRDA replies with a DSS frame whose 3rd byte is 0xD0 (or times out). Cache the result on port.extrainfo so db2.is_db2() and jnlp.is_jenkins_jnlp() are mutually exclusive. Without this, every Jenkins controller on the default port produces a phantom Db2 finding today.",
+      "value": "critical",
+      "cwe": []
+    },
+    {
+      "name": "jnlp-protocol-negotiation-probe",
+      "kind": "active",
+      "description": "Send 'PROTOCOL_INVALID\\n' after the initial handshake to trigger the controller's 'supported protocols' error listing. Parses the returned tokens: PROTOCOL_JNLP-connect (v1, plaintext, deprecated), PROTOCOL_JNLP2-connect (plaintext + SHA-based secret), PROTOCOL_JNLP3-connect (SHA + AES), PROTOCOL_JNLP4-connect (TLS-wrapped, current), PROTOCOL_CLI-connect / PROTOCOL_CLI2-connect (legacy CLI over agent port). Emits one finding per legacy protocol still enabled. Analogous to zookeeper.py's 4LW category walk.",
+      "value": "high",
+      "cwe": [
+        "CWE-327"
+      ],
+      "finding_kind": "jnlp_legacy_protocols"
+    },
+    {
+      "name": "cli2-connect-deserialization-detect",
+      "kind": "exploit",
+      "description": "If PROTOCOL_CLI-connect or PROTOCOL_CLI2-connect appears in the negotiation set, flag CVE-2017-1000353 (pre-auth Java-object deserialization RCE via the CLI over the agent port). Feeds act/exploitplan.py with the Metasploit module exploit/linux/misc/jenkins_command_receive (or exploit/multi/http/jenkins_ldap_deserialize) and a proof-of-exposure runbook. Version-gate against controller banner (fixed in 2.32.2 / 2.46.1) once the sibling HTTP fingerprint is known.",
+      "value": "critical",
+      "cwe": [
+        "CWE-502"
+      ],
+      "finding_kind": "jnlp_cli2_deser_rce",
+      "protocol_reference": "CVE-2017-1000353 / Jenkins Security Advisory 2017-04-26"
+    },
+    {
+      "name": "jnlp-plaintext-secret-leak-detect",
+      "kind": "active",
+      "description": "When PROTOCOL_JNLP-connect or PROTOCOL_JNLP2-connect is still enabled, the agent secret + node name traverse the wire in cleartext. Emit high-severity finding \u2014 an on-path attacker on the agent LAN passively harvests every reconnecting agent's HMAC secret and replays it. Fixed by disabling JNLP<4 in Configure Global Security.",
+      "value": "high",
+      "cwe": [
+        "CWE-319"
+      ],
+      "finding_kind": "jnlp_plaintext_agent_channel"
+    },
+    {
+      "name": "http-sibling-tcpSlaveAgentListener-probe",
+      "kind": "passive",
+      "description": "When the same host has an open Jenkins HTTP port (already fingerprinted by services/web/checks.py and http.py), fetch /tcpSlaveAgentListener/ and read the response headers: X-Jenkins (version), X-Jenkins-Agent-Protocols (whitelist), X-Instance-Identity (RSA pubkey b64), X-Hudson-JNLP-Port / X-Jenkins-CLI-Port (actual agent port \u2014 may NOT be 50000). This is the discovery path when the controller randomized its agent port; recce currently has no way to find those.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "jenkins_agent_listener_discovered"
+    },
+    {
+      "name": "x-instance-identity-fingerprint",
+      "kind": "passive",
+      "description": "Base64-decode the X-Instance-Identity RSA pubkey, take SHA-256 of the DER SubjectPublicKeyInfo. This fingerprint uniquely identifies one Jenkins controller \u2014 the same value shows up on every port the controller listens on and on every agent that trusts it. Publish as a NEW cross-service shared surface (known_pubkey_fingerprints / known_jenkins_controllers) so scans of multiple subnets can prove 'these three hosts are one Jenkins farm' and so a captured agent secret can be attributed to the correct controller.",
+      "value": "medium",
+      "cwe": [],
+      "finding_kind": "jenkins_controller_identity"
+    },
+    {
+      "name": "jnlp4-tls-cert-capture",
+      "kind": "passive",
+      "description": "PROTOCOL_JNLP4-connect wraps the channel in TLS with a self-signed cert whose CN/SAN carries 'Jenkins'. Complete the STARTTLS-style upgrade, capture the leaf cert, cross-check its pubkey against the X-Instance-Identity fingerprint above, and file the cert into services/probes.py's TLS store so cert-based correlation (services/probes.py cert_covers) covers Jenkins farms too.",
+      "value": "medium",
+      "cwe": []
+    },
+    {
+      "name": "agent-name-enumeration-from-http",
+      "kind": "chain",
+      "description": "When the HTTP controller has /computer/api/json readable (anonymously or with a known cred), harvest every agent's displayName + assignedLabels. Attempt a JNLP handshake using each name \u2014 a valid name gets a challenge, an unknown name gets 'Agent trust not established'. Yields the list of live agents even when the /computer/ UI is locked down. Feed harvested names into creds.known_users AND core.known_hostnames (Jenkins agents are usually named after their hosts).",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "jnlp_agent_names_enumerated"
+    },
+    {
+      "name": "agent-secret-relay-attack",
+      "kind": "chain",
+      "description": "If services/web/checks.py surfaces an unauthenticated /computer/{agent}/slave-agent.jnlp or a leaked /computer/{agent}/config.xml (both grant the 64-hex agent secret), open a fresh :50000 connection, negotiate JNLP4-connect, present the stolen (nodeName, secret) pair, complete the HMAC-SHA-256 challenge. The controller then dispatches remoting commands to us \u2014 arbitrary code execution in the controller's build-orchestration context, and file-read on any workspace the compromised agent had. Publishes the (controller_ip, agent_secret_b64) as a relay_targets entry so cli/_creds.py runs it exactly like it runs mssql/ldap relays today.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-522"
+      ],
+      "finding_kind": "jnlp_agent_secret_relay"
+    },
+    {
+      "name": "hmac-challenge-capture-for-offline-crack",
+      "kind": "auth",
+      "description": "In JNLP2/3 the server sends a challenge and expects HMAC-SHA-256(agent_secret, challenge). Capture both halves and emit a hashcat-ready line (mode 1450, HMAC-SHA-256 keyed by secret). Even on JNLP4 the inner challenge is HMAC-SHA-256 once the TLS is stripped in a controller-side capture. Published to creds.known_hashes for the normal hashloot / hashcat pipeline.",
+      "value": "medium",
+      "cwe": [
+        "CWE-916"
+      ],
+      "finding_kind": "jnlp_hmac_hash_captured"
+    },
+    {
+      "name": "cve-2024-43044-agent-file-read-detect",
+      "kind": "exploit",
+      "description": "Version-gate against the controller banner captured on the sibling HTTP port: Jenkins < 2.470 or LTS < 2.452.3 permits a compromised agent (or anyone completing the JNLP handshake, per the advisory) to invoke ClassLoaderProxy#fetchJar against arbitrary paths on the CONTROLLER filesystem \u2014 arbitrary file-read against JENKINS_HOME (secrets, credentials.xml, master.key). Emits a critical finding and a proof runbook.",
+      "value": "critical",
+      "cwe": [
+        "CWE-22"
+      ],
+      "finding_kind": "jnlp_cve_2024_43044",
+      "protocol_reference": "CVE-2024-43044 / SECURITY-3430"
+    },
+    {
+      "name": "jnlp-network-exposure-finding",
+      "kind": "passive",
+      "description": "Baseline reachability finding: an agent port reachable from a pentest-scope network segment is a misconfiguration on its own \u2014 Jenkins docs recommend the agent port be reachable ONLY from agent hosts. Analogous to zk_stat_reachable / db2_reachable. Records the negotiated protocol set as evidence.",
+      "value": "medium",
+      "cwe": [
+        "CWE-668"
+      ],
+      "finding_kind": "jnlp_reachable"
+    },
+    {
+      "name": "jnlp-runbook-emitter",
+      "kind": "passive",
+      "description": "Emit a runbook the operator can copy-paste: `printf 'PROTOCOL_INVALID\\n' | nc {ip} {port}` to dump supported protocols; `nmap -p{port} --script jnlp-info {ip}` (custom NSE) or Metasploit `auxiliary/scanner/jenkins/jenkins_udp_broadcast_enum` / `exploit/multi/http/jenkins_metaprogramming`. Mirrors zk runbook() / db2 runbook().",
+      "value": "low",
+      "cwe": []
+    },
+    {
+      "name": "controller-version-cross-link",
+      "kind": "chain",
+      "description": "Once the sibling HTTP Jenkins version is known, propagate it back onto the agent-port Port record (port.product='Jenkins', port.version=<X>) so recce/vuln/vulndb.py's version-matcher fires the Jenkins CVE stack (2.319-, CVE-2024-23897, CVE-2024-43044) against the agent port too. Today the agent port has no product/version so it's invisible to the CVE mapper even when the HTTP twin is fully fingerprinted.",
+      "value": "high",
+      "cwe": [],
+      "finding_kind": "jnlp_version_propagation"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_users (creds/known_users.py): agent nodeName strings harvested from /computer/api/json + successful JNLP handshakes \u2014 Jenkins agents are commonly named 'build-01', 'jenkins-worker', 'ci-runner' which double as OS/service usernames elsewhere on the network",
+    "known_hostnames (core/known_hostnames.py): agent nodeName often equals the agent host's short name; also X-Instance-Identity + cert SAN yield the controller's own hostname claim",
+    "known_hashes (creds/known_hashes.py): HMAC-SHA-256 challenge/response captured during JNLP2/3 negotiation \u2192 hashcat mode 1450 line for offline agent-secret cracking; also fingerprint of X-Instance-Identity RSA pubkey for correlation-only use",
+    "relay_targets (core/relay_targets.py): (controller_ip, controller_agent_port, nodeName, agent_secret) tuples \u2014 a stolen agent secret from an HTTP-side leak gets replayed against the JNLP port by cli/_creds.py exactly like mssql/ldap relays today",
+    "known_domains (core/known_domains.py): TLS SAN from the JNLP4 leaf cert and the controller's advertised URL in the tcpSlaveAgentListener response often disclose the internal DNS zone (e.g. jenkins.corp.internal)",
+    "NEW shared surface \u2014 known_pubkey_fingerprints / known_jenkins_controllers: SHA-256(SPKI(X-Instance-Identity RSA)) uniquely IDs a Jenkins controller across scans, ports, and IP changes. Same shape and consumer story as relay_targets \u2014 publish so any host serving the same fingerprint is auto-linked in the report as 'part of Jenkins controller X'. Would also let SSH/MSRPC-side host-identity clues attach to the same controller entity.",
+    "web/checks.py feedback loop: agent-port discovery on a non-standard port (X-Hudson-JNLP-Port header) tells the HTTP web-scanner to also probe /tcpSlaveAgentListener/ and /manage; conversely, web/checks.py's Jenkins version fingerprint propagates back onto the agent-port Port record so vuln/vulndb.py CVE-matches it (see controller-version-cross-link capability)",
+    "act/exploitplan.py: CLI2-connect detection produces a Metasploit-ready row (exploit/linux/misc/jenkins_command_receive) exactly like the current /script row",
+    "vuln/vulndb.py: publishes agent-port-specific CVE rows (CVE-2017-1000353, CVE-2024-43044) keyed on product=jenkins so version-matched findings fire on the agent port too, not just on HTTP"
+  ],
+  "recommended_hashcat_modes": [
+    {
+      "mode": 1450,
+      "description": "HMAC-SHA-256 (keyed by secret) \u2014 matches the JNLP2/3/4 agent authentication challenge/response; captured (challenge, response) pair cracks the 64-hex agent secret offline"
+    },
+    {
+      "mode": 1400,
+      "description": "Raw SHA-256 \u2014 matches the legacy JNLP1-connect 'hashed secret' form when a JNLP-connect handshake is observed"
+    }
+  ],
+  "recommended_findings": [
+    {
+      "severity": "critical",
+      "title": "Jenkins agent listener speaks CLI2-connect (CVE-2017-1000353 pre-auth Java deserialization RCE)"
+    },
+    {
+      "severity": "critical",
+      "title": "Jenkins agent port permits agent-secret relay from HTTP-side leak (full controller/workspace compromise)"
+    },
+    {
+      "severity": "critical",
+      "title": "Jenkins controller vulnerable to CVE-2024-43044 (agent -> controller arbitrary file read of JENKINS_HOME secrets)"
+    },
+    {
+      "severity": "high",
+      "title": "Jenkins JNLP legacy plaintext protocol (JNLP-connect / JNLP2-connect) enabled \u2014 agent secrets transit in cleartext"
+    },
+    {
+      "severity": "high",
+      "title": "Jenkins agent port reachable and 50000/tcp collision auto-resolved from Db2 to JNLP (misconfigured Db2 finding suppressed, real JNLP finding raised)"
+    },
+    {
+      "severity": "high",
+      "title": "Jenkins agent names harvested via /computer/api/json + JNLP handshake probing (feeds known_users/known_hostnames)"
+    },
+    {
+      "severity": "medium",
+      "title": "Jenkins controller reachable via JNLP agent-listener from pentest scope (should be agent-network-only)"
+    },
+    {
+      "severity": "medium",
+      "title": "Jenkins X-Instance-Identity pubkey captured and fingerprinted (cross-scan controller correlation)"
+    },
+    {
+      "severity": "medium",
+      "title": "Jenkins JNLP HMAC-SHA-256 challenge captured and queued for offline hashcat mode 1450"
+    },
+    {
+      "severity": "info",
+      "title": "Jenkins agent-listener protocol matrix enumerated (JNLP-connect/JNLP2/JNLP3/JNLP4/CLI/CLI2)"
+    },
+    {
+      "severity": "info",
+      "title": "Jenkins controller version propagated from HTTP twin onto agent-port record (CVE mapper now fires here)"
+    }
+  ],
+  "implementation_notes": "Ship as recce/services/jenkins_jnlp.py, mirroring services/zookeeper.py's shape: is_jenkins_jnlp(port) classifier, targets(hosts), probe(ip, port) doing (a) protocol negotiation and (b) sibling-HTTP /tcpSlaveAgentListener/ fetch when a Jenkins HTTP port is present on the same host, findings(hosts, probes), runbook(ip, port), findings_to_vulns(fs) via svccommon, analyze(hosts, ...) driven by svcprobe.iter_probe.\n\nThe db2.is_db2() port-only True on 50000 must become protocol-gated \u2014 refactor to require the DSS 0xD0 magic in the EXCSAT reply before claiming the port. Add a small svcdetect.py signature entry ((r'^PROTOCOL_JNLP|^Protocol:JNLP', 'jnlp-agent', 'Jenkins JNLP agent listener')) plus a PORT_NAMES fallback pointing 50000 to a disambiguator function (NOT a hardcoded name).\n\nRegister serviceenum.py entries: _NAME 'jnlp-agent'->'jenkins-jnlp', 'jenkins'->'jenkins-jnlp' when portid==50000; leave the recce-service.sh driver script (scripts/recce-service.sh) to add a jenkins-jnlp lane that shells out to nc / a small python probe.\n\nAdd vulndb.py rows for CVE-2017-1000353 and CVE-2024-43044 keyed on product=jenkins so the version cross-link capability fires them.\n\nFeed act/exploitplan.py with matcher r'jenkins.*cli2|cve-2017-1000353' -> exploit/linux/misc/jenkins_command_receive; matcher r'jnlp.*agent.secret.relay' -> a manual runbook (no MSF module \u2014 hand-rolled remoting client).\n\nThe NEW shared surface (known_jenkins_controllers keyed on SHA-256(SPKI)) is best placed alongside core/relay_targets.py \u2014 it is one file, one dict-of-sets, one write_* function, one reader \u2014 same footprint. Consumers: report/markdown.py + report/excel.py sections; and jenkins_jnlp.findings() itself uses it to auto-attach a finding to every host in the controller cluster."
+}

@@ -1,0 +1,232 @@
+{
+  "capabilities": [
+    {
+      "name": "list_identity_broadcast",
+      "kind": "passive",
+      "description": "Send the connectionless List Identity request (encapsulation command 0x63) to UDP/44818 and parse the CIP Identity Object item (0x000C) \u2014 vendor_id, device_type, product_code, revision, status, serial_number, product_name, state \u2014 the definitive presence/fingerprint for an ODVA device.",
+      "value": "high",
+      "protocol_reference": "ODVA Vol 2 (EtherNet/IP Adaptation of CIP), \u00a72-4.4 (List Identity) and \u00a75-2.2 (Identity Object 0x01)",
+      "finding_kind": "enip_reachable",
+      "notes": "Works with zero session state; the single most useful probe. Also succeeds over TCP/44818 for units that block the UDP variant."
+    },
+    {
+      "name": "list_services_enum",
+      "kind": "active",
+      "description": "Send List Services (command 0x0004) over TCP/44818 to enumerate the encapsulation services the endpoint supports \u2014 the presence of the 'Communications' capability with the CIP-encapsulation flag confirms explicit-messaging is possible, and its absence flags a pure I/O adapter.",
+      "value": "medium",
+      "protocol_reference": "ODVA Vol 2 \u00a72-4.5 (ListServices) / \u00a72-3.3 (Common Packet Format)",
+      "finding_kind": "enip_list_services",
+      "notes": "Cheap follow-on to List Identity; result gates whether the CIP-messaging probes below are worth trying."
+    },
+    {
+      "name": "list_interfaces_enum",
+      "kind": "active",
+      "description": "Send List Interfaces (command 0x0064) to enumerate the target's non-CIP interfaces \u2014 a device answering with multiple interfaces is typically a communications gateway/bridge (rack chassis backplane), a strong signal of a deeper OT segment reachable via CIP routing.",
+      "value": "medium",
+      "protocol_reference": "ODVA Vol 2 \u00a72-4.6 (ListInterfaces)",
+      "finding_kind": "enip_bridge_detected"
+    },
+    {
+      "name": "register_session",
+      "kind": "active",
+      "description": "Open a CIP explicit-messaging session with RegisterSession (0x0065) \u2014 succeeds with no credentials on any stock EtherNet/IP device and returns a session handle used for every subsequent Unconnected Send / SendRRData request; the fact that it succeeds is itself a finding on segments that shouldn't host OT.",
+      "value": "high",
+      "protocol_reference": "ODVA Vol 2 \u00a72-4.7 (RegisterSession)",
+      "finding_kind": "enip_unauth_session"
+    },
+    {
+      "name": "cip_identity_object_read",
+      "kind": "active",
+      "description": "Over the session, issue GetAttributesAll (service 0x01) on Identity Object class 0x01 instance 1 via SendRRData/UnconnectedSend to pull the same identity payload plus device Status word and Major/Minor Recoverable Faults \u2014 reveals whether the PLC is in Run/Program/Fault mode.",
+      "value": "high",
+      "protocol_reference": "ODVA Vol 1 \u00a75-2.2 (Identity Object 0x01 attributes 1-7)",
+      "finding_kind": "enip_identity_detailed"
+    },
+    {
+      "name": "cip_tcpip_object_read",
+      "kind": "active",
+      "description": "GetAttributesAll on TCP/IP Interface Object (class 0xF5, instance 1) exposes the device's static/DHCP config, IP address, netmask, gateway, primary/secondary name-server, domain name and host name \u2014 high-value host/network intelligence pulled with no auth.",
+      "value": "high",
+      "protocol_reference": "ODVA Vol 2 \u00a75-3.2 (TCP/IP Interface Object 0xF5, attrs 1-13)",
+      "finding_kind": "enip_tcpip_disclosure",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "cip_ethernet_link_read",
+      "kind": "active",
+      "description": "GetAttributesAll on Ethernet Link Object (class 0xF6) enumerates each physical port's MAC address, link speed/duplex and interface counters \u2014 the MAC is a durable identifier for asset inventory and cross-scan correlation.",
+      "value": "medium",
+      "protocol_reference": "ODVA Vol 2 \u00a75-4.2 (Ethernet Link Object 0xF6)",
+      "finding_kind": "enip_mac_disclosure"
+    },
+    {
+      "name": "rockwell_pccc_execute_pccc",
+      "kind": "active",
+      "description": "Rockwell/Allen-Bradley PLCs expose the legacy PCCC command set via CIP service 0x4B (Execute PCCC) on class 0x67 \u2014 supports memory-file reads (protected-typed-logical-read) with NO auth, dumping tag values, program state, and controller password hash from a MicroLogix/SLC/PLC-5 target.",
+      "value": "critical",
+      "protocol_reference": "Rockwell 1756-PM020/PM021 (PCCC / DF1 Protocol and Command Set), CIP Vol 2 Ch. 6 (Vendor-Specific Extensions)",
+      "finding_kind": "enip_pccc_read",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ]
+    },
+    {
+      "name": "cip_stop_cpu_service",
+      "kind": "exploit",
+      "description": "Unauthenticated Stop/Start via Identity-Object Reset (service 0x05) or the Rockwell Modify Mode service (PCCC 0x80 sub 0x01/0x02) drops a running PLC into Program mode from the network \u2014 process-halting critical impact, no creds required on any pre-CIP-Security firmware.",
+      "value": "critical",
+      "protocol_reference": "ODVA Vol 1 \u00a75-2.2 (Identity Object Reset service 0x05); Rockwell 1756-PM020 (Change Mode 0x8005)",
+      "finding_kind": "enip_unauth_stop_cpu",
+      "cwe": [
+        "CWE-306",
+        "CWE-284",
+        "CWE-1188"
+      ]
+    },
+    {
+      "name": "cip_forward_open_routing",
+      "kind": "chain",
+      "description": "ForwardOpen (service 0x54) on the Connection Manager (class 0x06) with a padded EPATH lets us route explicit messages through a rack backplane \u2014 chassis slot 0..N discovery reveals CPUs, I/O modules and comms cards on the isolated OT bus behind this gateway, extending the surface deeper than the visible IP.",
+      "value": "high",
+      "protocol_reference": "ODVA Vol 1 \u00a73-5.5 (Connection Manager 0x06, ForwardOpen 0x54); Vol 1 App. C (EPATH Routing)",
+      "finding_kind": "enip_backplane_enum",
+      "notes": "Emits new relay_targets (chassis-slot pseudo-hosts) that feed the next scan tranche."
+    },
+    {
+      "name": "cip_firmware_download_probe",
+      "kind": "exploit",
+      "description": "Vendor-specific File Object (class 0x37) / Rockwell firmware-download service 0x4E answers 'supported' on many models with no auth \u2014 actual write is destructive, but the availability check alone (a GetAttribute on Instance 0xC8) is a critical finding: firmware-flash from the network with no cert or password.",
+      "value": "critical",
+      "protocol_reference": "ODVA Vol 1 \u00a75-46 (File Object 0x37); Rockwell CVE-2021-22681 / ICSA-21-056-03 (firmware auth bypass class)",
+      "finding_kind": "enip_firmware_upload_capable",
+      "cwe": [
+        "CWE-306",
+        "CWE-345",
+        "CWE-494"
+      ]
+    },
+    {
+      "name": "vendor_id_cve_correlation",
+      "kind": "passive",
+      "description": "Map (vendor_id, product_code, revision) from Identity Object against the ODVA vendor-ID registry and known-vulnerable-device catalog (Rockwell ICSA advisories, Omron NX/NJ, Siemens 6ES7 CP343-1 EIP, Schneider M580) to emit specific CVE-bound findings \u2014 e.g. Rockwell CompactLogix rev < 32 = CVE-2021-22681 (weak session key).",
+      "value": "high",
+      "protocol_reference": "ODVA 'CIP Vendor IDs' registry (odva.org); ICS-CERT ICSA-YY-XXX-NN advisories",
+      "finding_kind": "enip_known_cve",
+      "cwe": [
+        "CWE-1395"
+      ]
+    },
+    {
+      "name": "cip_security_negotiation",
+      "kind": "passive",
+      "description": "Test whether the device rejects plaintext RegisterSession when only CIP Security (DTLS/TLS to Object class 0x5D) is required \u2014 a device that accepts unencrypted sessions on 44818 has CIP Security disabled, the single most important OT hardening control.",
+      "value": "high",
+      "protocol_reference": "ODVA Vol 8 (CIP Security), \u00a73.3 (EtherNet/IP Confidentiality Profile) \u2014 TCP/2221 (TLS) & UDP/2221 (DTLS) endpoints",
+      "finding_kind": "enip_cip_security_off",
+      "cwe": [
+        "CWE-319"
+      ]
+    },
+    {
+      "name": "udp_io_class1_listener",
+      "kind": "passive",
+      "description": "Presence of UDP/2222 open (Class 1 implicit I/O) means real-time process I/O packets traverse this segment in cleartext \u2014 a segmentation finding on its own, and lets an attacker sniff/forge I/O assemblies to spoof sensor values without ever touching the PLC on 44818.",
+      "value": "high",
+      "protocol_reference": "ODVA Vol 2 \u00a73-2.1 (Class 1 UDP transport, port 2222)",
+      "finding_kind": "enip_io_traffic_exposed",
+      "cwe": [
+        "CWE-319",
+        "CWE-345"
+      ]
+    },
+    {
+      "name": "enip_encap_fingerprint_marker",
+      "kind": "passive",
+      "description": "Signature-detect the fixed 24-byte EtherNet/IP encapsulation header (command LE, length LE, session, status, sender-context, options) in banner/servicefp output to positively ID the port even when nmap returns 'unknown' or 'tcpwrapped' \u2014 feeds svcdetect layer 1.",
+      "value": "medium",
+      "protocol_reference": "ODVA Vol 2 \u00a72-3.1 (Encapsulation Packet Structure)",
+      "finding_kind": "enip_detected"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames \u2014 TCP/IP Interface Object attribute 6 (Host Name) is a fully qualified device name pulled with no auth; feeds DNS/AD correlation.",
+    "known_domains \u2014 TCP/IP Interface Object attribute 5 (Domain Name) discloses the customer's AD/site domain (very common on Rockwell FactoryTalk-attached PLCs).",
+    "known_hostnames \u2014 Identity Object attribute 7 (Product Name) frequently embeds the vendor-assigned host label ('CLX-Line5-North') users also configure in DNS.",
+    "relay_targets \u2014 new surface: backplane chassis slots discovered via ForwardOpen routing (rack IP + slot 0..17) become their own scan targets for the next tranche; recommends a new shared surface 'cip_backplane_targets'.",
+    "known_macs (NEW SURFACE) \u2014 Ethernet Link Object attribute 4 (Interface MAC) is a hardware-durable identifier worth a shared table so ARP/DHCP/802.1X findings on other services can cross-reference the same box.",
+    "ot_asset_inventory (NEW SURFACE) \u2014 (vendor_id, device_type, product_code, revision, serial) tuples form a first-class OT asset table; Modbus, S7 (port 102), BACnet and DNP3 modules would populate the same store, giving reports one unified PLC/HMI/drive inventory instead of per-protocol islands.",
+    "known_vendor_ids \u2014 feeds CVE mapper directly: vendor_id 0x0001 (Rockwell), 0x002F (Omron), 0x005A (Schneider) plus product_code narrows to a single firmware family for ICS-CERT advisory correlation.",
+    "known_domains \u2014 Identity Object status word / Rockwell PCCC $50/$51 reads can expose the FactoryTalk directory name, another AD-adjacent domain worth wiring to LDAP/Kerberos scans."
+  ],
+  "default_ports": [
+    "44818/tcp",
+    "44818/udp",
+    "2222/udp",
+    "2221/tcp (CIP Security TLS)",
+    "2221/udp (CIP Security DTLS)"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [
+      "/home/kali/Desktop/projects/recce/recce/services/svcdetect.py",
+      "/home/kali/Desktop/projects/recce/recce/services/serviceenum.py"
+    ],
+    "notes": "Zero coverage. Grep for 44818/2222/enip/ethernet.ip/cip/ListIdentity across recce/ returns no service-code hits \u2014 only unrelated 'cipher' matches. svcdetect.PORT_NAMES has 102 (Siemens S7) and 502 is handled by modbus.py, but 44818 is absent; serviceenum._NAME and _PORT have no ODVA mapping. There is no recce/services/enip.py or recce/services/ethernetip.py."
+  },
+  "implementation_notes": "Model on recce/services/modbus.py \u2014 near-identical shape: single-file module, one probe() function returning a dict, findings()/runbook()/analyze() glue, stdlib socket + struct only (airgap-safe). Key protocol quirks: (1) EtherNet/IP encapsulation header is little-endian, unlike Modbus/TCP's big-endian MBAP \u2014 do NOT copy modbus's '>' struct format; use '<HHIIQI' for command/length/session/status/context(8B)/options. (2) List Identity works over both UDP/44818 (broadcast-friendly) and TCP/44818 (connect+read) \u2014 try UDP first (no session, single round-trip), fall back to TCP. (3) Every 'active' CIP request beyond List Identity/Services/Interfaces requires a RegisterSession first \u2014 cache the session handle and always UnregisterSession in a finally block, or the target counts stale sessions and can DoS itself (Rockwell has a 128-session cap on many models). (4) Never send ForwardClose without a matching ForwardOpen and never send Reset (service 0x05) to Identity Object \u2014 it will actually stop the CPU; the capability above is a *supported-service* probe (GetAttribute on the service list attr), not the write itself. Gate exploit-kind capabilities behind an --enable-exploit flag the same way sessions/exploit are gated today. Reuse svcprobe.iter_probe for the target loop and svccommon.findings_to_vulns for the export path \u2014 the same wiring modbus.py already uses. Add 44818 to svcdetect.PORT_NAMES (('ethernetip','ODVA EtherNet/IP / CIP')) and add an encapsulation-header signature to _SIGNATURES so nmap-unknown ports get labelled; add 'ethernetip'->'enip' to serviceenum._NAME and 44818->'enip' to _PORT.",
+  "recommended_findings": [
+    {
+      "title": "EtherNet/IP device reachable on the scanned network",
+      "severity": "high"
+    },
+    {
+      "title": "EtherNet/IP identity disclosed (vendor, product, firmware, serial)",
+      "severity": "info"
+    },
+    {
+      "title": "CIP TCP/IP object exposes host name, domain and DNS servers",
+      "severity": "medium"
+    },
+    {
+      "title": "CIP Ethernet Link object exposes MAC address",
+      "severity": "info"
+    },
+    {
+      "title": "Unauthenticated CIP session accepted (RegisterSession succeeds)",
+      "severity": "high"
+    },
+    {
+      "title": "CIP backplane routable \u2014 additional modules reachable via ForwardOpen",
+      "severity": "high"
+    },
+    {
+      "title": "Rockwell PCCC (service 0x4B) enabled \u2014 unauthenticated memory read/write",
+      "severity": "critical"
+    },
+    {
+      "title": "Unauthenticated CPU stop/reset capable (Identity Reset service 0x05 or PCCC Change Mode)",
+      "severity": "critical"
+    },
+    {
+      "title": "Unauthenticated firmware download service exposed (File Object 0x37 / vendor 0x4E)",
+      "severity": "critical"
+    },
+    {
+      "title": "CIP Security disabled \u2014 plaintext explicit messaging accepted on 44818",
+      "severity": "high"
+    },
+    {
+      "title": "EtherNet/IP Class 1 implicit I/O traffic exposed on UDP/2222",
+      "severity": "high"
+    },
+    {
+      "title": "Known-vulnerable ODVA firmware (vendor/product/revision matches ICS-CERT advisory)",
+      "severity": "high"
+    }
+  ],
+  "service": "EtherNet/IP (ODVA CIP)",
+  "summary": "EtherNet/IP is ODVA's adaptation of the Common Industrial Protocol (CIP) over TCP/UDP 44818, with real-time I/O on UDP 2222; it is the native fieldbus for Rockwell/Allen-Bradley ControlLogix/CompactLogix/MicroLogix PLCs and is widely deployed in manufacturing, water/wastewater and building automation. An attacker who reaches port 44818 can obtain a full device fingerprint (vendor, product code, firmware, serial, host name, MAC, IP config) with no authentication via List Identity (0x63) and CIP Identity/TCP-IP/Ethernet-Link objects; with a RegisterSession handle they can route explicit messages across the chassis backplane to reach otherwise-isolated modules, execute legacy PCCC commands against Rockwell PLCs, and \u2014 on any device without CIP Security \u2014 stop the CPU, reset it, or upload firmware, all unauthenticated. Recce currently has zero coverage: svcdetect does not know port 44818, serviceenum has no mapping, and there is no enip.py module. Adding one modelled on modbus.py gives recce a first-class OT-discovery surface that pairs with the existing modbus/S7 coverage and populates a new cross-service OT asset inventory."
+}

@@ -1,0 +1,211 @@
+{
+  "service": "etcd",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/etcd.py",
+    "/home/kali/Desktop/projects/recce/tests/test_etcd.py"
+  ],
+  "summary": "recce/services/etcd.py implements a shallow reachability probe: /version + /health fingerprint, GET /v2/keys/?recursive=true, and POST /v3/kv/range with the full-range 0x00..0x00 key. It counts keys but never extracts or classifies them, never touches maintenance/auth/cluster/debug endpoints, never probes the peer port, and never tests write. Findings are two-state (unauth-read vs auth-protected) \u2014 the module leaves the highest-value etcd primitives (snapshot download, member list, default-cred auth, k8s Secret harvesting, pprof heap) unrealized, and produces no cross-service artifacts (SA tokens, peer URLs, TLS SANs) that a kube-apiserver or scanner module could consume.",
+  "existing_capabilities": [
+    "Port match on 2379/2380/4001 and service/product='etcd' (is_etcd)",
+    "/version fingerprint with /health fallback",
+    "HTTP with automatic TLS fallback via _http()",
+    "v2 unauth read via GET /v2/keys/?recursive=true with recursive node count",
+    "v3 unauth read via POST /v3/kv/range with base64(0x00) range span",
+    "Two findings: critical etcd_unauth_read + info etcd_authed",
+    "svcprobe integration with budget/progress; findings_to_vulns wire-up",
+    "Runbook exposes v2/v3 enum commands"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "Snapshot download (POST /v3/maintenance/snapshot)",
+      "kind": "active",
+      "value": "critical",
+      "description": "etcd v3 exposes a streaming full-DB dump via /v3/maintenance/snapshot returning the entire bbolt file (all keys, revisions, tombstones \u2014 including deleted Secrets recoverable from historical revisions). Frequently unauth on the same permission tier as /v3/kv/range but also independently reachable on some misconfigurations where kv/range is filtered. This is THE etcd crown-jewel primitive and the module never touches it. Recovered file also feeds offline bbolt walking to defeat compaction.",
+      "protocol_reference": "etcd API v3 maintenance.proto Snapshot RPC / Documentation/dev-guide/api_reference_v3.md#service-maintenance",
+      "cwe": [
+        "CWE-200",
+        "CWE-306"
+      ],
+      "finding_kind": "etcd_snapshot_download"
+    },
+    {
+      "name": "Kubernetes payload extraction from kvs",
+      "kind": "passive",
+      "value": "critical",
+      "description": "When /v3/kv/range succeeds, the module counts kvs and discards them. The keys/values are protobuf-serialized k8s objects at well-known prefixes (/registry/secrets/<ns>/<name>, /registry/serviceaccounts/, /registry/configmaps/, /registry/apiextensions.k8s.io/, /registry/certificatesigningrequests/). Parsing the Secret ObjectMeta+Data recovers cleartext ServiceAccount JWTs, kubelet client cert PEMs, kubeconfig blobs, image-pull secrets, and TLS keys \u2014 every credential in the cluster. Currently zero of this is emitted.",
+      "protocol_reference": "kubernetes/pkg/registry/core/secret + apimachinery protobuf wire format; etcd Documentation/op-guide/recovery.md",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ],
+      "finding_kind": "etcd_k8s_secret_harvest"
+    },
+    {
+      "name": "Default-credential authentication (POST /v3/auth/authenticate)",
+      "kind": "auth",
+      "value": "critical",
+      "description": "When --auth is enabled, module returns info-only. It should attempt /v3/auth/authenticate with the seeded pairs root/root, root/'', root/etcd, root/password, root/admin (v3.0 defaults; also 'guest' role). A successful auth returns a bearer token usable via 'Authorization: <token>' against every other endpoint \u2014 bypasses the auth-protected verdict entirely. Also try /v2/auth for legacy pre-3.2 clusters.",
+      "protocol_reference": "etcd Documentation/op-guide/authentication.md; auth.proto Authenticate RPC",
+      "cwe": [
+        "CWE-798",
+        "CWE-521"
+      ],
+      "finding_kind": "etcd_default_creds"
+    },
+    {
+      "name": "Member/peer enumeration (POST /v3/cluster/member/list)",
+      "kind": "passive",
+      "value": "high",
+      "description": "MemberList RPC returns every member's peerURLs, clientURLs, name, and 64-bit member ID. Frequently unauth-readable when kv/range is denied (auth check applies per-tier). Reveals internal DNS names (etcd-0.etcd.kube-system.svc), private IPs of the entire control plane, and hostnames of the apiserver certs. Cross-service intel: those hostnames belong in the host discovery pool for other service modules (kubernetes.py, http.py).",
+      "protocol_reference": "etcd rpc.proto Cluster.MemberList; api_reference_v3.md#service-cluster",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "etcd_member_disclosure"
+    },
+    {
+      "name": "Peer/gRPC-raft port (2380) never probed",
+      "kind": "active",
+      "value": "high",
+      "description": "is_etcd() matches 2380 but probe() only ever hits the client port. The peer port speaks the raft protocol; when --peer-client-cert-auth is off (independent flag from --client-cert-auth), an attacker can add a rogue member via MemberAdd against the client API's cluster endpoint on the peer port, then raft-replicate arbitrary state \u2014 this is a full-cluster compromise even against v3-auth-enabled clusters. At minimum GET /raft/status and GET /v2/stats/self should be tried on 2380.",
+      "protocol_reference": "etcd Documentation/op-guide/security.md '--peer-client-cert-auth'; CVE-2018-16886 class",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "finding_kind": "etcd_peer_open"
+    },
+    {
+      "name": "Debug/pprof endpoints (/debug/pprof/*, /debug/vars)",
+      "kind": "passive",
+      "value": "high",
+      "description": "etcd bakes in net/http/pprof at /debug/pprof/{heap,goroutine,profile,cmdline,trace}. /debug/pprof/heap dumps process memory (containing decrypted secrets, gRPC creds, bearer tokens in flight); /debug/pprof/cmdline reveals the full argv (--cert-file, --peer-key-file paths, ETCDCTL_API=3 env). /debug/vars leaks module-level state. All are typically bound to the same listener as /metrics with no auth.",
+      "protocol_reference": "Go net/http/pprof; etcd main.go enablePprof; CVE-2019-11248 (same class in kubelet)",
+      "cwe": [
+        "CWE-200",
+        "CWE-497"
+      ],
+      "finding_kind": "etcd_pprof_open"
+    },
+    {
+      "name": "Prometheus /metrics endpoint",
+      "kind": "passive",
+      "value": "high",
+      "description": "GET /metrics returns Prometheus text: etcd_server_id, etcd_cluster_version, etcd_server_leader_changes_seen_total, etcd_disk_backend_commit_duration_seconds, grpc_server_started_total{grpc_method=...}. Discloses leader ID, DB size (hint at how many secrets exist), version at fine granularity for CVE mapping, and which RPCs are being served. Almost always unauth (separate --listen-metrics-urls flag, default no auth).",
+      "protocol_reference": "etcd Documentation/op-guide/monitoring.md; --listen-metrics-urls",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "etcd_metrics_open"
+    },
+    {
+      "name": "Write-capability probe (canary PUT)",
+      "kind": "active",
+      "value": "high",
+      "description": "Module only tests read. A POST /v3/kv/put with key=base64('/recce-probe-canary') value=base64(random) followed by immediate delete determines whether the anonymous role has write, which is a categorically worse finding: an attacker can write ValidatingWebhookConfiguration entries, forge RBAC ClusterRoleBindings, plant a mutating admission webhook, or insert a ServiceAccount token \u2014 full k8s takeover without touching the apiserver.",
+      "protocol_reference": "etcd rpc.proto KV.Put/DeleteRange; kv.proto PutRequest",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "finding_kind": "etcd_unauth_write"
+    },
+    {
+      "name": "v2 stats endpoints (/v2/stats/self, /v2/stats/leader, /v2/stats/store)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Even on v3-only clusters the v2 stats subtree is usually left mounted. /v2/stats/self returns name, id, state (leader/follower), leaderInfo.leader, startTime. /v2/stats/leader returns follower ID map with RTT and fail counts. /v2/stats/store returns setSuccess/setFail/getsSuccess counters \u2014 usable to fingerprint compaction and activity. Cheap unauth intel the module ignores.",
+      "protocol_reference": "etcd v2 API Documentation/v2/api.md#statistics",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "etcd_v2_stats"
+    },
+    {
+      "name": "Auth introspection (user/list, role/list, status)",
+      "kind": "auth",
+      "value": "medium",
+      "description": "POST /v3/auth/status returns enabled bool + auth revision without a token; /v3/auth/user/list and /v3/auth/role/list often need only root but leak on misconfig. Even the enabled bit from /v3/auth/status differentiates 'auth off' from 'auth on but readable' \u2014 the current module can only infer this from a 200 vs 401 on kv/range, missing the case where kv/range returns empty because of RBAC scoping (looks unreadable but read-with-creds would work).",
+      "protocol_reference": "etcd auth.proto AuthStatus/UserList/RoleList; Documentation/learning/design-auth-v3.md",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "etcd_auth_introspect"
+    },
+    {
+      "name": "Lease enumeration (POST /v3/lease/leases)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "LeaseLeases lists every active lease ID with TTL. In a k8s cluster each control-plane lease is a holder identity \u2014 kube-controller-manager/leader, kube-scheduler/leader, node-lease/<nodeName> \u2014 reading one lease's associated keys gives you the current leader hostname and every registered kubelet identity. Also feeds pivot targeting.",
+      "protocol_reference": "etcd rpc.proto Lease.LeaseLeases",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "etcd_lease_enum"
+    },
+    {
+      "name": "TLS certificate CN/SAN extraction",
+      "kind": "passive",
+      "value": "medium",
+      "description": "When _http() falls through to HTTPS the server cert is available via getpeercert() but discarded. etcd server certs typically SAN etcd internal DNS (etcd-0.etcd, controlplane-1.internal), the CN of the CA (kubernetes, kubernetes-front-proxy), and sometimes apiserver hostnames. These are host-discovery gold that no scanner input feeds today.",
+      "protocol_reference": "RFC 5280 \u00a74.2.1.6 subjectAltName; etcd Documentation/op-guide/security.md",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "etcd_tls_san"
+    },
+    {
+      "name": "Version-to-CVE mapping",
+      "kind": "passive",
+      "value": "medium",
+      "description": "version is captured but never mapped to known CVEs: CVE-2020-15106 (gateway crash), CVE-2020-15112 (integer overflow in decoding), CVE-2020-15113 (--data-dir directory traversal), CVE-2020-15114 (gateway TLS bypass), CVE-2021-28235 (auth token deserialization on 3.4.10-), CVE-2023-32082 (auth bypass with basic auth + password change race). Version string is already parsed; ranged comparison would produce a distinct severity finding per applicable CVE without adding new traffic.",
+      "protocol_reference": "MITRE CVE entries above; etcd security advisories at github.com/etcd-io/etcd/security/advisories",
+      "cwe": [
+        "CWE-937",
+        "CWE-1104"
+      ],
+      "finding_kind": "etcd_known_cve"
+    },
+    {
+      "name": "Maintenance status/alarm/hashKV (POST /v3/maintenance/{status,alarm,hash})",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Status returns raftIndex, raftTerm, leader member ID, dbSize, dbSizeInUse, isLearner. Hash returns full-store hash. Alarm returns cluster health alarms (NOSPACE, CORRUPT). All feed the same cluster-intel picture and are separately gated from kv/range on many deployments. dbSize is a direct predictor of secret volume for triaging targets.",
+      "protocol_reference": "etcd rpc.proto Maintenance.{Status,Alarm,Hash,HashKV}; api_reference_v3.md#service-maintenance",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "etcd_maintenance_status"
+    },
+    {
+      "name": "gRPC-native path via HTTP/2 h2c",
+      "kind": "active",
+      "value": "low",
+      "description": "Module uses http.client which is HTTP/1.1 only, so it interacts with the gRPC-JSON gateway. Real gRPC (POST with Content-Type: application/grpc, h2c or TLS-ALPN) sometimes has different auth handling and reveals streaming RPCs (Watch, LeaseKeepAlive) that the gateway doesn't fully proxy. Marginal for a scanner but a real gap in fidelity.",
+      "protocol_reference": "grpc.io/docs/guides/wire; etcd Documentation/dev-guide/api_grpc_gateway.md",
+      "cwe": [],
+      "finding_kind": "etcd_grpc_native"
+    }
+  ],
+  "priority_gaps": [
+    "1. Snapshot download via POST /v3/maintenance/snapshot \u2014 full bbolt dump including historical (uncompacted) revisions of deleted Secrets; the single highest-value etcd primitive currently absent.",
+    "2. K8s Secret / ServiceAccount decoding from kvs \u2014 the module already retrieves the values on unauth read but throws them away instead of protobuf-decoding /registry/secrets/ and /registry/serviceaccounts/ into bearer tokens for the credential broker.",
+    "3. Default-credential authenticate against /v3/auth/authenticate (root/root, root/'', root/etcd) \u2014 turns every 'etcd_authed' info finding into a potential critical.",
+    "4. Cluster/MemberList via POST /v3/cluster/member/list \u2014 internal peer URLs, IPs, DNS names; cross-service host discovery input.",
+    "5. Peer port 2380 probing \u2014 is_etcd() already matches it but probe() never contacts it; --peer-client-cert-auth is a separately configured flag frequently left off and permits raft MemberAdd.",
+    "6. Write-capability probe (canary PUT) \u2014 distinguishes unauth-read from unauth-write, the latter is full-cluster RCE.",
+    "7. /debug/pprof/heap and /debug/pprof/cmdline \u2014 process-memory dump and argv leak with cert/key paths.",
+    "8. /metrics \u2014 leader ID, dbSize, cluster_version, per-RPC counters, unauth by default (--listen-metrics-urls).",
+    "9. /v2/stats/{self,leader,store} \u2014 leader disclosure and follower topology on nearly every install.",
+    "10. Version-to-CVE mapping \u2014 CVE-2020-15113/15114, CVE-2021-28235, CVE-2023-32082; version already captured, no extra traffic."
+  ],
+  "cross_service_wire_gaps": [
+    "ServiceAccount JWTs and kubelet client certs recovered from /registry/secrets/ are not emitted as creds \u2014 a kubernetes.py / kube-apiserver module would use them for authenticated attacks but nothing hands them over.",
+    "Peer/clientURLs returned by /v3/cluster/member/list are internal hostnames/IPs that should feed the host-discovery input for other service modules (kubernetes.py, http.py, docker.py, docker_registry.py) but are not surfaced.",
+    "TLS server-cert SANs seen during the HTTPS fallback are discarded rather than added as host aliases; kube-apiserver certs frequently share the etcd CA.",
+    "A successful default-cred authenticate would yield an etcd bearer token; there is no cred store to publish it to for other collaborators \u2014 the finding would be one-shot.",
+    "dbSize from /v3/maintenance/status is a natural signal for cluster-severity ranking in the aggregate report but is not produced.",
+    "Leader member ID and follower peer IDs (from /v2/stats/leader and /v3/maintenance/status) would let the reporting layer group multi-host etcd findings under one logical cluster; today each host is an island."
+  ],
+  "notes": "Tests confirm coverage matches the module: v3 kvs read, v2 nodes read, auth-401 fallback, dead port. No test exercises snapshot, member list, auth, pprof, metrics, peer port, or TLS SAN \u2014 because the module never calls them. `_finding()` builds a single finding shape (svccommon-compatible) so adding new kinds is cheap. `analyze()` already routes through svcprobe with budget/progress so additional probe calls just need to be added inside `probe()` and surfaced in the returned dict."
+}

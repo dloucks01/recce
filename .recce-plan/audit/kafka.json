@@ -1,0 +1,229 @@
+{
+  "service": "kafka",
+  "summary": "recce/services/kafka.py implements a minimal ApiVersions handshake + MetadataRequest v1 probe. It parses brokers and topic names and emits two findings (kafka_metadata_leaked, kafka_saslgated). Beyond that it uses none of the ~70 other API keys in the Kafka wire protocol: it cannot enumerate SASL mechanisms, cannot attempt auth with looted creds, cannot read data, cannot list consumer groups, cannot describe configs/ACLs, and cannot fingerprint the broker version. It also throws away fields already sitting in the response it parses (controller_id, rack, is_internal, ApiVersions body) and never speaks TLS despite listing 9093/9094 as target ports. Multiple facts it does capture (advertised broker hosts, ports, rack IDs) are never fed to other services.",
+  "existing_capabilities": [
+    "ApiVersions v0 handshake (KIP-511 warmup) \u2014 response is discarded",
+    "MetadataRequest v1 \u2014 parses broker node_id/host/port and topic names",
+    "SASL/mTLS-gated broker detection (no-response classification)",
+    "is_kafka port heuristic covering 9092/9093/9094",
+    "kcat-based runbook stubs (metadata + consume) \u2014 cred-free only, no credentialed variant",
+    "kafka_metadata_leaked (HIGH) + kafka_saslgated (info) findings"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "SaslHandshakeRequest (ApiKey=17) enumeration",
+      "kind": "active",
+      "description": "Never sent. SaslHandshake v0/v1 returns the enabled_mechanisms array (PLAIN, SCRAM-SHA-256/512, GSSAPI, OAUTHBEARER, PLAIN-SASL_INHERIT). This is the single most useful pre-auth fact against a SASL-gated broker: it dictates which mechanism a spray campaign must use, and OAUTHBEARER/GSSAPI vs PLAIN implies very different downstream infrastructure (Keycloak/Kerberos KDC). KIP-43 / Kafka protocol guide \u00a7SaslHandshake.",
+      "value": "critical",
+      "protocol_reference": "KIP-43, Kafka protocol SaslHandshakeRequest v0/v1",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "kafka_sasl_mechanisms_enumerated"
+    },
+    {
+      "name": "SaslAuthenticate (ApiKey=36) with looted creds",
+      "kind": "auth",
+      "description": "analyze() ignores the creds argument entirely. There is no credentialed path \u2014 SASL PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512 auth attempts are never made even when other services have looted a user/pass. Given that Kafka commonly reuses LDAP / DB / SMTP passwords, this leaves the highest-value primitive on the table.",
+      "value": "critical",
+      "protocol_reference": "KIP-152 SaslAuthenticateRequest v0/v1/v2",
+      "cwe": [
+        "CWE-798",
+        "CWE-521"
+      ],
+      "finding_kind": "kafka_sasl_auth_success"
+    },
+    {
+      "name": "Fetch (ApiKey=1) \u2014 bounded data sample from open topics",
+      "kind": "exploit",
+      "description": "When metadata leaks freely, ANONYMOUS is very often also permitted READ on user topics. Module never issues a Fetch, so it cannot prove data disclosure. A bounded 1-record-per-topic fetch from earliest offset would upgrade kafka_metadata_leaked from HIGH inventory-leak to CRITICAL data-disclosure with sample payloads.",
+      "value": "critical",
+      "protocol_reference": "Kafka protocol FetchRequest v0-v13, KIP-74 (max_bytes)",
+      "cwe": [
+        "CWE-306",
+        "CWE-200"
+      ],
+      "finding_kind": "kafka_topic_data_readable"
+    },
+    {
+      "name": "ListOffsets (ApiKey=2) \u2014 activity + volume signal",
+      "kind": "active",
+      "description": "Never sent. earliest+latest offsets per partition disclose per-topic message counts and staleness, letting the operator prioritize which of dozens of leaked topic names actually contains fresh data before running Fetch.",
+      "value": "high",
+      "protocol_reference": "Kafka protocol ListOffsetsRequest v0-v7",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "kafka_topic_volume_disclosed"
+    },
+    {
+      "name": "ListGroups (ApiKey=16) + DescribeGroups (ApiKey=15)",
+      "kind": "active",
+      "description": "Consumer group IDs are named after the consuming application (e.g. `fraud-scorer-v2`, `keycloak-audit-sink`). DescribeGroups additionally returns members with their client_host, group_instance_id, and client_id \u2014 attacker-observable inventory of downstream services and the hosts running them. Currently unqueried.",
+      "value": "high",
+      "protocol_reference": "Kafka protocol ListGroupsRequest v0-v4, DescribeGroupsRequest v0-v5",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "kafka_consumer_groups_enumerated"
+    },
+    {
+      "name": "DescribeConfigs (ApiKey=32) on brokers + topics",
+      "kind": "active",
+      "description": "Never sent. Anonymous DescribeConfigs on a broker leaks listener config, ssl.keystore.location, sasl.jaas.config paths, log.dirs, super.users, advertised.listeners for all listeners (including internal ones not returned by Metadata). On topics it leaks retention, cleanup.policy, min.insync.replicas \u2014 plus per-topic ACL policy. Massive info-disclosure primitive not attempted.",
+      "value": "high",
+      "protocol_reference": "Kafka protocol DescribeConfigsRequest v0-v4, KIP-133",
+      "cwe": [
+        "CWE-200",
+        "CWE-16"
+      ],
+      "finding_kind": "kafka_configs_disclosed"
+    },
+    {
+      "name": "DescribeAcls (ApiKey=29)",
+      "kind": "active",
+      "description": "Never sent. When anonymous access is allowed at all, DescribeAcls typically works too and dumps the entire ACL table \u2014 every principal name (User:CN=..., User:alice), every resource, every permission \u2014 which is a complete authorization map of the cluster. Enumerates users for downstream spray.",
+      "value": "high",
+      "protocol_reference": "Kafka protocol DescribeAclsRequest v0-v3, KIP-11",
+      "cwe": [
+        "CWE-200",
+        "CWE-732"
+      ],
+      "finding_kind": "kafka_acls_disclosed"
+    },
+    {
+      "name": "Produce (ApiKey=0) write-test",
+      "kind": "exploit",
+      "description": "No probe attempts a zero-byte Produce to a synthetic topic to prove ANONYMOUS write, which would elevate the finding to log-tampering / event-injection (poisoning audit sinks, forging billing events). A single acks=0 Produce is idempotent-safe on a fabricated topic name.",
+      "value": "high",
+      "protocol_reference": "Kafka protocol ProduceRequest v0-v10",
+      "cwe": [
+        "CWE-306",
+        "CWE-345"
+      ],
+      "finding_kind": "kafka_anonymous_write"
+    },
+    {
+      "name": "CreateTopics (ApiKey=19) permission test",
+      "kind": "exploit",
+      "description": "Optional companion to the Produce test: a `validate_only=true` CreateTopics tells you whether an anonymous principal has cluster-level CREATE without actually creating anything. Currently no capability check.",
+      "value": "medium",
+      "protocol_reference": "Kafka protocol CreateTopicsRequest v0-v7 (validate_only flag added v1)",
+      "cwe": [
+        "CWE-306"
+      ],
+      "finding_kind": "kafka_anonymous_create_topic"
+    },
+    {
+      "name": "ApiVersions response parsing for broker fingerprint",
+      "kind": "passive",
+      "description": "The ApiVersions response is read then discarded. Its (api_key, min, max) tuple set uniquely fingerprints the Kafka release line (e.g. presence of ApiKey 60 DescribeCluster => Kafka >= 2.8; max Produce=10 => >= 3.0; ApiKey 68 ConsumerGroupHeartbeat => >= 3.7 KIP-848). Without this, CVE mapping (CVE-2023-25194 Kafka Connect JNDI, CVE-2022-34917 mTLS auth bypass 3.0-3.2, CVE-2024-27309 replication ACL bypass) is impossible.",
+      "value": "high",
+      "protocol_reference": "Kafka protocol ApiVersionsResponse v0-v3, KIP-35",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "kafka_version_fingerprint"
+    },
+    {
+      "name": "TLS wrapping for 9093 / 9094 listeners",
+      "kind": "active",
+      "description": "is_kafka() lists 9093 (default SSL) and 9094 (common SASL_SSL) but probe() only ever opens a plain socket. On a TLS listener the plaintext ApiVersions is discarded and the probe currently mislabels the broker as `kafka_saslgated` when it may actually be an open unauthenticated SSL listener. Missing: ssl.wrap_socket handshake, client-cert-required detection (SSL alert 40 handshake_failure without cert vs successful handshake), and cert CN/SAN extraction.",
+      "value": "high",
+      "protocol_reference": "RFC 8446 TLS 1.3, Kafka listener.security.protocol.map (KIP-103)",
+      "cwe": [
+        "CWE-295",
+        "CWE-297"
+      ],
+      "finding_kind": "kafka_tls_listener_probed"
+    },
+    {
+      "name": "mTLS client-auth detection",
+      "kind": "active",
+      "description": "Even after TLS wrapping is added, distinguishing SSL-only from SSL-with-required-client-cert requires observing the CertificateRequest handshake message / alert 40. Currently no code path attempts this \u2014 an mTLS-gated broker is indistinguishable from a broken one.",
+      "value": "medium",
+      "protocol_reference": "RFC 8446 \u00a74.3.2 CertificateRequest",
+      "cwe": [
+        "CWE-295"
+      ],
+      "finding_kind": "kafka_mtls_required"
+    },
+    {
+      "name": "DescribeCluster (ApiKey=60) \u2014 cluster_id + controller",
+      "kind": "passive",
+      "description": "Cluster_id and controller node are never emitted. Cluster_id correlates the same cluster across pivoted network paths (a broker discovered on a private subnet == the one seen on the perimeter). Not fetched.",
+      "value": "medium",
+      "protocol_reference": "Kafka protocol DescribeClusterRequest v0-v1, KIP-700",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "kafka_cluster_id_disclosed"
+    },
+    {
+      "name": "DescribeUserScramCredentials (ApiKey=50)",
+      "kind": "active",
+      "description": "When permitted for anonymous (rare but seen on misconfigured KRaft brokers), returns username + mechanism + iterations for every SCRAM user configured on the cluster. Full user enumeration for spray. Never attempted.",
+      "value": "medium",
+      "protocol_reference": "Kafka protocol DescribeUserScramCredentialsRequest v0, KIP-554",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "kafka_scram_users_enumerated"
+    },
+    {
+      "name": "CreateDelegationToken (ApiKey=38)",
+      "kind": "exploit",
+      "description": "With cluster-level auth (post-cred), issuing a delegation token yields a portable HMAC credential usable from any client without further creds. Currently no post-auth exploit primitive.",
+      "value": "medium",
+      "protocol_reference": "KIP-48 Delegation Token support",
+      "cwe": [
+        "CWE-798"
+      ],
+      "finding_kind": "kafka_delegation_token_issued"
+    },
+    {
+      "name": "is_internal / __consumer_offsets classification",
+      "kind": "passive",
+      "description": "_parse_metadata_v1 reads the is_internal bool then skips it. Findings therefore treat `__consumer_offsets` and `__transaction_state` as equivalent to user topics, inflating the topic list shown to the operator and hiding the more interesting user topics behind Kafka housekeeping ones.",
+      "value": "low",
+      "protocol_reference": "Kafka protocol MetadataResponse v1 topic.is_internal",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "kafka_internal_topics_marked"
+    },
+    {
+      "name": "Compact / flexible-versions parser (v9+)",
+      "kind": "passive",
+      "description": "Parser is hardcoded to v1 wire format (int16-length strings, int32 array counts). Modern KRaft brokers (>= 2.4 for many APIs) support only flexible/compact framing (varint lengths, tagged fields). The module works today only because it requests v1 explicitly; it cannot follow the ApiVersions-advertised maximum and so cannot use any of the KIP-482 flexible-only APIs.",
+      "value": "medium",
+      "protocol_reference": "KIP-482 flexible versions, KIP-511",
+      "cwe": [
+        "CWE-1287"
+      ],
+      "finding_kind": ""
+    }
+  ],
+  "priority_gaps": [
+    "SaslHandshake enumeration \u2014 one request per SASL-gated broker, tells the whole session which mechanism to spray. Blocks credentialed pivot until added.",
+    "SaslAuthenticate with creds \u2014 analyze() takes a creds arg and drops it on the floor. Every other credentialed service in recce is worth more if kafka feeds it a proven principal.",
+    "Fetch a bounded sample from leaked topics \u2014 the finding currently says `topic names disclose intent`; a real fetch upgrades it from inventory-leak to data-disclosure with proof bytes.",
+    "TLS wrapping for 9093/9094 \u2014 module already claims to probe those ports; today it lies about them, calling every SSL-only listener SASL-gated.",
+    "DescribeConfigs + DescribeAcls \u2014 the two highest-yield anonymous read primitives after Metadata; leaks JAAS paths, super.users, and full principal list.",
+    "ApiVersions response parsing \u2014 cheap (already read, just parse) and unlocks version-specific CVE mapping (CVE-2023-25194, CVE-2022-34917, CVE-2024-27309)."
+  ],
+  "cross_service_wire_gaps": [
+    "Advertised broker `host` values are parsed but never fed back into the recce hosts registry as newly-discovered targets. On perimeter-exposed brokers this routinely leaks internal FQDNs / RFC1918 IPs (advertised.listeners) that no other scanner would see \u2014 a free pivot list.",
+    "Broker `rack` field is parsed then dropped. Rack IDs commonly encode DC/AZ (`us-east-1a`, `dc2-rack7`) \u2014 topology facts other modules (bgp, snmp, cloud-metadata) could correlate.",
+    "controller_id is skipped. The controller node is the correct target for control-plane abuse (metadata mutation, ACL changes); no other service can name it.",
+    "Enumerated SASL mechanisms should be published to the credentials/spray module so `PLAIN` on kafka reuses looted LDAP passwords, `GSSAPI` triggers the Kerberos playbook, `OAUTHBEARER` marks a Keycloak/JWT dependency.",
+    "Consumer-group DescribeGroups member.client_host values are effectively a list of every downstream service host \u2014 cross-fed into recce hosts, these become new scan targets that would not otherwise be reachable from the scanner's vantage point.",
+    "Topic-name heuristics: presence of `_schemas` implies Confluent Schema Registry (8081) alongside; `connect-configs` / `connect-offsets` / `connect-status` implies Kafka Connect REST (8083) \u2014 recce has no cross-service handoff to schedule those probes when kafka observes those topic names.",
+    "DescribeConfigs (when added) will expose `sasl.jaas.config`, `ssl.truststore.location`, and inter-broker listener addresses \u2014 these are host and credential facts that belong in the shared session store, not in a single kafka finding."
+  ],
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/kafka.py",
+    "/home/kali/Desktop/projects/recce/tests/test_kafka.py"
+  ],
+  "notes": "The module's docstring still says `MetadataRequest v0` in two places while the code actually sends v1 (probe() line 197, module header line 3). Not a capability gap so omitted from the ranked list, but worth noting for the next editor. Also: probe() always uses correlation_id=1 and never validates the response's correlation_id \u2014 a hostile listener could return canned bytes claiming to be a Kafka reply and the parser would accept it; low-severity robustness, not an attack primitive."
+}

@@ -1,0 +1,266 @@
+{
+  "service": "OPC-UA",
+  "default_ports": [
+    "4840/tcp",
+    "4843/tcp (opc.tcps)"
+  ],
+  "summary": "OPC UA (IEC 62541) is the modern ICS/IIoT interoperability protocol - a binary UA Connection Protocol (uacp) over TCP that negotiates a SecureChannel and rides an object-oriented information model on top. Attackers care because a huge share of deployments accept Anonymous user identity, allow SecurityMode=None (cleartext), or expose deprecated crypto policies - and the unauthenticated GetEndpoints/FindServers Discovery services are mandated by the spec, so the server MUST respond to them with a rich fingerprint: endpoint URLs, security policies and modes, user token policies (Anonymous being the smoking gun), server X.509 certificate, application URIs, product URIs, and discoveryUrls that point deeper into the OT network. Recce currently has zero OPC UA coverage - not even a port label - so a single passive probe of 4840/tcp turns an unknown-service line into a vendor/product ID, an auth posture verdict, an X.509 identity for pivoting, and (when Anonymous is accepted) a proven-exploitable finding on OT infrastructure.",
+  "existing_coverage": {
+    "detected": false,
+    "files": [
+      "recce/services/svcdetect.py",
+      "recce/services/serviceenum.py",
+      "recce/services/modbus.py"
+    ],
+    "notes": "svcdetect.PORT_NAMES has no entry for 4840/4843; no signature in _SIGNATURES matches the uacp 'HEL'/'ACK'/'OPN'/'ERR' magic. serviceenum._NAME and _PORT have no opcua entry - a port 4840 nmap detects as 'opcua-tcp' currently maps to no per-service script. The only OT protocol modules today are modbus.py (Function 0x03 probe) and the S7/ISO-TSAP port label at 102. Case-insensitive grep for opc/opcua/4840 across the tree returns zero non-wordlist hits."
+  },
+  "capabilities": [
+    {
+      "name": "uacp_hello_ack_handshake",
+      "kind": "passive",
+      "description": "Send a uacp HELLO message (magic 'HELF' + ProtocolVersion + buffer/chunk sizes + EndpointUrl) and confirm the server answers with ACK ('ACKF') - proves the port is genuinely OPC UA rather than a look-alike and captures the server's negotiated buffer sizes and max message size for later chunking.",
+      "value": "high",
+      "cwe": [],
+      "finding_kind": "opcua_reachable",
+      "protocol_reference": "IEC 62541-6 \u00a77.1.2.3 (Hello Message) and \u00a77.1.2.4 (Acknowledge Message)",
+      "notes": "Use a bogus EndpointUrl like 'opc.tcp://recce/'; any conformant server ACKs before it looks at the URL. Distinguishes real OPC UA from ambiguous port matches."
+    },
+    {
+      "name": "get_endpoints_unauth",
+      "kind": "active",
+      "description": "After HELLO/ACK, open a temporary SecureChannel with SecurityPolicy=None and send GetEndpointsRequest - the spec REQUIRES the server to answer unauthenticated, returning the full EndpointDescription[] array (endpointUrl, securityMode, securityPolicyUri, userIdentityTokens, serverCertificate, transportProfileUri, securityLevel).",
+      "value": "critical",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "opcua_endpoints_enumerated",
+      "protocol_reference": "IEC 62541-4 \u00a75.4.4 (GetEndpoints Service), Part 6 \u00a77.1.4 (OpenSecureChannel with SecurityPolicy=None)",
+      "notes": "This one request produces most of the other findings' raw material. No auth, no session, no license risk."
+    },
+    {
+      "name": "anonymous_user_token_policy",
+      "kind": "auth",
+      "description": "Flag every endpoint whose userIdentityTokens[] contains a UserTokenPolicy with tokenType=Anonymous (0) - the server will let an unauthenticated Session Browse, Read and (unless per-node ACLs say otherwise) Call/Write against the OT information model.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-284",
+        "CWE-1263"
+      ],
+      "finding_kind": "opcua_anonymous_allowed",
+      "protocol_reference": "IEC 62541-4 \u00a77.42 (UserIdentityToken), Part 3 \u00a74.8 (Well Known Security Policy URIs), UserTokenType enum in Part 4 \u00a77.36"
+    },
+    {
+      "name": "security_mode_none_offered",
+      "kind": "passive",
+      "description": "Report any endpoint advertising MessageSecurityMode=None (1) - the SecureChannel is unencrypted and unsigned, so browse traffic, node values, and (for UserName tokens whose associated policy is also None) cleartext credentials cross the wire in the open.",
+      "value": "high",
+      "cwe": [
+        "CWE-319",
+        "CWE-311"
+      ],
+      "finding_kind": "opcua_security_mode_none",
+      "protocol_reference": "IEC 62541-4 \u00a77.15 (MessageSecurityMode), Part 2 \u00a75.5.2 (Confidentiality)"
+    },
+    {
+      "name": "deprecated_security_policy_offered",
+      "kind": "passive",
+      "description": "Match securityPolicyUri against the deprecated set - Basic128Rsa15 (deprecated 2017 for PKCS#1 v1.5 padding), Basic256 (SHA-1) - and raise a broken-crypto finding when they are offered alongside the modern Basic256Sha256 / Aes128_Sha256_RsaOaep / Aes256_Sha256_RsaPss.",
+      "value": "medium",
+      "cwe": [
+        "CWE-327",
+        "CWE-326"
+      ],
+      "finding_kind": "opcua_deprecated_policy",
+      "protocol_reference": "OPC UA Part 7 \u00a76.5.147 - Security Policy profiles; OPC Foundation deprecation notice 'Basic128Rsa15 and Basic256 are deprecated' (2017)"
+    },
+    {
+      "name": "server_certificate_extract",
+      "kind": "passive",
+      "description": "Parse the ByteString serverCertificate returned by GetEndpoints as X.509 DER and pull Subject, Issuer, SAN dNSNames/URIs, notBefore/notAfter, keyAlgorithm/keySize, and self-signed status - hostname/URI SANs feed known_hostnames, weak-key / self-signed / expired states become their own finding.",
+      "value": "high",
+      "cwe": [
+        "CWE-295",
+        "CWE-326",
+        "CWE-298"
+      ],
+      "finding_kind": "opcua_server_certificate",
+      "protocol_reference": "IEC 62541-6 \u00a76.2.2 (ApplicationInstanceCertificate); Part 4 \u00a77.13 (EndpointDescription.serverCertificate)"
+    },
+    {
+      "name": "application_identity_fingerprint",
+      "kind": "passive",
+      "description": "Extract server ApplicationDescription (applicationUri, productUri, applicationName, applicationType) - productUri typically encodes vendor+product (e.g. urn:Softing:dataFEED, urn:PTC:KEPServerEX, urn:Prosys:OPC-UA-Simulation-Server) and pins the target to a specific vendor CVE feed.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "opcua_application_id",
+      "protocol_reference": "IEC 62541-4 \u00a77.1 (ApplicationDescription structure)"
+    },
+    {
+      "name": "find_servers_discovery",
+      "kind": "active",
+      "description": "Send FindServersRequest on the same anonymous SecureChannel - returns the full list of ApplicationDescriptions the target LDS knows about, including sibling servers registered with this discovery endpoint and their opc.tcp://host:port discoveryUrls (often internal-only OT hosts not otherwise reachable).",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "opcua_find_servers",
+      "protocol_reference": "IEC 62541-4 \u00a75.4.2 (FindServers Service), Part 12 \u00a75 (Local Discovery Server)"
+    },
+    {
+      "name": "find_servers_on_network_lds_me",
+      "kind": "active",
+      "description": "If the target is a Local Discovery Server with Multicast Extension (LDS-ME) - detectable when applicationType=DiscoveryServer (3) - send FindServersOnNetworkRequest to enumerate every OPC UA app that has mDNS-registered with this LDS, giving a network-wide inventory from a single reachable host.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "opcua_lds_me_inventory",
+      "protocol_reference": "IEC 62541-12 \u00a75.4 (Multicast Extension), Part 4 \u00a75.4.3 (FindServersOnNetwork Service)"
+    },
+    {
+      "name": "anonymous_session_browse",
+      "kind": "exploit",
+      "description": "When Anonymous is allowed, complete CreateSession + ActivateSession (AnonymousIdentityToken) and issue a Browse from RootFolder (i=84) to enumerate the Server, Objects and Types folders - proves-out exploitability (not just posture) and surfaces the vendor namespace and any custom PLC objects.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "finding_kind": "opcua_anonymous_browse_ok",
+      "protocol_reference": "IEC 62541-4 \u00a75.6.2 (CreateSession), \u00a75.6.3 (ActivateSession), \u00a75.8.2 (Browse); Part 5 \u00a78 (Standard NodeIds)",
+      "notes": "Stop after depth 2 and cap at ~200 nodes - the punch list here is 'we could', not a full crawl."
+    },
+    {
+      "name": "server_status_read",
+      "kind": "exploit",
+      "description": "On the anonymous session, Read the ServerStatus variable (NodeId i=2256) - returns ServerStatusDataType with productName, softwareVersion, buildNumber, buildDate, startTime, secondsTillShutdown, and current ServerState. Gives an exact firmware/version string that goes straight to CVE matching.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "opcua_server_status",
+      "protocol_reference": "IEC 62541-5 \u00a76.3.2 (Server Object, ServerStatus variable); Part 4 \u00a75.10.2 (Read Service)"
+    },
+    {
+      "name": "username_password_bruteforce",
+      "kind": "auth",
+      "description": "For endpoints whose userIdentityTokens include tokenType=UserName (1), attempt a small dictionary of vendor-default OPC UA logins via ActivateSession with UserNameIdentityToken - covers documented defaults (e.g. Kepware admin/blank, Prosys 'user'/'password', Siemens OpcUaClient defaults).",
+      "value": "high",
+      "cwe": [
+        "CWE-521",
+        "CWE-798"
+      ],
+      "finding_kind": "opcua_default_credentials",
+      "protocol_reference": "IEC 62541-4 \u00a77.42.3 (UserNameIdentityToken), Part 6 \u00a77.36 (encryption of password field with server certificate)",
+      "notes": "Respect airgap: dictionary is local wordlist. Password field is RSA-encrypted to serverCertificate when policy != None - reuse the cert already captured by get_endpoints_unauth."
+    },
+    {
+      "name": "username_token_over_none_policy",
+      "kind": "passive",
+      "description": "Flag the specific misconfiguration where a UserName UserTokenPolicy references SecurityPolicyUri=None while the enclosing endpoint's channel is also None - the password crosses the wire without RSA wrapping, and an on-path attacker or later PCAP recovers cleartext creds.",
+      "value": "high",
+      "cwe": [
+        "CWE-319",
+        "CWE-522"
+      ],
+      "finding_kind": "opcua_credentials_in_cleartext",
+      "protocol_reference": "IEC 62541-6 \u00a77.36.4 (encryption requires a SecurityPolicy other than None), Part 2 \u00a75.5.2"
+    },
+    {
+      "name": "open_lds_register_server",
+      "kind": "active",
+      "description": "Send RegisterServerRequest to a Discovery Server - if it accepts a registration from an anonymous caller with no admin credential the LDS will happily advertise a rogue server to every OPC UA client on the segment (a supply-chain / MITM primitive for OT clients that auto-connect).",
+      "value": "high",
+      "cwe": [
+        "CWE-345",
+        "CWE-306"
+      ],
+      "finding_kind": "opcua_open_lds_registration",
+      "protocol_reference": "IEC 62541-4 \u00a75.4.5 (RegisterServer / RegisterServer2)"
+    },
+    {
+      "name": "err_message_version_leak",
+      "kind": "passive",
+      "description": "Deliberately send a HELLO with a bumped ProtocolVersion (e.g. 99) or an oversized ReceiveBufferSize - many stacks reply with an ERR message ('ERRF' + StatusCode + Reason string) that leaks the SDK name/version (e.g. 'open62541 1.3', 'UA-.NETStandard') in the reason text.",
+      "value": "medium",
+      "cwe": [
+        "CWE-209",
+        "CWE-200"
+      ],
+      "finding_kind": "opcua_error_banner",
+      "protocol_reference": "IEC 62541-6 \u00a77.1.2.5 (Error Message), StatusCodes in Part 4 Annex A"
+    }
+  ],
+  "recommended_findings": [
+    {
+      "title": "OPC UA server reachable on OT/enterprise segment",
+      "severity": "high"
+    },
+    {
+      "title": "OPC UA endpoint allows Anonymous user identity",
+      "severity": "critical"
+    },
+    {
+      "title": "OPC UA endpoint allows Anonymous browse and read (proven)",
+      "severity": "critical"
+    },
+    {
+      "title": "OPC UA endpoint offers SecurityMode=None (unencrypted channel)",
+      "severity": "high"
+    },
+    {
+      "title": "OPC UA endpoint accepts UserName tokens over None security policy (cleartext credentials)",
+      "severity": "high"
+    },
+    {
+      "title": "OPC UA endpoint offers deprecated security policy (Basic128Rsa15 / Basic256)",
+      "severity": "medium"
+    },
+    {
+      "title": "OPC UA server certificate is self-signed / expired / weak-key",
+      "severity": "medium"
+    },
+    {
+      "title": "OPC UA server discloses application and product identity (vendor fingerprint)",
+      "severity": "info"
+    },
+    {
+      "title": "OPC UA server discloses ServerStatus (productName, softwareVersion, buildNumber)",
+      "severity": "info"
+    },
+    {
+      "title": "OPC UA FindServers enumerated sibling servers and internal discoveryUrls",
+      "severity": "medium"
+    },
+    {
+      "title": "OPC UA LDS-ME exposes network-wide server inventory (FindServersOnNetwork)",
+      "severity": "medium"
+    },
+    {
+      "title": "OPC UA Discovery Server accepts unauthenticated RegisterServer (rogue-server primitive)",
+      "severity": "high"
+    },
+    {
+      "title": "OPC UA default credentials accepted",
+      "severity": "critical"
+    },
+    {
+      "title": "OPC UA server leaks SDK / product version in ERR message",
+      "severity": "low"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames <- serverCertificate SAN dNSNames and applicationUri host component (urn:HOSTNAME:vendor:product is the OPC UA convention)",
+    "known_domains <- serverCertificate Subject CN / SAN DNS suffixes",
+    "known_hashes <- serverCertificate SHA-256 fingerprint (for cross-host correlation of shared PKI across the OT fleet - a re-used self-signed cert marks a common vendor image)",
+    "relay_targets / new discovered hosts <- opc.tcp://host:port URIs harvested from EndpointDescription.endpointUrl, ApplicationDescription.discoveryUrls, and FindServers / FindServersOnNetwork results (very often internal-only OT hosts not in the original scope)",
+    "known_users <- usernames proven valid by opcua_default_credentials (and any UserName policy id strings the server advertises, e.g. 'username_basic256sha256' hinting at pre-provisioned account naming)",
+    "product/version enrichment for CVE matching <- productUri + ServerStatus.softwareVersion feeds the shared vendor/product CVE lookup the same way modbus_device_id does",
+    "NEW shared surface candidate 'known_ot_assets' <- (applicationUri, productUri, vendor, endpoint) tuples so later modules (Modbus, S7/ISO-TSAP on 102, EtherNet/IP, BACnet) can correlate a single physical PLC/HMI that speaks multiple protocols on multiple ports"
+  ],
+  "recommended_hashcat_modes": [],
+  "implementation_notes": "Style-match modbus.py: stdlib socket+struct only, one probe() returning a dict, is_opcua()/opcua_targets()/findings()/runbook()/analyze() shape, ~4s timeout, airgap-safe. All uacp integers are little-endian (not big-endian like Modbus) - build a tiny _pack_string helper for UA String (int32 length, -1 = null, then UTF-8 bytes) and _pack_bytestring / _read_bytestring for ByteString (X.509 cert and password payloads). Message framing: 3-byte type ('HEL'/'OPN'/'MSG'/'CLO'/'ERR'/'ACK') + 1-byte chunk-type ('F' final / 'C' continue / 'A' abort) + uint32 LE total size. For GetEndpoints, wrap the request in an OPN chunk with SecurityPolicyUri='http://opcfoundation.org/UA/SecurityPolicy#None', SenderCertificate=null ByteString, ReceiverCertificateThumbprint=null ByteString - keeps the whole exchange out of the crypto path. Add 4840 (opcua, 'OPC UA Binary') and 4843 (opcua-tls) to svcdetect.PORT_NAMES, an 'opcua' entry to serviceenum._NAME/_PORT, and a signature entry for the ACK response magic (b'ACKF' or b'ERRF' first 4 bytes) so passive banner-grab alone upgrades an unknown port. Reuse any existing X.509 parsing helper from the TLS path if one exists (grep for 'x509' / 'certificate') rather than pulling in a new dependency; if not, a minimal ASN.1 DER walker for Subject/SAN/notAfter is ~60 lines and preserves the stdlib-only invariant. Bruteforce dictionary should live in wordlists.py alongside existing service defaults and default to ~20 vendor-known creds - keep it short so the module stays under a couple of seconds per target."
+}

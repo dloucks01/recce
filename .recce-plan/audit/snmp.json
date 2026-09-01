@@ -1,0 +1,233 @@
+{
+  "service": "snmp",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/snmp.py",
+    "/home/kali/Desktop/projects/recce/tests/test_snmp_tables.py"
+  ],
+  "summary": "The SNMP module is a competent v2c-only enumerator: 16-string community brute of sysDescr, hand-rolled BER, system group, LanManager users, hrSWRun/hrSWInstalled, ifDescr, ARP (ipNetToMedia), and the RFC1213 ipRouteTable, with per-community RW-name flagging. It is strictly read-only (no SET, no TFTP config pull, no trap injection). The two biggest classes of gap are (1) zero SNMPv3 support \u2014 no engineID discovery, no USM user enumeration, no HMAC hash capture for offline crack \u2014 and (2) shallow cross-service wiring: LanManager users become Account rows on the host but never feed known_users; ARP neighbours and route next-hops are only cited in a finding rather than emitted as newly-discovered hosts / relay_targets; sysName / Windows domain MIB never populate known_hostnames / known_domains; installed-software strings never touch a vuln/CPE index.",
+  "existing_capabilities": [
+    "snmpv2c-only",
+    "community-brute-16-strings",
+    "rw-name-heuristic",
+    "system-group-read",
+    "lanmgr-user-walk",
+    "hrswrun-walk",
+    "hrswinstalled-walk",
+    "ifdescr-walk",
+    "arp-cache-walk-with-mac-decode",
+    "rfc1213-iproute-walk",
+    "hand-rolled-ber-asn1",
+    "request-id-correlation",
+    "account-emission-from-users",
+    "read-only-strict"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "snmpv3-engineid-discovery",
+      "kind": "passive",
+      "description": "SNMPv3 unauthenticated discovery: send a GetRequest with empty msgUserName and no security parameters (RFC 3414 \u00a74). The agent replies with a Report PDU containing msgAuthoritativeEngineID, msgAuthoritativeEngineBoots, and msgAuthoritativeEngineTime. EngineID leaks vendor+MAC+timestamp (RFC 3411 \u00a75), boots+time is required for any subsequent offline password crack, and this happens with no credentials of any kind. Recce currently only speaks v2c, so a v3-only agent looks 'closed' when in fact it is disclosing engine metadata.",
+      "value": "high",
+      "protocol_reference": "RFC 3411 \u00a75, RFC 3414 \u00a74",
+      "finding_kind": "snmp_v3_engineid_disclosure",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "snmpv3-user-enumeration",
+      "kind": "auth",
+      "description": "usmStatsUnknownUserNames counter vs. usmStatsWrongDigests: an unknown username returns a Report PDU pointing at the UnknownUserNames OID (1.3.6.1.6.3.15.1.1.3.0); a KNOWN username with wrong auth returns WrongDigests (\u20261.1.5.0). Recce can therefore brute-list valid SNMPv3 usernames pre-auth. Classic pentest primitive (snmp-check --v3, snmpwalk -v3 -u <name>). Not implemented \u2014 no v3 support at all.",
+      "value": "high",
+      "protocol_reference": "RFC 3414 \u00a75",
+      "finding_kind": "snmp_v3_valid_user",
+      "cwe": [
+        "CWE-200",
+        "CWE-204"
+      ]
+    },
+    {
+      "name": "snmpv3-hmac-capture-for-offline-crack",
+      "kind": "auth",
+      "description": "Once a valid v3 user is found, sending one authNoPriv request produces an HMAC-MD5/HMAC-SHA1 digest bound to (engineID, boots, time, password). That tuple is offline-crackable (hashcat -m 7500-ish equivalents / John's snmpv3 format). Recce could emit the captured hash line for the hashes/creds pipeline. Nothing does today.",
+      "value": "high",
+      "protocol_reference": "RFC 3414 \u00a76.3.1",
+      "finding_kind": "snmp_v3_hash",
+      "cwe": [
+        "CWE-916",
+        "CWE-326"
+      ]
+    },
+    {
+      "name": "cisco-config-copy-tftp-exfil-active",
+      "kind": "exploit",
+      "description": "CISCO-CONFIG-COPY-MIB (1.3.6.1.4.1.9.9.96.1.1.1.1.x) with an RW community lets you SET a row that copies running-config \u2192 TFTP to an attacker box. This is THE canonical SNMP-RW-to-full-device-compromise primitive (creds, enable secrets, IKE PSKs, TACACS keys). Recce prints the snmpset command in the runbook but never sends it even in a lab. Because the module is strictly read-only, there is no opt-in path for the actual exfil either. An 'active-exploit' gated helper (with the tester's own TFTP listener) would turn RW-community findings into recovered credentials.",
+      "value": "critical",
+      "protocol_reference": "CISCO-CONFIG-COPY-MIB (Cisco doc: 'Configuration File Management via SNMP')",
+      "finding_kind": "snmp_rw_config_exfil",
+      "cwe": [
+        "CWE-522",
+        "CWE-284"
+      ]
+    },
+    {
+      "name": "cisco-community-at-vlan-context",
+      "kind": "passive",
+      "description": "Cisco IOS accepts the 'community@vlan' syntax to switch SNMP context per VLAN, exposing per-VLAN MAC-forwarding tables and CAM entries invisible to the plain community. Standard onesixtyone/snmpwalk technique. Recce brutes only the flat community list.",
+      "value": "medium",
+      "protocol_reference": "Cisco IOS Configuration Guide \u2014 SNMP Community String Indexing",
+      "finding_kind": "snmp_cisco_vlan_context",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "getbulk-pdu",
+      "kind": "passive",
+      "description": "SNMPv2c/v3 GetBulkRequest (PDU tag 0xA5, RFC 3416 \u00a74.2.3) is dramatically faster than repeated GetNext for large tables (ARP, routes, hrSWInstalled). Recce only uses 0xA0/0xA1, so walks are 10-50x slower than needed and often hit budget cap before finishing. Also: some agents disable GetNext at scale but leave GetBulk on, so this is also a coverage gap.",
+      "value": "medium",
+      "protocol_reference": "RFC 3416 \u00a74.2.3",
+      "finding_kind": "snmp_getbulk_unused",
+      "cwe": []
+    },
+    {
+      "name": "ipcidrroutetable-walk",
+      "kind": "passive",
+      "description": "RFC 2096 ipCidrRouteTable (1.3.6.1.2.1.4.24.4) supersedes the old RFC 1213 ipRouteTable that recce walks. Modern IOS, Junos, ArubaOS, and Linux net-snmp populate CIDR only \u2014 many devices return an empty ipRouteTable but a full ipCidrRouteTable. Recce misses the routing table entirely on those.",
+      "value": "high",
+      "protocol_reference": "RFC 2096 \u00a73",
+      "finding_kind": "snmp_routes_cidr",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "tcpconntable-walk",
+      "kind": "passive",
+      "description": "tcpConnTable (1.3.6.1.2.1.6.13) / tcpConnectionTable (1.3.6.1.2.1.6.19, RFC 4022, IPv6-capable) lists every established/listening TCP connection with local+remote address/port. This is a live map of which internal boxes this host is talking to \u2014 free lateral-movement intel that also names services (SQL, LDAP, RDP) recce may not have scanned. Not walked.",
+      "value": "high",
+      "protocol_reference": "RFC 1213 / RFC 4022",
+      "finding_kind": "snmp_tcp_conn_disclosure",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "windows-shares-mib",
+      "kind": "passive",
+      "description": "The Windows LanManager MIB also exposes shares (1.3.6.1.4.1.77.1.2.27.1.1) with share names, paths, and comments. Recce walks users under this same tree but stops there. Shares seed SMB relay targets and NULL-session enumeration.",
+      "value": "medium",
+      "protocol_reference": "LANMAN-MIB (Microsoft LMMIB2)",
+      "finding_kind": "snmp_windows_shares",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "windows-domain-mib",
+      "kind": "passive",
+      "description": "1.3.6.1.4.1.77.1.4.1 (svSvcTable / domain), plus sysServices/Server groups, discloses the Windows domain or workgroup the host belongs to. Recce collects sysName + sysDescr but never the domain \u2014 which is exactly what known_domains needs to seed Kerberos / SMB attacks.",
+      "value": "high",
+      "protocol_reference": "LMMIB2 / hostmib",
+      "finding_kind": "snmp_windows_domain",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "process-cmdline-walk",
+      "kind": "passive",
+      "description": "hrSWRunParameters (1.3.6.1.2.1.25.4.2.1.5) returns the full command line of every process \u2014 routinely including cleartext passwords passed as CLI args (mysql -p<pass>, rsync passwords, curl -u user:pass, ansible variables). Recce walks hrSWRunName (short binary name) but not Parameters. This is Metasploit's snmp_enum credential goldmine.",
+      "value": "high",
+      "protocol_reference": "RFC 2790 HOST-RESOURCES-MIB",
+      "finding_kind": "snmp_process_cmdline_creds",
+      "cwe": [
+        "CWE-522",
+        "CWE-214"
+      ]
+    },
+    {
+      "name": "ifphysaddress-and-hrstorage",
+      "kind": "passive",
+      "description": "ifPhysAddress (1.3.6.1.2.1.2.2.1.6) yields the device's OWN interface MACs (vendor OUI, virtualisation fingerprint, host uniqueness). hrStorageTable (1.3.6.1.2.1.25.2.3) yields mounted volumes, sizes, filesystem types \u2014 reveals encrypted-at-rest state, container mounts, network shares. Neither walked.",
+      "value": "medium",
+      "protocol_reference": "RFC 2863 IF-MIB, RFC 2790 HOST-RESOURCES-MIB",
+      "finding_kind": "snmp_inventory",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "snmpv1-fallback-brute",
+      "kind": "passive",
+      "description": "Recce hard-codes version=1 (v2c wire value). Some legacy gear (older Cisco IOS, HP JetDirect, older UPS/PDU firmware) only responds to true v1 (version=0). A v1-only agent silently ignores v2c GET, so recce's brute reports 'closed'. RFC 1157 v1 fallback would recover those.",
+      "value": "medium",
+      "protocol_reference": "RFC 1157",
+      "finding_kind": "snmp_v1_only",
+      "cwe": []
+    },
+    {
+      "name": "cisco-cve-2017-6736-fingerprint",
+      "kind": "passive",
+      "description": "Multiple SNMP-triggered RCEs exist against Cisco IOS/IOS-XE (CVE-2017-6736..6743 \u2014 the 'SNMP subsystem' bugs). Recce already reads sysDescr / sysObjectID (IOS version banner) and knows which community works. Version-matching sysDescr against a known-vulnerable table would flag a pre-auth RCE candidate without ever firing the exploit. Purely fingerprint-based, safe to include.",
+      "value": "high",
+      "protocol_reference": "Cisco advisory cisco-sa-20180628-snmp",
+      "finding_kind": "snmp_cve_2017_6736_candidate",
+      "cwe": [
+        "CWE-119"
+      ]
+    },
+    {
+      "name": "snmpv3-usm-time-window-check",
+      "kind": "passive",
+      "description": "USM enforces a \u00b1150s time window (RFC 3414 \u00a72.2.3). Recce could compare msgAuthoritativeEngineTime to local wall clock and flag drift that permits replay-window abuse, or clocks so far off that the whole USM anti-replay is degraded.",
+      "value": "low",
+      "protocol_reference": "RFC 3414 \u00a72.2.3",
+      "finding_kind": "snmp_v3_time_skew",
+      "cwe": [
+        "CWE-294"
+      ]
+    },
+    {
+      "name": "snmp-write-community-verification-safe",
+      "kind": "active",
+      "description": "The module only INFERS RW from the community NAME (private/write/manager/\u2026). A safe verification would issue a SET that writes the SAME value back to sysContact (idempotent no-op) and check the error status. Confirmed-RW should be critical, name-only should stay medium.",
+      "value": "medium",
+      "protocol_reference": "RFC 3416 \u00a74.2.5 (SetRequest)",
+      "finding_kind": "snmp_rw_confirmed",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ]
+    },
+    {
+      "name": "vacm-view-and-community-context-enum",
+      "kind": "passive",
+      "description": "VACM tables (SNMP-VIEW-BASED-ACM-MIB, 1.3.6.1.6.3.16) list every configured view, group, and access rule. A readable community that also exposes VACM tells you which OIDs OTHER communities/users can read \u2014 including RW rules. Similarly SNMP-COMMUNITY-MIB (1.3.6.1.6.3.18) lists ALL configured community strings and their access. Nothing walked.",
+      "value": "high",
+      "protocol_reference": "RFC 3415, RFC 3584",
+      "finding_kind": "snmp_community_table_disclosure",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ]
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "LanManager users become Account rows on the Host but never feed the shared known_users / spray-list pipeline (other modules that consume known_users won't see them).",
+    "ARP-cache neighbour IPs and route next-hop IPs are only cited in a finding string \u2014 they should feed a 'newly-discovered hosts' bucket so downstream services scan/relay against them.",
+    "ARP MAC addresses are collected but nothing consumes MACs (OUI vendor fingerprinting, virtualisation detection, MAC-based deduplication of hosts across VLANs).",
+    "sysName / sysContact should populate known_hostnames (and, if the domain MIB were read, known_domains) \u2014 right now they only appear in the finding text.",
+    "hrSWInstalled software strings never feed a CPE/vuln index \u2014 installed 'OpenSSH 7.4', 'Apache Tomcat 8.5.32' are strong CVE candidates that die in a display string.",
+    "sysContact is often 'admin@corp.local' or 'noc@corp.local' \u2014 an email + domain leak that should feed known_domains and known_users but currently isn't parsed.",
+    "Discovered communities themselves (public, private, custom) should go into the shared credential store as 'snmp/community' entries for later reuse (some vendors re-use the SNMP community as the HTTP admin password on the same box).",
+    "Windows domain / workgroup name (if the domain MIB were walked) would feed known_domains \u2014 critical for Kerberos + relay flows and currently ungathered.",
+    "hrSWRunParameters (if walked) frequently contains cleartext passwords in cmdline args \u2014 those should hit hashes/creds, not just inventory."
+  ],
+  "priority_gaps": [
+    "SNMPv3 support end-to-end: engineID discovery + USM user enumeration (usmStatsUnknownUserNames vs WrongDigests) + HMAC hash capture for offline crack. Right now a v3-only agent looks closed to recce.",
+    "Cisco CONFIG-COPY-MIB active exfil (opt-in behind an --exploit flag): turn every RW-community find into a recovered running-config with enable secrets / TACACS keys / IKE PSKs.",
+    "ipCidrRouteTable (RFC 2096) + tcpConnTable + hrSWRunParameters walks: covers the modern route MIB that supersedes RFC1213, adds live connection maps, and harvests cleartext passwords passed as process cmdline args.",
+    "Cross-service wiring: emit LanManager users to known_users, ARP/route neighbours to newly-discovered hosts, sysName/sysContact/Windows-domain to known_hostnames + known_domains, and the working community itself to the credential store."
+  ],
+  "notes": "Module is well-engineered for v2c (raw BER, request-id correlation, raw-bytes path for MACs, budgeted walks). The biggest strategic gaps are architectural rather than cosmetic: no SNMPv3 at all (misses a whole protocol version and its pre-auth enumeration primitives), and rich data collected internally that never crosses the module boundary into recce's shared discovery/known_* pipelines. The Cisco config-copy exfil is the single highest-value active primitive available on SNMP-RW findings and would need a small TFTP-receiver helper."
+}

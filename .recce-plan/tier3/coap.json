@@ -1,0 +1,195 @@
+{
+  "service": "CoAP",
+  "summary": "CoAP (5683/udp plaintext, 5684/udp DTLS-PSK) has ZERO CoAP-specific coverage in recce today. Port 5683 appears once in recce/core/scanner.py line 976 as a UDP scan-list entry (\"MSSQL-browser/Citrix/RADIUS/L2TP/SSDP/NFS/STUN/SIP/mDNS/LLMNR/CoAP/memcached/VxWorks/\u2026\"), so recce will actually SCAN the port \u2014 but there is no downstream service module, no PORT_NAMES entry, no _SIGNATURES matcher, no serviceenum mapping, and no scripts/recce-service.sh hint. An open CoAP endpoint that responds to a GET /.well-known/core (RFC 6690) leaks the entire IoT resource inventory in one 4-byte-header UDP packet: sensor names, actuator paths, resource types (rt=), interface descriptions (if=), sizes, content-formats \u2014 the CoAP equivalent of an unauthenticated MQTT $SYS scrape. DTLS-PSK on 5684 is nearly always misconfigured (weak PSK identity hints, sometimes NULL cipher). Build shape mirrors recce/services/sip.py: single-file stdlib module (socket + struct), UDP-first probe returning a dict, is_coap(port), coap_targets(hosts), probe(ip,port,timeout), findings(hosts,probes), runbook(ip,port), analyze(hosts,creds,active,budget,progress). CoAP framing per RFC 7252 \u00a73: 4-byte header (Ver=01, T=CON/NON/ACK/RST, TKL, Code=class.detail, MID uint16), token, then delta-encoded options (RFC 7252 \u00a73.2), then 0xFF payload marker. Multicast discovery via 224.0.1.187 / [FF0X::FD] (RFC 7252 \u00a712.8) is powerful but must be off by default (broadcast/multicast in unknown networks is disruptive) \u2014 expose as opt-in like recce's other multicast probes.",
+  "default_ports": [
+    "5683/udp (plaintext, IANA)",
+    "5684/udp (CoAP-over-DTLS, IANA)",
+    "5685/udp (draft coap-tcp, rare \u2014 out of scope)",
+    "5683/tcp (RFC 8323 CoAP-over-TCP, uncommon \u2014 soft support only)",
+    "5684/tcp (RFC 8323 CoAP-over-TLS, uncommon \u2014 soft support only)",
+    "224.0.1.187 IPv4 / FF0X::FD IPv6 (RFC 7252 \u00a712.8 all-CoAP-nodes multicast, opt-in only)"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [
+      "recce/core/scanner.py:976 \u2014 port 5683 is in the UDP scan list (single mention, no CoAP-specific handling)"
+    ],
+    "notes": "grep for 'coap|5683|5684' across recce/ finds only the scanner UDP list entry and one string in .recce-plan/tier2/mqtt.json noting that a future device-fingerprint wire would feed coap post-tranche. No hits in svcdetect.PORT_NAMES (5683 falls through to 'unknown'/'radacct' from nmap-services), no hits in svcdetect._SIGNATURES (CoAP ACK's high-bit '01xxxxxx' first byte matches nothing), no serviceenum._NAME/_PORT entry, no scripts/recce-service.sh mapping, no recce/services/coap.py. An open CoAP endpoint in a scan today therefore surfaces as an unlabelled UDP port with zero actionable follow-up."
+  },
+  "capabilities": [
+    {
+      "name": "port-inference",
+      "kind": "passive",
+      "value": "low",
+      "description": "Add 5683 -> ('coap', 'CoAP endpoint (RFC 7252, plaintext UDP)') and 5684 -> ('coaps', 'CoAP over DTLS (RFC 7252 \u00a79)') to svcdetect.PORT_NAMES. Also register 5683 in serviceenum._PORT and 'coap' / 'coaps' in serviceenum._NAME so `recce services` prints an actionable next command instead of a blank line.",
+      "protocol_reference": "IANA service-names-port-numbers registry (coap, coaps)"
+    },
+    {
+      "name": "empty-confirmable-ping",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Send a 4-byte CoAP 'empty message' (Ver=01, T=CON, TKL=0, Code=0.00, MID=random uint16) to 5683/udp. Per RFC 7252 \u00a74.3 the endpoint MUST reply with an RST (Ver=01, T=RST, TKL=0, Code=0.00, matching MID). One packet in, one packet out, zero side effects \u2014 proves it is CoAP (distinguishing from mDNS/other UDP), pins the endpoint alive, feeds is_coap() when nmap left the port unlabelled. Cheapest possible fingerprint and unambiguous \u2014 RST to an empty CON is a CoAP-only shape.",
+      "protocol_reference": "RFC 7252 \u00a74.3 Messages Transmitted Without Reliability, \u00a74.2 Messages Transmitted Reliably"
+    },
+    {
+      "name": "wellknown-core-resource-dump",
+      "kind": "active",
+      "value": "critical",
+      "description": "GET coap://<ip>:5683/.well-known/core with Accept: application/link-format (Content-Format 40). Response body is CoRE Link Format (RFC 6690) \u2014 a comma-separated inventory of every resource: </sensors/temp>;rt='core.s';if='sensor';ct=0, </actuators/relay>;rt='oic.r.switch.binary';obs, </config>;rt='mfg.cfg';sz=8192. This is the CoAP equivalent of an unauthenticated MQTT wildcard subscribe and is virtually always readable \u2014 RFC 7252 \u00a77.2 makes /.well-known/core mandatory. Parse rt=, if=, ct=, sz=, obs into structured fields; write inventory to loot/coap/<ip>-<port>-resources.txt; feed device-fingerprint conventions ('oic.*'=OCF/IoTivity, 'core.*'=RFC 6690 stock, vendor-prefixed rt values) into known_devices. CRITICAL when the inventory names actuator resources (write access to physical world); HIGH when only sensor resources leak.",
+      "protocol_reference": "RFC 6690 \u00a71-4 CoRE Link Format; RFC 7252 \u00a77.2 The CoRE Link Format"
+    },
+    {
+      "name": "resource-get-sweep",
+      "kind": "active",
+      "value": "high",
+      "description": "Walk resources returned by /.well-known/core, GET each with Accept covering the ct= it advertises (0=text/plain, 40=link-format, 41=xml, 50=json, 60=cbor, 11542=senml+json, 11543=senml+cbor). Record response code (2.05 Content = anon-readable, 4.01/4.03/4.05 = gated), size, and a truncated snippet (bounded: 256 bytes/resource, 100 resources max). SenML (RFC 8428) payloads routinely include device serials, MAC-like device IDs, geolocation, current sensor state; OCF payloads include device model + firmware. Anon-readable /config, /device, /oic/d, /oic/p, /firmware are HIGH-signal.",
+      "protocol_reference": "RFC 7252 \u00a75.5 Response Codes; RFC 8428 \u00a74-6 SenML"
+    },
+    {
+      "name": "put-post-permission-test",
+      "kind": "active",
+      "value": "critical",
+      "description": "For each obs- or writable-looking resource (rt hints 'oic.r.switch.*', 'core.a', 'core.p'), PUT/POST a benign marker (payload='recce-probe-<uuid>', Content-Format matching the resource's advertised ct=). Response 2.04 Changed / 2.01 Created / 2.02 Deleted = anon WRITE (CRITICAL \u2014 arbitrary control of physical actuators or config). Cleanup: PUT the resource back to its pre-probe value captured by resource-get-sweep, and if the resource is not reversible SKIP it and just record capability without a write attempt. Skip entirely when active=False.",
+      "protocol_reference": "RFC 7252 \u00a75.8 Method Definitions (PUT/POST), \u00a75.9.1 Success 2.xx"
+    },
+    {
+      "name": "observe-subscribe",
+      "kind": "active",
+      "value": "high",
+      "description": "Register an Observe (RFC 7641) on any resource whose /.well-known/core entry contained 'obs'. Send GET with Observe option (23) = 0, keep the socket open for a bounded 3-5s window, log every 2.05 notification. Live sensor telemetry / actuator state changes leak in real time \u2014 same threat model as MQTT wildcard-subscribe but for CoAP. Deregister with Observe=1 before closing. Distinct from resource-get-sweep because Observe reveals rate-of-change and identifies the resources actually in active use (higher-signal target list).",
+      "protocol_reference": "RFC 7641 \u00a73 Observing Resources, \u00a73.6 Reordering"
+    },
+    {
+      "name": "multicast-discovery",
+      "kind": "active",
+      "value": "medium",
+      "description": "Opt-in only (like recce's other multicast probes \u2014 mDNS/SSDP): send a GET /.well-known/core as a NON message (T=NON, RFC 7252 \u00a78) to 224.0.1.187:5683 and FF02::FD/FF05::FD, socket bound with IP_MULTICAST_TTL=1 to keep local. Every CoAP endpoint on the L2 replies from its unicast IP \u2014 instant device roster, catches endpoints that firewalled unicast probes but honour multicast. Requires --multicast/--broadcast flag; MUST NOT run in default scans (violates air-gap-safe-by-default posture). Feed discovered IPs back into the host roster.",
+      "protocol_reference": "RFC 7252 \u00a78 Multicast CoAP, \u00a712.8 IANA multicast address allocations; RFC 7390 Group Communication for CoAP"
+    },
+    {
+      "name": "block-transfer-large-payload",
+      "kind": "passive",
+      "value": "low",
+      "description": "When a resource-get returns 2.05 with Block2 option (RFC 7959, option 23) indicating a larger transfer, follow the block sequence up to a bounded ceiling (16 blocks * 1024B = 16KB max) to reconstruct payloads that would otherwise truncate at UDP MTU. Necessary to read /.well-known/core on gateways with hundreds of resources (typical Contiki/Californium border-router). Purely a plumbing capability enabling wellknown-core-resource-dump and resource-get-sweep to complete their reads.",
+      "protocol_reference": "RFC 7959 \u00a72 Block-Wise Transfers, \u00a72.2 The Block2 Option"
+    },
+    {
+      "name": "dtls-handshake-fingerprint",
+      "kind": "passive",
+      "value": "high",
+      "description": "On 5684/udp send a DTLS 1.2 ClientHello with PSK cipher suites offered (TLS_PSK_WITH_AES_128_CCM_8 = 0xC0A8 \u2014 the RFC 7925 mandatory-to-implement IoT profile \u2014 plus AES_128_CBC_SHA, and TLS_ECDHE_PSK / TLS_ECDHE_ECDSA for RFC 7925 \u00a74.4 raw-public-key path). Record server response: ServerHello cipher choice, PSK identity hint (Handshake type 13, ServerKeyExchange when PSK), and any Certificate Request. HIGH findings: PSK identity hint that reveals device serial / MAC / vendor default (leaks device roster before auth); NULL cipher offered/selected; SSLv3/DTLS 1.0 accepted; export ciphers. Piggyback recce's existing TLS enrichment for certificate SANs when raw-public-key or cert is used.",
+      "protocol_reference": "RFC 6347 DTLS 1.2; RFC 4279 \u00a75.2 PSK Identity Hint; RFC 7925 \u00a73 & \u00a74 TLS/DTLS IoT profile mandatory-to-implement"
+    },
+    {
+      "name": "dtls-psk-spray",
+      "kind": "auth",
+      "value": "high",
+      "description": "Bounded PSK dictionary against 5684/udp using a tiny curated list of vendor defaults + observed PSK identity hints ('Client_identity' RFC 4279 example, '' empty, 'admin', 'coap', 'iot', device-serial-from-hint). Try each with a small PSK list ('secretPSK', vendor-default '123456', empty, PSK-identity-echoed). N*M capped at ~30 to avoid IoT-device DoS (many CoAP-DTLS stacks \u2014 mbedTLS on ESP32, tinyDTLS \u2014 crash on rapid retries). Success = DTLS handshake completes \u2192 run the plaintext capabilities under the DTLS envelope. Feed accepted PSK to the shared cred store as service='coap-dtls' with the identity/PSK pair.",
+      "protocol_reference": "RFC 4279 \u00a72 TLS-PSK Key Exchange; RFC 7925 \u00a74.2 PSK Requirements for IoT"
+    },
+    {
+      "name": "proxy-relay-abuse",
+      "kind": "active",
+      "value": "high",
+      "description": "CoAP endpoints commonly act as forward proxies via the Proxy-Uri option (option 35) or Proxy-Scheme (option 39) \u2014 RFC 7252 \u00a75.10.2. Send a CoAP GET with Proxy-Uri='http://<recce-canary>/coap-proxy-test-<uuid>' (or an internal RFC1918 URI when scanning from within a network). Response of 2.05 / any non-4.05 = the endpoint proxied our request \u2014 SSRF-class exposure (attacker uses CoAP endpoint to reach services otherwise unreachable). Record as relay_target for the attack-path graph. Also test coap:// -> http:// scheme translation (border-router pattern) which lets CoAP scanners pivot into HTTP-only internal services.",
+      "protocol_reference": "RFC 7252 \u00a75.10.2 Proxy-Uri, \u00a75.7 Proxying, \u00a75.10.2 Proxy-Scheme; RFC 8075 CoAP-HTTP mapping"
+    },
+    {
+      "name": "amplification-source-check",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Compute the amplification factor of GET /.well-known/core (typical: 20-byte request \u2192 300-4000 byte response, factor 15-200x). Symmetric with recce's NTP/SNMP/memcached amp checks. Report as info-level 'coap_amplifier' finding when the response body is >5x the request AND the endpoint answers spoofed-source-plausible unicast (i.e., accepts NON messages with no session state). CoAP is on the US-CERT UDP amplification list (advisory TA14-017A extension). No spoofing performed \u2014 this is a pure ratio measurement from the response we already have.",
+      "protocol_reference": "RFC 7252 \u00a711.3 Amplification; US-CERT TA14-017A UDP-Based Amplification Attacks"
+    },
+    {
+      "name": "coap-over-tcp-fallback",
+      "kind": "passive",
+      "value": "low",
+      "description": "If 5683/tcp or 5684/tcp is separately open (rare), attempt an RFC 8323 CSM (Capabilities and Settings Message, signalling code 7.01) followed by the same GET /.well-known/core flow. Framing is different (length-prefixed instead of MID/token retransmit), so implement as a small alt-transport shim. Rare in the wild but signals a modern IoT stack (Californium, iotivity-lite) that supports enterprise-friendly transport \u2014 useful fingerprint even when no interesting resources exist.",
+      "protocol_reference": "RFC 8323 \u00a73 Message Format for CoAP-over-TCP, \u00a75.3 Capabilities and Settings Message"
+    },
+    {
+      "name": "device-fingerprint-and-cve-map",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Pin port.product / port.version from three sources so recce's CVE mapper picks it up: (a) /oic/d or /oic/p resources (OCF spec \u2014 dmn=vendor, mnmn=model, mnfv=firmware version); (b) rt= namespace conventions in /.well-known/core (oic.*=IoTivity/OCF, snip.*=Espressif, ipso.*=IPSO Smart Objects, contiki.*=Contiki); (c) implementation-specific quirks (Californium sends its version in certain error diagnostics; libcoap has distinctive Empty-message-timing). Feeds CVEs: CVE-2023-42815 Contiki-NG CoAP DoS, CVE-2024-25689 libcoap OOB read, CVE-2023-30841 iotivity-lite auth bypass, CVE-2022-24196 Californium DTLS resource exhaustion.",
+      "protocol_reference": "OCF Core Specification v2.2.5 \u00a77.6 /oic/d and /oic/p"
+    },
+    {
+      "name": "auth-gated-info-finding",
+      "kind": "passive",
+      "value": "low",
+      "description": "Symmetric with mqtt_authgated / kafka_saslgated: when 5683/udp answers RST to empty-CON (endpoint alive) but /.well-known/core returns 4.01 Unauthorized / 4.03 Forbidden, or 5684/udp completes DTLS handshake but resource GETs return 4.01, emit a low/info 'coap_authgated' finding. Marks the endpoint as a target for any harvested PSK / OAuth / OSCORE key material (RFC 8613) and confirms authorization is enforced (rather than the port merely being packet-filtered).",
+      "protocol_reference": "RFC 7252 \u00a75.9.2 Client Error 4.xx; RFC 8613 \u00a72 OSCORE"
+    },
+    {
+      "name": "oscore-context-probe",
+      "kind": "passive",
+      "value": "low",
+      "description": "Detect OSCORE (RFC 8613, object-security-for-CoAP \u2014 the CoAP equivalent of application-layer encryption) by sending a plain GET and inspecting the response for OSCORE Option (option 9) in an error, or a 4.01 with 'kid' hint. Presence of OSCORE indicates modern hardening \u2014 record as info finding, do NOT attempt to brute-force the master secret (it is a symmetric ECDH-derived key, spraying is meaningless). Downstream value is telling the operator this endpoint's payloads are E2E-encrypted and DTLS-PSK spray results tell nothing about application-layer authz.",
+      "protocol_reference": "RFC 8613 \u00a72 Object Security for CoAP, \u00a76 OSCORE Option"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_devices \u2014 a first-class CoAP-native surface. rt= values in /.well-known/core name device vendor+role in a standardized way ('oic.r.switch.binary', 'oic.d.light', 'ipso.3303 temperature', 'contiki.rpl.parent'), and /oic/d resources give mnmn (manufacturer name) + mnpv (platform version) + di (device UUID). Feed a shared IoT device roster consumed by mdns, ssdp, upnp, mqtt (already flagged in mqtt.json as a post-tranche cross-wire \u2014 CoAP is the natural producer)",
+    "known_hostnames \u2014 /oic/d 'n' (device name) fields, DTLS certificate SANs on 5684 (when raw-public-key or cert-based auth is used per RFC 7925 \u00a74.4), and vendor default hostnames leaked in PSK identity hints (many devices set the hint to their DHCP hostname or serial-derived hostname)",
+    "known_users \u2014 PSK identity strings from DTLS ServerKeyExchange hint (RFC 4279 \u00a75.2); CoAP resource paths containing user segments (/users/<name>/sensors, /accounts/<uid>/config); OSCORE 'kid' identifiers in 4.01 responses; SenML 'bn' (base name) fields that carry 'urn:dev:mac:aabbccddeeff' or 'user:<name>' schemes (RFC 8428 \u00a75)",
+    "known_hashes \u2014 SenML payloads and JSON/CBOR resource bodies routinely contain JWTs (device access tokens), API keys, and bcrypt hashes (CoAP used as a config bus, same anti-pattern as MQTT retained messages). Scan captured payloads with hashloot's existing patterns and feed matches to the shared hash store",
+    "known_domains \u2014 DTLS cert SANs on 5684, /oic/p (platform info) 'mnpv' vendor domain, OSCORE server identity strings, resource paths with FQDN segments ('/api/v1/gateway/<host>.internal.corp/state')",
+    "relay_targets \u2014 anonymous-writable CoAP actuators are lateral pivot points for the attack-path graph (physical-world write access). Additionally, CoAP proxies (Proxy-Uri/Proxy-Scheme accepted, RFC 7252 \u00a75.10.2) are SSRF pivots \u2014 record as 'coap-proxy' relay type. CoAP-HTTP border routers (RFC 8075) that translate coap:// to http:// let CoAP-only-reachable scans pivot into HTTP-only internal services",
+    "NEW: known_resources \u2014 CoAP resource paths harvested from /.well-known/core form a namespace with structure (rt=/if=/ct= typed metadata). Overlaps with the proposed known_topics wire from mqtt.json: many mixed IoT stacks route the same logical entity through both busses ('sensors/room1/temp' becomes '/sensors/room1/temp' in CoAP and 'sensors/room1/temp' in MQTT). Cross-correlation lets attack-path graph link a CoAP endpoint to an MQTT broker as the same device",
+    "port.product / port.version \u2014 direct feed into recce's CVE mapper via svcdetect._fill_product; Californium/libcoap/aiocoap/Contiki-NG/iotivity-lite version pins from /oic/p mnpv, /oic/d mnfv, and implementation-quirk fingerprints",
+    "credentials/known_psk \u2014 NEW cred bucket: accepted DTLS PSK identity+key pairs. Distinct from known_hashes because PSKs are pre-shared symmetric secrets, not derivable from a hash; downstream services (any DTLS-PSK-using protocol \u2014 LwM2M on 5683/5684, EAP-PSK on some enterprise WPA, DTLS-SRTP) can be re-tried with the same PSK"
+  ],
+  "recommended_findings": [
+    {
+      "title": "CoAP endpoint exposes resource inventory via /.well-known/core",
+      "severity": "high"
+    },
+    {
+      "title": "CoAP endpoint allows anonymous PUT/POST to actuator resource (physical-world write)",
+      "severity": "critical"
+    },
+    {
+      "title": "CoAP endpoint discloses device identity/firmware via /oic/d /oic/p (OCF)",
+      "severity": "high"
+    },
+    {
+      "title": "CoAP endpoint leaks live telemetry via Observe (RFC 7641) without authentication",
+      "severity": "high"
+    },
+    {
+      "title": "CoAP endpoint acts as open proxy (Proxy-Uri accepted \u2014 SSRF pivot)",
+      "severity": "high"
+    },
+    {
+      "title": "CoAP-DTLS endpoint accepts weak / default PSK",
+      "severity": "critical"
+    },
+    {
+      "title": "CoAP-DTLS PSK identity hint discloses device serial/vendor",
+      "severity": "medium"
+    },
+    {
+      "title": "CoAP-DTLS endpoint offers NULL cipher / SSLv3 / export cipher",
+      "severity": "high"
+    },
+    {
+      "title": "CoAP endpoint is a viable UDP amplifier (response/request ratio > 5x)",
+      "severity": "medium"
+    },
+    {
+      "title": "CoAP endpoint running end-of-life / known-CVE stack (Contiki-NG, libcoap, Californium, iotivity-lite)",
+      "severity": "high"
+    },
+    {
+      "title": "CoAP endpoint reachable, authorization enforced (auth-gated)",
+      "severity": "info"
+    },
+    {
+      "title": "CoAP endpoint on 5683/udp without DTLS (plaintext IoT control traffic)",
+      "severity": "medium"
+    }
+  ],
+  "implementation_notes": "Create recce/services/coap.py modelled on recce/services/sip.py (compact stdlib-only UDP module) with a splash of recce/services/kafka.py structure for the response-parsing helpers. Public surface: is_coap(port), coap_targets(hosts), probe(ip,port,timeout) -> {reachable, transport, version, resources:[{path,rt,if,ct,sz,obs}], readable:[{path,code,ct,size,snippet}], writable:[{path,code}], observe_sample:[...], dtls:{cipher,psk_hint,version,cert_sans}, proxy_ok:bool, amp_ratio:float, oscore:bool, product, version_str, error}, findings(hosts,probes), runbook(ip,port), findings_to_vulns(fs), analyze(hosts,creds,active,budget,progress). Framing helpers (all stdlib struct only): _encode_header(ver=1,t,tkl,code_class,code_detail,mid) -> 4 bytes; _encode_option(delta,value_bytes) with 0-12 direct / 13 (+1 ext byte) / 14 (+2 ext bytes) delta encoding per RFC 7252 \u00a73.1; _encode_options(options:dict[int,bytes|list[bytes]]) with cumulative-delta ordering (options MUST be emitted in ascending option-number order \u2014 sip.py has no analogue, this is CoAP-specific); _decode_message(bytes) -> (ver,t,tkl,code,mid,token,options:dict[int,list[bytes]],payload). Option numbers: If-Match=1, Uri-Host=3, ETag=4, If-None-Match=5, Observe=6, Uri-Port=7, Location-Path=8, Uri-Path=11, Content-Format=12, Max-Age=14, Uri-Query=15, Accept=17, Location-Query=20, Block2=23, Block1=27, Size2=28, Proxy-Uri=35, Proxy-Scheme=39, Size1=60, OSCORE=9. Message types: CON=0, NON=1, ACK=2, RST=3. Method codes: GET=0.01, POST=0.02, PUT=0.03, DELETE=0.04. Response class extraction: (code >> 5, code & 0x1F) => '2.05'. Content-Format registry (subset used): 0=text/plain, 40=application/link-format, 41=application/xml, 42=application/octet-stream, 50=application/json, 60=application/cbor, 110=application/senml+json, 112=application/senml+cbor. Wire into svcdetect.PORT_NAMES (5683 coap, 5684 coaps), serviceenum._NAME ('coap','coaps'), serviceenum._PORT (5683,5684); add a coap branch to scripts/recce-service.sh with actionable hints (`coap-client -m get coap://{ip}/.well-known/core` for anon, `coap-client -m get -u <psk-id> -k <psk> coaps://{ip}/.well-known/core` for DTLS, `aiocoap-client coap://{ip}/.well-known/core` as pure-python alternative). CoAP has no easy generic byte signature for svcdetect._SIGNATURES (first byte 0x40-0x7F overlaps too many protocols) so rely on empty-CON RST fingerprint instead of passive signature. DTLS handshake on 5684 reuses recce/services/probes.py TLS helpers \u2014 extract the 'PSK identity hint' from ServerKeyExchange (Handshake type 12 with cipher-suite selected in {TLS_PSK_*, TLS_DHE_PSK_*, TLS_ECDHE_PSK_*}). Multicast probe MUST be gated on --multicast/--broadcast flag consistent with mDNS/SSDP defaults (recce/services/probes.py). Retained loot writes to loot/coap/<ip>-<port>/ (out-of-sheet \u2014 sensor payloads may be sensitive). Every probe uses svcprobe.iter_probe for budget/progress consistency. put-post-permission-test MUST respect active=False AND MUST roll back the resource to its pre-probe value captured earlier in the sweep \u2014 if pre-value was not captured (resource returned 4.05 to GET but 2.04 to PUT \u2014 write-only), SKIP the write attempt and record capability from the option metadata alone. DTLS-PSK spray N*M capped \u226430 with 250ms inter-attempt delay because embedded CoAP stacks (mbedTLS on ESP32, tinyDTLS on Contiki) are known to crash on rapid handshake churn \u2014 an aggressive spray = DoSing the customer's IoT devices, which is a hard-no. Reference implementations to consult for framing corner cases: libcoap (C), aiocoap (Python, closest to what we're building), Californium (Java) \u2014 all three are BSD/Apache-permissive so their test vectors are safe to mirror in unit tests."
+}

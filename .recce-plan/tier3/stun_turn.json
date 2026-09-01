@@ -1,0 +1,246 @@
+{
+  "service": "STUN / TURN",
+  "summary": "Recce currently has ZERO coverage of STUN (3478/udp+tcp) or TURN/TURNS (5349/tls). Neither port appears in svcdetect.py's PORT_NAMES map (would render as \"unknown\"), nor in serviceenum.py's _NAME/_PORT script-router maps (so `recce services` prints no follow-up command), nor is there a per-service module under recce/services/. The intended shape is ntp.py: a UDP-first module with tiny stdlib-only packet builders, an analyze() aggregator invoked via svcprobe.iter_probe, findings() \u2192 svccommon.findings_to_vulns, plus wiring in cli/_service_helpers.py, cli/_phases.py, cli/_services.py, cli/parser.py (_add_t4), and webui/_common.py. STUN's value in an engagement is that its unauthenticated Binding request produces immediate protocol-level info disclosure (external IP mapping via XOR-MAPPED-ADDRESS, server software via the SOFTWARE attribute), while TURN's unauthenticated Allocate deliberately answers 401 with REALM + NONCE attributes \u2014 a free correlation primitive that names the org's SIP/Kerberos/LDAP realm without any credentials. On top of that, misconfigured TURN servers are one of the highest-impact webRTC-era findings on the internet: open relays (Allocate without auth), long-term credentials sent cleartext on 3478 instead of 5349, and \u2014 worst \u2014 TURN allocations that will relay to RFC1918 or 169.254.169.254, turning the TURN server into a cloud-metadata SSRF pivot.",
+  "default_ports": [
+    "3478/udp",
+    "3478/tcp",
+    "5349/tcp",
+    "5349/udp",
+    "5350/udp"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [],
+    "notes": "grep -riE 'stun|turn|3478|5349|webrtc' over recce/ returns zero substantive hits (only English word 'return' etc). Port 3478 absent from svcdetect.py:PORT_NAMES (nmap will report 'unknown' for firewalled listeners); ports 3478/5349 absent from serviceenum.py's _NAME table and _PORT fallback \u2014 `recce services` emits no follow-up command; no recce/services/stun.py or turn.py; no wiring in cli/_service_helpers.py, cli/_phases.py, cli/_services.py, cli/parser.py, webui/_common.py; no CVE entries for coturn/eturnal/restund in vuln/vulndb.py."
+  },
+  "capabilities": [
+    {
+      "name": "port_map_registration",
+      "kind": "passive",
+      "description": "Add 3478 \u2192 ('stun','STUN / TURN (unencrypted)'), 5349 \u2192 ('turns','STUN/TURN over TLS'), 5350 \u2192 ('nat-pmp-alt','NAT-PMP / STUN alt') to svcdetect.py PORT_NAMES so nmap-unknown UDP listeners get an inferred label with provenance=inferred. Add matching entries to serviceenum.py _NAME ('stun','turn','turns','stuns' \u2192 'stun') and _PORT (3478,5349 \u2192 'stun') so `recce services` recommends the follow-up script. Add parser _add_t4('stun', ...) tier-4 flag and wire cmd_stun in _phases.py.",
+      "value": "medium",
+      "protocol_reference": "IANA service registry: stun=3478/udp+tcp, stuns=5349/tcp, turn=3478, turns=5349",
+      "cwe": []
+    },
+    {
+      "name": "stun_binding_probe",
+      "kind": "active",
+      "description": "Send an RFC 8489 \u00a76 Binding Request (message type 0x0001, 20-byte header with magic cookie 0x2112A442 + random 96-bit transaction ID, zero attributes) to 3478/udp and 3478/tcp. A STUN server answers 0x0101 Binding Success with an XOR-MAPPED-ADDRESS attribute (type 0x0020) carrying the client's public IP+port XORed with the magic cookie. Confirms STUN presence, measures round-trip, and yields the server's view of the scanner's NAT mapping \u2014 a pivot fact for cross-service correlation. Single 20-byte datagram, response 32-52 bytes.",
+      "value": "high",
+      "protocol_reference": "RFC 8489 \u00a76, \u00a714.2 (XOR-MAPPED-ADDRESS); RFC 5769 for test vectors",
+      "cwe": []
+    },
+    {
+      "name": "software_attribute_fingerprint",
+      "kind": "passive",
+      "description": "Parse the SOFTWARE attribute (type 0x8022) from the Binding Response and TURN error responses. coturn (Citrix/CoTURN Inc), eturnal, restund, pion/webrtc-rs, Asterisk res_stun, aiortc all identify themselves with a free-form UTF-8 vendor+version string. Feed the extracted (product, version) tuple to parse_product_version() and the vulndb CVE mapper. Zero extra traffic beyond capability #2.",
+      "value": "high",
+      "protocol_reference": "RFC 8489 \u00a714.10 (SOFTWARE attribute)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "stun_version_disclosure"
+    },
+    {
+      "name": "turn_allocate_realm_nonce_disclosure",
+      "kind": "auth",
+      "description": "Send an unauthenticated TURN Allocate request (message type 0x0003) with REQUESTED-TRANSPORT=17 (UDP, RFC 8656 \u00a714.7). A conformant TURN server MUST answer 401 Unauthorized with an ERROR-CODE (0x0009), a REALM (0x0014), and a NONCE (0x0015) attribute. The REALM is a free credentialless leak of the deployment's identity namespace \u2014 it almost always matches the org's SIP domain / Kerberos realm / AD DNS domain / signaling-server hostname, so it feeds cross-service correlation to LDAP, Kerberos, SIP, SMTP and web modules. NONCE freshness + format also fingerprints server family (coturn nonces are hex; pion is base64).",
+      "value": "critical",
+      "protocol_reference": "RFC 8656 \u00a77.2, RFC 8489 \u00a79.2 (Long-Term Credential Mechanism)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "turn_realm_disclosure"
+    },
+    {
+      "name": "turn_open_relay_check",
+      "kind": "exploit",
+      "description": "After the 401 REALM+NONCE round-trip, retry Allocate with MESSAGE-INTEGRITY built from a well-known-empty username or missing credentials. Some misconfigured deployments (custom auth handlers, dev builds, older restund) return 0x0103 Allocate Success and hand out a RELAYED-ADDRESS (0x0016) with no auth. That is a wide-open relay: attackers get free egress bandwidth, source-IP laundering, and (via internal-address allocation, capability #7) an ingress path. Never actually use the relay; recce only records that the server accepted the allocation and immediately sends a Refresh with lifetime=0.",
+      "value": "critical",
+      "protocol_reference": "RFC 8656 \u00a77 (Allocations); \u00a76 (Authentication)",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "finding_kind": "turn_open_relay"
+    },
+    {
+      "name": "cleartext_credential_channel",
+      "kind": "passive",
+      "description": "If 3478 speaks TURN (Allocate answered 401 with REALM), record a finding: any client authenticating over 3478 sends the long-term-credential's HMAC-SHA1 MESSAGE-INTEGRITY, but the username, realm, nonce and the entire signaling payload traverse in cleartext \u2014 the server SHOULD offer 5349/tls (TURNS) instead. Cross-correlate: if 5349 is closed while 3478 is open + accepts credentials, this becomes high severity because there is no TLS fallback available at all.",
+      "value": "high",
+      "protocol_reference": "RFC 8656 \u00a73.1 (TURN URIs), \u00a76.2; RFC 7350 (STUN/TURN over DTLS)",
+      "cwe": [
+        "CWE-319"
+      ],
+      "finding_kind": "turn_cleartext_creds"
+    },
+    {
+      "name": "internal_address_relay_ssrf",
+      "kind": "exploit",
+      "description": "The single highest-impact TURN finding. Once a valid nonce is obtained (401 challenge alone is enough for the request format), send Allocate with a XOR-PEER-ADDRESS pointing at 169.254.169.254 (AWS/GCP/Azure IMDS), 127.0.0.1, or an RFC1918 address, then CreatePermission + Send toward it. A correctly configured TURN server MUST refuse per RFC 8656 \u00a79 (`denied-peer-ip` in coturn config); a misconfigured one relays UDP into the internal network \u2014 turning TURN into a bidirectional SSRF/pivot with cloud-metadata reach. Recce sends the CreatePermission and one 0-byte Send indicator, never actual metadata queries; the finding is that the server accepted the permission for a forbidden peer.",
+      "value": "critical",
+      "protocol_reference": "RFC 8656 \u00a79 (Security Considerations \u2014 denied peer addresses)",
+      "cwe": [
+        "CWE-918",
+        "CWE-441"
+      ],
+      "finding_kind": "turn_internal_relay"
+    },
+    {
+      "name": "amplification_factor_measurement",
+      "kind": "active",
+      "description": "Compute response_bytes / request_bytes for the Binding Response (20-byte request \u2192 32-52 byte response, ~2x) and the TURN 401 challenge (20-byte request \u2192 80-120 byte response with REALM+NONCE+SOFTWARE, ~4-6x). Non-vulnerable by itself, but a >4x factor plus source-address-spoofable UDP is a reflective DDoS building block, and it slots into a future DDoS-posture aggregator alongside ntp monlist, memcached stats, and dns ANY.",
+      "value": "medium",
+      "protocol_reference": "US-CERT TA14-017A (UDP amplification); RFC 8489 \u00a717 (Security Considerations)",
+      "cwe": [
+        "CWE-406"
+      ],
+      "finding_kind": "stun_amplification"
+    },
+    {
+      "name": "classic_stun_rfc3489_legacy",
+      "kind": "active",
+      "description": "Send a legacy RFC 3489 Binding Request (no magic cookie \u2014 first 4 bytes of transaction ID are random rather than 0x2112A442). A modern RFC 5389/8489 server MUST reject or ignore this; a legacy or backward-compatible daemon answers with MAPPED-ADDRESS (0x0001, plaintext IP+port, no XOR). Presence of ClassicSTUN indicates an outdated daemon, larger amplification surface, and often correlates with old coturn/vovida/stund builds carrying unpatched CVEs.",
+      "value": "medium",
+      "protocol_reference": "RFC 3489 (obsolete ClassicSTUN); RFC 8489 \u00a7Appendix B (backwards compat)",
+      "cwe": [
+        "CWE-1104"
+      ],
+      "finding_kind": "stun_legacy_rfc3489"
+    },
+    {
+      "name": "nat_behavior_discovery_rfc5780",
+      "kind": "active",
+      "description": "Send Binding Requests with CHANGE-REQUEST (0x0003) flags set for change-IP and change-port, plus OTHER-ADDRESS (0x802C) probing. RFC 5780's diagnostic mode reveals whether the STUN server is dual-homed (many enterprise deployments are \u2014 the second address is often internal), the server's mapping/filtering behavior, and any secondary IP it will disclose in OTHER-ADDRESS. That second IP is a free host-discovery pivot \u2014 a second listener recce did not have to portscan for.",
+      "value": "medium",
+      "protocol_reference": "RFC 5780 \u00a77 (NAT Behavior Discovery)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "stun_second_address_disclosure"
+    },
+    {
+      "name": "turns_tls_posture",
+      "kind": "active",
+      "description": "On 5349/tcp complete a TLS handshake (reusing svccommon._tls_conn) and record: negotiated protocol version, cipher, certificate CN/SAN, issuer, notBefore/notAfter, and whether the server negotiates TLS 1.0/1.1 or exposes weak ciphers. TURNS certs frequently share SANs with the signaling WebSocket endpoint (wss://), which feeds the web/dns modules a hostname to enumerate. Also flag self-signed / expired / hostname-mismatched certs as usual.",
+      "value": "medium",
+      "protocol_reference": "RFC 8656 \u00a73.1 (TURNS URI scheme); RFC 7350 (DTLS binding)",
+      "cwe": [
+        "CWE-295",
+        "CWE-326"
+      ],
+      "finding_kind": "turns_tls_weak"
+    },
+    {
+      "name": "rest_api_ephemeral_credential_detection",
+      "kind": "passive",
+      "description": "coturn / Janus / Jitsi / LiveKit deployments commonly use the RFC 7635 / draft-uberti-rtcweb-turn-rest style: usernames of the form '<expiry_epoch>:<user_id>' and passwords = base64(HMAC-SHA1(static-auth-secret, username)). Detect this by shape in captured usernames (regex `^\\d{10,}:` in REALM/username fields observed via 401 responses or leaked config). Presence of this pattern is a signal to look for a REST endpoint on the paired signaling server that hands out credentials without authentication \u2014 a common WebRTC misconfig where /turn-credentials/ is world-readable.",
+      "value": "high",
+      "protocol_reference": "RFC 7635 (STUN/TURN with OAuth); draft-uberti-rtcweb-turn-rest-00",
+      "cwe": [
+        "CWE-522",
+        "CWE-798"
+      ],
+      "finding_kind": "turn_rest_creds_pattern"
+    },
+    {
+      "name": "shared_secret_weakness_hint",
+      "kind": "passive",
+      "description": "When credentials become available (either supplied via --creds, discovered by the REST endpoint from capability #12, or extracted from a captured WebRTC signaling exchange), the HMAC-SHA1 MESSAGE-INTEGRITY of any captured or generated Allocate can be cracked offline for the static-auth-secret with hashcat mode 31300 (or the shorter WebRTC-turn mode). Recce does not crack \u2014 it emits a runbook step + high-severity finding if the derived password is short (<12 chars) or matches known coturn defaults ('turnpassword', 'north', example.com samples).",
+      "value": "high",
+      "protocol_reference": "RFC 8489 \u00a714.5 (MESSAGE-INTEGRITY / HMAC-SHA1); hashcat mode 31300",
+      "cwe": [
+        "CWE-521",
+        "CWE-916"
+      ],
+      "finding_kind": "turn_weak_shared_secret"
+    },
+    {
+      "name": "cve_lookup_for_detected_daemon",
+      "kind": "passive",
+      "description": "Feed the (product, version) tuple extracted in capability #3 into vuln/vulndb.py \u2014 but the vulndb has zero coturn entries today, so this capability includes extending vulndb.py with the known-bad list: coturn <4.5.2 (CVE-2020-4067 loopback SSRF, CVE-2020-26262 IPv6 loopback bypass), coturn <4.5.0.7 (CVE-2018-4056 admin-listener PoW bypass), Cisco Meeting Server TURN CVEs, Asterisk res_stun_monitor bugs. Same shape as the mysql/openssh entries in vulndb.py.",
+      "value": "high",
+      "protocol_reference": "NVD: CVE-2020-4067, CVE-2020-26262, CVE-2020-26263, CVE-2018-4056",
+      "cwe": [
+        "CWE-918",
+        "CWE-1188"
+      ],
+      "finding_kind": "turn_daemon_cve"
+    },
+    {
+      "name": "stun_tcp_transport_check",
+      "kind": "active",
+      "description": "STUN and TURN both run over TCP (RFC 6062 TURN-TCP, RFC 5389 \u00a77.2.2) on the same 3478 port. Probe 3478/tcp with a Binding Request framed per RFC 4571 (2-byte length prefix). Presence indicates a fuller TURN deployment (webRTC clients use TCP TURN when UDP is blocked); absence of TCP support on a server that speaks UDP TURN is worth noting because it forces media over UDP (constrains firewall bypasses). Also enables TCP-relay allocation testing for the internal-address SSRF check in capability #7.",
+      "value": "medium",
+      "protocol_reference": "RFC 6062 (TURN Extensions for TCP Allocations); RFC 4571 (framing)",
+      "cwe": []
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "External NAT mapping (XOR-MAPPED-ADDRESS from capability #2) \u2192 feeds dns.py (reverse-cross-check against the discovered hostname's A record) and external.py (confirms which egress IP the target uses when it dials out, useful for pivoting and for correlating with any DNS answers from cloud metadata SSRF)",
+    "REALM value from TURN 401 (capability #4) \u2192 feeds ldap.py (bind DN heuristic \u2014 realm is usually the AD DNS domain), kerberos.py (Kerberos realm is upper-case of the STUN realm ~90% of the time), sip.py (SIP domain), smtp.py (HELO/EHLO domain), and web.py (co-hosted signaling server hostname). This is the single most valuable cross-service artifact \u2014 free identity-namespace disclosure without any auth.",
+    "SOFTWARE attribute product+version (capability #3) \u2192 feeds vuln/vulndb.py CVE mapping (same pipeline SSH/HTTP banners already use), and hints downstream modules \u2014 coturn implies Linux, Cisco Meeting Server implies Cisco infrastructure elsewhere",
+    "OTHER-ADDRESS second-listener IP (capability #10, RFC 5780) \u2192 feeds the host-discovery pipeline: a new IP recce never portscanned that is nonetheless known to be a live STUN server \u2014 schedule a full sweep of it",
+    "TURNS certificate CN + SAN list (capability #11) \u2192 feeds dns.py (subdomains to resolve), web.py (WebRTC signaling endpoints, typically wss://<same-host>/ or https://<same-host>/api/), and provides pivot hostnames for the whole webRTC platform",
+    "Detected REST-credential URL pattern (capability #12) \u2192 feeds web.py's URL wordlist: /turn-credentials, /api/turn, /_turn, /iceServers \u2014 often unauthenticated on the signaling server co-hosted with TURN",
+    "Amplification factor (capability #8) \u2192 feeds a future DDoS-posture cross-service report row alongside ntp monlist, dns ANY reflection, memcached stats, ssdp M-SEARCH",
+    "Internal-relay SSRF proof (capability #7) \u2192 feeds cloud-metadata / attack-path modules: if TURN relays to 169.254.169.254 it becomes an authenticated (over TURN) SSRF into IMDS, chainable with any cloud-role finding elsewhere",
+    "Long-term-credential MESSAGE-INTEGRITY captures (capability #13) \u2192 feeds hashcat handoff artifacts (mode 31300), parallel to the existing NTLM/kerberoast/asrep hash export flows"
+  ],
+  "recommended_findings": [
+    {
+      "title": "TURN Allocate reveals authentication realm and nonce (unauthenticated realm disclosure)",
+      "severity": "medium"
+    },
+    {
+      "title": "TURN server accepts allocations without authentication (open relay)",
+      "severity": "critical"
+    },
+    {
+      "title": "TURN allocation permits relay to internal/loopback/cloud-metadata address (SSRF via TURN)",
+      "severity": "critical"
+    },
+    {
+      "title": "TURN long-term credentials accepted on cleartext 3478 with no TURNS (5349) alternative",
+      "severity": "high"
+    },
+    {
+      "title": "STUN Binding Response discloses server software version via SOFTWARE attribute",
+      "severity": "low"
+    },
+    {
+      "title": "STUN Binding Response reveals scanner's external IP mapping (informational \u2014 pivot fact)",
+      "severity": "informational"
+    },
+    {
+      "title": "STUN server responds to legacy RFC 3489 ClassicSTUN (outdated daemon, higher amplification)",
+      "severity": "medium"
+    },
+    {
+      "title": "STUN OTHER-ADDRESS attribute discloses a second server IP (undiscovered listener)",
+      "severity": "low"
+    },
+    {
+      "title": "STUN/TURN reflective amplification factor exceeds 4x (DDoS building block)",
+      "severity": "medium"
+    },
+    {
+      "title": "TURNS (5349/tls) uses weak TLS version, weak cipher, or self-signed / expired certificate",
+      "severity": "medium"
+    },
+    {
+      "title": "TURN REST-style ephemeral-credential username pattern detected (co-hosted signaling API likely leaks credentials)",
+      "severity": "high"
+    },
+    {
+      "title": "coturn <4.5.2 detected \u2014 CVE-2020-4067 loopback SSRF and related unauthenticated relay CVEs",
+      "severity": "high"
+    },
+    {
+      "title": "TURN static-auth-secret is weak or matches a known default (offline HMAC-SHA1 crack)",
+      "severity": "high"
+    }
+  ],
+  "implementation_notes": "Create recce/services/stun.py modelled directly on ntp.py \u2014 same shape: is_stun(port) recognizer, _binding_request()/_allocate_request()/_change_request() bytes builders (stdlib struct only, no dependencies), _udp_exchange() (already generic enough to lift from ntp.py verbatim), probe(ip, port) returning a flat dict of booleans+values, findings(hosts, probes) building the finding dicts via svccommon.finding_builder, findings_to_vulns() delegating to svccommon.findings_to_vulns(fs, 'stun', 3478), and analyze() using svcprobe.iter_probe for budgeted concurrent execution with progress+state. For TURNS (5349/tls) reuse the TLS helper pattern from svcdetect._tls_conn / svccommon.https_conn \u2014 a TCP-STUN listener needs the RFC 4571 2-byte length framing, which is a 4-line difference from the UDP path. Wire the module into cli/_service_helpers.py (add 'stun': 'recce.services.stun'), cli/_phases.py (add ('stun','cmd_stun') tuple), cli/_services.py (add a cmd_stun following cmd_ntp exactly \u2014 module='stun', source='stun', label='STUN/TURN'), cli/parser.py (_add_t4('stun', 'STUN/TURN 3478,5349: TURN realm+nonce disclosure, open relays, internal-address SSRF, coturn CVEs, TURNS TLS posture')), and webui/_common.py (_cmd('STUN/TURN (realm disclosure + open relay + SSRF)', 'Services', 'optional')). Extend svcdetect.py PORT_NAMES with 3478/5349/5350 entries. Extend serviceenum.py _NAME with stun/stuns/turn/turns mapping to 'stun' and _PORT with 3478/5349. Extend vuln/vulndb.py with coturn CVE entries (CVE-2020-4067, CVE-2020-26262, CVE-2020-26263, CVE-2018-4056) using the existing product-lt schema. Runbook per target should include: nmap -sU -p3478,5349 --script stun-info,stun-version; a hand-crafted stun binding via `python3 -c` one-liner (offline-friendly since Kali has no bundled stun-client); openssl s_client -connect ip:5349 for TURNS cert; and a hashcat 31300 handoff line for any captured MESSAGE-INTEGRITY. All probes MUST be single-packet where possible (STUN is designed for that) and MUST refresh with lifetime=0 immediately after any successful Allocate to leave zero trace on the server. No third-party deps \u2014 stdlib socket + struct + ssl only, consistent with airgap constraint."
+}

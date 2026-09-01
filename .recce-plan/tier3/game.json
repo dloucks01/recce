@@ -1,0 +1,200 @@
+{
+  "service": "Minecraft server",
+  "default_ports": [
+    "25565/tcp",
+    "25565/udp (Query protocol)",
+    "25575/tcp (RCON, default)",
+    "19132/udp (Bedrock; out of scope for this Java-focused item)"
+  ],
+  "summary": "recce has ZERO coverage of Minecraft server today: port 25565 is not in PORT_NAMES (recce/services/svcdetect.py), there is no signature in _SIGNATURES for the Minecraft handshake, serviceenum.py has neither a name map (\"minecraft\") nor a port map (25565), no recce/services/minecraft.py module exists, and no scripts/services/minecraft.sh runbook. Grep for \"minecraft\" and \"25565\" turns up only unrelated password wordlist entries. Minecraft's Server List Ping (SLP) is a fully unauthenticated protocol that returns a rich JSON blob (version name+protocol number, MOTD/description, player sample with UUIDs and usernames, favicon PNG base64, and for modded servers the forgeData/modinfo block); on internal dev/game boxes the MOTD and player list frequently carry real corp branding, internal hostnames, and employee gamertags \u2014 exactly the kind of enumeration surface recce is built to fold into the cross-service picture. Not a typical attack path in itself, BUT the Log4Shell CVE-2021-44228 exposure on unpatched 1.7\u20131.18.0 servers is high-severity and detectable from the version string alone. The right shape is one focused enumeration module modelled on recce/services/ipp.py (small stdlib probe, is_XXX helper, targets/findings/runbook/analyze surface) plus the two-line detection registrations and a shell runbook. Cross-service fanout (feeding MOTD hostnames to known_hostnames, favicon hashes to a branding-fingerprint bucket, version to the CVE mapper) is where this pulls its weight \u2014 much more than the raw findings do.",
+  "existing_coverage": {
+    "detected": false,
+    "files": [],
+    "notes": "No prior coverage. Confirmed by: (1) no 25565 entry in svcdetect.PORT_NAMES; (2) no Minecraft signature in svcdetect._SIGNATURES; (3) no 'minecraft' key or 25565 port in serviceenum._NAME / _PORT; (4) no minecraft.py under recce/services/; (5) no minecraft.sh under recce/scripts/services/; (6) no probes.py entry. Only 'minecraft' hits are unrelated password-wordlist tokens (tools/build_wordlists.py:351, recce/data/wordlists/creds-top-passwords.txt:271)."
+  },
+  "capabilities": [
+    {
+      "name": "Register 25565/tcp in svcdetect PORT_NAMES",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Add 25565 -> ('minecraft', 'Minecraft Java Edition server (SLP)') to PORT_NAMES in recce/services/svcdetect.py so an nmap unknown/tcpwrapped on 25565 gets an inferred label (layer 2, no traffic).",
+      "protocol_reference": "IANA-registered service name 'minecraft' (unofficial), de-facto default port 25565/tcp since Notch's original 2009 client.",
+      "notes": "Trivial one-liner; mirrors the existing ipmi/ipp/mongodb/redis entries."
+    },
+    {
+      "name": "Handshake-frame signature in _SIGNATURES",
+      "kind": "passive",
+      "value": "low",
+      "description": "Minecraft servers don't greet on connect (client speaks first), so there is no server-initiated banner to signature. Instead: recognise the RESPONSE frame shape when svcdetect.grab_banner is followed by a Minecraft nudge \u2014 a varint length + packet id 0x00 followed by a JSON string starting with '{\"version\"'. Register a signature keyed on that JSON prelude.",
+      "protocol_reference": "wiki.vg 'Server List Ping' \u2014 Status Response packet (ID 0x00, single JSON String field).",
+      "notes": "Requires pairing with a nudge (next capability) because the port stays silent otherwise. Without the nudge svcdetect currently falls through to HTTP HEAD, which correctly does NOT match and leaves the port unknown \u2014 no false positive today, just a missed ID."
+    },
+    {
+      "name": "Add SLP nudge to svcdetect _NUDGE",
+      "kind": "active",
+      "value": "medium",
+      "description": "Send Handshake (packet 0x00: protocol_version=varint(-1 or 47), server_addr=string, port=uint16, next_state=varint(1)) immediately followed by Status Request (packet 0x00, empty). Encoded as two length-prefixed varint frames. Read up to 32KB (favicon PNGs push the JSON past the current 512B _READ). This is the 'Server List Ping' \u2014 every Minecraft server answers, no auth, no server-side side effects.",
+      "protocol_reference": "wiki.vg 'Server List Ping' (Handshake state 1 -> Status Request 0x00 -> Status Response 0x00 -> optional Ping 0x01).",
+      "notes": "Must bump _READ or use a dedicated reader for this port \u2014 favicons are ~10-20KB base64. Keep the varint helpers in the new minecraft.py, not svcdetect.py, and expose one bytes-builder svcdetect can import."
+    },
+    {
+      "name": "recce/services/minecraft.py enumeration module",
+      "kind": "active",
+      "value": "high",
+      "description": "New module modelled on services/ipp.py. Exposes: is_minecraft(port), _slp_request()/_read_slp_response(), probe(ip, port, timeout) returning dict with reachable/version_name/protocol_number/motd_text/motd_json/players_max/players_online/players_sample/favicon_png_b64/favicon_sha256/forge_mods/enforces_secure_chat/prevents_chat_reports/previews_chat, minecraft_targets(hosts), findings(hosts, probes), runbook(ip, port), findings_to_vulns(fs), analyze(hosts, ...). Pure stdlib (socket + struct + json + hashlib + base64).",
+      "protocol_reference": "wiki.vg 'Server List Ping' JSON schema (version{name,protocol}, players{max,online,sample:[{name,id}]}, description (chat component or string), favicon (data URI PNG), modinfo/forgeData for Forge, enforcesSecureChat).",
+      "notes": "Follow ipp.py's shape exactly (targets/findings/runbook/findings_to_vulns/analyze), so the CLI 'recce services' surface picks it up with no scaffolding."
+    },
+    {
+      "name": "MOTD/description flattening",
+      "kind": "active",
+      "value": "medium",
+      "description": "The 'description' field is either a plain string or a Chat Component tree with nested 'text'/'extra'/'translate' nodes and per-node colour/format. Walk the tree, strip formatting codes, extract the flat text. This is where internal server names, department labels, and admin contact strings usually live on corp game boxes.",
+      "protocol_reference": "wiki.vg 'Chat' \u2014 text component format; Mojang formatting codes 'section-sign + [0-9a-fk-or]'.",
+      "notes": "Also strip the legacy 'section-sign' colour codes from any raw string variant."
+    },
+    {
+      "name": "Player sample extraction (usernames + UUIDs)",
+      "kind": "active",
+      "value": "high",
+      "description": "players.sample is a list of {name, id (UUID)}. Persist both. Player names on an internal server are often employees' Mojang usernames (frequently identical to or a variant of corp usernames); UUIDs are stable across sessions and world-unique identity.",
+      "protocol_reference": "wiki.vg 'Server List Ping' -> Response -> players.sample.",
+      "notes": "Emit an info-severity 'unauthenticated player roster disclosed' finding when non-empty. Feeds cross-service identities/users bucket."
+    },
+    {
+      "name": "Favicon extraction and hashing",
+      "kind": "active",
+      "value": "medium",
+      "description": "Decode the 'favicon' data URI ('data:image/png;base64,...'), save the PNG bytes (or just the sha256), store on the probe result. Corp game/dev boxes often stamp company logos onto favicons \u2014 a strong branding fingerprint that lets recce correlate a hostname/IP to an org identity, and to group multiple boxes owned by the same team.",
+      "protocol_reference": "wiki.vg 'Server List Ping' -> Response -> favicon (64x64 PNG data URL).",
+      "notes": "Keep the raw PNG out of findings text (binary); store the sha256 + a short 'favicon present (NxN)' summary."
+    },
+    {
+      "name": "Version-string CVE flagging (Log4Shell)",
+      "kind": "passive",
+      "finding_kind": "cve",
+      "value": "high",
+      "cwe": [
+        "CWE-502",
+        "CWE-20"
+      ],
+      "description": "Emit a HIGH finding when version.name matches a vanilla/Paper/Spigot/Forge string in the Log4Shell-vulnerable range (Java Edition 1.7 through 1.18.0 inclusive, before Mojang's 1.18.1 patch and the emergency backport). Parse version.name conservatively \u2014 many servers prefix 'Paper 1.18.0' / 'Spigot 1.16.5' / 'Forge 1.12.2-14.23.5.2860'. This capability is passive with respect to the SERVER \u2014 it derives entirely from the already-captured version.name string; no additional probe traffic and no exploit payload is sent.",
+      "protocol_reference": "CVE-2021-44228 (Log4j 2 JNDI RCE); Mojang mitigation matrix (fixed in 1.18.1, backports for 1.7.10-1.17.1).",
+      "notes": "Version string alone is enough to flag; do NOT actively send a chat JNDI probe (that would BE the exploit). Keep this as a post-probe classifier \u2014 'reachable + version in vulnerable range' \u2192 finding."
+    },
+    {
+      "name": "Modded-server enumeration (Forge/Fabric)",
+      "kind": "active",
+      "value": "medium",
+      "description": "When forgeData.mods (1.13+) or modinfo.modList (1.7-1.12) is present, capture the mod id + version pairs. This is a product inventory: many mods have their own CVE histories, and mod loadouts frequently identify a specific game server template / studio.",
+      "protocol_reference": "wiki.vg 'Server List Ping' -> Response -> forgeData / modinfo (Forge FML handshake tack-on).",
+      "notes": "Also detect Fabric via mods list markers and version.name containing 'Fabric'. Feed the mod list to the product inventory."
+    },
+    {
+      "name": "Legacy Server List Ping (pre-1.6)",
+      "kind": "active",
+      "value": "low",
+      "description": "Servers older than 1.6 (protocol version <= 39) don't understand the modern SLP handshake and return an SLP over 0xFE 0x01 0xFA payload with a section-sign-delimited string (motd, online, max). Fall back to this when the modern SLP fails, so pre-1.6 boxes are still enumerated (and flagged as *very* legacy \u2014 every one of them is Log4Shell-era-and-older).",
+      "protocol_reference": "wiki.vg 'Server List Ping' -> Legacy Server List Ping (0xFE 0x01 optional 0xFA).",
+      "notes": "Any successful legacy SLP is itself a low-severity 'obsolete Minecraft server' finding \u2014 no patches since ~2013."
+    },
+    {
+      "name": "Query protocol probe (25565/udp GameSpy4)",
+      "kind": "active",
+      "value": "medium",
+      "description": "If enable-query=true in server.properties, 25565/udp answers the GameSpy4 protocol. Basic Stat reveals motd/gametype/map/numplayers/maxplayers/hostport/hostip; Full Stat additionally reveals the PLUGINS list (Bukkit/Spigot/Paper plugin names + versions) and the player NAME list. Plugins list is a much richer product inventory than the SLP JSON.",
+      "protocol_reference": "wiki.vg 'Query' (GameSpy4): handshake -> challenge token -> Basic Stat 0x00 / Full Stat 0x00 with padding.",
+      "notes": "UDP handshake is a two-step (challenge, then stat); implement both. Off-by-default in server.properties so many boxes won't answer \u2014 treat non-response as 'query disabled'."
+    },
+    {
+      "name": "RCON default-port detection (25575/tcp)",
+      "kind": "auth",
+      "value": "medium",
+      "cwe": [
+        "CWE-521",
+        "CWE-798"
+      ],
+      "description": "When 25565/tcp is confirmed Minecraft, register 25575/tcp as a suggested probe if that port is also open on the host: send an RCON Login packet (type 3) with an empty password and observe rejection. Do NOT brute-force. Emit a 'Minecraft RCON exposed' info/medium finding when the port is reachable and speaks the packet framing, high if it accepts an empty password.",
+      "protocol_reference": "Valve Source RCON protocol, re-used by Minecraft (packet size int32 LE, request id int32 LE, type int32 LE, payload NUL, pad NUL).",
+      "notes": "RCON grants arbitrary /op, /stop, /execute \u2014 full server takeover, and worlds routinely contain private notes. Empty-password check only; leave dictionaries to the operator."
+    },
+    {
+      "name": "BungeeCord/Velocity proxy detection",
+      "kind": "active",
+      "value": "medium",
+      "description": "A version.name starting 'BungeeCord' or 'Velocity' identifies a proxy that fronts a fleet of BACKEND Minecraft servers. Backends are usually reachable only from the proxy host and are rarely scanned separately. Flag proxies distinctly so an operator knows to enumerate the backend network from that host.",
+      "protocol_reference": "BungeeCord/Velocity handshake padding format (IP + UUID appended to Handshake serverAddress field).",
+      "notes": "The Handshake serverAddress padding is the tell for IP-forwarding mode \u2014 worth surfacing as a config-disclosure signal."
+    },
+    {
+      "name": "serviceenum.py mapping",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Add 'minecraft': 'minecraft' to _NAME and 25565: 'minecraft' to _PORT in recce/services/serviceenum.py so `recce services` prints a runbook command for it, and ship recce/scripts/services/minecraft.sh with a minimal `mcstatus`/`nmap --script minecraft-info` enumeration recipe. Update the twin maps in recce/scripts/recce-service.sh (name_to_svc / port_to_svc).",
+      "protocol_reference": "n/a \u2014 internal recce plumbing.",
+      "notes": "Without this the module exists but `recce services` won't offer a hand-command; the user has to know it themselves."
+    },
+    {
+      "name": "known_hostnames + product-inventory + branding fanout",
+      "kind": "chain",
+      "value": "high",
+      "description": "Wire the probe result into recce's cross-service state: (a) push any FQDN-shaped tokens extracted from the MOTD, forgeData mod ids that carry package paths, and BungeeCord serverAddress padding into core.known_hostnames.record_name(host, ...); (b) push mod list + plugin list into the product inventory the CVE mapper reads; (c) push favicon_sha256 into a session-wide branding-fingerprint bucket so a repeat sha across hosts groups them under one 'owner'; (d) push version_name/version_number into port.product/port.version so the existing CVE mapper picks up Log4Shell without a bespoke rule.",
+      "protocol_reference": "n/a \u2014 internal recce data flow (mirrors what LDAP/SMB/NTLM do today for hostname fanout).",
+      "notes": "This is the capability that turns Minecraft from 'a low-risk enumeration finding' into 'a source of cross-service pivots'. Do it in the analyze() function so the fanout is automatic."
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "MOTD/description text -> core.known_hostnames (internal hostnames, admin contact strings, department labels)",
+    "forgeData.mods + query-protocol plugins list -> product/CVE inventory (mod-level and plugin-level CVEs, not just the server jar)",
+    "version.name (e.g. 'Paper 1.16.5') -> Port.product/Port.version -> existing CVE mapper (Log4Shell CVE-2021-44228 and every server-side jar CVE)",
+    "players.sample[{name,id}] -> identities/users bucket (Mojang usernames frequently mirror corp usernames; UUIDs are stable pivots)",
+    "favicon PNG sha256 -> branding-fingerprint bucket (correlate multiple hosts owned by the same org/team; identify corp-branded dev boxes)",
+    "BungeeCord/Velocity proxy detection + Handshake serverAddress IP-forward padding -> new scan targets (backend Minecraft servers reachable only from the proxy)",
+    "Query-protocol hostip/hostport -> reveals the server's *own* view of its bind IP (often an internal RFC1918 address behind NAT/DNAT) \u2014 feeds internal-network topology",
+    "25575/tcp RCON detection paired with 25565/tcp Minecraft -> service co-location signal (recce already keys some findings on paired ports)",
+    "enforcesSecureChat / previewsChat flags -> policy inventory (Mojang online-mode / cracked-server signal; a cracked server on an internal network is a common shadow-IT smell)"
+  ],
+  "recommended_findings": [
+    {
+      "severity": "high",
+      "title": "Minecraft server in Log4Shell-vulnerable version range (CVE-2021-44228)"
+    },
+    {
+      "severity": "medium",
+      "title": "Minecraft Server List Ping discloses player roster (usernames + UUIDs) unauthenticated"
+    },
+    {
+      "severity": "medium",
+      "title": "Minecraft MOTD discloses internal hostnames / branding"
+    },
+    {
+      "severity": "medium",
+      "title": "Minecraft RCON exposed on 25575/tcp (companion to 25565)"
+    },
+    {
+      "severity": "high",
+      "title": "Minecraft RCON accepts empty password"
+    },
+    {
+      "severity": "medium",
+      "title": "Minecraft Query protocol enabled on 25565/udp (leaks plugin list and player names)"
+    },
+    {
+      "severity": "low",
+      "title": "Minecraft server on legacy protocol (<= 1.6, pre-modern SLP) \u2014 no security updates"
+    },
+    {
+      "severity": "info",
+      "title": "Minecraft server identified (version, protocol, MOTD, players)"
+    },
+    {
+      "severity": "info",
+      "title": "BungeeCord/Velocity proxy detected \u2014 enumerate backend Minecraft fleet from this host"
+    },
+    {
+      "severity": "info",
+      "title": "Modded Minecraft server (Forge/Fabric) \u2014 mod inventory captured"
+    }
+  ],
+  "implementation_notes": "SHAPE: single new module recce/services/minecraft.py (~250 lines, ipp.py as the template), plus five surgical registrations: (1) PORT_NAMES[25565] in svcdetect.py; (2) a Minecraft nudge added to svcdetect._NUDGE with a companion signature; (3) _NAME['minecraft'] and _PORT[25565] in serviceenum.py; (4) name_to_svc/port_to_svc entries in recce/scripts/recce-service.sh; (5) a new recce/scripts/services/minecraft.sh runbook. WIRE FORMAT primer for the probe: all lengths and packet ids are VarInt (7-bit LE, MSB=continuation). Modern SLP = two frames outbound (Handshake ID 0x00 with protocol_version=varint(-1), server_addr=length-prefixed UTF-8, port=uint16 big-endian, next_state=varint(1); then Status Request ID 0x00 empty), one frame inbound (Status Response ID 0x00 with a single JSON string). Bump the read buffer to at least 32KB \u2014 a 64x64 PNG favicon base64 easily pushes the JSON past 20KB and the current svcdetect _READ=512 will truncate. Timeouts through proxy.scaled(_TIMEOUT), same pattern as ipp.py. AIRGAP: everything above is stdlib (socket, struct, json, hashlib, base64, re). No new deps. CVE FLAG SCOPE: keep the Log4Shell finding driven off version.name parsing only \u2014 do NOT send a JNDI-in-chat probe; that is the exploit, not the check. TESTING: mock a Status Response with a canned JSON blob (vanilla, Paper, Forge, BungeeCord, legacy SLP) and drive probe()/_walk against it \u2014 no live server needed. FANOUT (the highest-leverage step, easy to forget): wire the analyze() output into core.known_hostnames.record_name for MOTD hostname tokens and the product inventory that the CVE mapper reads, so the module pays for itself across the rest of the scan rather than just producing four findings."
+}

@@ -1,0 +1,282 @@
+{
+  "service": "Telnet",
+  "default_ports": [
+    "23/tcp",
+    "992/tcp (telnets, TLS-wrapped)",
+    "2323/tcp (common IoT alt)",
+    "5555/tcp (IoT alt)"
+  ],
+  "summary": "Telnet (RFC 854) is a cleartext remote-terminal protocol whose mere presence in 2026 is itself a finding \u2014 every keystroke, credential, and command is on the wire. Attackers care about it as a foothold with three properties: (1) it hands out an OS/vendor fingerprint through the pre-auth banner and login-prompt style (Cisco 'User Access Verification', Juniper 'login:', Linux 'Ubuntu 22.04 LTS\\nlogin:', BusyBox '(none) login:', Solaris 'SunOS 5.10'); (2) it negotiates options via IAC that leak host state \u2014 NEW-ENVIRON (RFC 1572) can be tricked into revealing USER/DISPLAY/HOME/JOB/PRINTER/DOMAIN, TTYPE reveals the client's terminal expectation, and the presence/absence of ENCRYPT (RFC 2946) and AUTHENTICATION (RFC 2941) options tells you whether creds will fly cleartext; (3) legacy telnetd builds have unauthenticated RCEs and login-bypass bugs (Solaris CVE-2007-0882 in.telnetd -f arg injection, inetutils/netkit CVE-2020-10188 encrypt_keyid overflow, dozens of BusyBox/embedded devices with hardcoded creds). recce currently only harvests nmap's telnet-encryption/telnet-ntlm-info NSE output; a dedicated module can add a stdlib IAC negotiator, prompt-style fingerprinting, ENVIRON leak probe, and a small known-default-creds sweep, and it can enrich known_hostnames/known_users/relay_targets from what the banner and prompt reveal.",
+  "existing_coverage": {
+    "detected": true,
+    "files": [
+      "recce/services/serviceenum.py",
+      "recce/core/parser.py",
+      "recce/core/scanner.py",
+      "recce/services/svcdetect.py"
+    ],
+    "notes": "serviceenum.py maps nmap service name 'telnet' and TCP/23 to the 'telnet' script bucket (line 12, 38). core/scanner.py enables the nmap NSE scripts telnet-encryption and telnet-ntlm-info (line 254); parser.py turns a telnet-encryption 'does not support encryption' hit into a medium 'Telnet without encryption (cleartext)' finding with CWE-319 (parser.py:296). svcdetect.py does NOT list 23 in PORT_NAMES (relies on nmap for that well-known port) and there is no signature/nudge for telnet in _SIGNATURES/_NUDGE. There is NO recce/services/telnet.py \u2014 no stdlib IAC probe, no banner-fingerprint enrichment, no ENVIRON leak check, no default-cred sweep, no runbook, no findings mapper, no known-bad-build map. rservices.py (recce's closest peer for a 'presence-is-the-finding' legacy protocol) is the style template."
+  },
+  "capabilities": [
+    {
+      "name": "iac_option_negotiation_fingerprint",
+      "kind": "active",
+      "description": "Read the pre-auth IAC DO/WILL/DONT/WONT negotiation stream and record the set of options the server offers/refuses \u2014 the pattern (WILL ECHO, WILL SUPPRESS-GA, DO TERMINAL-TYPE, DO NAWS, DO NEW-ENVIRON, DO/WILL ENCRYPT, DO/WILL AUTHENTICATION) is a strong OS/vendor fingerprint distinct from the banner and grounds every other finding.",
+      "value": "high",
+      "protocol_reference": "RFC 854 Sec 'The Telnet Command Structure' (IAC=255), RFC 855 (option negotiation)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "telnet_iac_fingerprint",
+      "notes": "Stdlib socket + a 4-byte IAC parser. Mirror the ftp.py style: a probe() that returns a dict {banner, options_will, options_do, encrypt_offered, auth_offered, environ_offered, prompt_style, vendor_guess}."
+    },
+    {
+      "name": "cleartext_presence_is_the_finding",
+      "kind": "passive",
+      "description": "Emit a HIGH baseline finding whenever telnet is open at all \u2014 the protocol offers no cleartext-protection option by default, so its presence on a 2026 network is a categorical control failure worth its own writeup (recce already does this pattern for rlogin/rsh in rservices.py).",
+      "value": "high",
+      "protocol_reference": "RFC 854 (no encryption in the base protocol); RFC 2946 (Encryption option \u2014 optional, rarely negotiated)",
+      "cwe": [
+        "CWE-319",
+        "CWE-311"
+      ],
+      "finding_kind": "telnet_present",
+      "notes": "This one is emitted with zero packets beyond the enum sweep \u2014 same shape as rservices._finding()."
+    },
+    {
+      "name": "encryption_option_absent",
+      "kind": "active",
+      "description": "Confirm the server never sends WILL ENCRYPT (option 38) during the IAC negotiation \u2014 meaning even a client that asked for it cannot get a private channel \u2014 and upgrade the presence finding with definite evidence rather than an assumption.",
+      "value": "medium",
+      "protocol_reference": "RFC 2946 Sec 3 'Telnet Encryption Option', option code 38",
+      "cwe": [
+        "CWE-319",
+        "CWE-311"
+      ],
+      "finding_kind": "telnet_no_encrypt",
+      "notes": "Direct upgrade of the parser.py:296 nmap-NSE-derived finding \u2014 but recce should emit it itself so a scan without --script telnet-encryption still gets it. Also record whether AUTHENTICATION (option 37, RFC 2941) is offered \u2014 an unencrypted-but-authenticated login is still a Kerberos password oracle."
+    },
+    {
+      "name": "environ_option_leak",
+      "kind": "active",
+      "description": "When the server sends DO NEW-ENVIRON (option 39), reply with IAC SB NEW-ENVIRON SEND VAR IAC SE requesting standard variables (USER, DISPLAY, JOB, ACCT, PRINTER, SYSTEMTYPE) and record every value the server volunteers \u2014 real telnetds have leaked USER and HOME pre-auth this way.",
+      "value": "high",
+      "protocol_reference": "RFC 1572 Sec 2 'Command Names and Codes' (SEND=1, VAR=0, VALUE=1, USERVAR=3); RFC 1408 (older ENVIRON option 36 with reversed VAR/VALUE)",
+      "cwe": [
+        "CWE-200",
+        "CWE-201"
+      ],
+      "finding_kind": "telnet_environ_leak",
+      "notes": "Support BOTH option 36 (old ENVIRON, RFC 1408) and option 39 (NEW-ENVIRON, RFC 1572) \u2014 the semantic codes are reversed between them; a naive parser reads USER as VALUE and vice-versa. Leaked USER feeds known_users."
+    },
+    {
+      "name": "banner_and_prompt_vendor_fingerprint",
+      "kind": "passive",
+      "description": "Capture the pre-login banner text and the login prompt style and classify vendor/OS from a small regex table: 'User Access Verification' -> Cisco IOS, 'Username:'+'Password:' with no 'login:' -> Cisco/Juniper, '(none) login:' -> BusyBox/embedded, 'SunOS 5.\\d+' -> Solaris, 'HP-UX' -> HP-UX, 'iLO' -> HP iLO BMC, 'ONTAP' -> NetApp \u2014 each vendor guess opens a different runbook.",
+      "value": "high",
+      "protocol_reference": "No RFC \u2014 de-facto login(1)/getty(8) conventions; Cisco IOS 'User Access Verification' banner; RFC 854 IAC-stripping required before regex.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "telnet_vendor_fingerprint",
+      "notes": "Must IAC-strip the byte stream before regex \u2014 the banner is interleaved with 3-byte IAC sequences. Vendor guess -> product/version for CVE map (feeds recce's offline CVE DB the same way ftp.py does)."
+    },
+    {
+      "name": "known_bad_build_map",
+      "kind": "passive",
+      "description": "Match the banner/vendor against a small curated map of telnetd builds with pre-auth RCE or login-bypass CVEs \u2014 Solaris in.telnetd (CVE-2007-0882, USER=-froot bypass), inetutils/netkit telnetd (CVE-2020-10188, encrypt_keyid heap overflow), BusyBox telnetd embedded-device hardcoded creds, D-Link/TP-Link/Netgear telnet backdoors \u2014 each match becomes a critical pre-auth compromise finding with the referenced module.",
+      "value": "critical",
+      "protocol_reference": "CVE-2007-0882 (Solaris 10 in.telnetd -f); CVE-2020-10188 (netkit-telnetd); many vendor-specific",
+      "cwe": [
+        "CWE-287",
+        "CWE-798",
+        "CWE-119"
+      ],
+      "finding_kind": "telnet_known_backdoor",
+      "notes": "Same shape as ftp.py _KNOWN_BAD table \u2014 deliberately narrow, only well-known high-confidence signatures."
+    },
+    {
+      "name": "solaris_telnetd_dash_f_bypass",
+      "kind": "exploit",
+      "description": "When the fingerprint says Solaris 10 (banner 'SunOS 5.10') and the login prompt is reached, connect with the client-side argument USER=-fbin (or -froot) to trigger CVE-2007-0882 in.telnetd, which passes the tainted username as a login(1) -f flag and grants an unauthenticated shell as that user.",
+      "value": "critical",
+      "protocol_reference": "CVE-2007-0882; Sun alert 102802",
+      "cwe": [
+        "CWE-88",
+        "CWE-287"
+      ],
+      "finding_kind": "telnet_solaris_dashf_rce",
+      "notes": "Gate this behind explicit RECCE_ACTIVE_ATTACKS=1 like sqli.py does \u2014 it produces a live shell on a real host. Runbook uses `telnet -l -fbin <ip>`."
+    },
+    {
+      "name": "login_prompt_timing_user_enum",
+      "kind": "active",
+      "description": "Measure the wall-clock delay between a valid vs invalid username and record the differential \u2014 many telnetd builds (particularly wrapping PAM) leak username validity through the timing of the password prompt, giving a low-noise pre-auth user enumeration primitive that feeds known_users.",
+      "value": "medium",
+      "protocol_reference": "No RFC \u2014 implementation artifact of login(1)/PAM. Similar to SSH's classic timing enum.",
+      "cwe": [
+        "CWE-208",
+        "CWE-203"
+      ],
+      "finding_kind": "telnet_user_enum_timing",
+      "notes": "Requires a baseline (feed 3 clearly invalid usernames, average, then test candidates). Cheap: 3 short TCP sessions. Only run when known_users has candidates to test."
+    },
+    {
+      "name": "default_and_hardcoded_credential_sweep",
+      "kind": "auth",
+      "description": "Try a small, vendor-conditioned default-cred list (cisco/cisco, admin/admin, admin/<blank>, root/root, root/<blank>, root/xc3511 [Dahua/Xiongmai IoT backdoor], support/support, ubnt/ubnt) \u2014 telnet on embedded devices routinely accepts them, and each hit is credentialed shell.",
+      "value": "critical",
+      "protocol_reference": "No RFC \u2014 vendor default-credential databases (Cirt.net, Mitre BOTNET reports for Mirai's telnet cred list)",
+      "cwe": [
+        "CWE-798",
+        "CWE-521"
+      ],
+      "finding_kind": "telnet_default_creds",
+      "notes": "Vendor-conditioned: only try Cisco defaults when the banner said Cisco, Xiongmai/Dahua defaults when banner matches, etc. \u2014 avoids lockouts on real hosts. Successful cred -> relay_targets (try same on SSH/HTTP/SNMP)."
+    },
+    {
+      "name": "credentialed_privilege_and_hostname_capture",
+      "kind": "auth",
+      "description": "Where creds are supplied or discovered, log in and capture 'uname -a', 'hostname', 'id', 'show version' (Cisco), '/etc/passwd' head \u2014 the resulting hostname/domain/user list feeds known_hostnames, known_users, and known_domains; the OS/version feeds the CVE DB.",
+      "value": "high",
+      "protocol_reference": "N/A \u2014 post-auth shell",
+      "cwe": [
+        "CWE-522"
+      ],
+      "finding_kind": "telnet_credentialed_shell",
+      "notes": "Reuses the vendor guess from banner_and_prompt_vendor_fingerprint to pick the right identity commands ('show version' on Cisco, 'uname -a' on *nix). Cisco 'show running-config' reveals SNMP RO/RW and enable secret hashes -> known_hashes (hashcat -m 500/9200)."
+    },
+    {
+      "name": "ntlm_auth_option_leak",
+      "kind": "passive",
+      "description": "When the server offers Microsoft's telnet AUTHENTICATION sub-option NTLM and completes an NTLM Type-2 challenge, extract the AV_PAIR fields (NetBIOS/DNS computer name, domain, forest, timestamp) \u2014 same data class the nmap NSE telnet-ntlm-info already surfaces, but recce owns it and can wire the values into known_hostnames/known_domains directly.",
+      "value": "high",
+      "protocol_reference": "RFC 2941 (AUTHENTICATION option, code 37); MS-NLMP Sec 2.2.2.1 (AV_PAIR)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "telnet_ntlm_info_leak",
+      "notes": "Only triggers on Windows Telnet Server (rare in 2026 but still on old Windows Server boxes). Replaces the parser.py reliance on the nmap NSE."
+    },
+    {
+      "name": "cleartext_capture_witness",
+      "kind": "chain",
+      "description": "Cross-service note that any capture of a telnet session (tcpdump 'tcp port 23') yields USER, PASSWORD, and every keystroke in cleartext \u2014 recce should emit an explicit MITM/sniff runbook line and flag the target for the segmentation-review writeup, because the finding's real weight is 'anyone on-path already has these creds'.",
+      "value": "high",
+      "protocol_reference": "RFC 854 (no encryption); RFC 2946 (Encryption optional and normally not negotiated)",
+      "cwe": [
+        "CWE-319",
+        "CWE-311"
+      ],
+      "finding_kind": "telnet_sniff_runbook",
+      "notes": "Runbook line: 'tcpdump -i <iface> -A -s0 tcp port 23'. Also cross-references to arpspoof/ettercap in an ROE-appropriate way."
+    },
+    {
+      "name": "telnets_tls_wrapped_variant",
+      "kind": "active",
+      "description": "On 992/tcp (or any port where the initial bytes look like a TLS ClientHello response), complete a TLS handshake first and negotiate IAC options over the TLS session \u2014 telnets is rare but exists on Cisco/legacy printers, and recce currently ignores it.",
+      "value": "low",
+      "protocol_reference": "IANA 'telnets' (port 992), RFC 4248 (telnet URI)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "telnet_over_tls",
+      "notes": "Reuse svcdetect.tls_http_probe() pattern for the TLS wrap, then hand off to the same IAC parser."
+    },
+    {
+      "name": "iac_control_byte_smuggling_probe",
+      "kind": "active",
+      "description": "Send a benign IAC AYT (Are You There, IAC 246) and record whether the server responds \u2014 'IAC AYT' presence proves the peer is speaking telnet and not a rogue app on 23, disambiguating misidentified ports (many bootloader/serial-console proxies squat on 23 with only a raw banner).",
+      "value": "low",
+      "protocol_reference": "RFC 854 Sec 'Standard Representation of Control Functions' (AYT=246)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "telnet_ayt_liveness",
+      "notes": "Cheap disambiguator, avoids emitting the whole finding tree on a port that looks like telnet but is actually a Cisco console concentrator or U-Boot serial."
+    }
+  ],
+  "recommended_findings": [
+    {
+      "severity": "high",
+      "title": "Telnet service exposed (cleartext by design)"
+    },
+    {
+      "severity": "medium",
+      "title": "Telnet does not offer the ENCRYPT option (all traffic cleartext)"
+    },
+    {
+      "severity": "high",
+      "title": "Telnet NEW-ENVIRON leaks environment variables pre-auth"
+    },
+    {
+      "severity": "high",
+      "title": "Telnet banner/prompt fingerprint (vendor: <X>)"
+    },
+    {
+      "severity": "critical",
+      "title": "Telnet daemon is a known-backdoored/RCE build"
+    },
+    {
+      "severity": "critical",
+      "title": "Solaris in.telnetd -f authentication bypass (CVE-2007-0882)"
+    },
+    {
+      "severity": "medium",
+      "title": "Telnet login-prompt timing enables username enumeration"
+    },
+    {
+      "severity": "critical",
+      "title": "Telnet accepts vendor default credentials"
+    },
+    {
+      "severity": "high",
+      "title": "Telnet credentialed shell \u2014 hostname/OS/users captured"
+    },
+    {
+      "severity": "high",
+      "title": "Telnet NTLM AV_PAIR discloses NetBIOS/DNS/domain info"
+    },
+    {
+      "severity": "info",
+      "title": "Telnet-over-TLS (telnets) detected on 992/tcp"
+    }
+  ],
+  "recommended_hashcat_modes": [
+    {
+      "mode": 500,
+      "description": "Cisco IOS $1$ (MD5-crypt) \u2014 'enable secret 5' hash captured from a Cisco telnet session's 'show running-config'"
+    },
+    {
+      "mode": 9200,
+      "description": "Cisco IOS PBKDF2-SHA256 'enable secret 9' hash from 'show running-config'"
+    },
+    {
+      "mode": 2400,
+      "description": "Cisco Type 7 obfuscated password (reversible, not really a hash) from 'password 7 ...'"
+    },
+    {
+      "mode": 1500,
+      "description": "descrypt / traditional Unix crypt(3) hash from /etc/passwd or /etc/shadow on ancient AIX/HP-UX/Solaris via telnet shell"
+    },
+    {
+      "mode": 5600,
+      "description": "NetNTLMv2 challenge-response captured from a Windows Telnet Server AUTHENTICATION-option NTLM exchange"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames <- server hostname parsed from the pre-login banner ('hostname login:'), from Cisco 'User Access Verification\\n<hostname>>' prompt, and from NTLM AV_PAIR MsvAvNbComputerName/MsvAvDnsComputerName when the AUTHENTICATION option is used",
+    "known_hostnames <- fully-qualified DNS name from NTLM AV_PAIR MsvAvDnsComputerName/MsvAvDnsTreeName",
+    "known_domains <- NTLM AV_PAIR MsvAvNbDomainName/MsvAvDnsDomainName/MsvAvDnsTreeName from telnet AUTHENTICATION option 37",
+    "known_users <- USER/LOGNAME leaked pre-auth via NEW-ENVIRON (RFC 1572) SEND response",
+    "known_users <- usernames confirmed by login-prompt timing enumeration",
+    "known_users <- account names harvested from /etc/passwd or Cisco 'show running-config username' after a credentialed shell",
+    "known_hashes <- Cisco 'enable secret 5/9' and 'username X secret' hashes from a credentialed 'show running-config' (hashcat -m 500/9200)",
+    "known_hashes <- descrypt hashes from /etc/shadow on an ancient Solaris/AIX/HP-UX shell (hashcat -m 1500)",
+    "known_hashes <- captured NetNTLMv2 blob from Windows Telnet Server AUTHENTICATION exchange (hashcat -m 5600)",
+    "relay_targets <- any credential that worked on telnet gets fanned out to SSH/HTTP-admin/SNMP/FTP on the same host and to the rest of the subnet (embedded devices share creds ruthlessly)",
+    "NEW shared surface: known_vendors \u2014 'cisco-ios', 'juniper', 'busybox', 'solaris', 'hp-ilo', 'netapp-ontap' from banner/prompt fingerprint; gate subsequent modules' cred lists and NSE choices on this rather than re-guessing per module",
+    "NEW shared surface: cleartext_credentials_observed \u2014 a flag on the host/segment recording that a cleartext-auth protocol is exposed, so the segmentation/MITM writeup can aggregate telnet/ftp/http-basic/pop3/imap into one blast-radius argument"
+  ],
+  "implementation_notes": "Model this on recce/services/ftp.py: a probe(ip, port, timeout) that returns a dict, ftp_targets()-style discovery, a _KNOWN_BAD regex table, a finding_builder-based findings(), credfree_runbook()/cred_runbook(), and analyze(). But the byte layer differs: telnet is a duplex IAC-negotiated stream, not a line-mode ASCII protocol, so a small IAC parser is required \u2014 read into a buffer, split on IAC (0xFF), interpret 3-byte IAC WILL/WONT/DO/DONT (options 0x00..0xFF), handle IAC IAC as literal 0xFF, and buffer sub-negotiation between IAC SB and IAC SE. The initial 'passive-listen for the first 2s of IAC negotiation, then respond' pattern is enough for the fingerprint + ENVIRON leak capabilities without ever hitting a login prompt. Reuse recce/core/proxy.scaled() for timeout scaling under a pivot, same as svcdetect.grab_banner(). Add 23 to svcdetect PORT_NAMES and add a telnet signature to _SIGNATURES (a heuristic: any early sequence containing 0xFF 0xFB or 0xFF 0xFD is IAC and 90% telnet) so an unlabelled port on 2323/5555 gets picked up. Add a nudge b'\\xff\\xf6' (IAC AYT) to _NUDGE for port 23 so silent telnetds still surface. Reuse svcprobe.iter_probe() and svccommon.finding_builder / findings_to_vulns exactly like ftp.py does \u2014 no new plumbing. Gate the exploit capability (solaris_telnetd_dash_f_bypass) and the default-cred sweep behind RECCE_ACTIVE_ATTACKS=1 following the sqli.py pattern. Add a telnet script bucket under recce/scripts/services/ so recce-service.sh has something to invoke (serviceenum already routes 23 to 'telnet' but the script file does not exist yet)."
+}

@@ -1,0 +1,237 @@
+{
+  "service": "docker",
+  "existing_capabilities": [
+    "Detects ports 2375 (plain HTTP) and 2376 (HTTPS, TLS verification disabled) + service-name/product-string fallback.",
+    "Unauthenticated GET of /version and /info; captures Version, ApiVersion, Os, Arch, KernelVersion, Name, Containers/Running, Images, ServerVersion.",
+    "Unauthenticated GET of /containers/json (running list) and /images/json (image tag list, truncated to 40).",
+    "Per-container GET /containers/{id}/json \u2014 inspects HostConfig.Binds and HostConfig.Privileged only; flags binds mounting /, /etc, /root, /proc, /sys, docker.sock, /etc/, /root/, /var/log/.",
+    "Swarm mode enumeration: GET /swarm, /services, /secrets, /configs (names only, truncated to 25).",
+    "Volume enumeration via GET /volumes (names only, truncated to 40).",
+    "Findings: unauth API exposed (critical, CWE-306/284/269), inventory readable (high, CWE-200), host-mount/privileged escape route (critical, CWE-284/250/269), swarm secrets/configs readable (high, CWE-200/306), volume inventory (info).",
+    "Runbook: version+info, ps+images, inspect for env vars, --v /:/host chroot escape.",
+    "iter_probe integration for Ctrl-C / budget / hostile-endpoint safety; 16 MB response cap; findings_to_vulns pipeline integration."
+  ],
+  "missing_capabilities": [
+    {
+      "name": "Container environment/command extraction from /containers/{id}/json Config.Env",
+      "kind": "passive",
+      "description": "Per-container inspect reads only HostConfig; ignores Config.Env, Config.Cmd, Config.Entrypoint, Config.Labels. Env vars are the #1 secret-leak vector on the Docker API \u2014 DB_PASSWORD, AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, JWT_SECRET, connection strings routinely live there and are readable without any exec, container-create, or /archive call. The narrative text even claims we do this, but the code never touches Config.Env. Should regex-scan the harvested strings for high-entropy tokens and known key formats and hand them to the credential/hashloot pool.",
+      "value": "critical",
+      "protocol_reference": "Engine API 1.44 GET /containers/{id}/json \u2192 response.Config.Env / Config.Cmd / Config.Entrypoint / Config.Labels",
+      "cwe": [
+        "CWE-522",
+        "CWE-798",
+        "CWE-200"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "GET /containers/{id}/archive \u2014 arbitrary file read from any container",
+      "kind": "passive",
+      "description": "The Engine API exposes GET /containers/{id}/archive?path=/etc/passwd (and any path) which streams a tar of files out of a running container filesystem \u2014 no exec, no container create, no privileged flag needed. Full arbitrary-read primitive for every container's rootfs; grab /etc/shadow, /root/.ssh/id_rsa, /root/.aws/credentials, /run/secrets/* (swarm secret values), /var/lib/postgresql, etc. This is a distinct primitive from 'root on host via container-create' and lets recce demonstrate loot without any intrusive create call.",
+      "value": "critical",
+      "protocol_reference": "Engine API 1.44 \u00a7Container \u00a7GET /containers/{id}/archive",
+      "cwe": [
+        "CWE-306",
+        "CWE-552"
+      ],
+      "finding_kind": "arbitrary_file_read"
+    },
+    {
+      "name": "GET /containers/{id}/logs \u2014 plaintext log exfiltration",
+      "kind": "passive",
+      "description": "Unauthenticated GET /containers/{id}/logs?stdout=1&stderr=1&tail=N returns container logs. Application logs routinely contain full request/response bodies, stack traces with SQL connection strings, JWT tokens, session cookies, S3 pre-signed URLs, and error messages disclosing internal paths. Not currently pulled.",
+      "value": "high",
+      "protocol_reference": "Engine API 1.44 GET /containers/{id}/logs",
+      "cwe": [
+        "CWE-532",
+        "CWE-200"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "Namespace-share escapes: HostConfig.PidMode/IpcMode/NetworkMode=host + UsernsMode + Devices + CapAdd + SecurityOpt",
+      "kind": "passive",
+      "description": "Current risky-bind analyzer only flags Binds and Privileged=true. Misses equally-fatal escape enablers: NetworkMode=host (host network, sniff every port), PidMode=host (see/kill host processes \u2192 nsenter escape via /proc), IpcMode=host, UsernsMode empty when userns-remap disabled, Devices mounting /dev, /dev/mem, /dev/kmsg, /dev/sda, CapAdd containing SYS_ADMIN / SYS_PTRACE / SYS_MODULE / NET_ADMIN / DAC_READ_SEARCH (each is a documented single-cap escape route independent of --privileged), SecurityOpt containing seccomp=unconfined, apparmor=unconfined, or no-new-privileges:false. These are separate CVSS-critical container-escape primitives.",
+      "value": "critical",
+      "protocol_reference": "Engine API HostConfig object \u2014 PidMode, NetworkMode, IpcMode, UsernsMode, CapAdd, SecurityOpt, Devices",
+      "cwe": [
+        "CWE-269",
+        "CWE-250"
+      ],
+      "finding_kind": "misconfig"
+    },
+    {
+      "name": "GET /images/{name}/json + /images/{name}/history \u2014 image config secrets and RUN-line leaks",
+      "kind": "passive",
+      "description": "Neither endpoint is called. /images/{name}/json exposes the frozen ContainerConfig.Env (baked-in credentials survive image rebuilds), ExposedPorts, Cmd/Entrypoint. /images/{name}/history returns the layer-command history, which classically leaks 'RUN curl -u user:pass...', 'ENV DB_PASSWORD=...', 'COPY .aws/credentials /root/.aws/'. Supply-chain gold, purely passive.",
+      "value": "high",
+      "protocol_reference": "Engine API GET /images/{name}/json and GET /images/{name}/history",
+      "cwe": [
+        "CWE-798",
+        "CWE-200"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "CVE-2024-41110 Docker Engine AuthZ plugin bypass (Content-Length: 0 API request)",
+      "kind": "active",
+      "description": "Regression of CVE-2018-15514 in engines 19.03.x\u201327.1.0 that route AuthZ plugin checks; a crafted request bypasses the plugin. Version-based detection possible via /version.Version \u2192 flag any daemon < 23.0.14, < 26.1.4, or 27.0.x < 27.1.0. Currently no CVE mapping at all against the harvested ServerVersion string.",
+      "value": "critical",
+      "protocol_reference": "CVE-2024-41110 (moby/moby GHSA-v23v-6jw2-98fq)",
+      "cwe": [
+        "CWE-863",
+        "CWE-306"
+      ],
+      "finding_kind": "cve"
+    },
+    {
+      "name": "CVE-2024-21626 / CVE-2019-5736 runc container-escape version detection",
+      "kind": "active",
+      "description": "/info returns RuncCommit.ID and RuncCommit.Expected \u2014 recce never checks them. runc <1.1.12 (CVE-2024-21626 leaked-fd escape) and runc <1.0.0-rc6 (CVE-2019-5736 /proc/self/exe overwrite) are direct RCE-on-host paths; combined with the exposed API, they are one-shot exploits and would be flagged from a passive /info read.",
+      "value": "critical",
+      "protocol_reference": "CVE-2024-21626, CVE-2019-5736; Engine API /info.RuncCommit",
+      "cwe": [
+        "CWE-668"
+      ],
+      "finding_kind": "cve"
+    },
+    {
+      "name": "CVE-2020-15257 containerd-shim / CVE-2022-0492 cgroups release_agent / CVE-2023-28841 unencrypted swarm overlay",
+      "kind": "passive",
+      "description": "No detection surface for any of: containerd <1.4.3 (abstract socket, /info.ContainerdCommit); cgroup v1 with any privileged container (release_agent escape prerequisites visible from /info + inspect); swarm overlay networks lacking encrypted=true (GET /networks/{id} Options \u2014 CVE-2023-28841/2/3 series). Passive fingerprint from data already partially fetched.",
+      "value": "high",
+      "protocol_reference": "CVE-2020-15257; CVE-2022-0492; CVE-2023-28840/41/42; Engine API /info.ContainerdCommit and /networks/{id}.Options",
+      "cwe": [
+        "CWE-668",
+        "CWE-311"
+      ],
+      "finding_kind": "cve"
+    },
+    {
+      "name": "/info.RegistryConfig.InsecureRegistryCIDRs and /info.Warnings not parsed",
+      "kind": "passive",
+      "description": "/info payload already fetched carries RegistryConfig.InsecureRegistryCIDRs (registries reachable without TLS \u2014 feed pivot targets and MITM candidates), IndexConfigs, LiveRestoreEnabled, CgroupDriver/CgroupVersion, SecurityOptions (rootless/seccomp/apparmor/userns), Runtimes (kata/gvisor/runsc, or runc as default = escape-prone), Warnings[] ('IPv4 forwarding is disabled', 'No swap limit support', 'Support for cgroup v1 is deprecated'). Every one of these is already in-hand and thrown away.",
+      "value": "high",
+      "protocol_reference": "Engine API GET /info \u2014 RegistryConfig, Warnings, Runtimes, SecurityOptions, CgroupVersion",
+      "cwe": [
+        "CWE-200",
+        "CWE-16"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "/networks, /nodes, /tasks, /system/df, /plugins enumeration",
+      "kind": "passive",
+      "description": "Never called. /networks discloses overlay network membership + container IPs (feeds host-list & lateral pivot); /nodes (swarm) discloses manager+worker hostnames/IPs/labels (feeds known_hostnames); /tasks discloses task-to-node placement + secret mounts; /system/df image/volume disk usage; /plugins reveals installed AuthZ / network / volume plugins (a bad AuthZ plugin config = CVE-2024-41110 candidate).",
+      "value": "medium",
+      "protocol_reference": "Engine API GET /networks, /nodes, /tasks, /system/df, /plugins",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "POST /session (BuildKit gRPC-over-HTTP) and POST /build unauth build hijack",
+      "kind": "active",
+      "description": "BuildKit exposes gRPC hijack over the same daemon socket via POST /session (Upgrade: h2c) and POST /build accepts a tar context with a Dockerfile \u2014 running arbitrary RUN steps in the build sandbox. Neither is probed. On an exposed daemon this is a second RCE primitive independent of /containers/create.",
+      "value": "high",
+      "protocol_reference": "Engine API POST /session, POST /build; BuildKit gRPC-over-HTTP upgrade",
+      "cwe": [
+        "CWE-306",
+        "CWE-77"
+      ],
+      "finding_kind": "misconfig"
+    },
+    {
+      "name": "TLS-locked daemon on 2376 \u2014 no client-cert probe, no server-cert capture, no fallback to plaintext",
+      "kind": "passive",
+      "description": "For 2376 the code always uses HTTPS with an unverified context. It never (a) records the server certificate (subject/issuer/SANs \u2014 often 'docker-daemon.internal', leaks the fleet naming), (b) tries a plain HTTP request first (some misconfigs bind both), (c) distinguishes 'TLS handshake succeeded, HTTP 403/handshake_required' from 'connection refused' so 'TLS present but no client cert required' is silently classified as 'not exposed'. This is a real misconfig class recce currently reports as clean.",
+      "value": "high",
+      "protocol_reference": "Docker TLS reference; Engine API TLS section",
+      "cwe": [
+        "CWE-295",
+        "CWE-306"
+      ],
+      "finding_kind": "auth_weakness"
+    },
+    {
+      "name": "Explicit API-version probing (/v1.24/version fallback)",
+      "kind": "passive",
+      "description": "Very old daemons (<1.12) do not answer /version at root; require /v1.24/version. Newer ones may reject requests without an API-version prefix depending on ApiVersion negotiation. Missing this fallback loses coverage for legacy exposed daemons (still common in industrial fleets).",
+      "value": "low",
+      "protocol_reference": "Engine API versioning \u00a7Versioned API path prefix",
+      "cwe": [],
+      "finding_kind": "coverage_gap"
+    },
+    {
+      "name": "Non-intrusive exploitation proof: POST /containers/create + /containers/{id}/start with -v /:/host \u2014 currently only in runbook text",
+      "kind": "exploit",
+      "description": "The module claims 'CONFIRMED critical' but never actually creates the container. A gated (ROE-flag) exploit proof \u2014 create a busybox container binding /:/host, exec `id` inside, capture output, then remove \u2014 would elevate the finding from 'the endpoint answered' to 'here is /etc/shadow'. Related: POST /containers/{id}/exec against ANY existing running container is even less intrusive (no new container) and is a direct RCE inside every workload.",
+      "value": "critical",
+      "protocol_reference": "Engine API POST /containers/create, POST /containers/{id}/start, POST /containers/{id}/exec, POST /exec/{id}/start",
+      "cwe": [
+        "CWE-306",
+        "CWE-78"
+      ],
+      "finding_kind": "exploit"
+    },
+    {
+      "name": "Cross-service wiring: container IPs \u2192 known_hosts, image registries \u2192 known_hostnames, env-var secrets \u2192 cred pool, docker.sock volumes \u2192 relay_targets",
+      "kind": "chain",
+      "description": "The probe harvests data other modules would consume, but nothing flows out. Missing feeds: (1) NetworkSettings.IPAddress from /containers/{id}/json \u2192 extra internal-network hosts for the next scan sweep; (2) Image RepoTags of the form 'registry.corp.example.com/team/app:tag' \u2192 known_hostnames (registry pivot target); (3) Config.Env values matching credential regexes \u2192 creds/hashloot pool with source='docker'; (4) Swarm node advertise addresses / manager tokens \u2192 relay_targets; (5) Volumes whose mountpoint is docker.sock or ssh keys \u2192 relay_targets w/ escalation tag; (6) 'Name' from /info (dockerhost) + swarm /nodes hostnames \u2192 known_hostnames.",
+      "value": "high",
+      "protocol_reference": "recce inter-module cred pool / known_hostnames / relay_targets contracts",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "cross_service"
+    },
+    {
+      "name": "GET /events streaming for live workload discovery",
+      "kind": "passive",
+      "description": "GET /events (streaming NDJSON) reveals every create/start/stop/exec/destroy on the daemon in real time \u2014 with a bounded window (say 5s) recce can pick up short-lived cron/CI containers that /containers/json misses. Cheap and passive.",
+      "value": "low",
+      "protocol_reference": "Engine API GET /events",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "CVE-2025-9074 Docker Desktop internal SSRF to Engine API",
+      "kind": "active",
+      "description": "Docker Desktop exposes the Engine API on a host-only 'internal' interface reachable from any container (192.168.65.x). Not directly detectable network-side, but when scanning a workstation subnet, ServerVersion strings and /info Platform.Name='Docker Desktop' are the fingerprint \u2014 worth flagging so the assessor pivots via a container.",
+      "value": "medium",
+      "protocol_reference": "CVE-2025-9074; /info.OperatingSystem / Platform.Name = 'Docker Desktop'",
+      "cwe": [
+        "CWE-918"
+      ],
+      "finding_kind": "cve"
+    }
+  ],
+  "priority_gaps": [
+    "Config.Env / Cmd / Entrypoint extraction during /containers/{id}/json inspect + regex to credential pool \u2014 narrative already promises this, code silently omits it.",
+    "/containers/{id}/archive arbitrary-file-read primitive \u2014 extracts /etc/shadow, SSH keys, /run/secrets/* without exec or container-create.",
+    "Namespace-share and capability escape enablers (NetworkMode/PidMode/IpcMode=host, CapAdd SYS_ADMIN/SYS_PTRACE/SYS_MODULE, SecurityOpt seccomp=unconfined, Devices) alongside the existing bind/privileged check.",
+    "CVE-2024-41110 AuthZ bypass + CVE-2024-21626/CVE-2019-5736 runc detection from /version.Version and /info.RuncCommit already-fetched data.",
+    "TLS on 2376: capture server cert, distinguish 'TLS-only, no client cert required' from 'client cert enforced', try HTTP fallback before declaring clean.",
+    "Cross-service wiring: image registry hostnames \u2192 known_hostnames, container IPs \u2192 host sweep list, harvested env secrets \u2192 cred/hashloot pool, swarm node hostnames \u2192 known_hostnames."
+  ],
+  "cross_service_wire_gaps": [
+    "Image RepoTags carry registry hostnames ('registry.corp.example.com/\u2026') that are never fed to known_hostnames for follow-up scans of the registry.",
+    "NetworkSettings.IPAddress / IPAM subnets from /containers/{id}/json + /networks are never surfaced as additional targets for the internal-host sweep.",
+    "Container Config.Env values (DB_PASSWORD, AWS_SECRET, JWT_SECRET, GitHub tokens) are read only by narrative claim \u2014 never actually parsed, never handed to the credential/hashloot pool with source='docker'.",
+    "Swarm /nodes hostnames and manager advertise addresses are not enumerated, so known_hostnames / relay_targets get nothing from a swarm find.",
+    "Volumes whose Mountpoint contains docker.sock or .ssh/ are not flagged as pivot/relay_targets even though they enable one-shot escalation from a compromised container.",
+    "/info.Name and /info.OperatingSystem (host FQDN, Docker Desktop tag) never enter known_hostnames or the OS fingerprint pool."
+  ],
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/docker.py",
+    "/home/kali/Desktop/projects/recce/tests/test_service_fidelity.py",
+    "/home/kali/Desktop/projects/recce/tests/test_probe_transport.py",
+    "/home/kali/Desktop/projects/recce/tests/test_pipeline.py"
+  ],
+  "summary": "docker.py covers the headline unauth-API primitive (/version, /info, /containers/json, /images/json, per-container HostConfig bind/privileged inspect, swarm names, volumes) and produces the right critical finding, but leaves the Engine API's other high-value primitives on the table: container Config.Env (the module's own narrative claims we harvest env-var secrets \u2014 the code never does), GET /containers/{id}/archive (arbitrary file-read from any running container), GET /containers/{id}/logs (secret-leak in application output), namespace-share and capability escape enablers (NetworkMode/PidMode/IpcMode=host, CapAdd SYS_ADMIN, seccomp=unconfined, host Devices), image-inspect and layer history (baked-in credentials + RUN-line leaks), and BuildKit /session + /build as a second RCE primitive. No CVE mapping against the already-collected ServerVersion / RuncCommit / ContainerdCommit strings (CVE-2024-41110 AuthZ bypass, CVE-2024-21626 & CVE-2019-5736 runc escapes, CVE-2020-15257 containerd-shim, CVE-2023-28841 unencrypted swarm overlay). TLS handling on 2376 always uses an unverified context but never captures the server cert, never distinguishes 'TLS but no client-cert enforcement' from 'client-cert locked', and has no HTTP fallback. Cross-service wiring is absent: harvested registry hostnames, container IPs, swarm node names, env-var secrets, and docker.sock-mounting volumes never flow into known_hostnames / host sweep / cred pool / relay_targets.",
+  "notes": "Registry (v2, port 5000) is intentionally out of scope \u2014 lives in recce/services/docker_registry.py with its own tests. Kubernetes API on the same host is also a separate service module. Findings above are strictly Engine-API gaps in docker.py."
+}

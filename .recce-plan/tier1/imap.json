@@ -1,0 +1,283 @@
+{
+  "service": "IMAP",
+  "default_ports": [
+    "143/tcp",
+    "993/tcp"
+  ],
+  "summary": "IMAP4rev1 (RFC 3501) is the mailbox-access protocol; 143 is cleartext with STARTTLS available, 993 is implicit TLS (IMAPS). Attacker value: harvesting credentials (LOGIN accepted pre-STARTTLS = sniffable plaintext), enumerating valid usernames (differential LOGIN/AUTHENTICATE responses, RFC 2971 ID leaks, SASL mechanism advertisements), fingerprinting mail-server products with well-known CVE histories (Dovecot pre-auth mem-disclosure, Cyrus RCE, Courier), and post-credential reading mail, staging drafts, and pivoting through shared mailboxes/GSSAPI to AD identity. recce currently has zero enum for this: nmap identifies it, svcdetect labels it, and serviceenum tags it as \"pop-imap\" but no handler exists. A dedicated stdlib module (imaplib + raw socket for the pre-auth commands imaplib will not send) closes the gap and feeds known_users / known_hostnames / known_domains / known_hashes.",
+  "existing_coverage": {
+    "detected": true,
+    "notes": "nmap -sV names it; svcdetect confirms via `^\\* OK.*IMAP` greeting regex; svcdetect._PRODUCT_RE extracts Dovecot/Courier/Cyrus product (but not always version) for the offline CVE mapper; serviceenum maps 143/993 -> \"pop-imap\" enum group. No dedicated probe module. No CAPABILITY/AUTH/STARTTLS/LOGINDISABLED introspection. No user-enum. No credentialed mailbox probe. No wiring into known_users/known_hostnames/known_domains/known_hashes.",
+    "files": [
+      "recce/services/svcdetect.py",
+      "recce/services/serviceenum.py",
+      "recce/services/probes.py"
+    ]
+  },
+  "capabilities": [
+    {
+      "name": "starttls_missing_on_143",
+      "kind": "active",
+      "description": "On 143/tcp, parse CAPABILITY reply for STARTTLS token (RFC 3501 \u00a76.2.1) and flag when absent \u2014 every mailbox login on this listener crosses the wire in cleartext.",
+      "value": "high",
+      "protocol_reference": "RFC 3501 \u00a76.2.1 (STARTTLS); RFC 8314 \u00a73 (implicit-TLS mandate)",
+      "cwe": [
+        "CWE-319"
+      ],
+      "finding_kind": "imap_no_starttls",
+      "notes": "Send `A1 CAPABILITY\\r\\n`; look for `STARTTLS` in the untagged `* CAPABILITY` line."
+    },
+    {
+      "name": "logindisabled_missing_pretls",
+      "kind": "active",
+      "description": "Before issuing STARTTLS, check whether the pre-TLS CAPABILITY response advertises LOGINDISABLED (RFC 3501 \u00a76.2.3, RFC 2595 \u00a74); its absence means the server accepts a plaintext LOGIN over the cleartext channel \u2014 the top IMAP finding.",
+      "value": "critical",
+      "protocol_reference": "RFC 3501 \u00a76.2.3; RFC 2595 \u00a74",
+      "cwe": [
+        "CWE-319",
+        "CWE-522"
+      ],
+      "finding_kind": "imap_login_plaintext_allowed",
+      "notes": "Confirm by attempting LOGIN with a bogus username pre-STARTTLS: BAD/NO citing TLS = protected; NO 'invalid credentials' = plaintext accepted. Do NOT use real creds \u2014 the negative response alone confirms the exposure."
+    },
+    {
+      "name": "sasl_mech_enum",
+      "kind": "passive",
+      "description": "Parse CAPABILITY for every `AUTH=` token (RFC 3501 \u00a77.2.1) to inventory mechanisms \u2014 PLAIN, LOGIN, CRAM-MD5, DIGEST-MD5, GSSAPI, NTLM, XOAUTH2, EXTERNAL, ANONYMOUS \u2014 each carries a distinct downstream (sniffable / offline-crackable / AD-relayable / anon-mailbox).",
+      "value": "high",
+      "protocol_reference": "RFC 3501 \u00a77.2.1; RFC 4422 (SASL)",
+      "cwe": [
+        "CWE-327",
+        "CWE-522"
+      ],
+      "finding_kind": "imap_sasl_mechanisms",
+      "notes": "Emit one finding per weak mech: PLAIN/LOGIN over non-TLS = plaintext; CRAM-MD5/DIGEST-MD5 = offline-crackable (chain to known_hashes); GSSAPI = kerberos ticket relay; ANONYMOUS = free session; NTLM = SMB-relay chain."
+    },
+    {
+      "name": "sasl_anonymous_login",
+      "kind": "exploit",
+      "description": "If AUTH=ANONYMOUS is advertised (RFC 4505), send `AUTHENTICATE ANONYMOUS` with a base64 trace token \u2014 a successful tagged OK opens an unauthenticated mailbox session and is a confirmed finding, not a probe.",
+      "value": "high",
+      "protocol_reference": "RFC 4505 (SASL ANONYMOUS)",
+      "cwe": [
+        "CWE-306"
+      ],
+      "finding_kind": "imap_anonymous_allowed"
+    },
+    {
+      "name": "pre_auth_id_disclosure",
+      "kind": "passive",
+      "description": "Issue `A1 ID NIL` in the pre-auth state (RFC 2971) \u2014 servers commonly leak `name`, `version`, `os`, `os-version`, `vendor`, `support-url`, and sometimes `command`, feeding CVE mapping and fingerprinting.",
+      "value": "medium",
+      "protocol_reference": "RFC 2971 (IMAP ID)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "imap_id_disclosure",
+      "notes": "The reply is a parenthesised list of key/value strings; parse it, fold each field into the probe dict, and merge product/version into detect_source=\"banner\"."
+    },
+    {
+      "name": "preauth_greeting_state",
+      "kind": "passive",
+      "description": "The greeting can be `* PREAUTH ...` instead of `* OK ...` (RFC 3501 \u00a77.1.4) \u2014 this means the transport (stunnel/local socket bridge, misconfigured proxy trust) already authenticated the session; treat as critical unauthenticated mailbox access.",
+      "value": "critical",
+      "protocol_reference": "RFC 3501 \u00a77.1.4",
+      "cwe": [
+        "CWE-287",
+        "CWE-306"
+      ],
+      "finding_kind": "imap_preauth_greeting"
+    },
+    {
+      "name": "banner_product_version",
+      "kind": "passive",
+      "description": "Extract product/version from the `* OK` greeting and the ID response (Dovecot, Cyrus IMAPd, Courier, MDaemon, Exchange, Zimbra) and feed the offline CVE DB \u2014 extend svcdetect._PRODUCT_RE to capture the version and to recognise Exchange/Zimbra/MDaemon.",
+      "value": "medium",
+      "protocol_reference": "RFC 3501 \u00a77.1; svcdetect._PRODUCT_RE",
+      "cwe": [
+        "CWE-1104"
+      ],
+      "finding_kind": "imap_version_cve",
+      "notes": "Chains into recce's existing CVE mapper \u2014 no new code path, just a richer parse. Known-bad table example: Dovecot < 2.3.19.1 CVE-2022-30550 pre-auth memory disclosure; Cyrus IMAP < 2.5.17 CVE-2019-11356."
+    },
+    {
+      "name": "tls_posture_993",
+      "kind": "active",
+      "description": "On 993/tcp inspect the TLS handshake (cert CN/SAN, notAfter, issuer, negotiated protocol/cipher) and flag SSLv2/SSLv3/TLS1.0/1.1 or expired certs; extract cert SANs/DN into known_hostnames/known_domains.",
+      "value": "medium",
+      "protocol_reference": "RFC 8314 \u00a73",
+      "cwe": [
+        "CWE-327",
+        "CWE-295"
+      ],
+      "finding_kind": "imap_weak_tls",
+      "notes": "Reuse the TLS helpers already in recce/services/probes.py \u2014 993 is in _COMMON_TLS_PORTS."
+    },
+    {
+      "name": "user_enum_login_differential",
+      "kind": "auth",
+      "description": "Probe a small curated user list against LOGIN and record response-code / timing differentials \u2014 a valid-user branch that takes materially longer or returns a distinct NO string discloses valid mail accounts (RFC 3501 \u00a76.2.3).",
+      "value": "medium",
+      "protocol_reference": "RFC 3501 \u00a76.2.3 (LOGIN); RFC 4959 (SASL-IR)",
+      "cwe": [
+        "CWE-203",
+        "CWE-204"
+      ],
+      "finding_kind": "imap_user_enum",
+      "notes": "Bounded 10-15 name list (root, admin, postmaster, mail, info, test, user, guest, backup, support) \u2014 same posture as smtp.enum_users. Union hits into recce.creds.known_users."
+    },
+    {
+      "name": "default_creds_spray",
+      "kind": "auth",
+      "description": "Try a small default-credential set (admin/admin, root/root, cyrus/cyrus, mail/mail, postmaster/postmaster, dovecot/dovecot) and any project defaultcreds hits against LOGIN \u2014 a tagged OK is a confirmed weak-cred finding and unlocks all downstream credentialed capabilities.",
+      "value": "critical",
+      "protocol_reference": "RFC 3501 \u00a76.2.3",
+      "cwe": [
+        "CWE-521",
+        "CWE-1392"
+      ],
+      "finding_kind": "imap_default_creds",
+      "notes": "Hook into recce/creds/defaultcreds.py \u2014 that module already curates per-product defaults."
+    },
+    {
+      "name": "credentialed_mailbox_enum",
+      "kind": "chain",
+      "description": "Given a valid login, issue LIST \"\" \"*\", LSUB \"\" \"*\", NAMESPACE, GETQUOTAROOT, GETACL to enumerate every accessible mailbox, subscribed folders, and ACLs (RFC 3501 \u00a76.3.8, RFC 2342, RFC 2087, RFC 4314) \u2014 reveals shared/public mailboxes accessible to this user.",
+      "value": "high",
+      "protocol_reference": "RFC 3501 \u00a76.3.8-6.3.9; RFC 2342; RFC 2087; RFC 4314",
+      "cwe": [
+        "CWE-863"
+      ],
+      "finding_kind": "imap_mailbox_access"
+    },
+    {
+      "name": "credentialed_message_search",
+      "kind": "chain",
+      "description": "In a credentialed session run SEARCH against the inbox for password-reset / VPN-config / SSH-key / MFA-bypass patterns (RFC 3501 \u00a76.4.4) \u2014 mail servers are high-yield loot and this converts one credential into wider network access; return hit list without downloading bodies.",
+      "value": "high",
+      "protocol_reference": "RFC 3501 \u00a76.4.4 (SEARCH)",
+      "cwe": [
+        "CWE-538",
+        "CWE-200"
+      ],
+      "finding_kind": "imap_loot_hits",
+      "notes": "Bounded SUBJECT/BODY search terms; return message IDs + sender + subject only. Never persist bodies without operator opt-in."
+    },
+    {
+      "name": "starttls_downgrade_check",
+      "kind": "active",
+      "description": "After CAPABILITY, verify the server refuses commands other than STARTTLS/CAPABILITY/LOGOUT/NOOP in the pre-TLS state (RFC 3501 \u00a711.1) \u2014 servers that accept AUTHENTICATE or LOGIN before STARTTLS enable downgrade even if LOGINDISABLED is advertised.",
+      "value": "medium",
+      "protocol_reference": "RFC 3501 \u00a711.1; RFC 2595 \u00a74",
+      "cwe": [
+        "CWE-757"
+      ],
+      "finding_kind": "imap_starttls_downgrade"
+    },
+    {
+      "name": "gssapi_kerberos_relay",
+      "kind": "chain",
+      "description": "AUTH=GSSAPI on an AD-joined mail server (Exchange, Dovecot with GSSAPI) advertises Kerberos \u2014 a relayable channel for ticket-forwarding or Silver-Ticket abuse; flag and cross-reference the hostname into known_hostnames as a relay target.",
+      "value": "high",
+      "protocol_reference": "RFC 4752 (GSSAPI SASL); RFC 3501 \u00a77.2.1",
+      "cwe": [
+        "CWE-287"
+      ],
+      "finding_kind": "imap_gssapi_relay"
+    },
+    {
+      "name": "cram_digest_challenge_capture",
+      "kind": "exploit",
+      "description": "If AUTH=CRAM-MD5 or DIGEST-MD5 is advertised, initiate the challenge, capture the server nonce, and record it for offline hashcat \u2014 the server-issued challenge means a captured client response is offline-crackable.",
+      "value": "medium",
+      "protocol_reference": "RFC 2195 (CRAM-MD5); RFC 2831 (DIGEST-MD5)",
+      "cwe": [
+        "CWE-327",
+        "CWE-916"
+      ],
+      "finding_kind": "imap_offline_crack_channel",
+      "notes": "Feeds recce/creds/known_hashes.py \u2014 emit hashcat-mode 10200 (CRAM-MD5) with the challenge fragment."
+    }
+  ],
+  "recommended_findings": [
+    {
+      "title": "IMAP LOGIN accepted before STARTTLS (plaintext credentials)",
+      "severity": "critical"
+    },
+    {
+      "title": "IMAP PREAUTH greeting \u2014 unauthenticated mailbox session",
+      "severity": "critical"
+    },
+    {
+      "title": "IMAP AUTH=ANONYMOUS accepted",
+      "severity": "high"
+    },
+    {
+      "title": "IMAP default credentials accepted",
+      "severity": "critical"
+    },
+    {
+      "title": "IMAP does not offer STARTTLS on 143/tcp",
+      "severity": "high"
+    },
+    {
+      "title": "IMAP weak SASL mechanism advertised (PLAIN/LOGIN over cleartext)",
+      "severity": "high"
+    },
+    {
+      "title": "IMAP GSSAPI advertised \u2014 Kerberos relay surface",
+      "severity": "high"
+    },
+    {
+      "title": "IMAP CRAM-MD5/DIGEST-MD5 advertised \u2014 offline-crackable auth",
+      "severity": "medium"
+    },
+    {
+      "title": "IMAP pre-auth ID response leaks server/product info (RFC 2971)",
+      "severity": "low"
+    },
+    {
+      "title": "IMAP valid usernames enumerated via LOGIN differential",
+      "severity": "medium"
+    },
+    {
+      "title": "IMAP known-vulnerable product/version (banner CVE match)",
+      "severity": "high"
+    },
+    {
+      "title": "IMAPS TLS posture weak (SSLv3/TLS1.0/expired cert)",
+      "severity": "medium"
+    },
+    {
+      "title": "IMAP mailbox accessible with weak/default credentials (LIST/LSUB inventory)",
+      "severity": "high"
+    },
+    {
+      "title": "IMAP inbox contains high-value loot (password reset / VPN / SSH key hits)",
+      "severity": "high"
+    },
+    {
+      "title": "IMAP STARTTLS downgrade \u2014 AUTH accepted pre-TLS despite LOGINDISABLED",
+      "severity": "medium"
+    }
+  ],
+  "recommended_hashcat_modes": [
+    {
+      "mode": 10200,
+      "description": "CRAM-MD5 \u2014 capture server nonce during AUTH=CRAM-MD5 negotiation"
+    },
+    {
+      "mode": 11500,
+      "description": "DIGEST-MD5 challenge/response family \u2014 from AUTH=DIGEST-MD5"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_users \u2014 every valid mail account discovered via LOGIN differential, default-creds spray hit, or shared-mailbox owner extracted from LIST/GETACL; seeds SSH/SMB/AD/web spray downstream.",
+    "known_hostnames \u2014 server hostname from `* OK` greeting, RFC 2971 ID (`name`/`os`), and TLS cert CN/SAN on 993; feeds virtual-host discovery and Kerberos SPN construction.",
+    "known_domains \u2014 mail-domain part of any discovered account (user@domain), TLS cert SAN suffixes on 993, and NAMESPACE `Other Users/` shared-mailbox names; feeds OSINT/AD-domain enumeration.",
+    "known_hashes \u2014 CRAM-MD5 / DIGEST-MD5 server challenge + response pairs opportunistically captured; annotated with hashcat mode 10200 / 11500 for offline crack.",
+    "relay_targets \u2014 IMAP servers that advertise GSSAPI (Kerberos-relay surface) or NTLM AUTH= mechanism (SMB/HTTP-relay surface).",
+    "NEW SURFACE \u2014 mail_accounts (proposed): grouping of {SMTP submission user, IMAP user, POP3 user, mailbox-domain} across SMTP/IMAP/POP3 modules so a spray hit on one channel automatically re-tries the other two. Currently these three modules would learn the same accounts independently."
+  ],
+  "implementation_notes": "Build recce/services/imap.py modelled on smtp.py: stdlib-only, use `imaplib.IMAP4` for 143 and `imaplib.IMAP4_SSL` for 993 (leverages the class's built-in CAPABILITY parsing and STARTTLS method), fall back to raw `socket` for pre-STARTTLS ID, CAPABILITY, and the plaintext-LOGIN detection dance because imaplib will happily send LOGIN over cleartext without a warning. Reuse svccommon.finding_builder + findings_to_vulns for consistent Vuln shape. Register the module in the enumerator (serviceenum currently tags 143/993 as \"pop-imap\" \u2014 either add an `imap` handler in that dispatch or split \"pop-imap\" into two entries). Extend svcdetect._PRODUCT_RE version-capture for Dovecot/Cyrus/Courier so the CVE mapper picks up e.g. `Dovecot ready.` -> `Dovecot 2.3.16`. Bounded runtime: ~4s per target (banner + CAPABILITY + ID + STARTTLS + plaintext-LOGIN probe + optional 15-user enum bounded to ~5s more). All operations are read-only \u2014 no APPEND, no STORE, no mailbox modifications. Reuse recce/services/probes.py TLS helpers on 993 (already in _COMMON_TLS_PORTS)."
+}

@@ -1,0 +1,267 @@
+{
+  "service": "mysql",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/db/mysql.py"
+  ],
+  "existing_capabilities": [
+    "handshake-v10-parse",
+    "greeting-caps-salt-plugin",
+    "empty-password-login-root-and-anon",
+    "mysql_native_password-scramble-auth",
+    "com_query-resultset-parse",
+    "mysql.user-hash-harvest",
+    "show-databases",
+    "current_user-secure_file_priv-plugin_dir-@@local_infile-@@version_compile_os",
+    "show-grants-FILE-detect",
+    "sensitive-column-datamine-with-redacted-samples",
+    "connstring-harvest-from-samples",
+    "findings: empty_password, cred_access, local_infile, file_priv, datamine, no_tls",
+    "hash-credential-emission-hashcat-m300"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "caching_sha2_password auth (MySQL 8.0 default)",
+      "kind": "auth",
+      "value": "critical",
+      "protocol_reference": "MySQL Internals \u2014 'caching_sha2_password Information'; server_default_auth changed to caching_sha2_password in 8.0.4",
+      "description": "Module only implements mysql_native_password. Against a stock MySQL 8.0 server whose default plugin is caching_sha2_password, the empty-password probe fails at AuthSwitchRequest \u2014 recce records 'auth negotiation required' and moves on, missing genuinely-empty root on 8.x. Need to (a) handle AuthSwitchRequest (0xFE), (b) implement SHA256 scramble = SHA256(pw) XOR SHA256( SHA256(SHA256(pw)) || salt ), and (c) handle fast-auth / full-auth branches (0x01 0x03 = fast success, 0x01 0x04 = perform_full_authentication).",
+      "cwe": [
+        "CWE-521"
+      ],
+      "finding_kind": "mysql_caching_sha2_gap"
+    },
+    {
+      "name": "AuthSwitchRequest (0xFE) plugin switching",
+      "kind": "auth",
+      "value": "critical",
+      "protocol_reference": "MySQL Internals \u2014 Protocol::AuthSwitchRequest / AuthSwitchResponse",
+      "description": "Server may respond with plugin != client-declared. Module treats any 0xFE as failure; it should read new plugin name + salt and answer with the correct scramble. Also gates sha256_password, mysql_clear_password (PAM/LDAP), ed25519 (MariaDB), dialog and mysql_old_password. Without this, all non-native servers report as 'auth required' even when empty/weak.",
+      "cwe": [
+        "CWE-287"
+      ],
+      "finding_kind": "mysql_auth_switch_gap"
+    },
+    {
+      "name": "sha256_password + RSA public-key exchange",
+      "kind": "auth",
+      "value": "high",
+      "protocol_reference": "MySQL 5.6+ sha256_password plugin; caching_sha2_password full-auth path uses same RSA public key",
+      "description": "Full-auth path over cleartext-only channel requires requesting the server's RSA pubkey (0x02) and RSA-OAEP encrypting the XOR'd password. Not implemented \u2014 blocks credentialed follow-through on hardened 8.0 hosts and any 5.7 that set default_authentication_plugin=sha256_password.",
+      "cwe": [
+        "CWE-287"
+      ]
+    },
+    {
+      "name": "MariaDB ed25519 + mysql_clear_password / dialog (PAM)",
+      "kind": "auth",
+      "value": "high",
+      "protocol_reference": "MariaDB Knowledge Base \u2014 'Authentication Plugin - ed25519' and 'PAM Authentication Plugin'",
+      "description": "MariaDB defaults to mysql_native_password but ed25519 is common. PAM/LDAP-backed accounts negotiate mysql_clear_password (client sends cleartext) or dialog \u2014 a valuable capture surface: recce could authenticate with looted cleartext creds against a PAM-backed account, and could flag servers that force cleartext over unencrypted transport (credential capture risk).",
+      "cwe": [
+        "CWE-319",
+        "CWE-522"
+      ],
+      "finding_kind": "mysql_pam_cleartext"
+    },
+    {
+      "name": "CVE-2012-2122 memcmp auth-bypass probe",
+      "kind": "active",
+      "value": "high",
+      "protocol_reference": "CVE-2012-2122 \u2014 MariaDB/MySQL 5.1.x < 5.1.62, 5.5.x < 5.5.23, 5.6.x < 5.6.6 on affected glibc",
+      "description": "1-in-256 chance that any wrong password authenticates. A trivial 300-iteration loop of _login with a bogus scramble against `root` detects it. Legacy MariaDB in the wild still exists in air-gapped estates.",
+      "cwe": [
+        "CWE-287"
+      ],
+      "finding_kind": "mysql_cve_2012_2122"
+    },
+    {
+      "name": "MySQL X Protocol (port 33060) probe",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "MySQL X Protocol (Protobuf, mysqlx port 33060; ConnPlain/MYSQL41/SHA256_MEMORY/PLAIN SASL)",
+      "description": "Module claims 33060 in _PORTS but only speaks the classic protocol on it \u2014 will fail every handshake. X Protocol is protobuf-framed and offers PLAIN (cleartext creds if TLS off), MYSQL41 (native scramble) and SHA256_MEMORY. Missing: capabilities read (Mysqlx.Connection.CapabilitiesGet), SASL mech list, PLAIN over cleartext finding, native/sha256 auth. Same admin surface as 3306, often overlooked.",
+      "cwe": [
+        "CWE-306",
+        "CWE-319"
+      ],
+      "finding_kind": "mysqlx_exposed"
+    },
+    {
+      "name": "mysql.func UDF enumeration",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "MySQL Reference \u2014 CREATE FUNCTION ... SONAME; mysql.func table",
+      "description": "SELECT * FROM mysql.func lists ALREADY-LOADED UDFs. Presence of lib_mysqludf_sys (sys_exec, sys_eval) is instant OS command execution as the mysql user without needing FILE priv or plugin_dir write. Currently unread.",
+      "cwe": [
+        "CWE-250"
+      ],
+      "finding_kind": "mysql_udf_loaded"
+    },
+    {
+      "name": "Plugins / audit / keyring inventory (SHOW PLUGINS + mysql.plugin)",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "MySQL Reference \u2014 INFORMATION_SCHEMA.PLUGINS, mysql.plugin",
+      "description": "authentication_ldap_sasl / authentication_pam / keyring_file / audit_log / semisync configuration is scanner-visible. LDAP plugin points at the domain controller (feeds domains/hostnames). Missing audit_log = quiet exfil.",
+      "cwe": [
+        "CWE-778"
+      ],
+      "finding_kind": "mysql_plugins"
+    },
+    {
+      "name": "Replication topology enumeration",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "MySQL Reference \u2014 SHOW REPLICA STATUS / SHOW SLAVE STATUS / SHOW SLAVE HOSTS / SHOW MASTER STATUS / performance_schema.replication_connection_configuration",
+      "description": "Exposes master hostname/IP, replication username, port, GTID, and downstream replica IPs. Replication user typically has REPLICATION SLAVE (readable binlog \u2192 historical writes with values). None of this is queried today. Pure XREF gold for hostnames/relay_targets.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "mysql_replication_topology"
+    },
+    {
+      "name": "information_schema.PROCESSLIST / performance_schema.threads",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "MySQL Reference \u2014 SHOW PROCESSLIST / information_schema.PROCESSLIST",
+      "description": "Enumerates live client IPs, connected usernames, current SQL text (may contain literal secrets). Feeds relay_targets (which hosts actually talk to this DB) and known_users (real service accounts, not just mysql.user rows).",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "mysql_processlist"
+    },
+    {
+      "name": "Stored procedures / functions / triggers / events with DEFINER",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "MySQL Reference \u2014 information_schema.ROUTINES / TRIGGERS / EVENTS; SQL SECURITY DEFINER semantics",
+      "description": "SQL SECURITY DEFINER routines run with the definer's privs \u2014 a common privesc when a low-priv account can INVOKE a DEFINER=`root`@`%` procedure. Also mines routine bodies for embedded literals / secrets.",
+      "cwe": [
+        "CWE-269",
+        "CWE-250"
+      ],
+      "finding_kind": "mysql_definer_privesc"
+    },
+    {
+      "name": "mysql.user host-wildcard and anonymous-account audit",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "MySQL Reference \u2014 GRANT syntax host wildcards; anonymous users (user='')",
+      "description": "Rows like 'root'@'%' or user='' regardless of password state are a finding of their own \u2014 recce already reads the table but never flags wide-host or anonymous rows unless the account also had an empty password. Anonymous account existence is a distinct issue (implicit permission granting via anonymous match).",
+      "cwe": [
+        "CWE-284"
+      ],
+      "finding_kind": "mysql_wide_host_grant"
+    },
+    {
+      "name": "Expired / never-rotated / no-password accounts (password_expired, password_last_changed)",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "MySQL 5.6+ mysql.user.password_expired; 5.7+ password_last_changed / password_lifetime",
+      "description": "Accounts with authentication_string='' but plugin=mysql_native_password (or 'auth_socket') are logon-any. password_expired='N' with password_last_changed years old is stale. Not surfaced.",
+      "cwe": [
+        "CWE-263",
+        "CWE-521"
+      ],
+      "finding_kind": "mysql_password_hygiene"
+    },
+    {
+      "name": "Roles / GRANT OPTION / wildcard *.* privileges audit",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "MySQL 8.0 roles \u2014 mysql.role_edges, default_roles; SHOW GRANTS ... WITH GRANT OPTION; global *.* grants",
+      "description": "Currently only FILE is checked. SUPER, PROCESS, REPLICATION CLIENT, CREATE USER, GRANT OPTION on *.* are each an escalation vector (SUPER \u2192 mysqld_safe hijack pre-5.7, REPLICATION CLIENT \u2192 binlog dumps, GRANT OPTION \u2192 mint new roots). Roles graph reveals inherited privileges the direct-grant check misses.",
+      "cwe": [
+        "CWE-269"
+      ],
+      "finding_kind": "mysql_dangerous_privs"
+    },
+    {
+      "name": "Version-to-CVE correlation",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "Oracle CPU + MariaDB security advisories (CVE-2012-2122, CVE-2016-6662/6663/6664, CVE-2018-2696, CVE-2021-2154/2226/27928, CVE-2022-21245, CVE-2023-21980/21982)",
+      "description": "Greeting yields exact server_version string (already parsed) but no vulndb correlation is emitted. Every other recce module ties version\u2192CVE; mysql doesn't.",
+      "cwe": [
+        "CWE-1395"
+      ],
+      "finding_kind": "mysql_outdated"
+    },
+    {
+      "name": "SSL/TLS quality when TLS IS offered",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "MySQL Reference \u2014 SSL request packet; CLIENT_SSL cap; require_secure_transport",
+      "description": "Module reports only ON/OFF advertising. When ON, no STARTTLS upgrade + cert grab is performed \u2192 misses self-signed default certs (auto-generated by mysql_ssl_rsa_setup), expired certs, weak protocols (TLSv1.0/1.1), weak DHE, CN=MySQL_Server_x.y.z_Auto_Generated_Server_Certificate leak, and CN/SAN hostnames (feeds hostnames DB).",
+      "cwe": [
+        "CWE-295",
+        "CWE-326"
+      ],
+      "finding_kind": "mysql_tls_weak"
+    },
+    {
+      "name": "Binary log / relay log reads (SHOW BINARY LOGS + mysqlbinlog SQL)",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "MySQL Reference \u2014 SHOW BINARY LOGS, COM_BINLOG_DUMP, binlog password leaks",
+      "description": "Historical writes contain literal plaintext values including CREATE USER ... IDENTIFIED BY 'plaintext' up to 5.7, ALTER USER, and INSERT INTO users VALUES(..., 'password'). REPLICATION CLIENT + SUPER grants let recce dump binlog names; a follow-up read pulls historic credentials. Not touched.",
+      "cwe": [
+        "CWE-532"
+      ],
+      "finding_kind": "mysql_binlog_secrets"
+    },
+    {
+      "name": "FILE-privilege active proof (LOAD_FILE / INTO DUMPFILE writable plugin_dir)",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "MySQL Reference \u2014 LOAD_FILE(), SELECT ... INTO OUTFILE / DUMPFILE; plugin_dir semantics",
+      "description": "Finding is emitted purely from privilege inference. A read-only proof \u2014 LOAD_FILE('/etc/hostname') on Linux or '/etc/mysql/debian.cnf' (contains root creds) \u2014 moves it from theoretical to confirmed, and mysql debian.cnf leak is a common one-shot creds win. Only writable-plugin_dir check is currently textual.",
+      "cwe": [
+        "CWE-732"
+      ],
+      "finding_kind": "mysql_file_priv_proven"
+    },
+    {
+      "name": "Hashcat mode per-plugin (not always -m 300)",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "hashcat \u2014 300 mysql_native_password, 7401 mysql_$A$ / mysql sha256, 21100 auth_string caching_sha2 (\"$mysql-sha2\")",
+      "description": "Loot emits every hash with '-m 300' regardless of plugin field it already captured. caching_sha2_password / sha256_password / ed25519 hashes need different modes; wrong mode = analyst wastes wordlist time.",
+      "cwe": [
+        "CWE-916"
+      ],
+      "finding_kind": "mysql_hash_mode_mislabel"
+    },
+    {
+      "name": "mysql.slave_master_info / mysql.slave_relay_log_info (cleartext replication creds)",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "MySQL 5.6+ \u2014 mysql.slave_master_info table (User_name, User_password columns); Oracle bulletin about plaintext credential storage",
+      "description": "When master_info_repository=TABLE, replication user + PLAINTEXT password sit in mysql.slave_master_info. High-value secret; module never queries it.",
+      "cwe": [
+        "CWE-256",
+        "CWE-312"
+      ],
+      "finding_kind": "mysql_replication_cleartext_creds"
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "mysql.user usernames should feed known_users (only hashes are emitted as Credential today; the bare username list \u2014 'root','app','backup','replicator' \u2014 never enters the shared pool)",
+    "mysql.user Host column with concrete IPs/subnets ('root'@'10.0.0.5', 'app'@'10.0.0.%') should populate relay_targets and hostnames (identifies who is trusted to talk to this DB)",
+    "@@hostname / @@report_host and replication master host from SHOW REPLICA STATUS should feed hostnames",
+    "@@version_compile_os ('Linux','Win64') already retrieved into loot['os'] but never propagated to Host.os / OS fingerprint",
+    "SHOW SLAVE HOSTS / performance_schema.replication_connection_status downstream replicas \u2192 hosts + relay_targets",
+    "information_schema.PROCESSLIST client Host column \u2192 live client IPs \u2192 relay_targets/hostnames",
+    "authentication_ldap_sasl / authentication_pam server params \u2192 domains + DC hostnames",
+    "mysql.slave_master_info replication creds \u2192 Credential(kind=password) + relay_target (the master IP)",
+    "Harvested connection strings are enrolled as Credential but the HOST part is not exploded into hostnames/relay_targets",
+    "Hash Credential.notes always says '-m 300' \u2014 should carry per-plugin hashcat mode (7401 / 21100 / MariaDB ed25519)"
+  ],
+  "priority_gaps": [
+    "caching_sha2_password + AuthSwitchRequest handling \u2014 without it, recce is blind against MySQL 8.0 default auth (blocks every downstream loot/datamine on 8.x)",
+    "mysql.func UDF enumeration \u2014 one SELECT reveals pre-loaded UDFs (sys_exec/sys_eval) that grant instant RCE without any FILE-priv chain",
+    "Replication + PROCESSLIST + mysql.slave_master_info \u2014 pulls plaintext replication creds, master host, and live client IPs; feeds hostnames/relay_targets/known_users across the entire engagement",
+    "Version\u2192CVE correlation on the already-parsed server_version \u2014 CVE-2012-2122, CVE-2016-6662, CVE-2021-2154, ed25519 downgrades \u2014 every other recce service module does this and mysql doesn't"
+  ],
+  "notes": "Reviewed recce/services/db/mysql.py against MySQL Internals Manual, MySQL 8.0 Reference (auth plugins, replication, X Protocol), MariaDB KB (ed25519, PAM), and the mysql-specific CVE history. Module is solid on the classic-protocol empty-password + native-scramble surface but stops at MySQL 5.7-era assumptions: it does not follow AuthSwitchRequest, does not speak caching_sha2_password (8.0 default) or sha256_password / RSA, ignores X Protocol on 33060 despite claiming the port, never enumerates replication topology / PROCESSLIST / mysql.func / plugins / routines, and does no version\u2192CVE correlation on the version string it already parses. Wire-gap side: mysql.user rows, live PROCESSLIST client IPs, replication master/replica hosts, and @@version_compile_os are all captured or trivially available but never handed to the shared known_users / hostnames / relay_targets pools. Highest ROI adds are the caching_sha2/AuthSwitch pair (unblocks 8.0), mysql.func UDF check (immediate RCE detection), replication+slave_master_info+PROCESSLIST triple (topology + plaintext creds + client IPs), and version\u2192CVE emit."
+}

@@ -1,0 +1,246 @@
+{
+  "service": "Siemens S7",
+  "summary": "Siemens S7COMM is a proprietary PLC control protocol carried over ISO 8073 Class 0 (COTP) framed with RFC 1006 (ISO Transport over TCP), commonly on 102/tcp. An attacker who reaches port 102 typically gets unauthenticated read of PLC identity, code blocks (DB/M/I/Q memory) when the CPU has legacy PUT/GET enabled, and \u2014 on S7-300/400 or misconfigured 1200/1500 \u2014 the ability to STOP/START the CPU, upload/download OB/DB blocks, and read out the CPU protection password or bypass it. The high-value target is unambiguous OT-on-IT segmentation evidence plus a firmware/order-code fingerprint that maps to a large body of Siemens PLC CVEs (CVE-2015-2177, CVE-2020-15782, CVE-2022-38465, URGENT/11). Recce currently only labels the port in svcdetect; there is no probe module, no serviceenum mapping, and no per-service script. A modbus.py-shaped module using stdlib socket+struct can add high-signal OT findings without any writes to the device.",
+  "default_ports": [
+    "102/tcp",
+    "3389/tcp (S7-PLUS via NAT rare)",
+    "44818/tcp (not S7 \u2014 do not confuse with EtherNet/IP)"
+  ],
+  "existing_coverage": {
+    "detected": true,
+    "files": [
+      "recce/services/svcdetect.py:50 (port 102 -> 'iso-tsap', 'Siemens S7 / ISO-TSAP')"
+    ],
+    "notes": "svcdetect labels port 102 correctly, but there is NO recce/services/s7.py probe module, NO entry in recce/services/serviceenum.py _PORT/_NAME maps (so `recce services` prints nothing for open 102), and NO recce/scripts/recce-service-s7.sh. `is_s7()` predicate does not exist. TPKT parsing exists in rdp.py (RDP shares the RFC 1006 framing) and can be borrowed for the COTP/TPKT layer."
+  },
+  "capabilities": [
+    {
+      "name": "cotp_connect_probe",
+      "kind": "passive",
+      "description": "Send a COTP Connection Request (X.224 CR, TPDU code 0xE0) inside a TPKT (RFC 1006) and confirm a Connection Confirm (0xD0) comes back \u2014 distinguishes a real ISO-on-TCP stack from arbitrary listeners on 102/tcp.",
+      "value": "medium",
+      "cwes": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1006 \u00a76; ITU-T X.224 \u00a713.3 (CR/CC TPDU)",
+      "finding_kind": "s7_cotp_reachable",
+      "notes": "Two-byte length in TPKT is big-endian; identical framing to RDP's _X224_CR in rdp.py \u2014 reuse that skeleton."
+    },
+    {
+      "name": "tsap_rack_slot_enum",
+      "kind": "active",
+      "description": "Iterate common destination TSAPs (0x0102=rack0/slot2 CPU, 0x0201, 0x0202, 0x0300, 0x1000 OP) with source 0x0100 PG until COTP CC succeeds, revealing which rack/slot the CPU lives at and confirming PLC family.",
+      "value": "high",
+      "cwes": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Siemens S7 addressing: TSAP high-byte = comm type (1=PG, 2=OP, 3=S7-Basic), low-byte = (rack<<5)|slot",
+      "finding_kind": "s7_tsap_enumerated",
+      "notes": "Also enumerates non-CPU modules \u2014 CPs (comm processors) answer on their own slots."
+    },
+    {
+      "name": "s7_setup_communication",
+      "kind": "active",
+      "description": "After COTP CC, send an S7 ROSCTR=1 Job with function 0xF0 (Setup Communication) negotiating PDU size \u2014 a valid Ack_Data (ROSCTR=3) with function 0xF0 proves the S7 protocol stack, not just ISO-TSAP.",
+      "value": "high",
+      "cwes": [
+        "CWE-306"
+      ],
+      "protocol_reference": "S7COMM (Wireshark dissector packet-s7comm.c) ROSCTR types 0x01 Job / 0x03 Ack_Data; function 0xF0",
+      "finding_kind": "s7_stack_confirmed"
+    },
+    {
+      "name": "szl_module_identification",
+      "kind": "active",
+      "description": "Userdata request (ROSCTR=7) function 0x11 (READ_SZL) with SZL-ID 0x0011 index 0x0001 returns the CPU order code (MLFB, e.g. '6ES7 315-2EH14-0AB0'), hardware version, and firmware version \u2014 the crown-jewel fingerprint for CVE mapping.",
+      "value": "critical",
+      "cwes": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Siemens S7-300/400 System Software Reference Manual, SZL-ID 0x0011 (Modulkennung)",
+      "finding_kind": "s7_module_identification",
+      "notes": "Order code prefix disambiguates S7-300 (6ES7 3xx), S7-400 (6ES7 4xx), S7-1200 (6ES7 2xx), S7-1500 (6ES7 5xx). Feeds firmware_cve_fingerprint."
+    },
+    {
+      "name": "szl_component_identification",
+      "kind": "active",
+      "description": "SZL-ID 0x001C returns component-identification strings: PLC name (index 1), module name (2), plant designation (3), copyright (4), serial number (5), module-type name (6), OEM ID (7), location designation (8) \u2014 free text set by the engineer, often naming the process or site.",
+      "value": "critical",
+      "cwes": [
+        "CWE-200"
+      ],
+      "protocol_reference": "SZL-ID 0x001C (Komponenten-Identifikation)",
+      "finding_kind": "s7_component_identification",
+      "notes": "'Plant designation' and 'location designation' are goldmine strings \u2014 feed known_hostnames + a new known_ot_assets surface."
+    },
+    {
+      "name": "szl_cpu_protection_level",
+      "kind": "active",
+      "description": "SZL-ID 0x0232 index 0x0004 reports CPU protection level (1=none, 2=write-protect, 3=read+write-protect) and whether a password is set \u2014 indicates whether legacy password auth is required for privileged S7COMM operations.",
+      "value": "high",
+      "cwes": [
+        "CWE-284",
+        "CWE-306"
+      ],
+      "protocol_reference": "Siemens S7-300 CPU Manual \u00a7Protection Level; SZL 0x0232 (Schutzstufe)",
+      "finding_kind": "s7_protection_level"
+    },
+    {
+      "name": "szl_communication_capabilities",
+      "kind": "active",
+      "description": "SZL-IDs 0x0131/0x0132 expose whether PUT/GET communication is enabled \u2014 when on (default on S7-300/400, explicit opt-in on 1200/1500), any client that can reach 102/tcp can read and WRITE DB/M/I/Q memory without authentication.",
+      "value": "critical",
+      "cwes": [
+        "CWE-306",
+        "CWE-923"
+      ],
+      "protocol_reference": "Siemens Security Guideline for SIMATIC S7-1200/1500 \u00a7PUT/GET; SZL 0x0131",
+      "finding_kind": "s7_put_get_enabled"
+    },
+    {
+      "name": "s7_read_var_memory",
+      "kind": "active",
+      "description": "Function 0x04 (Read Variable) against a small, safe address (e.g. one byte of M0.0) proves unauthenticated read of process image / data blocks is possible \u2014 direct evidence PUT/GET is exploitable, no writes required.",
+      "value": "critical",
+      "cwes": [
+        "CWE-306"
+      ],
+      "protocol_reference": "S7COMM function 0x04 (Read Var), area codes 0x81 I / 0x82 Q / 0x83 M / 0x84 DB",
+      "finding_kind": "s7_read_var_ok",
+      "notes": "Read-only. Keep to a single byte at a well-defined address; some CPUs raise access-denied on M0 if protection level 3."
+    },
+    {
+      "name": "cpu_stop_start_control",
+      "kind": "exploit",
+      "description": "S7COMM function 0x29 (PLC STOP) and 0x28 (PLC START/HOT/COLD RESTART) halt or reboot the CPU, dropping the physical process \u2014 do NOT invoke from the probe; emit as an exploit runbook step gated behind operator confirmation.",
+      "value": "critical",
+      "cwes": [
+        "CWE-284",
+        "CWE-770",
+        "CWE-1247"
+      ],
+      "protocol_reference": "S7COMM ROSCTR=1 function 0x29 (PLC STOP) with 'P_PROGRAM' parameter; CVE-2015-2177",
+      "finding_kind": "s7_stop_start_possible"
+    },
+    {
+      "name": "legacy_cpu_password_bypass",
+      "kind": "auth",
+      "description": "S7-300/400 CPU protection passwords are transmitted as 8-byte SIMATIC 'obfuscated' blocks (XOR against 0x55 with a byte-rotation) that are offline-crackable and, for firmware <=CVE-2016-9159, retrievable via SZL 0x0132 index 0x0003 without authentication.",
+      "value": "critical",
+      "cwes": [
+        "CWE-522",
+        "CWE-327"
+      ],
+      "protocol_reference": "CVE-2016-9159; SCADACS Plcinject/snap7 reference; Siemens Advisory SSA-731239",
+      "finding_kind": "s7_legacy_password_readout"
+    },
+    {
+      "name": "s7_1500_plus_detect",
+      "kind": "passive",
+      "description": "S7-1200 firmware v4+ and S7-1500 speak S7COMM-PLUS (opcode 0x72) with TLS-wrapped session establishment \u2014 detect the 0x72 opcode in the response and flag that legacy S7COMM attacks (PUT/GET, STOP) do not apply, but the CPU may still expose CVE-2020-15782 memory-write.",
+      "value": "medium",
+      "cwes": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Wireshark dissector packet-s7comm-plus.c; Siemens Advisory SSA-434534 (CVE-2020-15782)",
+      "finding_kind": "s7_plus_detected"
+    },
+    {
+      "name": "firmware_cve_fingerprint",
+      "kind": "chain",
+      "description": "Cross-reference the order code + firmware version from szl_module_identification against a bundled Siemens PLC CVE table (URGENT/11 on VxWorks-based CPs, SSA-434534, SSA-731239, SSA-731239 password readout, CVE-2022-38465 hard-coded key) and emit per-CVE findings.",
+      "value": "high",
+      "cwes": [
+        "CWE-1395",
+        "CWE-798"
+      ],
+      "protocol_reference": "Siemens ProductCERT advisory feed",
+      "finding_kind": "s7_firmware_cve"
+    },
+    {
+      "name": "block_list_enumeration",
+      "kind": "active",
+      "description": "Userdata function 0x11 sub-function 0x0d (List Blocks / List Blocks of Type) enumerates OB / FB / FC / DB / SDB block numbers present on the CPU \u2014 reveals program structure, custom function blocks, and the DB numbers worth reading with s7_read_var_memory.",
+      "value": "medium",
+      "cwes": [
+        "CWE-200"
+      ],
+      "protocol_reference": "S7COMM Userdata subfunction 0x0d (Block List)",
+      "finding_kind": "s7_block_list"
+    },
+    {
+      "name": "s7_segmentation_finding",
+      "kind": "passive",
+      "description": "Emit a HIGH segmentation finding whenever a reachable S7 CPU is on a non-OT segment (mirrors modbus_reachable's stance) \u2014 OT PLCs on corporate/DMZ segments are a compliance and safety issue regardless of what else the probe learns.",
+      "value": "high",
+      "cwes": [
+        "CWE-923",
+        "CWE-1188"
+      ],
+      "protocol_reference": "IEC 62443-3-3 SR 5.1 Network Segmentation; NIST SP 800-82r3 \u00a75.5",
+      "finding_kind": "s7_reachable"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "PLC name + module name + plant designation + location designation (SZL 0x001C indices 1,2,3,8) \u2192 known_hostnames (engineer-set free text often names the site/process/cell)",
+    "CPU order code MLFB (e.g. '6ES7 315-2EH14-0AB0') \u2192 NEW shared surface known_ot_assets (order_code, firmware, serial) so other services (modbus, EtherNet/IP later) can cluster PLCs by asset identity",
+    "CPU serial number (SZL 0x001C index 5) \u2192 NEW shared surface known_serials for cross-report asset tracking and crown-jewels tagging",
+    "Firmware version \u2192 feeds a new firmware_versions surface consumed by a future cve_matcher pass (aligns with Modbus vendor/product cross-ref)",
+    "Legacy CPU password recovered via legacy_cpu_password_bypass \u2192 known_hashes / a new known_ot_passwords surface (S7 password reuse across engineering-station/HMI accounts is common)",
+    "Rack/slot topology from tsap_rack_slot_enum \u2192 host.notes or a new known_ot_topology surface \u2014 informs which slot future writes/reads would target",
+    "OEM ID string (SZL 0x001C index 7) \u2192 known_domains (OEM integrators often stamp their company name here, revealing the third-party who commissioned the plant)"
+  ],
+  "recommended_findings": [
+    {
+      "title": "Siemens S7 PLC reachable on scanned network",
+      "severity": "high"
+    },
+    {
+      "title": "S7 CPU identity disclosed (order code + firmware)",
+      "severity": "high"
+    },
+    {
+      "title": "S7 component identification disclosed (plant/location/serial)",
+      "severity": "medium"
+    },
+    {
+      "title": "S7 PUT/GET communication enabled \u2014 unauthenticated memory read/write",
+      "severity": "critical"
+    },
+    {
+      "title": "S7 CPU protection level = 1 (no password)",
+      "severity": "high"
+    },
+    {
+      "title": "S7 unauthenticated variable read succeeded (M/DB memory)",
+      "severity": "critical"
+    },
+    {
+      "title": "S7 legacy password readout / offline-crackable (CVE-2016-9159)",
+      "severity": "critical"
+    },
+    {
+      "title": "S7 CPU STOP/START function reachable \u2014 process DoS possible",
+      "severity": "critical"
+    },
+    {
+      "title": "S7COMM-PLUS (S7-1200 v4 / S7-1500) detected \u2014 legacy attacks not applicable",
+      "severity": "info"
+    },
+    {
+      "title": "S7 firmware matches published Siemens advisory (per-CVE)",
+      "severity": "high"
+    },
+    {
+      "title": "S7 block list enumerated (OB/FB/FC/DB inventory disclosed)",
+      "severity": "medium"
+    }
+  ],
+  "recommended_hashcat_modes": [
+    {
+      "mode": 22301,
+      "description": "Telegram (placeholder \u2014 no core hashcat mode exists for S7 legacy 8-byte SIMATIC obfuscation; recovered password is plaintext after XOR/rotate deobfuscation, not a hash, so no hashcat step is needed \u2014 document in the finding rather than emit a crack task)"
+    }
+  ],
+  "implementation_notes": "Model the module on recce/services/modbus.py \u2014 stdlib socket+struct only, single ~4s connect, read-only, findings emphasize OT-on-IT segmentation stance. Reuse the TPKT framing pattern from recce/services/rdp.py (RFC 1006 is identical between RDP and S7 at the transport layer). Add is_s7(port) predicate matching port 102 or service names containing 'iso-tsap' / 's7' / 'siemens'. Register 102 \u2192 's7' in recce/services/serviceenum.py _PORT and 'iso-tsap' \u2192 's7' in _NAME, and add a recce/scripts/recce-service-s7.sh driver so `recce services` emits it. Wire in via recce/services/__init__.py and the analyze() dispatcher (mirror modbus.analyze signature). NEVER emit function 0x05 (Write Var), 0x28/0x29 (START/STOP), or 0x1A/0x1B/0x1C (block upload/download/insert) from the probe \u2014 those go in the runbook as manual exploit steps behind explicit operator confirmation, per the airgap constraint's read-only stance. TSAP enumeration loop should cap at ~6 attempts to keep budget within svcprobe.iter_probe defaults. Also add S7 to any OT-segmentation cross-service aggregator that currently only reads modbus (grep for modbus_reachable in recce/core/attackpath/ if that consumer exists)."
+}

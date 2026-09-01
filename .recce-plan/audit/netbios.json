@@ -1,0 +1,138 @@
+{
+  "service": "netbios",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/netbios.py"
+  ],
+  "existing_capabilities": [
+    "NBNS Node Status query (opcode 0x0021, wildcard '*' name) on 137/udp \u2014 RFC 1002 section 4.2.18",
+    "Parse answer RDATA name list: 15-byte name, 1-byte suffix, 2-byte name flags (group bit 0x8000)",
+    "Extract 6-byte interface MAC that follows the name list",
+    "Suffix decode table for 0x00 (workstation), 0x03 (messenger), 0x1B (DMB), 0x1C (DC), 0x1D (MB), 0x1E (browser election), 0x20 (file server)",
+    "Derive hostname (0x00 unique), workgroup (0x00 group), domain (0x1C), is_dc flag",
+    "Single low-severity CWE-200 disclosure finding with nbtscan/nmap runbook + manuf OUI lookup",
+    "is_netbios() port matcher (137, or service string 'netbios'/'nbns'/'nbt')"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "NetBIOS Session Service 139/tcp probing (called-name check)",
+      "kind": "active",
+      "description": "Module ignores 139/tcp entirely. Send RFC 1002 sec 4.3.2 Session Request with called_name='*SMBSERVER<20>' vs the actual NBNS-derived hostname and inspect Negative Session Response error codes (0x80 not listening on called, 0x82 called name not present, 0x83 insufficient resources, 0x8F unspecified). Reveals whether NetBIOS-strict is enforced (older SMB pivot), whether the host answers to *SMBSERVER (indicates Samba-style permissive), and confirms a live SMB session endpoint distinct from 445 direct-host. High attack value as SMB relay/null-session pre-flight.",
+      "value": "high",
+      "protocol_reference": "RFC 1002 sec 4.3.2 / 4.3.6 (NEGATIVE SESSION RESPONSE)",
+      "cwe": [
+        "CWE-200",
+        "CWE-284"
+      ]
+    },
+    {
+      "name": "NetBIOS Datagram Service 138/udp \u2014 MS-BRWS browser announcement listen",
+      "kind": "passive",
+      "description": "No probe of 138/udp. Passive listen (or unicast DIRECT UNIQUE DATAGRAM to \\MAILSLOT\\BROWSE) captures periodic HostAnnouncement / DomainAnnouncement frames carrying hostname, OS major/minor, ServerType bitmask (SV_TYPE_WORKSTATION 0x1, SV_TYPE_SERVER 0x2, SV_TYPE_SQLSERVER 0x4, SV_TYPE_DOMAIN_CTRL 0x8, SV_TYPE_DOMAIN_BAKCTRL 0x10, SV_TYPE_TIME_SOURCE 0x20, SV_TYPE_PRINTQ_SERVER 0x200, SV_TYPE_NT 0x1000, SV_TYPE_WFW 0x8000), and free-text ServerComment. Full browse list = domain-wide host inventory pre-auth.",
+      "value": "high",
+      "protocol_reference": "RFC 1002 sec 4.4; [MS-BRWS] sec 2.2.1 HostAnnouncement, sec 2.2.2 DomainAnnouncement",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Node Status STATISTICS block parsing (dropped after MAC)",
+      "kind": "passive",
+      "description": "Parser stops at rdata[off:off+6] (MAC) and discards the ~46 bytes of NODE_STATUS STATISTICS that RFC 1002 sec 4.2.18 tacks on: unit_id (6B), jumpers, test_result, version_number (2B \u2014 Windows build vs Samba fingerprint), statistics_period, CRC/alignment/collision/send/receive counts, number_pending_sessions (active users on file server right now), max_number_pending_sessions, max_total_sessions_possible, session_data_packet_size. Free uptime/user-count/version fingerprint the module currently throws away.",
+      "value": "high",
+      "protocol_reference": "RFC 1002 sec 4.2.18 NODE STATUS RESPONSE / STATISTICS field",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "NBNS Name Query (opcode 0x0000) for spoofable names \u2014 WPAD, ISATAP, arbitrary host",
+      "kind": "active",
+      "description": "Only opcode 0x0021 is sent. RFC 1002 sec 4.2.12 Name Query for names likely to be cached/spoofable (WPAD<00>, ISATAP<00>, common short-name typos, DOMAIN<1C>) reveals: (a) hosts that will positively answer for names they do not own (poisoning-friendly / Responder-like), (b) cached poisoned entries already present in a WINS/Windows table, (c) presence of a WINS server behind the host. Direct enabler for NBNS/LLMNR poisoning finding class.",
+      "value": "high",
+      "protocol_reference": "RFC 1002 sec 4.2.12 NAME QUERY REQUEST, sec 5.1 NBNS name resolution",
+      "cwe": [
+        "CWE-290",
+        "CWE-345"
+      ]
+    },
+    {
+      "name": "NBNS Name Registration / Release / Conflict primitives",
+      "kind": "exploit",
+      "description": "No probe of RFC 1002 sec 4.2.2 Name Registration Request (opcode 0x0500), sec 4.2.5 Name Release Request (opcode 0x3000), sec 4.2.6 Name Conflict Demand. On hosts without WINS scope protection an unauthenticated Name Release forcibly evicts a registered name (DoS / hijack pre-condition); a Registration collision triggers Name Conflict responses that fingerprint node type (B/P/M/H). Even a passive probe with no-op payload measures whether the target refuses non-broadcast unicast registration (post-MS08-068 behavior).",
+      "value": "medium",
+      "protocol_reference": "RFC 1002 sec 4.2.2, 4.2.5, 4.2.6; sec 15 (name conflict handling)",
+      "cwe": [
+        "CWE-290",
+        "CWE-400"
+      ]
+    },
+    {
+      "name": "Node type (B/P/M/H) and WINS/scope disclosure",
+      "kind": "passive",
+      "description": "STATISTICS jumpers/test_result plus the presence of scope-ID suffix in the query response identify B-node (broadcast only), P-node (WINS only), M-node, or H-node \u2014 and by extension whether a WINS server is configured. RFC 1001 sec 10 defines the four end-node types. Not extracted today.",
+      "value": "medium",
+      "protocol_reference": "RFC 1001 sec 10, RFC 1002 sec 4.2.18 (jumpers/test_result), sec 11.1.3 (scope ID)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Missing/incomplete suffix decodes",
+      "kind": "passive",
+      "description": "_SUFFIX omits high-signal entries: 0x01 messenger + special group name '\\x01\\x02__MSBROWSE__\\x02<01>' (master browser announcement \u2014 WINS/browse-master identifier); 0x06 RAS server; 0x1F NetDDE; 0x21 RAS client; 0x22/0x23/0x24 Exchange Interchange/Store/Directory; 0x2B Lotus Notes; 0x87 Exchange MTA; 0xBE Network Monitor Agent; 0xBF Network Monitor Application; unique 'INet~Services<1C>' = IIS; 'IS~<computer><00>' = IIS. Missed role fingerprints on Exchange/IIS/RAS estates.",
+      "value": "medium",
+      "protocol_reference": "[MS-BRWS]/Microsoft KB163409 NetBIOS suffix chart; RFC 1001 sec 17 registered names",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "OEM/DBCS name codepage decode",
+      "kind": "passive",
+      "description": "Decode is ASCII/latin-1 fallback. RFC 1001 sec 14 permits OEM codepage names; Japanese/CJK Windows registers half-width kana or Shift-JIS in the 15-byte name field. Current decoder silently mangles those to '?'. Low frequency but blocks accurate hostname fact on Asian estates.",
+      "value": "low",
+      "protocol_reference": "RFC 1001 sec 14 (name representation)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Broadcast / subnet-sweep NBSTAT mode",
+      "kind": "active",
+      "description": "probe() only unicasts to a single IP. NBNS supports broadcast Node Status (255.255.255.255:137) yielding one response per live NBT host on the segment \u2014 nbtscan-style discovery. Useful when scanner is given a /24 but nmap missed 137/udp on quiet hosts. Not implemented.",
+      "value": "low",
+      "protocol_reference": "RFC 1002 sec 5.3 (broadcast operation)",
+      "cwe": []
+    },
+    {
+      "name": "Response-source vs. request-destination multi-homing check",
+      "kind": "passive",
+      "description": "recvfrom() return address is discarded (`data, _ = s.recvfrom(...)`). Comparing responder source-IP to the queried IP reveals multi-homed hosts and NAT/proxy scenarios (RFC 1002 sec 4.2.18 permits any interface to answer). Free multi-interface fingerprint.",
+      "value": "low",
+      "protocol_reference": "RFC 1002 sec 4.2.18",
+      "cwe": [
+        "CWE-200"
+      ]
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "Hostname/domain/is_dc/mac never propagated to Host model or downstream services. No consumer imports recce.services.netbios (verified via grep). SMB probe (recce/services/smb.py) builds targets with h.hostname but netbios never writes back to it \u2014 SMB session request cannot pick real name vs *SMBSERVER, and null-session enumeration cannot label the host with its NBNS-derived hostname.",
+    "is_dc=True is stored only in target dict and finding text. No AD-path builder / LDAP / Kerberos-shaped module ingests it to prioritize LDAP (389/636/3268), DNS SRV lookup, or krb5 pre-auth probing on that IP.",
+    "Domain (0x1C) vs workgroup (0x00 group) distinction is discarded before SMB module chooses --local-auth vs domain auth (smb.py line 430). NBNS could tell SMB whether to attempt DOMAIN\\user format automatically.",
+    "MAC/OUI produced but not exposed as a Host-level vendor fact. VMware (00:50:56), iDRAC/iLO, Cisco, HP JetDirect, printers all fingerprint from OUI \u2014 no scanner-wide inventory consumer collects it. LDAP/SNMP/IPMI modules would use vendor hint to bias probes.",
+    "NBNS reachability itself is not emitted as a segment-level 'NBNS-poisoning-friendly / LLMNR-adjacent' fact for a cross-host finding. A single NBNS-answering host implies the segment tolerates NBT broadcast and is Responder-vulnerable \u2014 the module writes one per-host low finding but no chain-level insight.",
+    "Registered-name role list (file server 0x20, DC 0x1C, DMB 0x1B) not fed to serviceenum so per-role scan priority (SMB share enumeration on file servers, LDAP/DNS on DCs, RPC endpoint mapper on DMBs) can be raised."
+  ],
+  "priority_gaps": [
+    "P0 \u2014 Publish NBNS-derived facts (hostname, domain, is_dc, mac/OUI, role suffixes) onto the Host model and have SMB/LDAP/AD-path consumers read them. Zero-cost wire-up unlocks all downstream AD attack paths.",
+    "P1 \u2014 Parse the STATISTICS block (RFC 1002 sec 4.2.18): version_number (Windows build fingerprint), number_pending_sessions (live users on file server), node type. Same UDP round-trip already made; module discards the bytes.",
+    "P1 \u2014 Add 138/udp Datagram Service listener for MS-BRWS HostAnnouncement/DomainAnnouncement (OS version + ServerType bitmask + comment). Domain-wide host+OS inventory pre-auth.",
+    "P1 \u2014 Add 139/tcp Session Service called-name probe (*SMBSERVER<20> vs real name) with negative-response code decode. Confirms SMB pivot and fingerprints NetBIOS-strict.",
+    "P2 \u2014 Send NBNS Name Query (opcode 0x0000) for WPAD/ISATAP/typo-names to detect poisoning-friendly hosts / cached spoofed entries.",
+    "P2 \u2014 Extend _SUFFIX with __MSBROWSE__ group name, Exchange 0x22/0x23/0x24/0x87, IIS INet~Services, RAS 0x06/0x21, NetDDE 0x1F, Notes 0x2B for role fingerprinting.",
+    "P3 \u2014 Name Registration/Release/Conflict probing (RFC 1002 sec 4.2.2/4.2.5/4.2.6) for DoS/hijack primitive and node-type (B/P/M/H) disclosure.",
+    "P3 \u2014 Preserve recvfrom source address for multi-homing detection; add optional broadcast NBSTAT sweep."
+  ],
+  "notes": "No test file dedicated to netbios (tests/test_new_services.py covers node-status parse only). No auth in NBNS by design \u2014 'auth weakness' angle is entirely about spoofing/relay/poisoning primitives (Name Query/Release/Registration) and about downstream SMB/LDAP/Kerberos consumers not receiving the identity facts NBNS produces. Biggest single win by ratio of code-to-value is P0 wire-up \u2014 the data is already parsed and thrown away.",
+  "summary": "The NetBIOS module implements only NBNS Node Status (opcode 0x0021) on 137/udp and reports a single CWE-200 disclosure. It ignores the STATISTICS block that comes in the same response (version_number, session counts, node type \u2014 RFC 1002 sec 4.2.18), never touches Datagram Service 138/udp (MS-BRWS browser announcements) or Session Service 139/tcp (called-name probe with negative-response codes \u2014 RFC 1002 sec 4.3), sends no Name Query for spoofable names (WPAD/ISATAP), and does not expose Name Registration/Release/Conflict primitives (RFC 1002 sec 4.2.2/4.2.5/4.2.6). The largest gap is cross-service: hostname / domain / is_dc / MAC / role suffixes are parsed but never published to the Host model, so SMB, LDAP, and any AD-path consumer never see the identity facts NBNS already produced."
+}

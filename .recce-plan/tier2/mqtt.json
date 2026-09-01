@@ -1,0 +1,171 @@
+{
+  "service": "MQTT",
+  "summary": "MQTT (1883/tcp, 8883/tcp TLS) has ZERO coverage in recce today \u2014 the port is not in `svcdetect.PORT_NAMES`, not in `serviceenum._NAME` or `_PORT`, has no signature in `_SIGNATURES`, and no `recce/services/mqtt.py` module exists. An open MQTT broker leaks topic namespace, retained messages, WILL credentials, and often the ClientID roster \u2014 a very high-signal cross-service surface (hostnames, usernames, hashes). Build shape mirrors `services/kafka.py`: length-prefixed binary framing + a bounded probe function returning a dict, plus `analyze()` + `findings()` + `runbook()`. Reference: OASIS mqtt-v3.1.1-os (\u00a73.1 CONNECT, \u00a73.2 CONNACK, \u00a73.3 PUBLISH incl. RETAIN, \u00a73.8 SUBSCRIBE) and OASIS mqtt-v5.0 (\u00a73.1 Properties, \u00a73.14 DISCONNECT reason codes). MQTT-SN (UDP 1884) is out of scope for tranche 1.",
+  "default_ports": [
+    "1883/tcp (plaintext, IANA)",
+    "8883/tcp (implicit TLS, IANA)",
+    "8884/tcp (mTLS convention, Mosquitto)",
+    "80/tcp + 443/tcp with WebSockets subprotocol 'mqtt' (out of scope for tranche 1 \u2014 covered by web enum if surfaced)"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [],
+    "notes": "No hits for 'mqtt', 1883, or 8883 anywhere under recce/ (excluding node_modules). PORT_NAMES in svcdetect.py has no MQTT entry so port 1883 with an unhelpful nmap label falls through to 'unknown'; _SIGNATURES has no 0x10/0x20 CONNECT/CONNACK matcher; serviceenum._NAME and _PORT have no mqtt entry so `recce services` prints nothing actionable next to an MQTT port; no per-service script maps to it."
+  },
+  "capabilities": [
+    {
+      "name": "port-inference",
+      "kind": "passive",
+      "description": "Add 1883 -> ('mqtt', 'MQTT broker (plaintext, OASIS 3.1.1/v5)') and 8883 -> ('mqtts', 'MQTT broker (TLS)') to svcdetect.PORT_NAMES so an unlabelled port gets an inferred label with zero traffic. Also add 1884/tcp (Mosquitto WSS convention) as a soft hint.",
+      "value": "low"
+    },
+    {
+      "name": "connack-signature",
+      "kind": "passive",
+      "description": "Add a byte-signature to svcdetect._SIGNATURES matching a CONNACK reply (fixed header 0x20 0x02 + 2 flag/reason bytes) so a stray high-port MQTT broker that answered a CONNECT nudge (or leaked a mid-session PUBLISH starting 0x30) is auto-labelled 'mqtt' from banner bytes rather than staying 'unknown'. Complements grab_banner's HTTP fallback \u2014 MQTT stays mute until a CONNECT is sent, so a dedicated nudge (see next capability) is what actually makes this fire.",
+      "value": "medium"
+    },
+    {
+      "name": "connect-nudge",
+      "kind": "passive",
+      "description": "In svcdetect._NUDGE (or an MQTT-specific branch) send a minimal MQTT 3.1.1 CONNECT for port 1883 (fixed header 0x10 + remaining-length + protocol name 'MQTT' + level 0x04 + clean-session + keepalive + empty ClientID). Read the CONNACK, then the reason code (byte 3) already tells us auth policy: 0x00 = anonymous accepted; 0x02 = 'identifier rejected' (still a broker, empty ClientID banned); 0x04 = bad user/password (auth required); 0x05 = not authorised. Zero credentials sent; result is a per-port policy fingerprint feeding the finding gate.",
+      "value": "high",
+      "protocol_reference": "OASIS mqtt-v3.1.1-os \u00a73.1 CONNECT, \u00a73.2 CONNACK (Table 3.1 return codes)"
+    },
+    {
+      "name": "anonymous-connect",
+      "kind": "auth",
+      "description": "Full-fat probe of an anonymous CONNECT with an auto-generated ClientID ('recce-' + 6 hex). CONNACK 0x00 without username/password is the headline HIGH finding \u2014 a public write/read broker. Record broker's granted keepalive, session-present bit, and (v5) any Server Reference / Server Keep Alive / Maximum QoS properties.",
+      "value": "critical",
+      "protocol_reference": "OASIS mqtt-v3.1.1-os \u00a73.1.2.3 Clean Session, \u00a73.2.2 CONNACK; OASIS mqtt-v5.0 \u00a73.1.2.11 CONNECT Properties, \u00a73.2.2.3 CONNACK Properties"
+    },
+    {
+      "name": "empty-clientid-accepted",
+      "kind": "auth",
+      "description": "MQTT 3.1.1 \u00a73.1.3.1 lets a broker accept an empty ClientID only when CleanSession=1; many brokers silently accept it under any config. Send CONNECT with ClientID length=0. CONNACK 0x00 = broker allows anonymous session with no identity at all (HIGH \u2014 anti-forensic; concurrent 'ghost' clients cannot be told apart, and other clients using empty ClientID get their sessions stolen).",
+      "value": "high",
+      "protocol_reference": "OASIS mqtt-v3.1.1-os \u00a73.1.3.1 ClientID"
+    },
+    {
+      "name": "protocol-version-probe",
+      "kind": "passive",
+      "description": "Send both CONNECT v3.1.1 (level 0x04) and CONNECT v5 (level 0x05); a v5 broker returns extra properties in CONNACK (Assigned Client Identifier, Server Keep Alive, Maximum Packet Size, Retain Available, Wildcard Subscription Available, Shared Subscription Available, Server Reference). Parse them \u2014 'Retain Available=1' + 'Wildcard Subscription Available=1' are what makes the retained-message exfil below realistic. Also record which versions the broker refuses (CONNACK 0x01 = unacceptable protocol version) as a fingerprint.",
+      "value": "medium",
+      "protocol_reference": "OASIS mqtt-v5.0 \u00a73.2.2.3 CONNACK Properties (0x11, 0x13, 0x24, 0x25, 0x28, 0x29, 0x27)"
+    },
+    {
+      "name": "wildcard-subscribe-hash",
+      "kind": "active",
+      "description": "After a successful anonymous CONNECT, SUBSCRIBE to '#' (root multi-level wildcard) at QoS 0 for a bounded window (~2-3s). RETAIN-flagged PUBLISH packets arrive immediately \u2014 the broker replays every retained message on every topic. Record topic tree + payload sizes + a per-topic sample (truncated) for the report. Retained messages routinely contain device state, credentials, JWTs, plaintext config. CRITICAL finding when >0 retained messages leak; HIGH when only live traffic leaks. Cap payload capture (e.g. 256 bytes/topic, 200 topics) to keep the probe bounded \u2014 sensitive data goes to the loot dir, not the sheet.",
+      "value": "critical",
+      "protocol_reference": "OASIS mqtt-v3.1.1-os \u00a74.7 Topic Names and Topic Filters (# multi-level wildcard), \u00a73.3.1.3 RETAIN"
+    },
+    {
+      "name": "sys-topic-scrape",
+      "kind": "active",
+      "description": "Subscribe to '$SYS/#' (Mosquitto/HiveMQ convention) \u2014 broker version, uptime, client count, bytes sent/received, live client-list on some brokers. Highest signal: '$SYS/broker/version' pins vendor+version straight into port.product/port.version (feeds CVE map \u2014 Mosquitto <2.0.15, EMQX <5.0.9, HiveMQ CE, etc). Distinct from '#' because $SYS is often filtered from '#' by broker policy but readable directly.",
+      "value": "high",
+      "protocol_reference": "Mosquitto broker docs \u2014 $SYS topic hierarchy (de-facto standard, no OASIS spec)"
+    },
+    {
+      "name": "publish-permission-test",
+      "kind": "active",
+      "description": "PUBLISH a tiny benign marker ('recce-probe-<uuid>') at QoS 1 to a canary topic ('recce/probe/<uuid>'), then SUBSCRIBE and confirm receipt. Success = broker accepts anonymous WRITE (CRITICAL \u2014 the broker is a public bus, attacker can inject commands to any subscribing device: home automation, industrial controls, telemetry corruption). Clean up: PUBLISH empty retained message to the same topic to clear it. Skip when broker returned SUBACK with rejected QoS (0x80) on '#' \u2014 write is very likely also gated.",
+      "value": "critical",
+      "protocol_reference": "OASIS mqtt-v3.1.1-os \u00a73.3 PUBLISH, \u00a73.4 PUBACK"
+    },
+    {
+      "name": "credential-spray",
+      "kind": "auth",
+      "description": "Bounded CONNECT sweep with (creds.known_users x tiny weak-password list: '', <user>, mqtt, admin, password, changeme, 1883). Small \u2014 MQTT has no lockout in the spec and brokers rarely rate-limit, but keep it to N*M<=40 and single-target-serial to avoid DoS. CONNACK 0x00 = valid cred; record to shared cred store. Complements wildcard-subscribe: an auth-gated broker becomes a full retained-message dump once one cred hits.",
+      "value": "high",
+      "protocol_reference": "OASIS mqtt-v3.1.1-os \u00a73.1.2.8/9 UserName/Password flags, \u00a73.2.2 CONNACK 0x04/0x05 reason codes"
+    },
+    {
+      "name": "will-message-inspection",
+      "kind": "passive",
+      "description": "MQTT lets a client register a Last-Will PUBLISH the broker sends on ungraceful disconnect. Some brokers expose current wills via $SYS or make them observable when we forcibly disconnect a subscribed session. Additionally, a subscribe to '#' catches wills as they fire in real time (see wildcard-subscribe-hash). Wills routinely include device identity + tokens ('device/42/status offline, token=eyJ...'). Report distinctly because they identify device roster and often carry secrets.",
+      "value": "medium",
+      "protocol_reference": "OASIS mqtt-v3.1.1-os \u00a73.1.2.5-8 Will Flag/QoS/Retain/Topic/Message"
+    },
+    {
+      "name": "banner-version-fingerprint",
+      "kind": "passive",
+      "description": "Pin broker product/version from three complementary sources: (a) CONNACK v5 property 0x1F 'Reason String' on rejection (often names broker), (b) $SYS/broker/version (see sys-topic-scrape), (c) Mosquitto 2.x quirk of returning ProtocolError on malformed CONNECT with a distinctive length-prefix. Write into port.product / port.version so recce's CVE mapper picks it up (Mosquitto: CVE-2023-28366 memory leak, CVE-2023-3592 use-after-free; EMQX: CVE-2024-43201 auth bypass; HiveMQ: CVE-2023-33461).",
+      "value": "medium"
+    },
+    {
+      "name": "tls-alpn-and-cert",
+      "kind": "passive",
+      "description": "For port 8883 (and any other port whose CONNACK arrived over TLS), use the existing tls probe path: capture cert SANs (feeds core.known_hostnames \u2014 MQTT brokers are commonly issued certs with the internal hostname), verify chain, note weak ciphers / expired certs / self-signed. Record ALPN \u2014 spec says MQTT-over-TLS does NOT use ALPN, so a broker advertising 'mqtt' ALPN is uncommon but noteworthy.",
+      "value": "medium",
+      "protocol_reference": "OASIS mqtt-v3.1.1-os \u00a75.4 Network Connections; IANA ALPN registry ('mqtt' is registered for WebSocket subprotocol only)"
+    },
+    {
+      "name": "topic-namespace-loot",
+      "kind": "chain",
+      "description": "Persist the observed topic tree to loot/mqtt/<ip>-<port>-topics.txt and feed distinctive path segments cross-service: 'homeassistant/*/config', 'zigbee2mqtt/*', 'shellies/*', 'tele/*' -> device fingerprints; 'devices/<hostname>/*' -> known_hostnames candidates; 'users/<name>/*' -> known_users candidates. Downstream: web enum uses hostnames when re-scanning HTTP/HTTPS; kerberos/ldap enum uses usernames.",
+      "value": "high"
+    },
+    {
+      "name": "auth-required-info-finding",
+      "kind": "passive",
+      "description": "Symmetric with kafka_saslgated: when TCP connects and CONNECT is answered by CONNACK 0x04/0x05 (or the socket is torn down mid-handshake), emit a low/info 'mqtt_authgated' finding recording the reason code + broker version if extractable. Marks the endpoint as a target for any looted MQTT/IoT credential and confirms auth is actually enforced (vs the port merely being firewalled at connect).",
+      "value": "low"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames \u2014 TLS cert SANs on 8883 (existing probes.py cert code), plus device hostnames mined from topic path segments like 'devices/<host>/*', 'homeassistant/<host>/*', 'zigbee2mqtt/<host>/*', $SYS/broker/uptime replies",
+    "known_users \u2014 ClientIDs harvested from live PUBLISH source (v5 assigned-client-identifier property, retained payloads containing 'user'/'client', '$SYS/broker/clients' lists on Mosquitto). MQTT ClientIDs are frequently reused as usernames on other services (device identity), and Will Message payloads often include 'user=' fields",
+    "known_hashes \u2014 Retained PUBLISH payloads regularly contain JWTs, API tokens, bcrypt hashes (broker used as a config bus). Scan captured payloads for the same patterns hashloot uses; feed matches to the shared hash store",
+    "known_domains \u2014 TLS cert issuer/subject on 8883, plus MQTT broker $SYS/broker/version strings that embed a hostname ('mosquitto version 2.0.15 running on broker.internal.corp')",
+    "relay_targets \u2014 an anonymous-writable broker is a lateral-movement staging point (publish a command to any subscribing device); record as 'mqtt-write' relay for the attack-path graph",
+    "NEW: known_topics \u2014 a first-class cross-service surface. Distinct from all existing wires because topic paths carry structure (namespace/device/action) other IoT-adjacent scanners could seed against \u2014 Modbus/OPC-UA scans, HTTP api enum ('/api/mqtt/topics'), Kafka topic-name correlation (same names used on both bus systems in mixed IoT-cloud stacks)",
+    "NEW: known_devices \u2014 device fingerprints (mqtt vendor conventions: shelly, tasmota, zigbee2mqtt, wled, esphome, hass) feed a shared IoT device roster consumed by upnp, ssdp, coap, mdns (post-tranche)",
+    "port.product / port.version \u2014 direct feed into recce's CVE mapper (per _fill_product path in svcdetect) for Mosquitto/EMQX/HiveMQ/VerneMQ CVEs"
+  ],
+  "recommended_findings": [
+    {
+      "title": "MQTT broker accepts anonymous CONNECT",
+      "severity": "high"
+    },
+    {
+      "title": "MQTT broker leaks retained messages on wildcard subscribe (#)",
+      "severity": "critical"
+    },
+    {
+      "title": "MQTT broker leaks $SYS metrics (version, clients, uptime)",
+      "severity": "high"
+    },
+    {
+      "title": "MQTT broker accepts anonymous PUBLISH (public write bus)",
+      "severity": "critical"
+    },
+    {
+      "title": "MQTT broker accepts empty ClientID (ghost/session-hijack risk)",
+      "severity": "high"
+    },
+    {
+      "title": "MQTT credential accepted via low-effort spray (weak/default password)",
+      "severity": "critical"
+    },
+    {
+      "title": "MQTT Will Message discloses device identity/token",
+      "severity": "medium"
+    },
+    {
+      "title": "MQTT broker on 1883/tcp without TLS (plaintext credentials on the wire)",
+      "severity": "medium"
+    },
+    {
+      "title": "MQTT broker reachable, authentication enforced (auth-gated)",
+      "severity": "info"
+    },
+    {
+      "title": "MQTT broker running end-of-life / known-CVE version",
+      "severity": "high"
+    }
+  ],
+  "recommended_hashcat_modes": [],
+  "implementation_notes": "Build `recce/services/mqtt.py` mirroring `services/kafka.py` shape: stdlib socket + struct only, bounded probe, `is_mqtt(port)` + `mqtt_targets(hosts)` + `probe(ip, port, timeout)` returning `{reachable, version, anon_ok, empty_clientid_ok, publish_ok, sys, retained: [{topic, size, snippet}], live: [...], reason, error}` + `findings(hosts, probes)` + `runbook(ip, port)` + `analyze(hosts, creds, active, budget, progress)`. MQTT framing: fixed header byte 1 = packet-type<<4 | flags, then variable-length remaining-length (1-4 bytes, 7-bit continuation like protobuf varint \u2014 implement `_encode_remlen`/`_decode_remlen`). Packet types: CONNECT=1, CONNACK=2, PUBLISH=3, PUBACK=4, SUBSCRIBE=8, SUBACK=9, UNSUBSCRIBE=10, DISCONNECT=14. Strings are length-prefixed UTF-8 (uint16 length). For v5 add a Properties section (varint length + typed fields). Wire into `svcdetect.PORT_NAMES` (1883, 8883, 1884) + `_SIGNATURES` (CONNACK 0x20 0x02); wire into `serviceenum._NAME` ('mqtt', 'mqtts', 'secure-mqtt') and `_PORT` (1883, 8883); add `mqtt` to `scripts/recce-service.sh` name_to_svc/port_to_svc so `recce services` prints an actionable next command (`mosquitto_sub -h {ip} -p {port} -t '#' -v -W 3` for anon, `mosquitto_sub -h {ip} -p {port} -u <user> -P <pass> -t '$SYS/#'` for auth). Retained-payload capture writes to loot/mqtt/<ip>-<port>/ (out-of-sheet \u2014 sensitive). Every probe uses `svcprobe.iter_probe` for budget/progress consistent with other services. Cleanup after `publish-permission-test` is mandatory (empty retained publish to zero the canary). All active probes must respect `active=False` for passive-only runs."
+}

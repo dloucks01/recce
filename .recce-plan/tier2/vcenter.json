@@ -1,0 +1,190 @@
+{
+  "service": "vCenter / ESXi SOAP (vSphere Web Services SDK)",
+  "summary": "vCenter and ESXi hosts expose the vSphere Web Services SDK as a SOAP endpoint at POST /sdk on 443/tcp (also 902/tcp for the mgmt/agent channel). Recce currently has ZERO dedicated coverage: no `vcenter.py`/`vsphere.py` module in `recce/services/`, port 443 is only mapped generically to the `http` enum script in `serviceenum.py`, and `svcdetect.py` does not recognise the vSphere SDK Server/response signatures. The only existing mention of vSphere is two loose product-based CVE-advisory rows in `recce/vuln/vulndb.py` (line 566 and 576) that fire only if some other component happens to name-drop \"vmware esxi\"/\"vmware vcenter\" in a banner \u2014 which the SDK's minimal `Server: VMware/*` header on the redirect from `/` normally does NOT trigger. Given air-gap constraints and the outsized post-exploitation value of a vCenter foothold (hypervisor takeover, VM stealing, snapshot-based credential extraction, AD identity source pivoting via vsphere.local SSO), this is a high-value gap. Implementation should be a stdlib-only `recce/services/vsphere.py` that emits SOAP over TLS to `/sdk`, parses the `ServiceContent` reply for version/build/apiType, does credentialed SessionManager.Login when creds are available, harvests HostSystem/VirtualMachine/SessionManager inventory, and \u2014 critically \u2014 feeds every discovered ESXi host, SSO/AD domain, and account back into recce's cross-service wires so the rest of the tool can pivot on them.",
+  "default_ports": [
+    "443/tcp (vSphere Web Services SDK - SOAP /sdk)",
+    "902/tcp (ESXi/vCenter hostd agent, NFC file transfer)",
+    "5480/tcp (vCenter Server Appliance VAMI - separate but co-located)",
+    "9443/tcp (vSphere Client / legacy Flex, Analytics Service - Log4Shell surface)"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "notes": "No dedicated module exists. `recce/services/svcdetect.py` PORT_NAMES does not list 443 or 902 for vSphere (443 is left to `serviceenum.py._PORT` which maps to the generic `http` script \u2014 the SDK POST /sdk path is never touched). `_SIGNATURES` has no vSphere/VMware pattern. `serviceenum.py` line 40 maps 443 -> 'http' only; port 902 is entirely absent. The only recce mentions of vSphere/ESXi are two advisory rows in `recce/vuln/vulndb.py` (lines 566 and 576) keyed on product substrings `vmware esxi` / `vmware vcenter` / `vsphere`, which almost never populate `port.product` because nmap's default `-sV` on 443 returns a generic 'ssl/http' with an nginx/openresty Server header (the vSphere front-end proxy), not a VMware product string. `netbios.py` line 206 comment mentions VMware only for MAC OUI. No probe, no version-to-build CVE mapping, no SessionManager.Login flow, no HostSystem/VM harvesting, no SSO domain extraction. NOTE: adjacent VMware-adjacent surfaces are also uncovered \u2014 no OpenSLP 427/tcp probe (CVE-2021-21974 ESXiArgs), no CIM 5989/tcp, no VAMI 5480/tcp.",
+    "files": [
+      "recce/services/svcdetect.py (no signature, no port entry)",
+      "recce/services/serviceenum.py (443 -> http only, 902 missing)",
+      "recce/vuln/vulndb.py:566 (advisory-only ESXi row)",
+      "recce/vuln/vulndb.py:576 (advisory-only vCenter row)"
+    ]
+  },
+  "capabilities": [
+    {
+      "name": "detect-vsphere-sdk",
+      "kind": "passive",
+      "description": "Recognise the vSphere Web Services SDK on 443/tcp by (a) fetching `/` and matching the redirect to `/ui` / `/vsphere-client/`, (b) matching `Server: VMware/*` or `Set-Cookie: vmware_client=VMware;` response headers, and (c) content-sniffing the HTML title 'ID_VC_Welcome' (vCenter) / 'ID_EESX_Welcome' (ESXi). Adds a PORT_NAMES entry (443: hint) and a new `_SIGNATURES` entry so an unnamed 443 gets labelled 'vsphere-sdk' with the SSL wrap picked up by the existing `tls_http_probe` path. Zero SOAP traffic \u2014 a single HEAD/GET.",
+      "value": "high",
+      "protocol_reference": "vSphere Web Services SDK Programming Guide 8.0 \u00a72 (Endpoint URL)"
+    },
+    {
+      "name": "retrieveservicecontent-fingerprint",
+      "kind": "passive",
+      "description": "POST a fixed SOAP envelope invoking `RetrieveServiceContent` to `https://<host>/sdk` and parse the returned `ServiceContent` for `about.fullName`, `about.version`, `about.build`, `about.apiType` (VirtualCenter | HostAgent), `about.instanceUuid`, `about.osType`, and `about.licenseProductName`. This is the ground-truth fingerprint \u2014 no auth required \u2014 and the sole reliable way to distinguish vCenter (apiType=VirtualCenter) from ESXi (apiType=HostAgent) and to get the build number the CVE mapper needs.",
+      "value": "critical",
+      "protocol_reference": "vSphere API 8.0 - ServiceInstance.RetrieveServiceContent, AboutInfo data object",
+      "finding_kind": "vsphere_fingerprint"
+    },
+    {
+      "name": "cve-build-map",
+      "kind": "passive",
+      "description": "Map the exact `about.build` string to a curated air-gapped CVE table: CVE-2021-21985 (vSphere Client vROps plugin pre-auth RCE, <7.0 U2a), CVE-2021-22005 (file-upload analytics, <7.0 U2c/6.7 U3o), CVE-2023-34048 (DCE-RPC OOB write pre-auth RCE, <8.0 U2/U1c), CVE-2024-37085 (ESXi AD group priv-esc), CVE-2021-21974 (OpenSLP ESXiArgs 427/tcp), CVE-2024-22252/22253 (USB stack). Builds are the honest identifier here \u2014 the marketing version (7.0.3) covers 30+ builds with different patch states \u2014 so keying the finding on `build` avoids the false-positive blanket advisory the current `vulndb.py` row produces.",
+      "value": "critical",
+      "finding_kind": "vsphere_outdated_build"
+    },
+    {
+      "name": "sessionmanager-login",
+      "kind": "auth",
+      "description": "When creds are available (from `known_users` / operator-provided / SSO defaults `administrator@vsphere.local`, `root`/`vmware`, `root`/blank on lab ESXi), send `SessionManager.Login` SOAP with `<userName>` and `<password>` fragments and check the response for a session cookie (`vmware_soap_session`). A successful login on ESXi is direct host takeover; on vCenter it grants API-level control over every managed host and VM. Must handle the AD-integrated case (userName in UPN form `user@domain`) \u2014 SSO federates to AD identity sources.",
+      "value": "critical",
+      "protocol_reference": "vSphere API - SessionManager.Login, LoginByToken",
+      "finding_kind": "vsphere_valid_creds"
+    },
+    {
+      "name": "session-hijack-list",
+      "kind": "auth",
+      "description": "After a successful login (or with a looted `vmware_soap_session` cookie), invoke `SessionManager.SessionList` to enumerate every active operator session \u2014 userName, ipAddress, loginTime, lastActiveTime, callCount. Feeds `known_users` with real operators (not guessed), and their client IPs land in `relay_targets` as admin workstations worth their own scan.",
+      "value": "high",
+      "protocol_reference": "vSphere API - SessionManager.sessionList, UserSession"
+    },
+    {
+      "name": "hostsystem-inventory",
+      "kind": "auth",
+      "description": "Traverse the vCenter inventory tree (`RetrievePropertiesEx` on `PropertyCollector` filtered to `HostSystem`) to list every managed ESXi host: name (FQDN), hardware.systemInfo, config.product.build, config.network.dnsConfig, runtime.connectionState. Each host is an independent takeover target with its own /sdk. This is the multiplier that makes a single vCenter compromise so valuable \u2014 one auth turns into N hypervisor foothholds.",
+      "value": "critical",
+      "protocol_reference": "vSphere API - HostSystem managed object, PropertyCollector.RetrievePropertiesEx"
+    },
+    {
+      "name": "vm-inventory",
+      "kind": "auth",
+      "description": "Enumerate VirtualMachine managed objects for name, config.guestFullName, guest.hostName, guest.ipAddress, config.datastoreUrl, config.uuid, runtime.powerState, snapshot list. Feeds a new shared surface (`known_vms`) and cross-populates `known_hostnames` with per-VM guest hostnames \u2014 the tenant-side hostnames operators need but that DNS never held.",
+      "value": "high",
+      "protocol_reference": "vSphere API - VirtualMachine, GuestInfo"
+    },
+    {
+      "name": "sso-domain-extract",
+      "kind": "passive",
+      "description": "Extract the SSO / PSC domain from `ServiceContent.about.instanceUuid`, from `LookupService.List` (/lookupservice/sdk on vCenter), and from the STS cert SAN. Default is `vsphere.local` but operators frequently retain that default in production \u2014 surfacing it enables the `administrator@vsphere.local` login attempt AND feeds `known_domains` so LDAP/Kerberos modules know to try SSO federation flows.",
+      "value": "high",
+      "finding_kind": "vsphere_sso_domain"
+    },
+    {
+      "name": "identity-source-enum",
+      "kind": "auth",
+      "description": "Query `SsoAdminIdentitySourceManagementService` (vCenter only, /sso-adminserver/sdk) for the configured AD/LDAP identity sources \u2014 server FQDN, base DN, bind DN. This is the pivot that connects a vCenter compromise to the Windows domain: the bind account is often a stale service principal, and its DN gives the AD DC hostname to attack next. Cross-service gold.",
+      "value": "critical",
+      "protocol_reference": "vSphere Web Services SDK - vim.sso IDL"
+    },
+    {
+      "name": "esxi-local-user-enum",
+      "kind": "auth",
+      "description": "On apiType=HostAgent, invoke `HostLocalAccountManager.RetrieveUserGroups` (or the `AccountManager` on older builds) to list every local shell/API account and role. Recovers root-alternative accounts and dcui, which routinely have blank or trivial passwords in labs and small ops. Each userName lands in `known_users` tagged `service=esxi host=<fqdn>`.",
+      "value": "high",
+      "protocol_reference": "vSphere API - HostLocalAccountManager"
+    },
+    {
+      "name": "datastore-browse",
+      "kind": "auth",
+      "description": "Use `HostDatastoreBrowser.SearchDatastoreSubFolders` to list `[datastore] */*.vmx`, `.vmdk`, `.nvram`, `.vmsd` files across every datastore. Reveals VM names never exported to inventory, orphaned VMs (a stale DC image with reachable ntds.dit inside), and datastore URLs \u2014 an NFS-backed datastore URL correlates directly with recce's NFS module output as the same export.",
+      "value": "high",
+      "protocol_reference": "vSphere API - HostDatastoreBrowser"
+    },
+    {
+      "name": "vmdk-cred-harvest",
+      "kind": "chain",
+      "description": "For a powered-off Windows VM with a reachable VMDK, use the NFC channel on 902/tcp (or datastore HTTP `/folder/<ds>/<vm>/<vm>-flat.vmdk?dcPath=...&dsName=...`) to pull the disk offline and lift SAM/SYSTEM or NTDS.dit \u2014 feeds `known_hashes`. Even skipping the download, listing the snapshot chain proves whether the AD DC on this vCenter has an old unpatched snapshot to revert to (bypass of any post-compromise password rotation).",
+      "value": "critical",
+      "cwe": [
+        "CWE-522",
+        "CWE-284"
+      ],
+      "finding_kind": "vsphere_offline_disk_reachable"
+    },
+    {
+      "name": "guest-ops-manager-exec",
+      "kind": "chain",
+      "description": "With VM-admin rights and stored guest credentials (or after `VirtualMachine.AcquireCredentialsInGuest`), `GuestOperationsManager.processManager.StartProgramInGuest` runs an arbitrary command inside any powered-on guest with no network path \u2014 pure hypervisor-mediated exec. Turns a vCenter foothold into shells on every tenant OS with tools installed.",
+      "value": "critical",
+      "protocol_reference": "vSphere API - GuestOperationsManager, GuestProcessManager"
+    },
+    {
+      "name": "exploit-cve-2021-21985",
+      "kind": "exploit",
+      "description": "Pre-auth RCE via the vSphere Client vROps plugin: POST to `/ui/h5-vsan/rest/proxy/service/vsanQueryUtil_setVsanPerfsvcHosts` (path varies by build) with a Java-serialised payload. Gated on build-map hit AND explicit operator opt-in \u2014 the exploit writes files on the appliance. Recce should DETECT the vulnerable build and emit the finding + a manual-run command, not launch by default.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-502"
+      ],
+      "finding_kind": "vsphere_cve_2021_21985"
+    },
+    {
+      "name": "linked-vcenter-discovery",
+      "kind": "auth",
+      "description": "Query `LookupService.List` for federated PSC / Enhanced Linked Mode peers and read `HostSystem.summary.managementServerIp` to identify OTHER vCenters that manage the same hosts or share the same SSO domain. Each linked vCenter is a new relay target: the same SSO creds may work on it, and one federated vCenter can push tokens to another.",
+      "value": "high"
+    },
+    {
+      "name": "cert-hostname-mine",
+      "kind": "passive",
+      "description": "Read the /sdk endpoint's TLS cert and extract Subject CN + all SAN DNS entries. vSphere deploys a machine SSL cert whose SAN typically holds the appliance FQDN AND the PSC FQDN AND (on ESXi) the host's short + FQDN forms. Every DNS name feeds `known_hostnames`; the CN's domain suffix feeds `known_domains`. Costs one TLS handshake we already do for `tls_http_probe`.",
+      "value": "medium"
+    },
+    {
+      "name": "vami-adjacency",
+      "kind": "passive",
+      "description": "Note whether 5480/tcp (vCenter Server Appliance Management Interface) is also open on the same host \u2014 VAMI has its own auth surface (root/vmware defaults still common), separate CVE class, and hands over the appliance OS rather than vSphere. Cheap check via the existing port list; emits a paired finding steering the operator to the VAMI runbook.",
+      "value": "medium"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames: every HostSystem.name (ESXi FQDNs), every VirtualMachine.guest.hostName (tenant hostnames DNS never held), every SAN entry from the /sdk TLS cert, LookupService peer FQDNs \u2014 vSphere is often the ONLY oracle that names all tenant machines by their real internal FQDN",
+    "known_domains: the SSO domain (default `vsphere.local`, often kept), every AD identity-source domain from SsoAdminIdentitySourceManagementService, the cert Subject CN suffix \u2014 direct pivot into recce's Kerberos/LDAP flows",
+    "known_users: SsoAdmin user list, ESXi HostLocalAccountManager users, active SessionManager.SessionList operators (real usernames observed, not guessed), every guest.customization owner, every VM annotation author. Tag each with `service=vsphere` and `domain=<sso-or-ad>`",
+    "known_hashes: offline-disk harvest from powered-off VM VMDKs (NFC on 902/tcp or /folder HTTP) \u2014 SAM/SYSTEM, NTDS.dit, sssd cache; VMX files leak encoded VNC and Autologon passwords in `RemoteDisplay.vnc.password` and `guestinfo.*` keys",
+    "relay_targets: (a) every managed ESXi host as its own SDK relay target \u2014 one vCenter compromise multiplies into N hypervisor targets; (b) every linked vCenter / PSC in Enhanced Linked Mode; (c) every operator client IP seen in SessionManager.SessionList as an admin workstation worth scanning; (d) NFS/iSCSI datastore back-end IPs (correlate against recce's NFS module hits)",
+    "NEW - known_vms: a new shared surface holding (uuid, name, guest_fqdn, guest_ip, power_state, snapshot_count, datastore_paths, source=vcenter|esxi|proxmox|hyperv). Consumers: findings that a critical asset (DC, DB) has an old snapshot; correlation that a host discovered by nmap is actually a VM whose disk we can read offline; provider-agnostic \u2014 Proxmox/Hyper-V modules populate the same surface later",
+    "NEW - datastores: (name, type=nfs|vmfs|iscsi, remote_host, remote_path, capacity) \u2014 an NFS-typed datastore's remote_host+remote_path is exactly what recce's NFS module produces; matching them proves the same export and lets one finding chain to the other (mount the datastore export from Kali, walk the VMs)",
+    "NEW - hypervisor_inventory: a per-host summary (apiType, product, build, host_count, vm_count, sso_domain, ad_identity_sources[]) so downstream reports and the attack-path graph can render the vSphere estate as one node with its blast radius, not a list of unrelated 443/tcp findings"
+  ],
+  "recommended_findings": [
+    {
+      "severity": "critical",
+      "title": "vCenter/ESXi SDK exposed with vulnerable build (CVE-2021-21985 / 22005 / 2023-34048 pre-auth RCE)"
+    },
+    {
+      "severity": "critical",
+      "title": "vSphere SSO/ESXi default credentials accepted (administrator@vsphere.local, root/vmware, root/blank)"
+    },
+    {
+      "severity": "critical",
+      "title": "vCenter offline VM disk reachable via 902/tcp NFC or /folder HTTP (SAM/NTDS harvest)"
+    },
+    {
+      "severity": "high",
+      "title": "vCenter AD identity source configured \u2014 SSO federates to Windows domain <name> via bind DN <dn>"
+    },
+    {
+      "severity": "high",
+      "title": "vSphere estate enumerated: <N> ESXi hosts, <M> VMs, SSO domain <d>, linked vCenters <k>"
+    },
+    {
+      "severity": "medium",
+      "title": "vCenter Server Appliance VAMI (5480/tcp) reachable alongside the SDK \u2014 separate auth surface"
+    },
+    {
+      "severity": "info",
+      "title": "vSphere Web Services SDK reachable (build <b>, apiType <VirtualCenter|HostAgent>) \u2014 auth required"
+    }
+  ],
+  "recommended_hashcat_modes": [],
+  "implementation_notes": "Create `recce/services/vsphere.py` shaped like `recce/services/consul.py` (stdlib http.client + ssl over an unverified context; a `probe()` returning a dict; `is_vsphere(port)`, `vsphere_targets()`, `findings()`, `runbook()`, `analyze()`; wire into svcprobe.iter_probe for budget/progress). All SOAP is short fixed envelopes stored as string constants \u2014 no external SOAP library (air-gap constraint). Add PORT_NAMES entries `443: ('vsphere-sdk-or-https', 'HTTPS - may be vSphere SDK)` and `902: ('vmware-auth', 'VMware host agent / NFC')` in `svcdetect.py`, add a `_SIGNATURES` entry matching `VMware/` in Server headers, and add an `esx*` / `vsphere*` / `vcenter*` route in `serviceenum.py._NAME` pointing at a new `vsphere` per-service script. Update `recce/vuln/vulndb.py` rows to be build-keyed via a callback rather than string-match. Add `known_vms`, `datastores`, `hypervisor_inventory` shared surfaces in `recce/core/` mirroring the existing `known_hostnames.py` / `relay_targets.py` shape. Detect vs exploit split: the `-cve-*` capability should DETECT vulnerable builds and emit a finding + copy-pasteable manual command by default, and only launch the exploit under an explicit opt-in flag (matches recce's current stance on active exploitation). NFC on 902/tcp for VMDK reads needs a small binary framing implementation \u2014 plan a follow-on tranche, keep the initial ship at SOAP-only + HTTP `/folder` datastore reads over 443."
+}

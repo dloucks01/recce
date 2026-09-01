@@ -1,0 +1,227 @@
+{
+  "service": "Nagios NRPE",
+  "summary": "Nagios NRPE (5666/tcp) is a MISSING SERVICE MODULE in recce. Port 5666 is absent from svcdetect.PORT_NAMES and serviceenum _PORT/_NAME maps, no signature exists in _SIGNATURES, and no per-service script maps to it. Only Nagios reference in the tree is a generic web-dashboard vuln entry in vuln/vulndb.py:707 (unrelated to NRPE binary protocol). NRPE is a high-value gap: it is an RCE-adjacent daemon (its entire job is to run shell commands on behalf of a remote monitoring server), historically vulnerable to CVE-2013-1362 argument injection when dont_blame_nrpe=1, gated only by an allowed_hosts IP whitelist (no user auth), and its command output leaks logged-in users, mounted filesystems, processes, hostnames, and plugin paths \u2014 a rich cross-service seeding surface. NRPE v2 speaks a fixed 1036-byte CRC32-checked packet; v3 added length-prefixed variable payloads; v4 requires TLS (usually anon-DH ADH-AES256-SHA with no cert validation, itself a finding). Build a new recce/services/nrpe.py in the shape of modbus.py (binary probe + findings + runbook + analyze) with ipmi.py-style cred/known_users wiring for enumerated output. Register the port in svcdetect.PORT_NAMES (\"nrpe\", \"Nagios NRPE agent\"), add nrpe -> \"nrpe\" to serviceenum._NAME and 5666 -> \"nrpe\" to _PORT, and add a byte-signature for the NRPE response header (v2 fixed header 0x00 0x02 0x00 0x02) in _SIGNATURES.",
+  "default_ports": [
+    "5666/tcp"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [
+      "recce/vuln/vulndb.py"
+    ],
+    "notes": "Only Nagios reference is vulndb.py:707 covering the Nagios XI web dashboard (unauth RCE / default creds against the web UI), NOT the NRPE agent binary protocol on 5666. No probe, no signature, no port map entry, no per-service script mapping. Port 5666 falls through svcdetect (returns unknown) and serviceenum (no script suggestion)."
+  },
+  "capabilities": [
+    {
+      "name": "detect-nrpe-port",
+      "kind": "passive",
+      "description": "Register 5666/tcp in svcdetect.PORT_NAMES as ('nrpe','Nagios NRPE agent') and in serviceenum _NAME/_PORT so the port stops appearing as unknown and gets a runbook slot. Also add a byte-signature to svcdetect._SIGNATURES matching the NRPE v2 response header (0x00 0x02 0x00 0x02, big-endian: version=2 type=response) so non-standard ports still classify.",
+      "value": "medium",
+      "finding_kind": "detection"
+    },
+    {
+      "name": "nrpe-version-probe",
+      "kind": "active",
+      "description": "Send the built-in _NRPE_CHECK query (packet_type=1/query, command_buffer='_NRPE_CHECK') and parse the response. Reveals NRPE major/minor version (v2 vs v3 vs v4) and confirms this is a live NRPE daemon rather than a random 5666 listener. Version drives which vuln fingerprints apply (CVE-2013-1362 pre-2.15, CVE-2014-2913 pre-2.15, CVE-2020-6581 pre-3.2.1).",
+      "value": "high",
+      "protocol_reference": "NRPE protocol source (nrpe.h) \u2014 packet_version=2, packet_type QUERY=1 / RESPONSE=2, buffer[1024]",
+      "finding_kind": "nrpe_version_disclosed"
+    },
+    {
+      "name": "nrpe-plaintext-v2-detect",
+      "kind": "passive",
+      "description": "Attempt an unencrypted v2 handshake first. If the daemon replies in clear (older NRPE builds with use_ssl=0 or plain v2), flag it high \u2014 command output, hostnames, and usernames traverse the network in the clear AND anyone reaching the port can invoke commands (no auth in the base protocol). Compare against TLS-only v4 defaults.",
+      "value": "high",
+      "cwe": [
+        "CWE-319"
+      ],
+      "finding_kind": "nrpe_plaintext_traffic"
+    },
+    {
+      "name": "nrpe-anon-dh-tls",
+      "kind": "passive",
+      "description": "When plaintext fails, retry via TLS with the anonymous-DH cipher suite historically used by NRPE (ADH-AES256-SHA / ADH-AES128-SHA). If the handshake succeeds without a certificate, flag it: anon-DH provides confidentiality but zero server authentication \u2014 a MITM can transparently proxy the session, harvest exec output, and forge query packets. This is the default for NRPE 3.x builds and remains common in 4.x.",
+      "value": "high",
+      "cwe": [
+        "CWE-295",
+        "CWE-757"
+      ],
+      "protocol_reference": "NRPE ssl_utils.c \u2014 SSL_CTX with SSL_CTX_set_cipher_list(\"ADH\")",
+      "finding_kind": "nrpe_anon_dh_tls"
+    },
+    {
+      "name": "nrpe-command-enumeration",
+      "kind": "active",
+      "description": "Probe a curated list of default check commands (check_load, check_disk, check_users, check_procs, check_swap, check_total_procs, check_zombie_procs, check_mem, check_cpu, check_uptime, check_hostname, check_mailq, check_ntp_time, check_ide_smart, check_apt, check_yum). Each successful invocation is a live registered command; each 'NRPE: Command not defined' response is negative evidence. Builds the attack surface map for arg-injection targeting and reveals what the monitoring surface actually exposes.",
+      "value": "high",
+      "finding_kind": "nrpe_command_surface"
+    },
+    {
+      "name": "nrpe-arg-injection-cve-2013-1362",
+      "kind": "exploit",
+      "description": "Send a command that accepts $ARG1$ substitution (any command line in nrpe.cfg with $ARGx$) with metachars in the argument: bang-separator ! then shell metacharacters (;, `, $(...), \\n, |). On daemons built with --enable-command-args AND configured with dont_blame_nrpe=1, NRPE substitutes into the shell exec unquoted \u2192 arbitrary command execution as the nagios user. Test with a benign payload like 'check_something!\\`id\\`' or 'a && echo RECCE_MARKER' and search the response for the marker or 'uid=' before declaring RCE.",
+      "value": "critical",
+      "cwe": [
+        "CWE-78",
+        "CWE-88"
+      ],
+      "protocol_reference": "CVE-2013-1362 \u2014 NRPE < 2.15 nrpe.c process_arguments()",
+      "finding_kind": "nrpe_arg_injection_rce"
+    },
+    {
+      "name": "nrpe-metachar-bypass-cve-2014-2913",
+      "kind": "exploit",
+      "description": "CVE-2014-2913 patch for CVE-2013-1362 blocked most metachars but missed newline (0x0a) when dont_blame_nrpe=1. Send a payload containing a literal LF to bypass the sanitizer and still get shell exec. Only applies to NRPE 2.15 / early 2.x patched builds.",
+      "value": "critical",
+      "cwe": [
+        "CWE-78",
+        "CWE-184"
+      ],
+      "protocol_reference": "CVE-2014-2913 \u2014 incomplete fix for CVE-2013-1362",
+      "finding_kind": "nrpe_metachar_bypass_rce"
+    },
+    {
+      "name": "nrpe-response-oob-cve-2020-6581",
+      "kind": "passive",
+      "description": "NRPE < 3.2.1 has an out-of-bounds read in the response parser (length field vs. buffer). Fingerprint by version disclosed from _NRPE_CHECK; do NOT attempt to trigger \u2014 this is a client-side crash primitive that mostly matters as a DoS/info-disclosure vector on the monitoring server. Report as version-tagged finding, no exploit sent.",
+      "value": "low",
+      "cwe": [
+        "CWE-125"
+      ],
+      "protocol_reference": "CVE-2020-6581",
+      "finding_kind": "nrpe_cve_2020_6581_version"
+    },
+    {
+      "name": "nrpe-allowed-hosts-inferred-permissive",
+      "kind": "auth",
+      "description": "NRPE has NO user authentication \u2014 allowed_hosts is the entire ACL. If recce's scanner IP reaches the daemon and receives a valid response, the allowed_hosts entry is either wildcarded, contains a broad CIDR, or is unset. Report the source IP that got through as evidence the ACL includes it, and cite that best practice restricts to the Nagios/Icinga server IP(s) only. This is often the finding operators care about most because the ACL is the sole gate on remote command execution.",
+      "value": "high",
+      "cwe": [
+        "CWE-284",
+        "CWE-1188"
+      ],
+      "finding_kind": "nrpe_allowed_hosts_permissive"
+    },
+    {
+      "name": "nrpe-check-users-user-harvest",
+      "kind": "active",
+      "description": "Invoke check_users (or check_procs -a) and parse the response: check_users returns 'USERS OK - N users currently logged in' and, in verbose mode / on some plugins, lists names. check_procs with -f flag can leak process argv including bind addresses, database strings, and connection args. Emit each username seen to feed known_users for reuse against SSH / SMB / LDAP / IPMI / MSSQL. High-signal cheap read.",
+      "value": "high",
+      "finding_kind": "nrpe_userlist_extracted"
+    },
+    {
+      "name": "nrpe-check-hostname-selfid",
+      "kind": "active",
+      "description": "Invoke check_hostname (when present) or parse check_uptime / check_load response for the hostname string plugins often prefix. Emit hostname to known_hostnames so it feeds TLS-SAN checks, Kerberos realm inference, and reverse-lookup validation across other services (LDAP, SMB, MSSQL).",
+      "value": "medium",
+      "finding_kind": "nrpe_hostname_extracted"
+    },
+    {
+      "name": "nrpe-plugin-path-os-fingerprint",
+      "kind": "passive",
+      "description": "Error paths in check-not-found responses ('/usr/lib/nagios/plugins/check_x not found' vs '/usr/lib64/nagios/plugins/...' vs '/opt/local/libexec/...') fingerprint the OS/distribution (Debian vs RHEL/CentOS vs macports vs FreeBSD). Also confirms whether NRPE is running under a container (paths like /app/nagios). Cheap OS classification with zero extra traffic.",
+      "value": "medium",
+      "finding_kind": "nrpe_os_fingerprint"
+    },
+    {
+      "name": "nrpe-monitored-service-inference",
+      "kind": "chain",
+      "description": "The set of configured check_ commands implies what else runs on the host: check_mysql \u2192 MySQL locally, check_pgsql \u2192 PostgreSQL, check_http \u2192 local web app, check_smtp \u2192 mail, check_dns \u2192 resolver, check_oracle_health \u2192 Oracle, check_ldap \u2192 LDAP. Cross-reference against ports actually seen open on this host by the port sweep \u2014 an implied service with no open port is a bound-to-127.0.0.1 target reachable ONLY via the NRPE RCE (a pivot signal for the operator).",
+      "value": "high",
+      "finding_kind": "nrpe_implied_local_services"
+    },
+    {
+      "name": "nrpe-crc32-integrity-only",
+      "kind": "passive",
+      "description": "The NRPE v2 packet CRC32 is integrity-only, not a MAC \u2014 anyone who can reach the socket can craft valid packets. Note this once alongside plaintext-v2 detection to explain why plaintext + no-auth means anyone on-path can invoke any registered command. Documentation-grade finding that sharpens the plaintext one.",
+      "value": "low",
+      "cwe": [
+        "CWE-353"
+      ],
+      "finding_kind": "nrpe_no_message_auth"
+    },
+    {
+      "name": "nrpe-tls-cert-harvest",
+      "kind": "passive",
+      "description": "When NRPE v4 is deployed with a real certificate (not anon-DH), extract the server cert CN and SANs during the TLS handshake. Feed to known_hostnames for cross-service validation. Also record the cert fingerprint so a fleet-wide scan clusters agents that share the same cert (common when one image is redeployed).",
+      "value": "medium",
+      "finding_kind": "nrpe_tls_cert_extracted"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_users: parse check_users (logged-in user names) and check_procs -f (process owner column, argv strings) \u2014 seeds SSH/SMB/LDAP/IPMI/MSSQL/PostgreSQL/MySQL password-spray and cred re-use",
+    "known_hostnames: parse check_hostname output, check_load/check_uptime hostname prefix, and NRPE v4 TLS cert CN/SAN \u2014 seeds Kerberos realm inference, TLS SAN validation, LDAP base-DN guessing, reverse-DNS cross-check",
+    "known_domains: extract FQDN suffix from hostname / TLS SAN \u2014 seeds Kerberos/AD/LDAP realm discovery",
+    "implied_local_services (NEW shared surface): the set of configured check_ commands (check_mysql / check_pgsql / check_oracle_health / check_http / check_ldap / check_smtp / check_dns / check_ntp_time / check_mailq) implies services listening on 127.0.0.1 that the port sweep can't see \u2014 a NEW cross-service surface that pivot planning, RCE-payload staging, and lateral-movement suggestions should read from",
+    "os_fingerprint: plugin path prefix (/usr/lib vs /usr/lib64 vs /opt/local) refines host OS beyond nmap OS guess \u2014 consumed by exploit selection, package-version heuristics, path assumptions in other modules",
+    "rce_footholds (NEW shared surface): if CVE-2013-1362 arg-injection succeeds, this host becomes a confirmed code-exec pivot as user 'nagios' \u2014 feed to a shared 'rce_footholds' registry that session/persistence/pivot planners read for staging targets",
+    "monitoring_server_candidates (NEW shared surface): allowed_hosts is the whitelist of Nagios/Icinga monitoring server IPs; if we later gain code-exec, /etc/nagios/nrpe.cfg reads that list \u2014 those IPs are high-value follow-on scan targets (the monitoring server itself typically has SSH keys or agent trust into every monitored host)",
+    "relay_targets: a monitoring host reached from NRPE config \u2192 likely SSH/WinRM/agent trust outward to every host it monitors (feed relay_targets style pivot list)",
+    "cred_material_paths: post-RCE, ~nagios/.ssh/, /etc/nagios/resource.cfg (contains $USER1$..$USERN$ macros often holding DB passwords for check_mysql / check_pgsql / check_oracle) \u2192 feed known_hashes / known_credentials",
+    "tls_cert_registry: NRPE v4 cert fingerprint clusters identically-provisioned hosts across the fleet \u2014 useful for the (planned) cert-fingerprint cross-service map"
+  ],
+  "recommended_findings": [
+    {
+      "title": "nrpe_reachable",
+      "severity": "medium"
+    },
+    {
+      "title": "nrpe_version_disclosed",
+      "severity": "info"
+    },
+    {
+      "title": "nrpe_plaintext_traffic",
+      "severity": "high"
+    },
+    {
+      "title": "nrpe_anon_dh_tls",
+      "severity": "high"
+    },
+    {
+      "title": "nrpe_allowed_hosts_permissive",
+      "severity": "high"
+    },
+    {
+      "title": "nrpe_command_surface_enumerated",
+      "severity": "medium"
+    },
+    {
+      "title": "nrpe_arg_injection_rce (CVE-2013-1362)",
+      "severity": "critical"
+    },
+    {
+      "title": "nrpe_metachar_bypass_rce (CVE-2014-2913)",
+      "severity": "critical"
+    },
+    {
+      "title": "nrpe_cve_2020_6581_version",
+      "severity": "low"
+    },
+    {
+      "title": "nrpe_userlist_extracted",
+      "severity": "medium"
+    },
+    {
+      "title": "nrpe_hostname_extracted",
+      "severity": "info"
+    },
+    {
+      "title": "nrpe_os_fingerprint",
+      "severity": "info"
+    },
+    {
+      "title": "nrpe_implied_local_services",
+      "severity": "medium"
+    },
+    {
+      "title": "nrpe_no_message_auth (v2 CRC-only integrity)",
+      "severity": "low"
+    },
+    {
+      "title": "nrpe_tls_cert_extracted",
+      "severity": "info"
+    }
+  ],
+  "recommended_hashcat_modes": [],
+  "implementation_notes": "Create recce/services/nrpe.py in the shape of recce/services/modbus.py (line 1-243): module docstring explaining protocol + findings; _DEFAULT_PORT=5666, _TIMEOUT=4.0; is_nrpe(port) predicate matching portid==5666 or 'nrpe' in service/product; a _build_v2_query(command, args) that packs the fixed 1036-byte NRPE v2 packet (2B version=2, 2B type=1/query, 4B CRC32=0 placeholder, 2B result_code=0, 1024B buffer command\\\\x00pad\\\\xff+2B pad, then recompute CRC32 over the whole thing and patch bytes 4-7); a _build_v3_query() for length-prefixed variant; _parse_response(data) that reads the response type=2 packet and returns (result_code, buffer_text); a probe() that first tries plaintext v2 _NRPE_CHECK, falls back to TLS with ctx.set_ciphers('ALL:@SECLEVEL=0:ADH-AES256-SHA:ADH-AES128-SHA') and ctx.check_hostname=False; a nrpe_targets(hosts) collector; _finding() helper matching modbus.py line 159; findings(hosts, probes) that emits the enumerated finding list; runbook(ip, port) with check_nrpe -H host -p 5666 -c _NRPE_CHECK and -c check_users lines; findings_to_vulns delegating to svccommon; analyze(hosts, creds, active, budget, progress) matching the modbus.py signature at line 221 for scheduler compat. For the cred/known_users wiring, mirror ipmi.py line 604-621 (from ..creds.known_users import known_users; picked = known_users(hosts, cap=17, extras=[...])) if we ever want to pre-seed users to test with check_procs -u <user>. Register port in svcdetect.PORT_NAMES: 5666: ('nrpe','Nagios NRPE agent'). Add signature in _SIGNATURES: (re.compile(r'^\\\\x00\\\\x02\\\\x00\\\\x02'), 'nrpe','Nagios NRPE'). Add to serviceenum._NAME: 'nrpe':'nrpe' and _PORT: 5666:'nrpe'. Create recce/scripts/recce-service-nrpe.sh runbook alongside. Add a vulndb entry for CVE-2013-1362 keyed on the nrpe_arg_injection_rce finding kind. Airgap-safe: stdlib socket + ssl + struct + zlib.crc32 only; no external tools required at scan time (check_nrpe / nagios-nrpe-plugin is referenced only in the runbook for the operator)."
+}

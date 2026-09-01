@@ -1,0 +1,229 @@
+{
+  "service": "iSCSI",
+  "default_ports": [
+    "3260/tcp"
+  ],
+  "summary": "iSCSI (RFC 3720 / RFC 7143) tunnels SCSI over TCP so an initiator can mount raw block LUNs on a remote target. The Login PDU (opcode 0x03) opens either a Discovery or Normal session and negotiates AuthMethod (None / CHAP / SRP / KRB5); Text Request PDUs (opcode 0x04) with `SendTargets=All` walk every advertised target and its portal addresses. An attacker cares because storage arrays and hypervisor SANs habitually ship with AuthMethod=None (or CHAP only in one direction) \u2014 an unauthenticated SendTargets sweep reveals every LUN's IQN, and a Normal-session login with no credential mounts raw block devices (guest VM disks, database volumes, backup shares). Even where CHAP is enforced, offering a fake CHAP_C to the initiator can harvest a hashcat-crackable challenge/response, IQNs leak hostnames and reversed DNS zones, and Target Portal Groups often disclose an internal storage-network IP range recce has not yet seen. recce has zero coverage today: 3260 is not in the port map, no services/iscsi.py exists, and the SendTargets result feeds four of the five cross-service surfaces (users, hostnames, domains, hashes) plus arguably a new \"storage LUN\" surface.",
+  "existing_coverage": {
+    "detected": false,
+    "files": [],
+    "notes": "Zero coverage: no hit for 'iscsi' or '3260' anywhere under recce/*.py. Port 3260 is absent from svcdetect.PORT_NAMES and from serviceenum._PORT/_NAME, so an open 3260 today prints as an unnamed port with no runbook and no findings. No services/iscsi.py, no scripts/recce-service-iscsi.sh, no CVE/vuln entries reference the protocol."
+  },
+  "capabilities": [
+    {
+      "name": "port_recognition",
+      "kind": "passive",
+      "description": "Register 3260/tcp -> ('iscsi', 'iSCSI target portal (RFC 7143)') in svcdetect.PORT_NAMES and in serviceenum._PORT so open portals get a name and a runbook without an nmap re-probe.",
+      "value": "low",
+      "protocol_reference": "IANA / RFC 7143 \u00a73",
+      "notes": "One-line addition; prerequisite for every other capability."
+    },
+    {
+      "name": "login_pdu_probe",
+      "kind": "active",
+      "description": "Send a minimal iSCSI Login Request PDU (opcode 0x43 = Login|Immediate, CSG=SecurityNegotiation, T=1, InitiatorName=iqn.2005-03.org.open-iscsi:recce) and parse the Login Response BHS to confirm the port speaks iSCSI and to read the target's advertised AuthMethod list.",
+      "value": "high",
+      "protocol_reference": "RFC 7143 \u00a711.12 (Login Request) / \u00a711.13 (Login Response)",
+      "finding_kind": "iscsi_reachable",
+      "notes": "Login Response opcode 0x23 with StatusClass=0/Redirect confirms iSCSI; parses AuthMethod=<None,CHAP,...> from the Text key/value payload."
+    },
+    {
+      "name": "authmethod_none_discovery",
+      "kind": "auth",
+      "description": "Detect when the discovery-session Login accepts AuthMethod=None (StatusClass=0, session transitions to LoginOperationalNegotiation with no CHAP round-trip) \u2014 the baseline exposure that unlocks SendTargets.",
+      "value": "high",
+      "cwe": [
+        "CWE-306"
+      ],
+      "protocol_reference": "RFC 7143 \u00a711.1.3, \u00a712.1",
+      "finding_kind": "iscsi_auth_none_discovery"
+    },
+    {
+      "name": "authmethod_none_normal",
+      "kind": "auth",
+      "description": "Escalate to a Normal (SessionType=Normal) Login against a discovered TargetName with AuthMethod=None; a successful transition to FullFeaturePhase proves an attacker can mount the LUN with no credential.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "protocol_reference": "RFC 7143 \u00a76.3, \u00a711.12",
+      "finding_kind": "iscsi_auth_none_normal",
+      "notes": "Read-only: do NOT issue SCSI WRITEs; INQUIRY + READ CAPACITY (10) is enough to prove access."
+    },
+    {
+      "name": "sendtargets_discovery",
+      "kind": "active",
+      "description": "After discovery Login, issue a Text Request PDU (opcode 0x04) with `SendTargets=All` and parse the Text Response for every TargetName=iqn... and TargetAddress=ip:port,portalgroup pair \u2014 the target catalogue and every portal IP it advertises.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 7143 \u00a711.4, \u00a712.6, Appendix D.4",
+      "finding_kind": "iscsi_targets_disclosed",
+      "notes": "F-bit on the Text Request; if Target sets C=1 (Continue) recce must reissue Text Requests until F=1 to drain the list."
+    },
+    {
+      "name": "chap_negotiation_probe",
+      "kind": "auth",
+      "description": "When AuthMethod includes CHAP but not None, negotiate CHAP_A=5 and record the returned CHAP_I (id) and CHAP_C (challenge); a target that accepts a bogus CHAP_N/CHAP_R with StatusClass=0 is broken-auth, otherwise the challenge is captured for offline cracking.",
+      "value": "high",
+      "cwe": [
+        "CWE-287",
+        "CWE-916"
+      ],
+      "protocol_reference": "RFC 7143 \u00a712.1.2, RFC 1994",
+      "finding_kind": "iscsi_chap_challenge_captured"
+    },
+    {
+      "name": "one_way_chap_detection",
+      "kind": "auth",
+      "description": "Detect that the target does NOT demand mutual CHAP (initiator never receives a CHAP_I/CHAP_C after answering) \u2014 a MITM/relay attacker can proxy the initiator's response to the target without knowing the secret.",
+      "value": "medium",
+      "cwe": [
+        "CWE-287",
+        "CWE-300"
+      ],
+      "protocol_reference": "RFC 7143 \u00a712.1.3 (bidirectional CHAP)",
+      "finding_kind": "iscsi_chap_one_way"
+    },
+    {
+      "name": "protocol_version_downgrade_check",
+      "kind": "active",
+      "description": "Send Login with Version-Min=0x00/Version-Max=0x02 to see whether the target speaks anything below the RFC 7143 v0x00 baseline \u2014 legacy vendor firmware often accepts junk versions.",
+      "value": "low",
+      "protocol_reference": "RFC 7143 \u00a711.12.4",
+      "finding_kind": "iscsi_legacy_version"
+    },
+    {
+      "name": "operational_params_dump",
+      "kind": "passive",
+      "description": "Record negotiated MaxRecvDataSegmentLength, FirstBurstLength, MaxBurstLength, HeaderDigest, DataDigest, DefaultTime2Wait/Retain \u2014 HeaderDigest=None + DataDigest=None on a routed portal is trivial on-path tampering surface.",
+      "value": "low",
+      "cwe": [
+        "CWE-353"
+      ],
+      "protocol_reference": "RFC 7143 \u00a712.16\u201312.24",
+      "finding_kind": "iscsi_no_digest"
+    },
+    {
+      "name": "scsi_inquiry_fingerprint",
+      "kind": "exploit",
+      "description": "On an unauth Normal session, issue SCSI INQUIRY (opcode 0x12) via a SCSI Command PDU (0x01) to LUN 0 and parse the returned Vendor(8) / Product(16) / Revision(4) \u2014 proves real block access and identifies the array (NetApp/EMC/HP/LIO/tgt/vhostmd) for CVE mapping.",
+      "value": "high",
+      "cwe": [
+        "CWE-306"
+      ],
+      "protocol_reference": "RFC 7143 \u00a711.3 + SPC-4 \u00a76.6 (INQUIRY)",
+      "finding_kind": "iscsi_inquiry_leak"
+    },
+    {
+      "name": "read_capacity_proof",
+      "kind": "exploit",
+      "description": "Follow INQUIRY with READ CAPACITY (10) (opcode 0x25) to report the LUN's logical block count and block size \u2014 a concrete number of bytes an attacker can dump proves LUN masking is absent.",
+      "value": "high",
+      "cwe": [
+        "CWE-306"
+      ],
+      "protocol_reference": "SBC-3 \u00a75.15 (READ CAPACITY (10))",
+      "finding_kind": "iscsi_lun_readable",
+      "notes": "Never send WRITE opcodes (0x2A/0x8A) \u2014 read-only proof is enough."
+    },
+    {
+      "name": "iqn_hostname_domain_extraction",
+      "kind": "passive",
+      "description": "Parse discovered IQNs of form `iqn.<yyyy-mm>.<reversed.domain>:<host-specific>` \u2014 split the reversed-domain portion into a domain hint and the tail into a hostname hint (e.g. `iqn.2001-04.com.example:storage.sql01` -> domain=example.com, host=sql01.storage).",
+      "value": "medium",
+      "protocol_reference": "RFC 7143 \u00a76.1, RFC 3721 \u00a71.1",
+      "finding_kind": "iscsi_iqn_hostinfo"
+    },
+    {
+      "name": "target_portal_pivot_disclosure",
+      "kind": "chain",
+      "description": "Every TargetAddress returned by SendTargets that lies outside the currently-scanned scope is a pivot candidate: an internal-only storage LAN IP the initiator is expected to reach \u2014 feed those into the shared relay-targets/host-inventory surface for the next scan tranche.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 7143 \u00a711.4 (TargetAddress), \u00a712.6",
+      "finding_kind": "iscsi_pivot_portal"
+    },
+    {
+      "name": "chap_hash_harvest",
+      "kind": "exploit",
+      "description": "When a real initiator connects (or in an active MITM), replay CHAP_I + CHAP_C to it and record CHAP_N (username) + CHAP_R (16-byte MD5 response); the tuple is hashcat -m 4800 material (iSCSI CHAP authentications, MD5).",
+      "value": "high",
+      "cwe": [
+        "CWE-916"
+      ],
+      "protocol_reference": "RFC 7143 \u00a712.1.2, RFC 1994 \u00a74.1",
+      "finding_kind": "iscsi_chap_hash_captured"
+    },
+    {
+      "name": "isns_cross_check",
+      "kind": "chain",
+      "description": "When 3205/tcp (iSNS) is also open on the target or a nearby host, cross-reference the SendTargets list with the iSNS DevAttrQry response \u2014 a mismatch means iSNS has orphan/legacy target records worth exploring.",
+      "value": "low",
+      "protocol_reference": "RFC 4171 \u00a75.6",
+      "finding_kind": "iscsi_isns_mismatch",
+      "notes": "Only when a future iSNS module lands; skip for the first tranche."
+    }
+  ],
+  "recommended_findings": [
+    {
+      "title": "iSCSI portal \u2014 unauthenticated SendTargets discloses all IQNs and portal addresses",
+      "severity": "high"
+    },
+    {
+      "title": "iSCSI target \u2014 AuthMethod=None accepted for Discovery session",
+      "severity": "high"
+    },
+    {
+      "title": "iSCSI target \u2014 AuthMethod=None accepted for Normal session (raw LUN mount, no credential)",
+      "severity": "critical"
+    },
+    {
+      "title": "iSCSI target \u2014 INQUIRY / READ CAPACITY succeeded on LUN 0 (LUN masking absent)",
+      "severity": "high"
+    },
+    {
+      "title": "iSCSI CHAP \u2014 one-way authentication only (initiator does not verify target; MITM/relay-safe)",
+      "severity": "medium"
+    },
+    {
+      "title": "iSCSI CHAP \u2014 challenge captured for offline cracking (hashcat -m 4800)",
+      "severity": "high"
+    },
+    {
+      "title": "iSCSI portal \u2014 HeaderDigest=None and DataDigest=None (on-path tampering)",
+      "severity": "low"
+    },
+    {
+      "title": "iSCSI portal \u2014 legacy Version-Min accepted (pre-RFC 7143)",
+      "severity": "low"
+    },
+    {
+      "title": "iSCSI IQN discloses hostname / reversed-DNS domain",
+      "severity": "info"
+    },
+    {
+      "title": "iSCSI SendTargets discloses internal-only storage-network portal IPs",
+      "severity": "medium"
+    }
+  ],
+  "recommended_hashcat_modes": [
+    {
+      "mode": 4800,
+      "description": "iSCSI CHAP authentications (MD5) \u2014 captured CHAP_I + CHAP_C + CHAP_N + CHAP_R tuple; format `response:challenge:id` for -m 4800."
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames: the host-specific tail of every IQN (`iqn.<date>.<rev-domain>:<host>`) \u2014 commonly the storage node's shortname (e.g. `storage.sql01`, `bkp02.dc1`) \u2014 should feed known_hostnames so the DNS/TLS/AD passes see it.",
+    "known_domains: the reversed-domain portion of every IQN (`com.example`, `edu.mit`) reverses cleanly into an FQDN suffix \u2014 a first-class known_domains contributor, especially when the target is inside a customer VLAN that never leaks A-records elsewhere.",
+    "known_users: CHAP usernames observed during negotiation (CHAP_N) \u2014 treat exactly like SNMPv3 usernames / IPMI RAKP names; they are almost always reused for the storage array's web/SSH management plane.",
+    "known_hashes: captured CHAP challenge/response tuples land in the shared hash pot with mode=4800 so hashloot picks them up in the same cracking sweep as NetNTLM/Kerberos AS-REP material.",
+    "relay_targets: every TargetAddress ip:port returned by SendTargets that is outside the current scan scope is a new pivot host \u2014 the same shape as the existing relay_targets surface (an IP the current host is expected to reach). Consider adding a `storage_portals` label so the attack-path builder can distinguish 'storage LAN' pivots from generic hosts.",
+    "NEW surface `known_luns` (proposal): (portal_ip, iqn, lun_id, vendor, product, revision, blocks, block_size) \u2014 no other module today produces block-level asset inventory, and this feeds both CVE mapping (vendor firmware) and the report's data-exposure narrative. Small enough to be a peer of known_hashes rather than a bolt-on to relay_targets."
+  ],
+  "implementation_notes": "Style: model on recce/services/db/cassandra.py \u2014 stdlib-only, hand-rolled binary framing, `probe()` returns a dict, `findings()` builds structured items via `finding_builder`, `analyze()` orchestrates through svcprobe.iter_probe. iSCSI's 48-byte BHS is straightforward: `struct.pack('>BBBB', opcode, flags, 0, 0)` + reserved + TotalAHSLength(1)+DataSegmentLength(3)+LUN(8)+InitiatorTaskTag(4)+CID/CmdSN/ExpStatSN+ISID(6)+TSIH(2)+... Login PDUs carry `key=value\\0` pairs in the Data Segment; text payloads are the same. Reuse existing helpers: `..svccommon.finding_builder`, `make_proof_html_wrapper('iscsi> ')`, `make_findings_to_vulns_wrapper('iscsi', 3260)`. Register the port in svcdetect.PORT_NAMES (line ~77) and in serviceenum._PORT + _NAME (line ~38/49) in the SAME commit that introduces services/iscsi.py \u2014 otherwise the probe never fires. Add an `_iscsi_signature` (`\\x23` = Login Response opcode in first byte of a StatusClass=0 reply) to svcdetect._SIGNATURES for banner-grab recognition on non-standard ports (some vendors move iSCSI to 860 or a high port). Airgap-safe: no external cracking, no third-party libs \u2014 CHAP hashes go to the local pot and rely on the existing hashloot sweep. Never send SCSI WRITE opcodes; INQUIRY (0x12) + READ CAPACITY (0x25) is the read-only proof envelope. Timeouts: 6s connect, 8s per PDU exchange (mirror cassandra._TIMEOUT). Consider a `--iscsi-no-inquiry` flag if a customer wants zero SCSI-layer traffic. iSNS (3205) is a separate module for a future tranche \u2014 do not bundle."
+}

@@ -1,0 +1,190 @@
+{
+  "service": "Zabbix agent + server (10050/tcp, 10051/tcp)",
+  "summary": "recce has ZERO active coverage of the Zabbix agent (10050/tcp) or Zabbix server/proxy trapper (10051/tcp). Ports are not in svcdetect.PORT_NAMES; the ZBXD binary header (\"ZBXD\\x01\" + 8-byte length) is not in _SIGNATURES; serviceenum has no zabbix mapping and no zabbix.py service module exists; recce/scripts/ has no zabbix per-service script. Existing evidence of any Zabbix awareness is limited to (a) one product-based advisory vuln entry in vuln/vulndb.py:688 keyed on product=\"zabbix\" (SAML bypass + default Admin/zabbix, targeting the WEB FRONTEND \u2014 not the agent/server monitoring protocol), (b) the string \"zabbix\" in tools/build_wordlists.py credential list, and (c) the label \"Zabbix\" in tests/test_pipeline.py. The agent/server protocol is a rich unmapped surface: agent items leak hostname/OS/user/file contents and can achieve pre-auth RCE when EnableRemoteCommands=1; the server trapper accepts unauthenticated auto-registration when TLS PSK/cert is off (CVE-2024-22120 chain preconditions), and agent-to-server relationships expose cluster topology usable for lateral pivot.",
+  "default_ports": [
+    "10050/tcp (agent)",
+    "10051/tcp (server/proxy trapper)"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [
+      "recce/vuln/vulndb.py:688-693 (generic product='zabbix' web-frontend advisory only; not port/protocol-aware)",
+      "tools/build_wordlists.py:478 (username string only)",
+      "tests/test_pipeline.py:1558 (test fixture label only)"
+    ],
+    "notes": "No entry in recce/services/svcdetect.py PORT_NAMES for 10050/10051; no ZBXD entry in _SIGNATURES; no mapping in recce/services/serviceenum.py _NAME/_PORT; no recce/services/zabbix.py; no recce/scripts/recce-service.sh zabbix branch. Even the vulndb entry is generic-advisory (advisory=True) with no version-range gating and no port hook \u2014 it never fires against a bare agent port. Effectively unmapped."
+  },
+  "capabilities": [
+    {
+      "name": "port-map-10050-10051",
+      "kind": "passive",
+      "description": "Add 10050 -> ('zabbix-agent', 'Zabbix agent \u2014 passive-check listener (ZBXD)') and 10051 -> ('zabbix-trapper', 'Zabbix server/proxy trapper \u2014 active checks & auto-registration') to svcdetect.PORT_NAMES so an nmap 'unknown' result on the standard ports gets labelled without any new traffic.",
+      "value": "low",
+      "protocol_reference": "Zabbix docs \u2014 Passive/Active checks, default TCP 10050/10051"
+    },
+    {
+      "name": "zbxd-header-signature",
+      "kind": "passive",
+      "description": "Add re.compile(rb'^ZBXD[\\x01\\x03]') to svcdetect._SIGNATURES (bytes re; the current list is decoded latin-1 so keep parity) \u2014 matches both v1 plaintext and v3 compressed headers so any grabbed banner or nmap-kept servicefp is labelled 'zabbix' regardless of port. Zero new traffic when the banner already exists.",
+      "value": "low",
+      "protocol_reference": "Zabbix agent/server protocol: 4-byte magic 'ZBXD' + 1-byte flags (0x01 plaintext / 0x03 zlib-compressed) + 8-byte little-endian length"
+    },
+    {
+      "name": "serviceenum-mapping",
+      "kind": "passive",
+      "description": "Add 'zabbix-agent'/'zabbix-trapper'/'zabbix' name entries and 10050/10051 port entries to recce/services/serviceenum.py _NAME/_PORT (and mirror in scripts/recce-service.sh) so `recce services` emits an actionable next-command instead of 'unmapped'.",
+      "value": "low"
+    },
+    {
+      "name": "agent-fingerprint-probe",
+      "kind": "active",
+      "description": "Airgap-safe stdlib probe: connect 10050, send ZBXD-framed 'agent.version' then 'agent.hostname' then 'agent.ping' (each key wrapped in header + LE length). Return the version string (e.g. '6.4.7'), the agent's self-reported hostname, and the ping='1' liveness. Version + hostname are the highest-leverage single request against this port \u2014 both feed downstream CVE mapping and known_hostnames.",
+      "value": "high",
+      "protocol_reference": "Zabbix agent 'passive check' item keys: agent.version, agent.hostname, agent.ping \u2014 RFC-less but stable across 3.x-7.x"
+    },
+    {
+      "name": "agent-allowedhosts-bypass-detect",
+      "kind": "active",
+      "description": "The whole security model of the classic agent is the 'Server=' allow-list (source-IP allowlist for the trapper). If ANY of our version/hostname/ping probes above returned a valid ZBXD reply, the scanner's IP is de-facto in the allow-list (or the allow-list is 0.0.0.0/0). Emit a HIGH finding: 'Zabbix agent accepts item queries from arbitrary source IPs \u2014 Server= restriction missing/misconfigured', which is the precondition for every downstream data-exfil and RCE finding.",
+      "value": "high",
+      "cwe": [
+        "CWE-284",
+        "CWE-306"
+      ]
+    },
+    {
+      "name": "agent-host-inventory-harvest",
+      "kind": "active",
+      "description": "Query the built-in inventory item keys on 10050 once the agent is confirmed responsive: system.hostname, system.hostname[fqdn], system.uname, system.users.num, system.sw.os, net.if.list, net.if.discovery, net.tcp.listen, vfs.fs.discovery, vm.memory.size. Every one of these returns without any Zabbix-side authentication when the allow-list is misconfigured. This is the primary source of new facts to wire cross-service (hostname \u2192 known_hostnames, FQDN \u2192 known_domains, interface IPs \u2192 new scan candidates, listening ports \u2192 cross-check against the port set we saw from outside \u2014 spotting internal-only ports the perimeter scan missed).",
+      "value": "high",
+      "protocol_reference": "Zabbix built-in agent items \u2014 'system.*' / 'vfs.*' / 'net.*' families"
+    },
+    {
+      "name": "agent-file-read",
+      "kind": "exploit",
+      "description": "vfs.file.contents[/path] returns the file body verbatim under the agent's UID (typically 'zabbix', sometimes root). Try /etc/passwd, /etc/hostname, /etc/resolv.conf, /etc/zabbix/zabbix_agentd.conf (leaks Server=, ServerActive=, HostMetadata, TLSPSKIdentity, TLSPSKFile path), C:\\Windows\\win.ini. When AllowKey / DenyKey are default this is unrestricted. Any hit = HIGH data-disclosure finding, and /etc/passwd \u2192 known_users, resolv.conf \u2192 known_domains, agent conf \u2192 relay_targets (the Server= list is a pivot map).",
+      "value": "high",
+      "cwe": [
+        "CWE-200",
+        "CWE-552"
+      ],
+      "protocol_reference": "Zabbix item vfs.file.contents"
+    },
+    {
+      "name": "agent-remote-commands-rce",
+      "kind": "exploit",
+      "description": "system.run[<cmd>] executes shell/cmd on the agent host when EnableRemoteCommands=1 in zabbix_agentd.conf. Test with system.run[echo recce-$$] (benign, uniquely identifiable, one-line output). A non-empty numeric-suffixed reply == pre-auth RCE. CRITICAL. Also test system.run[id] / system.run[whoami] to record the run-as UID for the report. Guard behind an --exploit / --unsafe flag consistent with recce's other RCE probes.",
+      "value": "critical",
+      "cwe": [
+        "CWE-78",
+        "CWE-306"
+      ],
+      "protocol_reference": "Zabbix agent 'AllowKey=system.run[*]' / legacy EnableRemoteCommands"
+    },
+    {
+      "name": "server-trapper-fingerprint",
+      "kind": "active",
+      "description": "Probe 10051 with a well-formed empty JSON trapper request ({'request':'active checks','host':'recce-probe'}) wrapped in ZBXD. A Zabbix server/proxy replies with a JSON envelope even for unknown hosts ({'response':'failed','info':'host [...] not found'}); the info string discloses server version and whether the endpoint is server-vs-proxy. Feeds product/version to the vuln mapper.",
+      "value": "medium",
+      "protocol_reference": "Zabbix server trapper protocol \u2014 'sender data' / 'active checks' / 'proxy config' requests"
+    },
+    {
+      "name": "server-autoregistration-abuse",
+      "kind": "exploit",
+      "description": "Send an 'active checks' request to 10051 with a chosen host name + HostMetadata that matches a default auto-registration action ('Linux', 'Windows'). When TLS-PSK/cert is off (the very common misconfig this ships with), the server auto-creates a monitored host and links templates \u2014 attacker-controlled hostnames land in the server DB. This is the CVE-2024-22120 precondition surface (SQLi in audit log via crafted hostname during auto-reg). CRITICAL when the request is accepted; also record whether the server enforces TLS (rejection with a TLS-required error string) as a MEDIUM finding on its own.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-89"
+      ],
+      "protocol_reference": "Zabbix auto-registration; CVE-2024-22120 (SQLi in server audit log via auto-reg)"
+    },
+    {
+      "name": "cluster-topology-derive",
+      "kind": "chain",
+      "description": "Agents reveal their upstream server IPs two ways: (a) reading /etc/zabbix/zabbix_agentd.conf via vfs.file.contents pulls Server= and ServerActive=; (b) system.run[grep -E '^Server' ...] when RCE is on. Aggregate across every agent found in the scan \u2014 the set of unique ServerActive values IS the Zabbix cluster topology (proxies + primary server). Emit those as new scan candidates AND as relay_targets (the server trusts the agent's outbound TCP \u2014 a compromised agent can pivot into the server on 10051 with sender/proxy protocol). This is a first-class chain finding that no per-host probe can produce.",
+      "value": "high"
+    },
+    {
+      "name": "tls-psk-status-detect",
+      "kind": "passive",
+      "description": "Wrap the initial 10050/10051 connect: if the plaintext ZBXD probe gets a normal reply, TLS is OFF (LOW-INFO but gates every finding above); if the server closes immediately after our plaintext bytes without a ZBXD reply, TLS PSK/cert is likely enforced (record and skip active probes). No traffic added \u2014 the probe we already send is the signal.",
+      "value": "medium",
+      "cwe": [
+        "CWE-319"
+      ]
+    },
+    {
+      "name": "vulndb-version-mapping",
+      "kind": "passive",
+      "description": "Current vulndb.py:688 has ONE product='zabbix' entry that is advisory-only, unversioned, and targets the web frontend. Add version-range entries for the agent/server track: CVE-2024-22120 (server <= 6.0.27/6.4.12/7.0.0alpha7 \u2014 SQLi via auto-reg audit log, CRITICAL), CVE-2022-24917 (server, low-priv-to-RCE, HIGH), CVE-2017-2824 (proxy trapper cmd injection, CRITICAL for exposed proxies), CVE-2016-10134 (jsrpc SQLi, HIGH). Key them on our new agent.version/trapper fingerprint output so a version string produced by the probe automatically maps to CVEs the way SSH/nginx already do.",
+      "value": "high"
+    },
+    {
+      "name": "runbook-and-service-script",
+      "kind": "passive",
+      "description": "Ship scripts/recce-service.sh zabbix branch: zabbix_get -s TGT -k agent.version / agent.hostname / system.uname / vfs.file.contents[/etc/passwd] for 10050; a python one-liner ZBXD sender for 10051 auto-reg. Plus a runbook() in the new services/zabbix.py mirroring prometheus.py \u2014 credfree steps (fingerprint + hostname + safe reads) and credentialed placeholder (Zabbix web/API creds for downstream frontend enum).",
+      "value": "low"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames <- agent.hostname + system.hostname + system.hostname[fqdn] (10050): authoritative self-reported hostname of the monitored box, higher-confidence than reverse DNS since it's what the OS itself reports",
+    "known_domains <- system.hostname[fqdn] suffix + /etc/resolv.conf 'search'/'domain' via vfs.file.contents: reveals the internal AD/DNS domain even on hosts with no LDAP/Kerberos exposure",
+    "known_users <- /etc/passwd via vfs.file.contents[/etc/passwd] and Windows equivalent via system.run[net user] (RCE path): populates a real local-user list for SSH/SMB/WinRM spraying",
+    "known_hashes <- /etc/shadow via vfs.file.contents when agent runs as root (rare but happens); feeds hashcat-mode-1800 (sha512crypt) directly",
+    "relay_targets <- Server= and ServerActive= values parsed out of /etc/zabbix/zabbix_agentd.conf (readable via vfs.file.contents) or agent.conf equivalents: those IPs are the Zabbix server/proxy the agent already trusts on 10051 \u2014 pivot candidates for sender/auto-reg abuse from a compromised agent",
+    "new host candidates (feed the scan queue) <- net.if.list / net.if.discovery / net.tcp.listen output from agents: reveals internal interfaces and internal-only listening ports the external scan never saw; also reveals cluster peer IPs from the derived-topology chain",
+    "NEW SHARED SURFACE \u2014 known_monitoring_agents: (ip, product='zabbix-agent', server_ips=[...], hostname_reported=..., tls_on=bool, remote_cmd=bool). No consumer today but is the natural fifth-plus surface (like relay_targets was for AD): a host that runs a Zabbix agent is a host that ALREADY has an outbound path to the monitoring server on a firewalled port \u2014 exactly the shape other agent-based tooling (SCCM, Puppet, Ansible) will want to share when those get added",
+    "vuln keying <- agent.version / server trapper version \u2192 feeds vulndb.py CVE mapping the same way OpenSSH/nginx versions do today (currently the sole Zabbix vulndb row is advisory-unversioned and doesn't fire on the monitoring ports at all)",
+    "web-frontend correlation <- when a Zabbix agent is found on host X and an HTTP service on host Y returns a Zabbix web frontend (title/cookie/URL), X is a monitored asset of Y \u2014 record the linkage so 'compromise the web front-end' automatically expands to 'you now control every host in known_monitoring_agents pointing to Y'"
+  ],
+  "recommended_findings": [
+    {
+      "title": "Zabbix agent responds to arbitrary source IPs (Server= allow-list missing)",
+      "severity": "high"
+    },
+    {
+      "title": "Zabbix agent discloses host inventory (hostname/OS/users/interfaces) unauthenticated",
+      "severity": "high"
+    },
+    {
+      "title": "Zabbix agent allows arbitrary file read via vfs.file.contents",
+      "severity": "high"
+    },
+    {
+      "title": "Zabbix agent EnableRemoteCommands=1 \u2014 pre-auth RCE via system.run[]",
+      "severity": "critical"
+    },
+    {
+      "title": "Zabbix server/proxy accepts unauthenticated auto-registration (TLS PSK/cert off)",
+      "severity": "critical"
+    },
+    {
+      "title": "Zabbix agent/server communication is plaintext (no TLS PSK/cert)",
+      "severity": "medium"
+    },
+    {
+      "title": "Zabbix server version vulnerable to CVE-2024-22120 (auto-reg audit-log SQLi)",
+      "severity": "critical"
+    },
+    {
+      "title": "Zabbix agent leaks Server=/ServerActive= \u2014 internal monitoring topology disclosed",
+      "severity": "medium"
+    },
+    {
+      "title": "Zabbix trapper reachable \u2014 fingerprint recorded",
+      "severity": "info"
+    }
+  ],
+  "recommended_hashcat_modes": [
+    {
+      "mode": 1800,
+      "description": "sha512crypt \u2014 /etc/shadow lines when agent runs as root and shadow is readable via vfs.file.contents"
+    },
+    {
+      "mode": 500,
+      "description": "md5crypt \u2014 legacy /etc/shadow on older RHEL/CentOS agents"
+    }
+  ],
+  "implementation_notes": "Shape after prometheus.py exemplar (recce/services/prometheus.py:1-249): create recce/services/zabbix.py with (a) is_zabbix_agent/is_zabbix_trapper predicates on Port, (b) low-level _zbxd(sock, key) helper that frames b'ZBXD\\\\x01' + struct.pack('<Q', len(key)) + key and parses the identical reply header, (c) probe(ip, port) returning {reachable, version, hostname, uname, users_num, remote_commands, tls_required, file_read_ok, autoreg_ok, server_ips, listeners}, (d) findings() matching the severity map above, (e) runbook() with zabbix_get commands, (f) analyze() following the svcprobe.iter_probe budget/progress pattern already used by prometheus/etcd. Wire in three passive fixes at the same time: PORT_NAMES entries in svcdetect.py:34, ZBXD regex in svcdetect.py:_SIGNATURES:88 (note: current signatures list is decoded latin-1 \u2014 either add there or upgrade to a bytes-signature layer), _NAME/_PORT rows in serviceenum.py:11 and mirror in scripts/recce-service.sh. Cross-service exports: hostname \u2192 known_hostnames.py contributor, /etc/passwd parse \u2192 known_users source, Server=/ServerActive= list \u2192 relay_targets contributor. Guard system.run[] RCE test behind the same --exploit flag other RCE probes use. Timeouts: bounded \u22644s and iter_probe budget (both matching prometheus.py). All stdlib \u2014 no new deps, airgap-safe."
+}

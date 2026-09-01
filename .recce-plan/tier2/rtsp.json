@@ -1,0 +1,251 @@
+{
+  "service": "RTSP",
+  "default_ports": [
+    "554/tcp",
+    "8554/tcp",
+    "8554/tcp-tls (RTSPS)",
+    "322/tcp (RTSPS legacy)"
+  ],
+  "summary": "RTSP (RFC 2326, superseded by RFC 7826) is present in recce ONLY as a servicefp signature in svcdetect.py:102 (matches `^RTSP/\\d`). There is no port-name entry in svcdetect PORT_NAMES for 554/8554, no serviceenum.py _NAME/_PORT wiring, no recce/services/rtsp.py module, no vulndb entries for the four dominant camera vendors (Hikvision/Dahua/Axis/Foscam), and no defaultcreds table for IP cameras. RTSP is one of the highest-density attack surfaces in modern enterprise networks (physical security, meeting rooms, warehouse cams, hospital wards) and is almost entirely uninspected today. A proper module would mirror the SIP module's shape \u2014 OPTIONS/DESCRIBE fingerprint, Digest auth-realm capture, default-cred pass, well-known path enumeration \u2014 with a feed into a NEW `known_streams` cross-service surface plus contributions to `known_users`, `known_hostnames`, and `known_hashes` (hashcat mode 11400 covers RTSP Digest as it does SIP).",
+  "existing_coverage": {
+    "detected": false,
+    "files": [
+      "recce/services/svcdetect.py:102 \u2014 signature-only (`^RTSP/\\d` \u2192 `rtsp`); NOT in PORT_NAMES so a nudged/banner-less 554 stays labelled unknown",
+      "recce/services/serviceenum.py \u2014 no `rtsp` in _NAME, no 554/8554 in _PORT, so `recce services` emits no next-step command for open RTSP ports",
+      "recce/services/ \u2014 no rtsp.py module (contrast: sip.py, ipp.py, vnc.py all exist)",
+      "recce/creds/defaultcreds.py \u2014 no camera-vendor default credential table",
+      "recce/vuln/vulndb.py \u2014 no Hikvision / Dahua / Axis / Foscam / ONVIF entries",
+      "recce/scripts/services/ \u2014 no rtsp helper",
+      "recce/scripts/recce-service.sh \u2014 no `rtsp` service mapping"
+    ],
+    "notes": "Effectively zero coverage. Only signal recce produces today is 'this port speaks RTSP' when a banner nudge happens to elicit an RTSP status line."
+  },
+  "capabilities": [
+    {
+      "name": "port-registry-wire",
+      "kind": "passive",
+      "description": "Add 554 and 8554 to svcdetect.PORT_NAMES ({554: ('rtsp','Real-Time Streaming Protocol'), 8554: ('rtsp-alt','RTSP (alt)')}), add 'rtsp': 'rtsp' to serviceenum._NAME and 554/8554 \u2192 'rtsp' to _PORT, and register 'rtsp' in scripts/recce-service.sh. Without this an open 554 keeps its 'unknown' label whenever nmap fails to elicit the banner, and `recce services` emits no next-step command.",
+      "value": "low",
+      "protocol_reference": "RFC 2326 \u00a718.1 (IANA-assigned ports 554/tcp+udp); RFC 7826 \u00a722.1 (RTSP 2.0 keeps 554); IANA rtsp-alt on 8554/tcp",
+      "cwe": [
+        "CWE-1059"
+      ]
+    },
+    {
+      "name": "options-fingerprint",
+      "kind": "active",
+      "description": "Send `OPTIONS rtsp://<ip>:<port>/ RTSP/1.0` with CSeq: 1 and User-Agent. Parse the response's `Server:` header (camera model+firmware \u2014 e.g. `Server: Hipcam RealServer/V1.0`, `GStreamer RTSP server`, `H264DVR 1.0`, `Dahua Rtsp Server`) and `Public:` header (allowed verbs \u2014 GET_PARAMETER means heartbeat works, ANNOUNCE/RECORD means writable RTSP push). One packet, no auth, always answered. Primary fingerprint.",
+      "value": "high",
+      "protocol_reference": "RFC 2326 \u00a710.1 (OPTIONS), \u00a712.16 (Public), \u00a712.36 (Server); RFC 7826 \u00a713.1",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "rtsp_fingerprint"
+    },
+    {
+      "name": "describe-sdp-harvest",
+      "kind": "active",
+      "description": "Send `DESCRIBE rtsp://<ip>:<port><path> RTSP/1.0` with `Accept: application/sdp`. On 200 OK parse the SDP body: `s=` (session name \u2014 often hostname/model), `i=` (info), `a=tool:` (encoder brand), `a=control:` (per-track control URIs), `m=video`/`m=audio` (codec + payload types \u2014 H.264/H.265/MJPEG), `a=rtpmap` (clock rate), `a=fmtp` (SPS/PPS reveals resolution/profile). SDP is the highest-value artifact this service produces. Requires unauth stream or valid creds.",
+      "value": "high",
+      "protocol_reference": "RFC 2326 \u00a710.2 (DESCRIBE); RFC 4566 (SDP); RFC 6184 (H.264 SDP \u2014 SPS/PPS)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "rtsp_sdp_disclosure"
+    },
+    {
+      "name": "auth-realm-disclosure",
+      "kind": "passive",
+      "description": "Capture the 401 challenge. `WWW-Authenticate: Digest realm=\"...\", nonce=\"...\", algorithm=MD5, qop=\"auth\"` \u2014 realm is almost always vendor-branded (`IP Camera`, `HikvisionDS`, `Login to <MAC>`, `AXIS_<serial>`, `IPCam`). Also flag when BOTH Basic AND Digest are offered (cleartext downgrade) or Basic-only (creds go plaintext on the wire the moment a client authenticates).",
+      "value": "medium",
+      "protocol_reference": "RFC 2326 \u00a712.17, \u00a712.44 (WWW-Authenticate); RFC 7616 (Digest); RFC 7617 (Basic)",
+      "cwe": [
+        "CWE-522",
+        "CWE-319"
+      ],
+      "finding_kind": "rtsp_auth_disclosure"
+    },
+    {
+      "name": "unauth-stream-detection",
+      "kind": "active",
+      "description": "If DESCRIBE (or SETUP) returns 200 without an Authorization header ever being sent, the stream is world-viewable. Critical for any camera reachable from an untrusted segment \u2014 a scanner can confirm this in one round trip. Also test the Hikvision quirk `?authbasic=YWRtaW46MTEK` and Dahua magic-query bypass paths.",
+      "value": "critical",
+      "protocol_reference": "RFC 2326 \u00a710.2, \u00a710.4 (SETUP); OWASP IoT Top 10 I2 (Insecure Network Services)",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "finding_kind": "rtsp_unauth_stream"
+    },
+    {
+      "name": "well-known-path-enum",
+      "kind": "active",
+      "description": "Vendors ship documented, unchanging URIs. Probe DESCRIBE against a small curated table: Hikvision `/Streaming/Channels/101`, `/h264/ch1/main/av_stream`, `/ISAPI/Streaming/channels/101`; Dahua `/cam/realmonitor?channel=1&subtype=0`, `/live`; Axis `/axis-media/media.amp`, `/mpeg4/media.amp`; Foscam `/videoMain`, `/videoSub`; ONVIF-generic `/onvif/media`, `/live/main`; GStreamer `/test`, `/stream`. Response codes (200 vs 401 vs 404) disambiguate vendor even when Server header is stripped and tell you which stream a valid cred would unlock.",
+      "value": "high",
+      "protocol_reference": "Hikvision ISAPI IP Media Device Protocol \u00a77; Dahua HTTP API v2.76 \u00a75.1; Axis VAPIX v3 (media/stream); Foscam CGI SDK",
+      "cwe": [
+        "CWE-425",
+        "CWE-200"
+      ],
+      "finding_kind": "rtsp_path_enum"
+    },
+    {
+      "name": "default-cred-check",
+      "kind": "auth",
+      "description": "Bounded (\u226412 pairs, 1 pair/sec) Digest attempt against the discovered realm using industry-known camera defaults: admin/12345 (Hikvision pre-2015), admin/admin (Dahua/Foscam), root/pass and root/root (Axis pre-2018), admin/<blank>, admin/888888 (Dahua backdoor era), service/service (Bosch), ubnt/ubnt (Ubiquiti UniFi Video). Honour recce's global auth-attempt budget; back off on 429. Feed discovered creds into recce's Credential store so downstream modules (SMB, SNMP) can try them.",
+      "value": "critical",
+      "protocol_reference": "RFC 2326 \u00a716 (Authentication); RFC 7616 (Digest); vendor factory-default matrices",
+      "cwe": [
+        "CWE-798",
+        "CWE-521"
+      ],
+      "finding_kind": "rtsp_default_cred"
+    },
+    {
+      "name": "digest-challenge-capture",
+      "kind": "chain",
+      "description": "Persist the Digest realm+nonce+algorithm+qop from the 401 into loot as a hashcat-ready line (`$sip$*<realm>*<uri>*<method>*<nonce>*<nc>*<cnonce>*<qop>*<response>` \u2014 hashcat mode 11400 covers RTSP the same way it covers SIP because the KD/H construction is identical). Recce cannot recover the client response unless a client authenticates in the scan window, but stashing the server challenge lets an operator run a subsequent capture or MitM their own client and feed hashcat directly.",
+      "value": "medium",
+      "protocol_reference": "RFC 7616 \u00a73.4 (response computation); hashcat mode 11400 (SIP Digest MD5) \u2014 identical HA1/HA2 to RTSP Digest",
+      "cwe": [
+        "CWE-522"
+      ],
+      "finding_kind": "rtsp_digest_capture"
+    },
+    {
+      "name": "tls-rtsps-probe",
+      "kind": "active",
+      "description": "8554 also carries RTSP-over-TLS in some GStreamer/Live555 deployments and enterprise VMS (Milestone, Genetec). Try a TLS handshake first on 8554 (svcprobe already has the primitive) \u2014 if it succeeds, tunnel OPTIONS through TLS and feed the presented cert into recce's known_hostnames via probes.py cert_covers (CN on IP-camera certs is usually MAC/serial/model \u2014 high-signal identifier).",
+      "value": "medium",
+      "protocol_reference": "RFC 2326 \u00a719.2 discusses SSL layering; IANA rtsps assignment (322/tcp historic, 8554 in modern deployments)",
+      "cwe": [
+        "CWE-319"
+      ],
+      "finding_kind": "rtsps_probe"
+    },
+    {
+      "name": "rtsp-http-tunnel-probe",
+      "kind": "active",
+      "description": "RTSP-over-HTTP tunneling (Apple/QuickTime spec, still implemented by Live555, Wowza, some VMSes): client sends `GET /path HTTP/1.0` with `x-sessioncookie: <id>` on 80/8080 and a paired POST on the same URL to bidirectionally tunnel RTSP. Detects RTSP hiding behind an HTTP front-end (common when a camera is behind a reverse proxy). Extend recce's HTTP probe to recognise the tunnel signature (`Server: DSS/`, `x-server-ip-address`, `application/x-rtsp-tunnelled`).",
+      "value": "medium",
+      "protocol_reference": "Apple QuickTime Streaming Server RTSP-over-HTTP tunneling spec (1999); Live555 RTSPOverHTTPServer",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "rtsp_http_tunnel"
+    },
+    {
+      "name": "get-parameter-liveness",
+      "kind": "passive",
+      "description": "After OPTIONS reports GET_PARAMETER in Public:, send one `GET_PARAMETER *` with no body \u2014 the RTSP-standard keepalive. Confirms the service is genuinely live (not a stray SYN-ACK from a load balancer) and, for some servers, echoes `Session:` timeout hints and `Date:` (drift vs recce clock is a soft NTP-adjacency signal fed to ntp.py).",
+      "value": "low",
+      "protocol_reference": "RFC 2326 \u00a710.8 (GET_PARAMETER), \u00a712.37 (Session), \u00a712.18 (Date)",
+      "cwe": [],
+      "finding_kind": "rtsp_liveness"
+    },
+    {
+      "name": "camera-model-cve-map",
+      "kind": "passive",
+      "description": "Add a curated table to vulndb.py mapping normalized (vendor, model, firmware) \u2192 CVEs. Minimum launch set: Hikvision CVE-2021-36260 (unauth RCE via ISAPI, KEV), CVE-2017-7921 (auth bypass); Dahua CVE-2021-33044/33045 (auth bypass), CVE-2013-6117 (backdoor); Axis CVE-2018-10660..10664 (multiple pre-auth), CVE-2022-31199; Foscam CVE-2018-6832. Keyed off the Server header + SDP `a=tool` extracted by options-fingerprint / describe-sdp-harvest.",
+      "value": "high",
+      "protocol_reference": "MITRE CVE; CISA KEV catalog",
+      "cwe": [
+        "CWE-1035"
+      ],
+      "finding_kind": "rtsp_known_vuln"
+    },
+    {
+      "name": "onvif-adjacency",
+      "kind": "chain",
+      "description": "An RTSP-answering port almost always has an ONVIF SOAP endpoint on the same host at 80/8080/8899 (`/onvif/device_service`). When RTSP is confirmed, flag http.py to probe those paths for `GetDeviceInformation` (unauth on many builds) and `GetCapabilities` \u2014 ONVIF returns manufacturer, model, firmware, serial, hardware ID as one SOAP response. Also flag hashcat mode 25100 (ONVIF WS-UsernameToken PasswordDigest \u2014 SHA1(nonce+created+password)) if a challenge is captured.",
+      "value": "medium",
+      "protocol_reference": "ONVIF Core Specification v22.06 \u00a75.11 (Device Management); OASIS WS-Security UsernameToken Profile 1.1 \u00a73.1",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "rtsp_onvif_adjacent"
+    },
+    {
+      "name": "credentials-in-url-catch",
+      "kind": "passive",
+      "description": "If any prior recce observation (nmap script output, HTTP referrers, config dumps, SDP a=control lines) contains `rtsp://user:pass@host/...`, extract and file the credential \u2014 RTSP URIs still routinely carry inline creds in operator docs and NVR configs, and the ffmpeg/vlc command-line convention normalizes this. One regex over already-collected text; zero new traffic.",
+      "value": "medium",
+      "protocol_reference": "RFC 2326 \u00a73.2 (rtsp URL syntax inherits RFC 3986 userinfo)",
+      "cwe": [
+        "CWE-522",
+        "CWE-598"
+      ],
+      "finding_kind": "rtsp_creds_in_url"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_users: contribute camera-default usernames (admin, root, guest, service, ubnt, operator, viewer, MediaAdmin) once recce/services/rtsp.py sees an RTSP port \u2014 feeds SMB/SNMP/WinRM/SSH sprays without any per-service duplication (mirror recce/services/ipmi.py:604-621 pattern that pulls known_users)",
+    "known_hostnames: feed the SDP `s=` session name, the RTSPS certificate CN/SAN (via probes.cert_covers at probes.py:288), and any ONVIF GetDeviceInformation Manufacturer+SerialNumber \u2014 camera hostnames are almost always MAC or serial-derived and become high-quality reverse-DNS / AD-search seeds",
+    "known_hashes: emit RTSP Digest challenges as hashcat mode-11400 lines (identical construction to SIP Digest) and ONVIF PasswordDigest as mode 25100; both feed the existing creds.known_hashes / hashloot pipeline",
+    "NEW `known_streams` (proposed 6th shared surface): {url, transport, codec, resolution, auth_required, vendor, model, firmware} \u2014 consumed by report generation (docx.py can render a camera-inventory table) and by future attack-path graphs (an unauth camera in the DMZ + a workstation in office = pivot). This is the RTSP equivalent of relay_targets \u2014 a service-produced list of actionable endpoints downstream code queries by shape, not by service name. Follow core/relay_targets.py file shape (write_known_streams(hosts, out_path)).",
+    "NEW `known_devices` (proposed 7th shared surface, generalization): {vendor, model, firmware, host, evidence_service} \u2014 populated by RTSP, ONVIF, IPMI, SNMP sysDescr, UPnP; consumed by vulndb for CVE mapping and by known_hostnames for identifier inference. RTSP is the natural first citizen because it discloses model with zero auth on nearly every camera in the field.",
+    "creds.Credential store (existing): any default-cred hit gets written back so downstream modules retry the pair \u2014 cameras and NVRs share creds with the servers around them far more often than expected (same IT team, same password policy)",
+    "relay_targets: not directly applicable \u2014 cameras aren't SMB relay peers \u2014 but a compromised NVR (Linux/ARM box with root) is a valid pivot; contribute to a broader `pivot_targets` list if that surface is later added"
+  ],
+  "recommended_findings": [
+    {
+      "severity": "critical",
+      "title": "RTSP stream world-viewable (no authentication)"
+    },
+    {
+      "severity": "critical",
+      "title": "RTSP default credentials accepted (<vendor>: <user>/<pass>)"
+    },
+    {
+      "severity": "high",
+      "title": "IP camera exposes known-vulnerable firmware (<CVE>)"
+    },
+    {
+      "severity": "high",
+      "title": "RTSP DESCRIBE discloses SDP: <n> tracks, codec, resolution \u2014 enables targeted attack"
+    },
+    {
+      "severity": "medium",
+      "title": "RTSP server discloses vendor/model via OPTIONS Server header"
+    },
+    {
+      "severity": "medium",
+      "title": "RTSP offers Basic authentication \u2014 credentials sent in cleartext"
+    },
+    {
+      "severity": "medium",
+      "title": "RTSP Digest realm discloses camera identity (<realm>)"
+    },
+    {
+      "severity": "medium",
+      "title": "ONVIF endpoint co-located with RTSP \u2014 full device info unauth"
+    },
+    {
+      "severity": "medium",
+      "title": "RTSP-over-HTTP tunnel detected on <port> (RTSP hidden behind HTTP)"
+    },
+    {
+      "severity": "medium",
+      "title": "RTSP credentials found in URL/config: rtsp://<user>:<pass>@..."
+    },
+    {
+      "severity": "low",
+      "title": "RTSP port 554/8554 open (no dedicated recce probe today)"
+    }
+  ],
+  "recommended_hashcat_modes": [
+    {
+      "mode": 11400,
+      "description": "SIP Digest MD5 \u2014 identical HA1/HA2 to RTSP Digest per RFC 7616; use for captured RTSP 401 challenges once a client response is intercepted"
+    },
+    {
+      "mode": 25100,
+      "description": "ONVIF WS-UsernameToken PasswordDigest (SHA1(nonce+created+password)) \u2014 for the co-located ONVIF endpoint on the same camera"
+    },
+    {
+      "mode": 1000,
+      "description": "NTLM \u2014 enterprise VMS front-ends (Milestone, Genetec) sometimes proxy RTSP behind NTLM-auth HTTP; fallback"
+    }
+  ],
+  "implementation_notes": "Mirror recce/services/sip.py exactly \u2014 it is the closest structural analogue (text-header protocol, OPTIONS fingerprint, Digest realm capture, bounded enumeration secondary pass, findings + runbook + analyze). Create recce/services/rtsp.py at ~500 LOC with: is_rtsp(port), _options()/_describe()/_get_parameter() wire builders, probe(ip, port, timeout, tls=False), rtsp_targets(hosts), findings(hosts, probes), findings_to_vulns delegating to svccommon (matches sip.py:312-314), runbook (openRTSP / ffprobe / cameradar), analyze(hosts, creds, active, budget, progress) using svcprobe.iter_probe. Additions elsewhere: (1) svcdetect.py PORT_NAMES gets 554 and 8554; (2) serviceenum.py _NAME gets 'rtsp':'rtsp', _PORT gets 554/8554 \u2192 'rtsp'; (3) scripts/services/ gets an rtsp helper, recce-service.sh gets the mapping; (4) creds/defaultcreds.py grows a CAMERA_DEFAULTS table (vendor \u2192 [(user,pass),...]); (5) vuln/vulndb.py grows a small camera-CVE table keyed on normalized (vendor,model); (6) core/known_streams.py added as the new cross-service surface (follow core/relay_targets.py shape); (7) cli surfaces the module in `recce services` output. Airgap constraint respected \u2014 all probes are stdlib socket/ssl. RTSP Digest lines emitted in hashcat-11400 format so no new cracker integration is needed."
+}

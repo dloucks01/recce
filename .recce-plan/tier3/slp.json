@@ -1,0 +1,168 @@
+{
+  "service": "SLP",
+  "summary": "SLP (Service Location Protocol, RFC 2608) on 427/tcp+udp is currently unmapped in recce's per-service layer. The port is included in the enum-phase UDP sweep (`_UDP_BASIC_PORTS` in recce/core/scanner.py) so nmap -sV will fingerprint it if run as root, and vulndb.py carries one ESXi/OpenSLP advisory (CVE-2021-21974 + CVE-2019-5544 + CVE-2020-3992), but there is no recce/services/slp.py, no PORT_NAMES entry in svcdetect.py, and no _NAME/_PORT mapping in serviceenum.py. Nothing in the codebase issues SrvTypeRqst / SrvRqst / AttrRqst, parses SLPv2 replies, discovers Directory Agents, or turns advertised service URLs into cross-service pivots. This is a green-field service module that lands high-value passive intel (service catalogue, host inventory, ESXi build strings) with a small stdlib probe, plus a well-known amplification / RCE story worth flagging.",
+  "capabilities": [
+    {
+      "name": "port_registration_427",
+      "kind": "passive",
+      "value": "high",
+      "description": "Register 427/tcp and 427/udp in svcdetect.PORT_NAMES and serviceenum._PORT so an nmap-blank port gets an 'slp' / 'Service Location Protocol' label without any traffic. Currently missing \u2014 427 is not in either table.",
+      "protocol_reference": "RFC 2608 \u00a72 (IANA well-known port 427)",
+      "finding_kind": "coverage_gap"
+    },
+    {
+      "name": "slp_version_fingerprint",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Parse the Version byte (1 = SLPv1, 2 = SLPv2) and function-id of any reply already grabbed by nmap-sV/banner, and record 'openslp' when the AttrRqst response carries the OpenSLP signature (SrvRply/AttrRply length quirks, or an explicit 'openslp' string in attributes). Enables version-gated CVE decisions later.",
+      "protocol_reference": "RFC 2608 \u00a78 (Message Header), OpenSLP 1.x/2.x wire quirks",
+      "finding_kind": "fingerprint"
+    },
+    {
+      "name": "srvtyperqst_enumeration",
+      "kind": "active",
+      "value": "high",
+      "description": "Send SrvTypeRqst (function-id 9) with service-type='service:' and scope='DEFAULT' to unicast 427/udp; parse the SrvTypeRply list of advertised service types (service:vmware-infrastructure, service:printer, service:cifs, service:nfs, service:jetdirect, service:directory-agent, \u2026). This is the single most useful passive-shape probe \u2014 one packet, full service catalogue.",
+      "protocol_reference": "RFC 2608 \u00a710.1 (SrvTypeRqst), \u00a710.2 (SrvTypeRply)",
+      "finding_kind": "service_catalogue"
+    },
+    {
+      "name": "srvrqst_url_enumeration",
+      "kind": "active",
+      "value": "high",
+      "description": "For each service type from the previous step (or a curated seed set), send SrvRqst (function-id 1) and parse SrvRply (function-id 2) to extract every advertised service:URL. Each URL carries host, port, path, and often the product tag \u2014 the raw material every cross-service pivot below needs.",
+      "protocol_reference": "RFC 2608 \u00a710 (SrvRqst/SrvRply), RFC 2609 (service:URL templates)",
+      "finding_kind": "url_disclosure"
+    },
+    {
+      "name": "attrrqst_leak",
+      "kind": "active",
+      "value": "high",
+      "description": "AttrRqst (function-id 6) against each URL returns per-service attribute lists. On ESXi this exposes fields such as (product='VMware ESXi'), (version='7.0.3 build-20328353'), (uuid=\u2026), (managementserver=\u2026), (cimom=\u2026) \u2014 precise build strings ideal for CVE mapping. On CUPS/JetDirect it discloses printer names and PPDs. Unauthenticated on the standard OpenSLP config.",
+      "protocol_reference": "RFC 2608 \u00a710.3 (AttrRqst/AttrRply), RFC 2609 templates",
+      "finding_kind": "attribute_disclosure"
+    },
+    {
+      "name": "directory_agent_discovery",
+      "kind": "active",
+      "value": "medium",
+      "description": "SrvRqst for service-type 'service:directory-agent' (or listen for unsolicited DAAdvert function-id 8 on multicast 239.255.255.253) identifies DAs \u2014 a single DA typically aggregates every SA on the segment, so hitting it with SrvRqst pulls the whole network's advertisements in one shot.",
+      "protocol_reference": "RFC 2608 \u00a712 (Directory Agents), \u00a78 (DAAdvert msg)",
+      "finding_kind": "topology"
+    },
+    {
+      "name": "multicast_srvrqst_segment_sweep",
+      "kind": "active",
+      "value": "medium",
+      "description": "Send SrvRqst to multicast 239.255.255.253:427 (IPv4 SLP-scope) with an empty PRList; every SLPv2 speaker on the segment replies over unicast UDP. Yields sibling hosts recce did not target, straight from L2. Gated behind an --slp-multicast flag because it needs local L2 and generates broadcast traffic.",
+      "protocol_reference": "RFC 2608 \u00a75 (Multicast address 239.255.255.253), \u00a76 (Retransmission)",
+      "finding_kind": "sibling_discovery"
+    },
+    {
+      "name": "esxi_openslp_cve_flag",
+      "kind": "exploit",
+      "value": "critical",
+      "description": "When SrvRqst/AttrRqst returns service:VMwareInfrastructure (or the ESXi cimom URL) AND the extracted ESXi build predates the CVE-2021-21974 fix line, raise the existing vulndb.py 'VMware ESXi exposed \u2014 OpenSLP pre-auth RCE' advisory with a concrete build citation instead of a bare product-name match. Same treatment for CVE-2019-5544 (heap overflow) and CVE-2020-3992 (UAF).",
+      "cwe": [
+        "CWE-787",
+        "CWE-416"
+      ],
+      "protocol_reference": "CVE-2021-21974 (ESXi 6.5/6.7/7.0 OpenSLP heap overflow); CVE-2019-5544 (OpenSLP heap overflow, MSF module); CVE-2020-3992 (OpenSLP UAF)",
+      "finding_kind": "cve_targeting"
+    },
+    {
+      "name": "slpreflector_amplification",
+      "kind": "passive",
+      "value": "high",
+      "description": "Any SLP responder answering unauthenticated AttrRqst over UDP is a candidate SLPReflector amplifier (CVE-2023-29552, BAF up to ~2200\u00d7, CISA KEV 2023). Flag every 427/udp responder with a 'reflected DDoS amplifier' finding regardless of vendor; remediation is disable SLP on the public interface or drop source-spoofed 427/udp.",
+      "cwe": [
+        "CWE-406"
+      ],
+      "protocol_reference": "CVE-2023-29552 (SLPReflector); RFC 2608 \u00a75 (no source validation on UDP replies)",
+      "finding_kind": "amplification"
+    },
+    {
+      "name": "scope_and_language_disclosure",
+      "kind": "passive",
+      "value": "low",
+      "description": "SrvRply carries the scope list (e.g. 'PROD-VMOTION', 'BLDG12-PRINT') and language tag; scope names routinely disclose site / environment structure that helps a tester map internal segmentation, and are worth capturing into host notes.",
+      "protocol_reference": "RFC 2608 \u00a78.1 (Language Tag), \u00a711 (Scope)",
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "runbook_and_external_tools",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Emit runbook rows for external verification: nmap NSE 'slp-info', slptool (openslp-server) 'slptool findsrvtypes' / 'findsrvs' / 'findattrs', and a Metasploit 'auxiliary/scanner/misc/openslp' entry for CVE-2019-5544 (do NOT invoke automatically \u2014 flag only). Mirrors ipp.py runbook() shape.",
+      "protocol_reference": "nmap-nse slp-info.nse; openslp slptool(1)",
+      "finding_kind": "runbook"
+    },
+    {
+      "name": "tcp_fallback_probe",
+      "kind": "active",
+      "value": "low",
+      "description": "SLPv2 permits TCP for replies larger than the MTU (Overflow bit in message header). Send the same SrvRqst to 427/tcp \u2014 many ESXi hosts answer TCP even when UDP is filtered by intermediate networks, so a TCP probe recovers coverage that a UDP-only sweep loses.",
+      "protocol_reference": "RFC 2608 \u00a78 (Overflow flag), \u00a76.3 (Use of TCP)",
+      "finding_kind": "coverage"
+    },
+    {
+      "name": "auth_block_detection",
+      "kind": "auth",
+      "value": "low",
+      "description": "SLPv2 authentication blocks (RFC 2608 \u00a79) are almost universally unimplemented \u2014 record their presence/absence in the reply as evidence of hardening. Presence of Auth Blocks on an ESXi host is a strong signal of a locked-down deployment; absence on any 427-responder is the norm and reinforces the unauthenticated-disclosure finding.",
+      "protocol_reference": "RFC 2608 \u00a79 (SLP Authentication), RFC 3421 (deprecated)",
+      "finding_kind": "hardening_check"
+    }
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [
+      "recce/core/scanner.py:974 \u2014 427 sits inside _UDP_BASIC_PORTS so nmap -sU -sV covers it in the enum phase when root",
+      "recce/vuln/vulndb.py:566-575 \u2014 one product-match advisory for VMware ESXi OpenSLP RCE (CVE-2021-21974/CVE-2019-5544/CVE-2020-3992), no version-gate, no service probe",
+      "recce/core/scanner.py:971 \u2014 SLP named only in a comment listing the UDP set"
+    ],
+    "notes": "No recce/services/slp.py exists. 427 is NOT in svcdetect.PORT_NAMES nor in serviceenum._PORT/_NAME, so a blank-service nmap result on 427 gets no label and no per-service script mapping. Nothing in the tree sends SrvTypeRqst/SrvRqst/AttrRqst or parses SLPv2 wire format. The ESXi advisory fires only if nmap-sV happens to set a product string containing 'vmware esxi' \u2014 SLP itself is not the trigger."
+  },
+  "cross_service_wire_candidates": [
+    "service:URL list from SrvRply \u2192 seed cross-service scanners: service:http/https \u2192 recce/services/http.py, service:printer/ipp \u2192 ipp.py, service:cifs \u2192 smb.py, service:nfs \u2192 nfs.py, service:ldap \u2192 ldap.py, service:jetdirect \u2192 JetDirect flag, service:VMwareInfrastructure / service:wbem \u2192 treat host as ESXi/vCenter",
+    "product + version pairs from AttrRqst (esp. ESXi 'product'/'version'/'build') \u2192 vulndb.py product match with precise version-gate (CVE-2021-21974 line)",
+    "New IPv4 hosts learned from multicast SrvRply / DAAdvert on 239.255.255.253 \u2192 append to host inventory as sibling discovery (feeds scanner + msrpc/smb/etc.)",
+    "Directory Agent identity (DAAdvert URL + scope list) \u2192 seed a follow-up unicast SLP query that aggregates every SA in scope in one shot",
+    "Scope names and site tags (e.g. 'PROD-VMOTION', 'BLDG12') \u2192 host notes + segmentation map used by report + attack-path narratives",
+    "Printer names / share names / filesystem export names from AttrRqst \u2192 enrich existing smb/nfs/ipp findings with human-recognisable resource labels",
+    "SLP responders on 427/udp with unauth AttrRqst \u2192 SLPReflector amplification list (CVE-2023-29552), consumable by an eventual DoS/exposure summary tab",
+    "CIMOM / managementserver URLs from ESXi AttrRply \u2192 vCenter host address (feeds vsphere / port-443 web probing on the management-plane host)"
+  ],
+  "default_ports": [
+    "427/tcp",
+    "427/udp",
+    "multicast 239.255.255.253:427"
+  ],
+  "recommended_findings": [
+    {
+      "severity": "critical",
+      "title": "ESXi OpenSLP RCE (CVE-2021-21974 / CVE-2019-5544 / CVE-2020-3992) \u2014 build-gated via SLP AttrRqst"
+    },
+    {
+      "severity": "high",
+      "title": "SLP unauthenticated service catalogue readable (SrvTypeRqst + SrvRqst + AttrRqst)"
+    },
+    {
+      "severity": "high",
+      "title": "SLP UDP amplification reflector exposed (CVE-2023-29552, KEV)"
+    },
+    {
+      "severity": "medium",
+      "title": "SLP AttrRqst discloses product+version and internal URLs unauthenticated"
+    },
+    {
+      "severity": "medium",
+      "title": "SLP Directory Agent aggregates network-wide advertisements"
+    },
+    {
+      "severity": "low",
+      "title": "SLP scope / language tags disclose environment structure"
+    }
+  ],
+  "implementation_notes": "Ship as recce/services/slp.py modeled on ipp.py's shape: is_slp() gate, wire-format helpers (_slp_header, _slp_srvtyperqst, _slp_srvrqst, _slp_attrrqst) using stdlib struct + socket only (no third-party deps \u2014 recce is air-gapped, per project_airgap.md), probe()/targets()/findings()/runbook()/findings_to_vulns()/analyze() following svcprobe.iter_probe budget+state contract. Two integration wires needed at the same time: (1) add 427 \u2192 ('slp','Service Location Protocol') to svcdetect.PORT_NAMES and (2) add 427 \u2192 'slp' plus name 'slp' \u2192 'slp' to serviceenum._PORT / _NAME so recce services and the enrich_port path both light up. Multicast SrvRqst must be flag-gated (--slp-multicast) and skipped in default runs because it needs local L2 and generates broadcast traffic \u2014 matches how udp_basic_scan() gates on root. Version-gate the existing vulndb ESXi advisory on the build string parsed here to avoid a false positive when a patched ESXi still answers SLP. No new binaries to bundle; slptool / nmap slp-info live in runbook rows only."
+}

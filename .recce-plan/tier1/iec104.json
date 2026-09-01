@@ -1,0 +1,243 @@
+{
+  "service": "IEC-104 (IEC 60870-5-104 SCADA)",
+  "default_ports": [
+    "2404/tcp"
+  ],
+  "summary": "IEC 60870-5-104 is the TCP transport for the IEC 60870-5 SCADA telecontrol protocol, ubiquitous in electric transmission/distribution SCADA (RTUs, gateways, master stations). The base protocol has NO authentication and NO encryption (IEC 62351-3 defines an optional TLS wrap that most fielded gear does not run), so any client that can reach 2404/tcp can enumerate the station's process image (analog measurements, breaker positions, tap positions) via General Interrogation, and \u2014 in the worst case \u2014 issue Single/Double Commands, clock-sync, and Reset Process commands that actuate physical equipment. Recce has ZERO IEC-104 coverage today: 2404/tcp is not in svcdetect.PORT_NAMES, no scripts/recce-service.sh handler, no serviceenum mapping, and no probe module. Adding it is high-value for power-grid engagements \u2014 an IEC-104 responder on a corporate/DMZ segment is by itself a critical segmentation finding, and STARTDT + General Interrogation gives a testable, non-destructive proof.",
+  "existing_coverage": {
+    "detected": false,
+    "files": [
+      "recce/services/svcdetect.py",
+      "recce/services/serviceenum.py"
+    ],
+    "notes": "grep for 'iec.104|iec104|iec-104|2404' across recce/**/*.py returned zero hits. svcdetect.PORT_NAMES maps 102 -> iso-tsap (Siemens S7) but has no entry for 2404. serviceenum._PORT / _NAME have no iec-104 handler. modbus.py is the only sibling OT probe and is the correct style template \u2014 6-byte binary header, connect + single request/response, read-only default."
+  },
+  "capabilities": [
+    {
+      "name": "iec104_apci_detect",
+      "kind": "active",
+      "description": "TCP connect to 2404 and validate the 6-byte APCI: any valid frame from the peer starts with the 0x68 START byte and a length octet <= 253 \u2014 cheap positive fingerprint that beats a bare TCP-open guess.",
+      "value": "high",
+      "finding_kind": "iec104_reachable",
+      "protocol_reference": "IEC 60870-5-104:2006 \u00a75.1 (APCI format), \u00a75.2 (frame formats)",
+      "cwes": [
+        "CWE-284",
+        "CWE-923"
+      ],
+      "notes": "0x68 + length + 4 control-field octets; any non-0x68 first byte on 2404 is a mislabel and should downgrade the label, not raise the finding."
+    },
+    {
+      "name": "iec104_testfr_liveness",
+      "kind": "active",
+      "description": "Send TESTFR act (U-format ctl1=0x43, frame '68 04 43 00 00 00'); a TESTFR con (ctl1=0x83) reply proves a live IEC-104 stack without touching data-transfer state.",
+      "value": "high",
+      "finding_kind": "iec104_reachable",
+      "protocol_reference": "IEC 60870-5-104:2006 \u00a75.3, Table 5 (U-format control-field encoding)",
+      "cwes": [
+        "CWE-284"
+      ],
+      "notes": "Baseline probe \u2014 safe on live grid gear. The task hint reversed act/con for TESTFR; the correct wire values are act=0x43, con=0x83."
+    },
+    {
+      "name": "iec104_startdt_no_auth",
+      "kind": "auth",
+      "description": "STARTDT act (U-format ctl1=0x07, '68 04 07 00 00 00') is accepted with no credentials \u2014 a STARTDT con (0x0B) reply proves an unauthenticated peer can enter data-transfer state, the entire basis for every downstream ASDU.",
+      "value": "critical",
+      "finding_kind": "iec104_startdt_accepted",
+      "protocol_reference": "IEC 60870-5-104:2006 \u00a75.3 (U-format), \u00a75.4 (data-transfer state), IEC 62351-3 (the TLS profile most gear does not run)",
+      "cwes": [
+        "CWE-306",
+        "CWE-319"
+      ],
+      "notes": "Emit even when the finding is nominally redundant with base-protocol lack-of-auth \u2014 a successful STARTDT is the concrete proof and the runbook screenshot."
+    },
+    {
+      "name": "iec104_general_interrogation_dump",
+      "kind": "active",
+      "description": "After STARTDT, send C_IC_NA_1 (TypeID 100) General Interrogation with COT=6 (activation), QOI=20 (station interrogation); the RTU replies with a burst of M_ME_/M_SP_/M_DP_ ASDUs enumerating every analog measurement and single/double-point (breaker, isolator, transformer tap) it exposes \u2014 a complete process-image dump with zero authentication.",
+      "value": "critical",
+      "finding_kind": "iec104_process_image_readable",
+      "protocol_reference": "IEC 60870-5-101:2003 \u00a77.4.11 (C_IC_NA_1), \u00a77.2.3 (TypeID table), IEC 60870-5-104 \u00a77 (ASDU over TCP)",
+      "cwes": [
+        "CWE-306",
+        "CWE-200"
+      ],
+      "notes": "Read-only, safe. Cap the collection burst (t2 timeout ~10 s or first N ASDUs, whichever) so a large station does not stall the probe budget. Include IOA + measured value in the finding detail \u2014 it is what makes the report land with the OT operator."
+    },
+    {
+      "name": "iec104_coa_enum",
+      "kind": "active",
+      "description": "Common ASDU Address (CAA, 2 octets) identifies the station; probe a shortlist (1, 3, 65535 broadcast) plus a small sweep to discover live station addresses when the fielded gateway hosts multiple substations \u2014 an 'unknown common address' response (COT=46) proves the CAA is invalid, any other reply proves it is live.",
+      "value": "high",
+      "finding_kind": "iec104_station_addresses",
+      "protocol_reference": "IEC 60870-5-101:2003 \u00a77.2.4 (Common Address of ASDU), \u00a77.2.3 Table 5 (COT=46 unknown CAA)",
+      "cwes": [
+        "CWE-200"
+      ],
+      "notes": "Do NOT full-sweep 1..65534 by default \u2014 a burst that big trips OT SIEMs. Ship a small default list and a --coa-range flag for the OT-authorized case."
+    },
+    {
+      "name": "iec104_read_command",
+      "kind": "active",
+      "description": "C_RD_NA_1 (TypeID 102) read command for a single Information Object Address is a safer, targeted alternative to General Interrogation when a specific IOA is known \u2014 proves per-object read is unauthenticated and lets the tester fingerprint one point without the traffic burst.",
+      "value": "medium",
+      "finding_kind": "iec104_ioa_read_ok",
+      "protocol_reference": "IEC 60870-5-101:2003 \u00a77.4.13 (C_RD_NA_1)",
+      "cwes": [
+        "CWE-306"
+      ],
+      "notes": "Use with IOAs learned from the general-interrogation dump to demonstrate repeatable reads."
+    },
+    {
+      "name": "iec104_clock_sync_write",
+      "kind": "exploit",
+      "description": "C_CS_NA_1 (TypeID 103) Clock Synchronization writes CP56Time2a into the RTU's real-time clock \u2014 an unauthenticated write that desynchronizes SOE (sequence-of-events) logs and breaks post-incident forensics; MUST be off by default and gated behind an explicit --iec104-write flag.",
+      "value": "critical",
+      "finding_kind": "iec104_clock_writable",
+      "protocol_reference": "IEC 60870-5-101:2003 \u00a77.4.14 (C_CS_NA_1)",
+      "cwes": [
+        "CWE-306",
+        "CWE-345"
+      ],
+      "notes": "Gate behind the same class-of-danger flag as active exploit modules. Even a 1-second nudge is destructive on a live substation timeline."
+    },
+    {
+      "name": "iec104_single_command_write",
+      "kind": "exploit",
+      "description": "C_SC_NA_1 (TypeID 45) Single Command writes a boolean (breaker open/close, isolator, motor-operated switch) to an IOA \u2014 issuing one to a live grid device trips real primary equipment; DANGEROUS, off by default, must require an explicit target IOA AND write flag, never a sweep.",
+      "value": "critical",
+      "finding_kind": "iec104_control_writable",
+      "protocol_reference": "IEC 60870-5-101:2003 \u00a77.4.1 (C_SC_NA_1), \u00a77.2.6.26 (SCO qualifier)",
+      "cwes": [
+        "CWE-306",
+        "CWE-284",
+        "CWE-807"
+      ],
+      "notes": "Recce should never issue this speculatively. In non-exploit mode the module can DESCRIBE the exposure (the RTU accepted STARTDT and returns valid COT for control types) without transmitting. C_DC_NA_1 (46, double command) and C_RC_NA_1 (47, regulating-step) belong on the same gated write path."
+    },
+    {
+      "name": "iec104_reset_process_write",
+      "kind": "exploit",
+      "description": "C_RP_NA_1 (TypeID 105) Reset Process forces the RTU application to reinitialize \u2014 an unauthenticated remote reboot of the outstation; off by default, gated behind the same write flag as clock/command.",
+      "value": "critical",
+      "finding_kind": "iec104_reset_writable",
+      "protocol_reference": "IEC 60870-5-101:2003 \u00a77.4.16 (C_RP_NA_1)",
+      "cwes": [
+        "CWE-306",
+        "CWE-1327"
+      ]
+    },
+    {
+      "name": "iec104_tls_wrap_check",
+      "kind": "passive",
+      "description": "IEC 62351-3 profiles IEC-104 over TLS on the same port; attempt a ClientHello and record whether the peer completes a TLS handshake \u2014 negative outcome is the finding (no encryption, no peer authentication on the SCADA transport).",
+      "value": "medium",
+      "finding_kind": "iec104_no_tls",
+      "protocol_reference": "IEC 62351-3:2020 \u00a75 (TLS mandatory ciphersuites), IEC TR 62351-90-3",
+      "cwes": [
+        "CWE-319",
+        "CWE-311"
+      ],
+      "notes": "Reuse svcdetect.tls_http_probe pattern (SSLContext + wrap_socket). Positive TLS should NOT stop the probe \u2014 record cipher suite + client-cert requirement, then attempt IEC-104 inside the TLS session."
+    },
+    {
+      "name": "iec104_vendor_fingerprint",
+      "kind": "passive",
+      "description": "Private/reserved TypeIDs 128-255 and the ASDU response cadence (block size, timing, COT usage) fingerprint the RTU family (Siemens SICAM, ABB RTU5xx, GE D20/D400, SEL, Kalkitech, IEC104-python) \u2014 feeds CVE lookup and default-credential shortlists for the HMI that fronts the device.",
+      "value": "medium",
+      "finding_kind": "iec104_vendor_identified",
+      "protocol_reference": "IEC 60870-5-101:2003 \u00a77.2.3 Table 5 (private-range TypeIDs 128..255)",
+      "cwes": [
+        "CWE-200"
+      ],
+      "notes": "Capture the fingerprint even when the vendor is not resolvable \u2014 the raw private-TypeID list itself is a stable identifier."
+    },
+    {
+      "name": "iec104_source_ip_acl_probe",
+      "kind": "auth",
+      "description": "Many OT gateways implement a soft source-IP allowlist as their only access control (IEC 62351-3 not being feasible on legacy RTUs); probing from an off-list source and being refused is a positive control finding, being accepted is the ACL gap \u2014 record either outcome.",
+      "value": "medium",
+      "finding_kind": "iec104_source_ip_acl",
+      "protocol_reference": "Vendor practice; see IEC TR 62351-90-1 \u00a76.3 (network-layer compensating controls)",
+      "cwes": [
+        "CWE-284"
+      ],
+      "notes": "Only assertable when recce knows the probe's own source IP; wire it through the proxy/pivot layer so a Chain result from an internal pivot is comparable to the external baseline."
+    },
+    {
+      "name": "iec104_session_singleton_check",
+      "kind": "chain",
+      "description": "Many stacks accept only one active data-transfer connection; open a second TCP + STARTDT while the first is live and observe whether the first is torn down or the second is refused \u2014 the first behavior is a session-hijack primitive against a legitimate master, the second is the correct hardening.",
+      "value": "medium",
+      "finding_kind": "iec104_session_hijack",
+      "protocol_reference": "IEC 60870-5-104:2006 \u00a75.4 (single controlling station), Annex A (redundancy expectations)",
+      "cwes": [
+        "CWE-287"
+      ],
+      "notes": "Off by default in engagements against production masters; document as a lab-only capability."
+    },
+    {
+      "name": "iec104_seq_window_fingerprint",
+      "kind": "chain",
+      "description": "Send k I-frames without acknowledging (never returning an S-format N(R)) \u2014 the peer's k/w window (defaults k=12, w=8) is observable from when it stops sending; combined with the vendor fingerprint this narrows the stack and, at abusive scale, is a DoS primitive.",
+      "value": "low",
+      "finding_kind": "iec104_window_dos",
+      "protocol_reference": "IEC 60870-5-104:2006 \u00a75.5 (k/w parameters), Table 8",
+      "cwes": [
+        "CWE-770"
+      ],
+      "notes": "Read-only unless intentionally abused; keep k small (<=k default) in the fingerprint mode."
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "New shared surface known_ics_stations: (ip, common_asdu_address, vendor?, iec104|dnp3|modbus) \u2014 CAAs learned here feed later DNP3/61850 probes and let the summary tab render a substation topology.",
+    "New shared surface known_process_points: (ip, ioa, type_id, value_seen) \u2014 the process-image dump from general interrogation is the OT equivalent of an SMB share listing and belongs in a durable surface, not only in the runbook.",
+    "known_hostnames: RTU/gateway vendor+model strings extracted from private-TypeID responses (e.g. 'SICAM A8000', 'RTU560') feed the CVE mapper the same way modbus vendor strings do.",
+    "relay_targets: an IEC-104 responder is almost always a substation gateway with a second NIC into the process bus \u2014 mark the host as a pivot candidate for reaching 61850 MMS (102/tcp) and DNP3 (20000/tcp) on the OT side.",
+    "known_domains / OT naming: substation IDs and bay/line tags that appear in vendor-specific ASDU payloads can seed a naming convention for downstream host discovery."
+  ],
+  "recommended_findings": [
+    {
+      "title": "IEC-104 SCADA device on the scanned network",
+      "severity": "high"
+    },
+    {
+      "title": "IEC-104 accepts STARTDT with no authentication",
+      "severity": "high"
+    },
+    {
+      "title": "IEC-104 General Interrogation returned the full process image",
+      "severity": "critical"
+    },
+    {
+      "title": "IEC-104 control write types (C_SC_NA_1 / C_DC_NA_1) reachable \u2014 unauthenticated actuation of physical equipment",
+      "severity": "critical"
+    },
+    {
+      "title": "IEC-104 clock synchronization (C_CS_NA_1) writable \u2014 SOE forensic integrity at risk",
+      "severity": "critical"
+    },
+    {
+      "title": "IEC-104 Reset Process (C_RP_NA_1) reachable \u2014 unauthenticated remote RTU reboot",
+      "severity": "critical"
+    },
+    {
+      "title": "IEC-104 transported in cleartext (no IEC 62351-3 TLS)",
+      "severity": "medium"
+    },
+    {
+      "title": "IEC-104 vendor / RTU model identified",
+      "severity": "info"
+    },
+    {
+      "title": "IEC-104 additional Common ASDU Addresses reachable behind the gateway",
+      "severity": "medium"
+    },
+    {
+      "title": "IEC-104 session singleton: legitimate master can be forcibly displaced",
+      "severity": "medium"
+    }
+  ],
+  "recommended_hashcat_modes": [],
+  "implementation_notes": "Model the module on recce/services/modbus.py \u2014 same shape (is_iec104 / probe / targets / findings / runbook / analyze / findings_to_vulns) and same svcprobe.iter_probe orchestration. APCI is fixed at 6 bytes starting 0x68 <len> <ctl1..ctl4>; APDU max length is 253 (len octet). U-format frames used for probing: TESTFR act '68 04 43 00 00 00', STARTDT act '68 04 07 00 00 00'; expected replies TESTFR con 0x83, STARTDT con 0x0B. I-format ASDU carrying General Interrogation is roughly 14 bytes: APCI(6) + TypeID=100 + VSQ=0x01 + COT=0x06 0x00 + CAA(2) + IOA(3, all zero) + QOI=0x14. Use conservative recv timeouts (~4 s) and a small budget (t2=10 s cap on interrogation collect) so a chatty station does not stall the scan. Airgap constraint (per project_airgap.md): stdlib socket + struct only \u2014 no scapy, no requests, no lib60870. Reuse svccommon.findings_to_vulns for the vuln adapter. Add 2404 to svcdetect.PORT_NAMES as ('iec-104', 'IEC 60870-5-104 SCADA') and add an 'iec-104' entry to serviceenum._PORT/_NAME once a scripts/recce-service.sh iec-104 handler exists. WRITE capabilities (single/double command, clock sync, reset process) MUST be off by default behind an explicit --iec104-write flag \u2014 this protocol runs on live grid equipment and a stray Single Command trips real breakers. Document read-only default prominently in the module docstring, mirroring modbus.py's read-only stance."
+}

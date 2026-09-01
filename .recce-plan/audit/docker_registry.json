@@ -1,0 +1,219 @@
+{
+  "service": "docker_registry",
+  "existing_capabilities": [
+    "Registry fingerprinting via /v2/ probe + Docker-Distribution-Api-Version header (spec section: v2 API version check)",
+    "TLS auto-fallback (HTTP first, then HTTPS with unverified context)",
+    "Anonymous /v2/_catalog enumeration with n=200 limit and 100-repo cap in output",
+    "Auth-required detection via 401+Bearer challenge",
+    "Two findings: dockerreg_anonymous_catalog (HIGH), dockerreg_authed (info)",
+    "Basic runbook (fingerprint, catalog, docker pull)",
+    "docker_registry_targets() port matcher for 5000/5001/5002/443/5443"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "Config blob extraction for env-var / secret mining",
+      "kind": "active",
+      "description": "Module's HIGH finding text promises 'mined for secrets baked into layers (env variables, config files, private keys)', but the code never fetches a manifest or config blob. The image config JSON (referenced by manifest.config.digest, pulled via GET /v2/<repo>/blobs/<digest>) contains config.Env, config.Cmd, config.Entrypoint, config.Labels, config.User, config.WorkingDir, config.ExposedPorts. Env is where AWS_SECRET_ACCESS_KEY, DB_PASSWORD, DOCKER_AUTH_CONFIG, GITHUB_TOKEN etc. live. No layer FS extraction required, one blob pull per repo. Spec: OCI Image Spec 'Image Configuration', Distribution v2 'Pulling An Image Manifest' + 'Pulling a Layer'.",
+      "value": "critical",
+      "cwe": [
+        "CWE-798",
+        "CWE-200",
+        "CWE-522"
+      ],
+      "protocol_reference": "OCI Distribution spec 'end-3' (manifest GET) + 'end-2' (blob GET); OCI Image Spec v1.1 image-config"
+    },
+    {
+      "name": "Anonymous write / push access probe",
+      "kind": "active",
+      "description": "Never tests POST /v2/<name>/blobs/uploads/ (spec 'end-4a'). If the registry allows anonymous write (very common misconfig \u2014 read-only auth in front, no auth on write, or reversed) an attacker can push a poisoned :latest tag over an existing repo -> RCE on every host that pulls. This is the highest-value primitive a registry offers and is completely absent. A single POST returning 202 Accepted with a Location header is definitive.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-434",
+        "CWE-863"
+      ],
+      "protocol_reference": "OCI Distribution spec end-4a 'POST /v2/<name>/blobs/uploads/'; behaviors 'push'"
+    },
+    {
+      "name": "Cross-repo blob mount probe",
+      "kind": "active",
+      "description": "POST /v2/<dst>/blobs/uploads/?mount=<digest>&from=<src> \u2014 if src is readable but dst is 'restricted', mount can bypass ACL and confirm blob presence across repos. Also confirms write path from another angle. Spec: end-11.",
+      "value": "high",
+      "cwe": [
+        "CWE-863",
+        "CWE-284"
+      ],
+      "protocol_reference": "OCI Distribution spec end-11 'Mounting A Blob From Another Repository'"
+    },
+    {
+      "name": "Tag enumeration per repository",
+      "kind": "active",
+      "description": "GET /v2/<name>/tags/list not called. Tags reveal dev/staging/prod separation, dated builds (e.g. 2019-03-old), branch names (feature/, pr-*), sig-suffixed tags (cosign .sig / .att), and stale tags pinning known-vulnerable base images. Also required to pick a reference for the manifest fetch above. Spec 'end-8a'.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "OCI Distribution spec end-8a 'GET /v2/<name>/tags/list'"
+    },
+    {
+      "name": "Anonymous Bearer token acquisition against advertised realm",
+      "kind": "auth",
+      "description": "When /v2/ returns 401 with `Bearer realm=<url>,service=<svc>,scope=<...>`, the module records auth_required and stops. It should parse the challenge, GET the realm URL with no credentials (or with `?scope=registry:catalog:*`) \u2014 many token services (registry:2 default, GitLab CR, misconfigured Harbor) issue a valid token to unauthenticated clients with empty or catalog scope. Re-hit /v2/_catalog with that Bearer token \u2014 a common way to defeat the 'auth-required' state entirely. Also captures the realm URL as a cross-service hostname pivot.",
+      "value": "high",
+      "cwe": [
+        "CWE-287",
+        "CWE-306"
+      ],
+      "protocol_reference": "Distribution v2 'Token Authentication Specification' (docker/distribution spec/auth/token.md)"
+    },
+    {
+      "name": "Manifest fetch with correct Accept header set",
+      "kind": "active",
+      "description": "Even with anon catalog, module never fetches GET /v2/<name>/manifests/<ref>. Must send Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json \u2014 otherwise registries fall back to v1 which has different structure. Manifest gives digest of the config blob (previous capability) and the layer digests.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "OCI Distribution end-3; OCI Image Manifest v1.1"
+    },
+    {
+      "name": "Catalog pagination via `last=` cursor",
+      "kind": "active",
+      "description": "Module sends ?n=200 once and reports 'repositories' as len(response). Registries with >200 repos are silently truncated and the count is wrong. Spec requires paginated iteration using the `Link: <...?n=X&last=Y>; rel=\"next\"` header per RFC 5988 (section 'Listing Repositories'). Missing repos = missing findings.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Distribution v2 'Listing Repositories' \u2014 pagination via `Link` header + `last` query param"
+    },
+    {
+      "name": "Repo-name enumeration fallback when _catalog is disabled/403",
+      "kind": "active",
+      "description": "Hardened registries disable /v2/_catalog (Distribution env REGISTRY_STORAGE_MAINTENANCE_READONLY or auth-scoped). Even then, HEAD /v2/<name>/manifests/latest against a small wordlist (library/nginx, library/redis, app, api, backend, frontend, admin, jenkins, gitlab, harbor, sonarqube, org/repo guesses from known_domains) discovers hidden repos. Currently the module gives up completely when catalog is gated.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Distribution v2 end-3 HEAD variant"
+    },
+    {
+      "name": "Vendor detection & unauth vendor API pulls (Harbor / Quay / GitLab CR / Nexus / ECR-mock)",
+      "kind": "passive",
+      "description": "Registry is identified only as generic 'registry/2'. Vendor-specific unauth surfaces are huge and untouched: Harbor GET /api/v2.0/systeminfo (product+version, auth mode, storage backend \u2014 unauth by default before 2.5), /api/v2.0/health, /api/v2.0/projects?public=true (public projects incl. members); Quay GET /api/v1/discovery, /api/v1/repository?public=true; GitLab Container Registry X-Gitlab-Container-Registry-Version header + /jwt/auth realm; Nexus /service/rest/v1/repositories. Also parse Server, X-Harbor-*, X-Registry-Uuid, X-Registry-Supports-Signatures headers already returned. Enables CVE mapping.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Harbor OpenAPI v2.0; Quay API v1; GitLab CR authentication spec"
+    },
+    {
+      "name": "Referrers API (OCI 1.1) enumeration",
+      "kind": "active",
+      "description": "GET /v2/<name>/referrers/<digest> lists SBOMs, cosign signatures, in-toto attestations attached to an image. These blobs often embed CI system URLs, git commit SHAs, builder identities, developer emails \u2014 cross-service pivot gold. Spec: OCI Distribution v1.1 end-12a.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "OCI Distribution v1.1 end-12a 'GET /v2/<name>/referrers/<digest>'"
+    },
+    {
+      "name": "TLS SAN / cert fingerprint capture on HTTPS path",
+      "kind": "passive",
+      "description": "_http uses ssl._create_unverified_context() and discards the peer cert. Registries on 443/5443 frequently carry internal hostnames in SAN (registry.corp.internal, harbor.prod.k8s.local) \u2014 feeds known_hostnames/known_domains. Also cert notAfter for expiry finding.",
+      "value": "medium",
+      "cwe": [
+        "CWE-295",
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 5280 SAN extension"
+    },
+    {
+      "name": "Anonymous DELETE probe",
+      "kind": "active",
+      "description": "DELETE /v2/<name>/manifests/<digest> \u2014 if allowed unauth (registry env REGISTRY_STORAGE_DELETE_ENABLED=true + no auth on write), a lone HEAD-then-DELETE against a scratch tag proves destructive access without actually destroying prod data. Spec end-9.",
+      "value": "medium",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "protocol_reference": "OCI Distribution end-9 'DELETE /v2/<name>/manifests/<reference>'"
+    },
+    {
+      "name": "Cross-service wiring: known_users / known_hostnames / known_domains / relay_targets feeds",
+      "kind": "passive",
+      "description": "Repo names like `org/team/service` yield users (org, team) and internal hostnames (svc names commonly resolve internally). Manifest 'RepoTags', 'author' field in image config, and Labels (org.opencontainers.image.source URL, image.authors, image.vendor, image.url) are dense pivot data. Currently zero of this flows into the shared cross-service surfaces. Harbor/Quay project members endpoints (when unauth) yield literal usernames + emails.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "OCI Image Spec v1.1 'Pre-Defined Annotation Keys' (org.opencontainers.image.*)"
+    },
+    {
+      "name": "CVE-tagged findings tied to detected version/vendor",
+      "kind": "passive",
+      "finding_kind": "cve",
+      "description": "Once vendor detection lands, map to: CVE-2023-2253 (Distribution DoS via manifest push), CVE-2023-30845 (Distribution redis session key exposure), CVE-2020-29662 (Harbor auth-bypass RCE), CVE-2022-2989 (Harbor privilege escalation), CVE-2022-31666 (Harbor SSRF), Quay CVE-2023-3384 (RCE), GitLab CR CVE-2021-22205 (RCE via ExifTool \u2014 related registry paths). Base-image vintage findings when tags reference e.g. `alpine:3.6` (CVE-2019-5021 null-root).",
+      "value": "high",
+      "cwe": [
+        "CWE-1035"
+      ],
+      "protocol_reference": "NVD"
+    },
+    {
+      "name": "'Auth required' state should still try /v2/_catalog blindly",
+      "kind": "active",
+      "description": "Module returns immediately on 401 at /v2/. Nginx-fronted registries and misconfigured k8s ingresses sometimes require auth on /v2/ but leak /v2/_catalog (or vice versa) because rules were pasted per-path. Cheap extra GET, high-yield miss otherwise.",
+      "value": "medium",
+      "cwe": [
+        "CWE-284"
+      ],
+      "protocol_reference": "Distribution v2 end-1 vs end-8 independent path handling"
+    },
+    {
+      "name": "Basic-auth challenge handling & default-cred spray hook",
+      "kind": "auth",
+      "description": "Only 'Bearer' is recognized in www_auth. htpasswd-fronted registries return `WWW-Authenticate: Basic realm=\"Registry\"`. Neither is spray-tested with recce's cred bank (admin:admin, admin:Harbor12345 default, docker:docker). Missing entirely.",
+      "value": "high",
+      "cwe": [
+        "CWE-521",
+        "CWE-798"
+      ],
+      "protocol_reference": "RFC 7617 Basic; Harbor default admin password Harbor12345"
+    },
+    {
+      "name": "Signed-URL / storage-backend redirect capture",
+      "kind": "passive",
+      "description": "Blob GETs on S3/GCS-backed registries respond 307 to a signed URL \u2014 that URL leaks bucket name, region, account id (S3 path style), and IAM role in some SigV4 configurations. Capturing the Location header of one blob HEAD is a low-cost internal-infra leak.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Distribution 'storagedrivers' \u2014 S3/GCS driver 307 redirect behavior"
+    }
+  ],
+  "priority_gaps": [
+    "Config blob fetch + env-var/secret scan \u2014 module already advertises this in its HIGH finding text but does not implement it; single highest ROI",
+    "Anonymous write probe (POST /v2/<name>/blobs/uploads/) \u2014 turns registry from info-leak into supply-chain RCE primitive",
+    "Bearer token anonymous acquisition against advertised realm \u2014 defeats most 'auth_required' outcomes cheaply",
+    "Vendor detection (Harbor/Quay/GitLab CR) + unauth vendor API pulls \u2014 unlocks whole family of CVE findings and pivot data",
+    "Tag enumeration per repo \u2014 prerequisite for manifest fetch and reveals stale/vulnerable image tags",
+    "HEAD-probe wordlist fallback when /v2/_catalog is gated \u2014 most hardened registries still leak known repo names this way",
+    "Cross-service wiring: repo path segments -> known_users/known_domains; image Labels + manifest annotations -> known_hostnames; Harbor project members -> known_users",
+    "Basic-auth branch + default-cred spray hook (Harbor12345, admin/admin)"
+  ],
+  "cross_service_wire_gaps": [
+    "Repo names of form `<org>/<team>/<service>` never feed known_users or known_domains",
+    "OCI image annotations (org.opencontainers.image.source URL, image.authors, image.vendor, image.url) and image config author field never parsed -> lost known_users/known_domains/known_hostnames",
+    "Bearer realm hostname from WWW-Authenticate is discarded (auth server host = high-value pivot)",
+    "TLS SAN on 443/5443 not captured despite HTTPS fallback path already opening the socket",
+    "Blob storage 307 redirects (S3/GCS bucket URLs, region, account) never captured",
+    "Harbor /api/v2.0/projects members and Quay /api/v1/user listings never queried -> missing free known_users source",
+    "Repository/tag pairs never surfaced as relay_targets even though a writable registry is a first-class pivot (push poisoned image -> pulled cluster-wide)"
+  ],
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/docker_registry.py",
+    "/home/kali/Desktop/projects/recce/tests/test_docker_registry.py"
+  ],
+  "summary": "docker_registry.py currently implements only the two lightest touches of the OCI Distribution v2 API: /v2/ fingerprint and /v2/_catalog listing. It stops at auth_required, never fetches a manifest or config blob (though its HIGH finding text promises secret mining), never probes write access (the actual supply-chain RCE primitive), never enumerates tags, never handles pagination, never parses/exercises the Bearer challenge for anonymous token issuance, and never distinguishes vendor (Harbor/Quay/GitLab CR) \u2014 so all vendor-CVE mapping is off the table. Cross-service wiring is essentially zero: repo path segments, OCI annotations, bearer realms, TLS SAN, and storage 307 targets are all discarded. Test coverage mirrors the code \u2014 three probe cases, no manifest/blob/write/auth-branch cases.",
+  "notes": "Module claims \"airgap-safe, bounded, 2 GETs 3s each\". Any expansion should stay stdlib-only (http.client + ssl) and keep a budget guard; svcprobe.iter_probe already provides that harness. The highest-value additions (config blob fetch, write probe, bearer token flow) each add 1-3 stdlib requests per target \u2014 comfortably within an air-gapped budget. Harbor default password Harbor12345 is documented public and should feed the shared cred bank rather than being hard-coded here."
+}

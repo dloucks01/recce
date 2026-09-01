@@ -1,0 +1,184 @@
+{
+  "service": "oracle",
+  "module_files": [
+    "recce/services/db/oracle.py",
+    "tests/test_db_engines.py"
+  ],
+  "summary": "recce speaks TNS well enough to confirm a listener and (best-effort) leak the banner/version via a single (CONNECT_DATA=(COMMAND=version)) probe. Everything else the Oracle attack surface actually offers \u2014 SID/service enumeration, remote-admin commands on pre-10g listeners, active CVE-2012-1675 (TNS Poison) service-registration check, CVE-2012-3137 o5logon hash disclosure via the native auth exchange, TCPS/2484 detection, version\u2192CVE mapping, and pushing the well-known Oracle default-account list + discovered SIDs/hostnames into cross-service pools \u2014 is currently just narrative/runbook text pointing at odat and nmap. All of it is speakable pre-auth in stdlib and would produce direct, high-value findings.",
+  "existing_capabilities": [
+    "port-detect-1521-1522-1526-1748-1754",
+    "tns-connect-command-version-probe",
+    "tns-packet-type-parsing",
+    "version-regex-extraction",
+    "tnslsnr-banner-regex",
+    "finding-oracle-tns-exposed",
+    "finding-oracle-version-leak",
+    "runbook-odat-nmap-tnscmd-stubs"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "cve_2012_1675_tns_poison_active_check",
+      "kind": "exploit",
+      "value": "critical",
+      "description": "Send an unsolicited service registration packet (Net Services Reference: NSGR / service_register_NSGR) to the listener; a vulnerable 10g/11g < 11.2.0.4 listener accepts remote instance registration from any IP, letting an attacker MITM future client sessions. Module mentions CVE-2012-1675 in the narrative but never actively probes it \u2014 that's the difference between a hint and a proven vuln. Emit finding oracle_tns_poison_vulnerable.",
+      "protocol_reference": "Oracle Alert CVE-2012-1675 / Oracle Net Services Admin Guide 'Registration of Instance Information'",
+      "cwe": [
+        "CWE-306",
+        "CWE-940"
+      ],
+      "finding_kind": "oracle_tns_poison_vulnerable"
+    },
+    {
+      "name": "cve_2012_3137_o5logon_hash_disclosure",
+      "kind": "exploit",
+      "value": "critical",
+      "description": "After a valid CONNECT for a known SID, send an AUTH request for a well-known user (SYS, SYSTEM, DBSNMP). Pre-11.2.0.3 / unpatched 11g/12c listeners answer with AUTH_SESSKEY (48 bytes) + AUTH_VFR_DATA (16 bytes salt) \u2014 a SHA-1/AES-192 hash offline-crackable by JtR 'oracle11' / hashcat 3100. Fully pre-auth (no valid password needed); the response is returned to any client that supplies a username. Feed the captured hash into known_hashes. Emit finding oracle_o5logon_hash_disclosure.",
+      "protocol_reference": "CVE-2012-3137; Esteban Fay\u00f3 'CryptoAG' Oracle Auth Protocol paper (Ekoparty 2012)",
+      "cwe": [
+        "CWE-522",
+        "CWE-916"
+      ],
+      "finding_kind": "oracle_o5logon_hash_disclosure"
+    },
+    {
+      "name": "listener_status_and_services_dump",
+      "kind": "passive",
+      "value": "high",
+      "description": "Send (CONNECT_DATA=(COMMAND=status)) and (COMMAND=services). Unhardened listeners (no LOCAL_OS_AUTHENTICATION_<lsnr> restriction) return the full status blob: SIDs, SERVICE_NAMEs, per-service handler counts, dispatcher endpoints, uptime, ORACLE_HOME, host OS/version, trace/log paths. Currently only (COMMAND=version) is sent \u2014 services/status carry vastly more intel and are just as unauthenticated on legacy listeners. Parse the SIDs, handlers, and machine name.",
+      "protocol_reference": "Oracle Net Services Reference 'LSNRCTL Commands' \u2014 services / status TNS command codes",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "oracle_listener_status_leak"
+    },
+    {
+      "name": "sid_service_name_bruteforce",
+      "kind": "active",
+      "value": "high",
+      "description": "When (COMMAND=services) is refused, brute a built-in SID list (ORCL, ORCL9i, XE, XEPDB1, PLSExtProc, HR, DB1, PROD, TEST, PDBORCL, CDB$ROOT). Send (CONNECT_DATA=(SERVICE_NAME=<sid>)); a valid SID yields ACCEPT/REDIRECT, an invalid one yields REFUSE + TNS-12514/12505. Any SID reached without listener credentials is a foothold for the o5logon hash grab and default-cred spray. Currently deferred entirely to odat.",
+      "protocol_reference": "Oracle Net Services Reference, TNS error codes 12505/12514/12518/12519",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "oracle_sid_enumerated"
+    },
+    {
+      "name": "listener_remote_admin_unauth",
+      "kind": "active",
+      "value": "high",
+      "description": "Pre-10g and any listener without a listener password / ADMIN_RESTRICTIONS_<lsnr>=ON accepts remote (COMMAND=stop), (COMMAND=set_log_file=<path>), (COMMAND=save_config) commands from any client. recce should send a benign (COMMAND=set_log_status=on) or (COMMAND=status)+password test and detect whether a password is required (TNS-01169) versus outright accepted. An unauth admin listener == unauth DoS + arbitrary file overwrite (log/trace redirection to shell scripts is a public RCE path). Emit oracle_listener_unauth_admin.",
+      "protocol_reference": "Oracle Note 260986.1 'Listener Administration'; CVE-2012-1675 mitigation ADMIN_RESTRICTIONS_<lsnr>",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "finding_kind": "oracle_listener_unauth_admin"
+    },
+    {
+      "name": "tcps_ssl_listener_2484",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Oracle TCPS (SQL*Net over TLS) defaults to 2484 and 2483. Neither is in _PORTS. Add both, and when the port is TCPS wrap the socket in TLS to (a) extract cert CN/SAN into known_hostnames, (b) flag SSLv3/TLS1.0/weak-cipher acceptance, (c) confirm listener via TNS over TLS.",
+      "protocol_reference": "Oracle Advanced Security Admin Guide, 'Configuring Secure Sockets Layer'; IANA port 2484 (nsrp-ssl / oracle-tcps)",
+      "cwe": [
+        "CWE-326",
+        "CWE-327"
+      ],
+      "finding_kind": "oracle_tcps_weak_tls"
+    },
+    {
+      "name": "version_to_cve_mapping",
+      "kind": "passive",
+      "value": "medium",
+      "description": "When version_leaked, map the version to known CVEs and emit each with severity: <11.2.0.4 \u2192 CVE-2012-1675 (TNS Poison), <=11.2.0.3 \u2192 CVE-2012-3137 (o5logon), 12.1.0.2 pre-Jul2018 CPU \u2192 CVE-2018-3110 (Java VM RCE), 12.1/12.2/18c/19c pre-CPU \u2192 various DBMS_XMLSAVE / XDB RCEs. Today the version is emitted only as an info-leak; the module has the data to attribute concrete RCEs.",
+      "protocol_reference": "Oracle CPU advisories 2012\u20132020",
+      "cwe": [
+        "CWE-1035"
+      ],
+      "finding_kind": "oracle_known_vulnerable_version"
+    },
+    {
+      "name": "cve_2018_3110_javavm_rce_flag",
+      "kind": "passive",
+      "value": "high",
+      "description": "12.1.0.2 / 12.2.0.1 / 11.2.0.4 pre-Jul-2018 CPU are affected by CVE-2018-3110 (CVSS 9.9) \u2014 auth'd but low-priv Java VM RCE. When the banner reveals such a version, flag the DB (not just the listener) as prone to post-auth RCE once any credential is obtained. Increases urgency of the paired default-cred spray.",
+      "protocol_reference": "Oracle Security Alert CVE-2018-3110",
+      "cwe": [
+        "CWE-94"
+      ],
+      "finding_kind": "oracle_javavm_rce_candidate"
+    },
+    {
+      "name": "redirect_reveals_internal_endpoint",
+      "kind": "passive",
+      "value": "medium",
+      "description": "REDIRECT (type=5) responses (typical in RAC / SCAN listener setups) carry a (DESCRIPTION=(ADDRESS=(HOST=\u2026)(PORT=\u2026))) with the internal cluster node's IP or hostname \u2014 often a private/RFC1918 address not otherwise reachable. Module records type='REDIRECT' but never parses the payload. Extract HOST/PORT and push HOST into known_hostnames / relay_targets.",
+      "protocol_reference": "Oracle Net Services Reference, 'Connect Descriptor'; RAC / SCAN listener architecture",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "oracle_rac_internal_endpoint_leak"
+    },
+    {
+      "name": "tns_refuse_reason_parsing",
+      "kind": "passive",
+      "value": "low",
+      "description": "REFUSE packets carry a reason code + a text refuse body (TNS-12500 internal error, TNS-12514 unknown service, TNS-12518 handler failure, TNS-12519 no available handlers, TNS-01189 refused, TNS-01169 no password). Distinguishing 12514 from 12519 is what makes SID brute possible, and 01169 vs 01189 is what tells you if listener admin is password-protected. Currently unused.",
+      "protocol_reference": "Oracle Database Error Messages, TNS-12500 series",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "oracle_refuse_reason"
+    },
+    {
+      "name": "ano_encryption_negotiation_downgrade",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Oracle Advanced Networking Option negotiates SQLNET.ENCRYPTION_SERVER during the AUTH_NEGOTIATE exchange. Default is 'accepted' (no encryption unless the client asks) \u2014 a passive MITM downgrade to plaintext SQL*Net wire. recce could send an AUTH_NEGOTIATE offering only NULL cipher and record whether the server accepts it (SQLNET.ENCRYPTION_SERVER != REQUIRED).",
+      "protocol_reference": "Oracle Advanced Security Admin Guide 'Configuring Native Network Encryption'; SQLNET.ENCRYPTION_SERVER parameter",
+      "cwe": [
+        "CWE-319",
+        "CWE-757"
+      ],
+      "finding_kind": "oracle_ano_encryption_optional"
+    },
+    {
+      "name": "default_credential_spray_native",
+      "kind": "auth",
+      "value": "high",
+      "description": "After SID enumeration, spray the Oracle default-account matrix using the native o3/o5 logon exchange in stdlib \u2014 no oracledb dependency. Well-known pairs the industry never removed: SYS/change_on_install, SYS/manager, SYSTEM/manager, DBSNMP/dbsnmp, SCOTT/tiger, OUTLN/outln, MDSYS/mdsys, CTXSYS/ctxsys, XDB/xdb, HR/hr, OE/oe, SH/sh, WKSYS/wksys, ORDSYS/ordsys, ANONYMOUS/anonymous. The module names these in narrative but never tests them. Successful login triggers post-auth chain (utl_file, dbms_scheduler, Java VM \u2192 OS RCE).",
+      "protocol_reference": "Oracle Note 227010.1 'Default User Accounts'; oracle-default-passwords.csv (Pete Finnigan)",
+      "cwe": [
+        "CWE-521",
+        "CWE-798"
+      ],
+      "finding_kind": "oracle_default_creds_valid"
+    },
+    {
+      "name": "xdb_ftp_http_colocated_flag",
+      "kind": "passive",
+      "value": "low",
+      "description": "Oracle XML DB (XDB) runs FTP on 2100 and HTTP on 8080 by default, embedded in the DB. When an Oracle listener is confirmed, module should signal that any 2100/8080 on the same host is likely XDB (auth defaults: anonymous, or SCOTT/tiger, or XDB default account). Cross-service hint.",
+      "protocol_reference": "Oracle XML DB Developer's Guide, 'Configuring the FTP and HTTP Ports for Oracle XML DB'",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "oracle_xdb_colocated"
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "Discovered SIDs / SERVICE_NAMEs from (COMMAND=services|status) or SID-brute \u2014 no service-name pool exists; needs one so post-auth attempts and credentialed runbooks can consume them",
+    "Oracle default-account list (SYS, SYSTEM, DBSNMP, SCOTT, OUTLN, MDSYS, CTXSYS, XDB, HR, OE, SH, PM, IX, BI, WKSYS, ANONYMOUS, ORDSYS) \u2014 should be seeded into known_users when any oracle listener is confirmed, not just quoted in narrative",
+    "TNSLSNR banner exposes host OS name and machine hostname (e.g. 'TNSLSNR for Linux: Version 11.2.0.4.0 \u2026 on host prod-db01.corp.local') \u2014 parse and feed known_hostnames / known_domains",
+    "REDIRECT packets from SCAN/RAC listeners leak internal cluster node IPs and hostnames \u2014 feed known_hostnames and relay_targets",
+    "o5logon hashes (CVE-2012-3137) captured from AUTH_SESSKEY/AUTH_VFR_DATA \u2014 feed known_hashes tagged 'oracle11' for offline JtR/hashcat cracking",
+    "Discovered ORACLE_HOME / trace path in listener status \u2014 feed a filesystem-path pool (useful for later utl_file abuse or LFI chaining)"
+  ],
+  "priority_gaps": [
+    "Active CVE-2012-1675 TNS Poison service-registration check \u2014 turns a 14-year-old narrative into a proven finding",
+    "CVE-2012-3137 o5logon hash disclosure (send valid CONNECT + AUTH for SYS/SYSTEM/DBSNMP) \u2014 pre-auth harvestable hash, feeds known_hashes for offline cracking",
+    "(COMMAND=services)+(COMMAND=status) full listener dump + SID brute-force list \u2014 unlocks the whole post-auth chain by producing real SIDs recce doesn't otherwise know",
+    "TCPS port 2484/2483 detection + TLS wrap (currently invisible to recce) plus version\u2192CVE mapping so the version_leaked finding actually names the CVEs the leak exposes"
+  ],
+  "notes": "Tests are shallow (test_db_engines.py::OracleTNS just fires the (COMMAND=version) probe against a stub server and asserts the two existing finding kinds are emitted) \u2014 no test covers SID enumeration, poison registration, o5logon, TCPS, or REDIRECT parsing, so any of the priority gaps can be added without disturbing existing coverage. Everything listed here is speakable in stdlib socket + struct; no oracledb / cx_Oracle needed, preserving the airgap constraint."
+}

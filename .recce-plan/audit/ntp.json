@@ -1,0 +1,349 @@
+{
+  "service": "ntp",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/ntp.py",
+    "/home/kali/Desktop/projects/recce/tests/test_ntp.py"
+  ],
+  "summary": "Module covers the three headline exposures (monlist / mode-6 readvar / clock-skew) plus mode-7 peer_list, but leaves the majority of mode-6 opcodes, most mode-7 request codes, and every post-2014 ntpd CVE untouched. Biggest gap is that monlist is detected as a *volume* only \u2014 the ~600 client IPs it returns are never parsed, so the free host-discovery use-case is thrown away. Version banner is fetched via readvar but never cross-checked against vulnerable ranges (CVE-2014-9293/95, 2016-7431/34, 2018-7182, 2020-11868/13817, 2023-266xx). No auth-mode probing (Autokey RFC 5906, symmetric-key MAC), no NTS-KE (RFC 8915) awareness, no KoD interpretation.",
+  "existing_capabilities": [
+    "RFC 5905 mode-3 client packet + reachability + stratum/version/mode decode",
+    "Clock-skew measurement against midpoint of send/recv, Kerberos 5-min tolerance test (MS-KILE)",
+    "Refid decode (stratum-1 ASCII clock id vs stratum-2+ IPv4)",
+    "RFC 1305 App. B mode-6 READVAR (opcode 2, assoc=0) with ASCII k=v parsing",
+    "ntpd version extraction from version= plus processor/system/leap/stratum sysinfo",
+    "Mode-7 REQ_MON_GETLIST_1 (code 42) \u2014 CVE-2013-5211 detect + amplification ratio",
+    "Mode-7 REQ_PEER_LIST (code 0) \u2014 peer_list presence",
+    "Finding for peer_list suppressed when monlist already fires (dedupe)",
+    "svcprobe budget/progress plumbing, findings_to_vulns, runbook"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "monlist entry parsing \u2192 known_hosts / relay_targets feed",
+      "kind": "passive",
+      "value": "critical",
+      "protocol_reference": "ntpd mode-7 MON_GETLIST_1 (info_monitor_1 struct: firsttime, lasttime, restr, count, addr, daddr, flags, port, mode, version)",
+      "description": "Response volume is measured but the payload is discarded. Each entry carries client IPv4 (and daddr = local interface), port, mode, count and lastseen. These IPs are the whole point of the finding on an internal engagement \u2014 should be extracted, deduped, and fed to hostnames/hosts as newly-discovered assets and to relay_targets (clients that talk to a DC are frequently DC-adjacent). Currently zero cross-service wire.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "cross_service_wire"
+    },
+    {
+      "name": "peer_list entry parsing \u2192 known_hosts / relay_targets feed",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "ntpd mode-7 REQ_PEER_LIST info_peer_list (srcadr, srcport, hmode, flags)",
+      "description": "peer_list is flagged as present, but the peer IPs (upstream time sources, often internal appliances or DCs) are never extracted. Same wire gap as monlist.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "cross_service_wire"
+    },
+    {
+      "name": "ntpd version \u2192 CVE cross-check",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "N/A \u2014 post-extraction gate",
+      "description": "ntpd_version is captured but never compared to known-vulnerable ranges: <4.2.8 (2014-9293/9294/9295 auth-key/crypto_recv BO), 4.2.8p8- (2016-1548 xleave, 2016-7431 zero-origin bypass, 2016-7434 mrulist NULL deref), 4.2.8p11- (2018-7182/7183/7184/7185), 4.2.8p14- (2020-11868/13817/15025 off-path spoof + amplification), and 4.2.8p18/ntpsec-1.2.2- (2023-26551..26555). Trivial add on top of existing parse.",
+      "cwe": [
+        "CWE-1395",
+        "CWE-1104"
+      ],
+      "finding_kind": "version_cve"
+    },
+    {
+      "name": "mrulist (mode-6 CTL_OP_REQ_NONCE + read_mru)",
+      "kind": "active",
+      "value": "high",
+      "protocol_reference": "ntpq mrulist \u2014 opcode 12 REQ_NONCE then opcode 10 with 'nonce=..., frags=32' as data; ntpd 4.2.7+",
+      "description": "monlist replacement in ntpd \u22654.2.7. Modern hardened boxes disable monitor but still answer mrulist to unauthed queriers \u2014 same last-N-clients disclosure as CVE-2013-5211. Not probed at all; module misses every 4.2.7+ deployment.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "protocol_gap"
+    },
+    {
+      "name": "REQ_GET_RESTRICT (mode-7 code 16)",
+      "kind": "active",
+      "value": "high",
+      "protocol_reference": "ntpd request.h REQ_GET_RESTRICT / info_restrict",
+      "description": "Dumps the ACL table (addr, mask, flags, count). Reveals which subnets are trusted for mode 6/7/config, exposing management networks and any wildcard restrict entries. Cheap one-datagram probe; also useful amplification vector.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "protocol_gap"
+    },
+    {
+      "name": "CTL_OP_READSTAT (mode-6 opcode 1) + per-assoc READVAR walk",
+      "kind": "active",
+      "value": "high",
+      "protocol_reference": "RFC 1305 App. B opcode 1 (read status) returns 16-bit assoc IDs + peer status",
+      "description": "READVAR assoc=0 (already implemented) only gives system vars. Opcode 1 returns the full association list; iterating READVAR against each assoc id yields per-peer srcadr, srcport, hmode, hpoll, refid, reach, stratum, jitter \u2014 full topology with authoritative peer IPs and their reach state. Standard ntpq -p pipeline.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "protocol_gap"
+    },
+    {
+      "name": "CTL_OP_READ_CLOCK (mode-6 opcode 5)",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "RFC 1305 App. B opcode 5 with a clock assoc id",
+      "description": "Reference-clock vars (device path, GPS/PPS/PTP hardware id, driver name). On appliances this fingerprints the hardware (GPS antenna, PTP grandmaster, refclock driver version) \u2014 separate exposure from readvar.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "protocol_gap"
+    },
+    {
+      "name": "REQ_SYS_INFO / REQ_SYS_STATS / REQ_IO_STATS / REQ_MEM_STATS / REQ_TIMER_STATS (mode-7 codes 4/6/7/8/10)",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "ntpd request.h",
+      "description": "Free operational disclosure \u2014 precision, refid, syspeer, packet counters, memory table sizes, timer overrun. Reveals daemon activity level and version-specific field layouts (fingerprinting).",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "protocol_gap"
+    },
+    {
+      "name": "REQ_IF_STATS (mode-7 code 44)",
+      "kind": "active",
+      "value": "high",
+      "protocol_reference": "ntpd request.h REQ_IF_STATS info_if_stats",
+      "description": "Lists every bound interface with its IPv4/IPv6 address and index \u2014 enumerates multi-homed hosts (jump boxes, dual-NIC firewalls, management VLANs). Directly feeds hostnames/hosts across networks recce hasn't scanned yet.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "cross_service_wire"
+    },
+    {
+      "name": "Autokey (mode-3 with extension field) detection",
+      "kind": "auth",
+      "value": "medium",
+      "protocol_reference": "RFC 5906 (deprecated, cryptographically broken 2019+)",
+      "description": "No probe for Autokey. `crypto` field in readvar or extension-field capability in mode-3 response identifies servers with Autokey enabled \u2014 a finding on its own (deprecated + broken IFF/GQ/MV identity schemes, key-exchange DoS).",
+      "cwe": [
+        "CWE-327",
+        "CWE-1240"
+      ],
+      "finding_kind": "auth_weakness"
+    },
+    {
+      "name": "Symmetric-key MAC probe (crypto-NAK path)",
+      "kind": "auth",
+      "value": "medium",
+      "protocol_reference": "RFC 5905 \u00a77.5 + CVE-2015-7871 crypto-NAK auth bypass ('NAK to the Future')",
+      "description": "Send a mode-3 with a bogus MAC/key-id: pre-4.2.8p4 ntpd honours it as an authenticated peer (CVE-2015-7871). Also detects whether symmetric-key auth is enabled at all (MD5-only vs SHA1/AES-128-CMAC). No probe today.",
+      "cwe": [
+        "CWE-287",
+        "CWE-327"
+      ],
+      "finding_kind": "auth_weakness"
+    },
+    {
+      "name": "CVE-2016-7431 zero-origin timestamp spoof",
+      "kind": "active",
+      "value": "high",
+      "protocol_reference": "RFC 5905 \u00a78 origin timestamp; ntpd <4.2.8p9",
+      "description": "Send a mode-4 with origin=0: vulnerable ntpd accepts it and updates state, enabling off-path time-shift. Detectable by observing state change on a follow-up readvar (reftime advances) after a zero-origin injection.",
+      "cwe": [
+        "CWE-345"
+      ],
+      "finding_kind": "active_exploit"
+    },
+    {
+      "name": "CVE-2020-13817 off-path origin-timestamp leak",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "ntpd <4.2.8p15",
+      "description": "Origin timestamp derived from predictable transmit \u2014 allows off-path attackers to guess and desync. Version-gated detection (piggybacks on the CVE cross-check gap above but is a distinct primitive).",
+      "cwe": [
+        "CWE-330"
+      ],
+      "finding_kind": "version_cve"
+    },
+    {
+      "name": "CVE-2016-1550 sysvar timing side channel",
+      "kind": "active",
+      "value": "low",
+      "protocol_reference": "ntpd <4.2.8p7 authenticate() timing",
+      "description": "Timing oracle on MAC verification. Not runtime-detected today.",
+      "cwe": [
+        "CWE-208"
+      ],
+      "finding_kind": "version_cve"
+    },
+    {
+      "name": "Kiss-of-Death (KoD) interpretation on stratum=0",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "RFC 5905 \u00a77.4 \u2014 refid 4-char codes: DENY, RATE, RSTR, INIT, STEP, MCST, ACST, AUTH, AUTO, CRYP, NKEY, NTSN",
+      "description": "When pkt[1]=0 the refid is an ASCII KoD code, not an IP. Current code branches on stratum==1 for ASCII but not stratum==0. DENY/RSTR tells the tester which restrict flag hit; AUTH/CRYP/NKEY/NTSN reveals authentication posture. Never surfaced.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "protocol_gap"
+    },
+    {
+      "name": "Refid IPv6 hash detect (RFC 5905 \u00a77.3)",
+      "kind": "passive",
+      "value": "low",
+      "protocol_reference": "RFC 5905 \u00a77.3 \u2014 stratum\u22652 refid = MD5 hash of source when IPv6",
+      "description": "Non-routable-looking 4 bytes get emitted as bogus IPv4 dotted-quad. Should be recognised and flagged as IPv6 upstream (still a topology signal, but not a directly usable IP).",
+      "cwe": [],
+      "finding_kind": "correctness"
+    },
+    {
+      "name": "Refid IP \u2192 known_hosts / relay_targets feed",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "RFC 5905 \u00a77.3",
+      "description": "Stratum-2+ refid is the upstream server's IPv4 \u2014 on a corporate LAN this is nearly always the DC or the internal time appliance. Currently only rendered into the finding text; not fed to hostnames/relay_targets/dc_candidates.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "cross_service_wire"
+    },
+    {
+      "name": "Hostname / OS extraction from readvar \u2192 known_hostnames + host.notes",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "ntpq readvar system= often contains kernel version 'Linux/3.10.0-1160.el7.x86_64' plus 'hostname' var on some builds",
+      "description": "sysinfo dict is stored on the probe result and rendered into the mode-6 finding but never fed to the shared host fingerprint / hostname stores. Duplicate work for every other module doing OS discovery.",
+      "cwe": [],
+      "finding_kind": "cross_service_wire"
+    },
+    {
+      "name": "Chrony vs ntpd vs openntpd vs w32time fingerprinting",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "chrony refuses mode-6/7 by default (cmdmon on 323/udp), openntpd never answers mode-6/7, Windows w32time returns stratum-typed refid strings ('LOCL' / DC08)",
+      "description": "Module conflates 'no monlist' with 'hardened ntpd'. Distinguishing chrony/openntpd/w32time drives exploit selection (chrony has cmdmon CVEs, w32time drives Kerberos infrastructure identification).",
+      "cwe": [],
+      "finding_kind": "protocol_gap"
+    },
+    {
+      "name": "Chrony cmdmon (323/udp) probe",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "chrony cmdmon protocol; CVE-2020-14367 (chronyd pidfile), CVE-2023-32617 chronyc auth",
+      "description": "recce only touches 123/udp. When 323/udp is open chrony exposes SYSTEMSTATS/TRACKING/SOURCES \u2014 analogue of monlist for chrony. Currently entirely absent.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "protocol_gap"
+    },
+    {
+      "name": "NTS-KE (4460/tcp) detection",
+      "kind": "passive",
+      "value": "low",
+      "protocol_reference": "RFC 8915 Network Time Security key establishment",
+      "description": "Positive-control: NTS deployed is a good posture signal and negates several off-path CVEs. Currently no awareness \u2014 cannot even distinguish NTS-protected from bare NTP.",
+      "cwe": [],
+      "finding_kind": "protocol_gap"
+    },
+    {
+      "name": "Broadcast/multicast responder detection (224.0.1.1 / mode 5)",
+      "kind": "passive",
+      "value": "low",
+      "protocol_reference": "RFC 5905 \u00a73 broadcast mode 5",
+      "description": "Passive listen for broadcast/multicast NTP identifies servers advertising themselves + reveals additional clients accepting broadcasts (spoof-target inventory).",
+      "cwe": [
+        "CWE-346"
+      ],
+      "finding_kind": "protocol_gap"
+    },
+    {
+      "name": "REQ_AUTHINFO / REQ_TRUSTKEY presence (mode-7 codes 28/26)",
+      "kind": "auth",
+      "value": "medium",
+      "protocol_reference": "ntpd request.h \u2014 REQ_AUTHINFO returns numkeys, numfreekeys, keylookups, keynotfound, encryptions, decryptions, expired, uncached",
+      "description": "Discloses whether authentication is even configured on the server and its usage counters. Distinguishes 'no MAC configured' from 'MAC required but you didn't send one'.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "auth_weakness"
+    },
+    {
+      "name": "CVE-2014-9293/9294/9295 vulnerable-version detection",
+      "kind": "active",
+      "value": "critical",
+      "protocol_reference": "ntpd <4.2.8: default trusted key + weak key gen + crypto_recv/ctl_putdata/configure stack overflows (unauthenticated RCE with autokey)",
+      "description": "Version already parsed \u2014 a single semver compare fires a critical finding on unauthed-RCE-eligible daemons. Currently absent.",
+      "cwe": [
+        "CWE-798",
+        "CWE-121",
+        "CWE-330"
+      ],
+      "finding_kind": "version_cve"
+    },
+    {
+      "name": "CVE-2016-7434 unauth mrulist NULL-deref DoS",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "ntpd <4.2.8p9 read_mru_list()",
+      "description": "Malformed mrulist request crashes ntpd. Detectable as a version gate; active PoC is intrusive so gate behind --active-exploit.",
+      "cwe": [
+        "CWE-476"
+      ],
+      "finding_kind": "version_cve"
+    },
+    {
+      "name": "CVE-2018-7182 ctl_getitem OOB read",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "ntpd <4.2.8p11 mode-6 ctl_getitem",
+      "description": "Version-gated finding on the same readvar path recce already speaks.",
+      "cwe": [
+        "CWE-125"
+      ],
+      "finding_kind": "version_cve"
+    },
+    {
+      "name": "Amplification classification for reflection register",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "US-CERT TA14-013A",
+      "description": "Amplification ratio is measured but never surfaced to a cross-service 'amplifier register' (should join DNS ANY, memcached, SSDP, chargen amplifier inventory feeding external-exposure findings).",
+      "cwe": [
+        "CWE-406"
+      ],
+      "finding_kind": "cross_service_wire"
+    },
+    {
+      "name": "REQ_GET_KERNEL (mode-7 code 38) kernel PLL disclosure",
+      "kind": "active",
+      "value": "low",
+      "protocol_reference": "ntpd request.h info_kernel",
+      "description": "Discloses kernel PLL parameters (offset, freq, jitter, stability) \u2014 precise fingerprint of kernel time-adj implementation.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "protocol_gap"
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "monlist client IPs (up to ~600) never parsed \u2192 hostnames/relay_targets/dc_adjacent \u2014 largest missed value in the module",
+    "peer_list peer IPs never parsed \u2192 hostnames/relay_targets (upstream time source = internal appliance/DC)",
+    "Stratum-2+ refid IP never fed to hostnames/relay_targets/dc_candidates (typically the DC on a corporate LAN)",
+    "sysinfo (system=/processor=/version=) captured but not fed to shared host fingerprint / known_hostnames \u2014 every other module re-derives OS",
+    "REQ_IF_STATS interface list would reveal multi-homed hosts on unscanned networks, not probed",
+    "Amplification ratio not registered with a shared amplifier/external-exposure ledger"
+  ],
+  "priority_gaps": [
+    "P0: parse monlist entries \u2192 feed client IPs to hostnames/relay_targets (the whole point of CVE-2013-5211 on an internal engagement is being thrown away)",
+    "P0: version-based CVE gate \u2014 2014-9293/95 (unauth RCE-class), 2015-7871 (NAK-to-the-Future), 2016-7431/34, 2018-7182, 2020-11868/13817, 2023-266xx \u2014 trivial add on top of already-parsed ntpd_version",
+    "P1: mrulist (mode-6 REQ_NONCE + read_mru) \u2014 same disclosure as monlist for ntpd \u22654.2.7, currently 0% coverage of modern hardened boxes",
+    "P1: parse peer_list + stratum-2+ refid \u2192 hostnames/relay_targets \u2014 upstream IPs are DC/appliance candidates",
+    "P1: REQ_GET_RESTRICT (mode-7 code 16) \u2014 dumps ACL table, reveals trusted management subnets",
+    "P1: CTL_OP_READSTAT + per-assoc READVAR walk \u2014 full ntpq -p equivalent, authoritative peer topology",
+    "P2: Autokey (RFC 5906) + symmetric-MAC auth-mode probe (CVE-2015-7871 NAK bypass on <4.2.8p4)",
+    "P2: REQ_IF_STATS (mode-7 code 44) \u2014 bound-interface enumeration on multi-homed hosts",
+    "P2: KoD refid decoding on stratum=0 (DENY/RSTR/AUTH/NTSN \u2014 tells the tester exactly which control fired)",
+    "P3: chrony cmdmon (323/udp) probe + chrony/openntpd/w32time fingerprint disambiguation",
+    "P3: REQ_SYS_INFO / REQ_AUTHINFO / REQ_GET_KERNEL / READ_CLOCK opcodes for supplementary disclosure",
+    "P3: NTS-KE (4460/tcp) awareness for posture control"
+  ],
+  "notes": "Test suite is protocol-faithful (fixtures built from raw struct, not the encoder under test) \u2014 good foundation. Additions should follow the same discipline: wire-format fixtures, per-opcode fake responder branches. The FakeNtpd already dispatches by mode/req and can be extended with mrulist, get_restrict, readstat, if_stats without restructuring."
+}

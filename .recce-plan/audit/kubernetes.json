@@ -1,0 +1,351 @@
+{
+  "service": "kubernetes",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/kubernetes.py"
+  ],
+  "summary": "The module competently covers the four best-known unauth surfaces (kubelet 10250 /pods + /run probe + /stats, kubelet-ro 10255 /pods, apiserver /version + anonymous LIST of namespaces/secrets/configmaps/SAs/nodes/CRBs + hostPath/privileged pod scan, etcd v2 /keys + v3 /maintenance/status). Big gaps remain: it never touches other kubelet exec/log/proxy endpoints, ignores the apiserver's node/pod PROXY (kubelet-tunnel-through-API), SelfSubjectAccessReview / SelfSubjectRulesReview (the definitive 'what can anon do' primitive), CSR approval endpoint, cAdvisor metrics, /configz, checkpoint (CVE-2022-3172, CVE-2024-9042, CVE-2025-0426), the etcd v3 range-read that actually dumps keys, and the kube-scheduler / kube-controller-manager / kube-proxy metrics ports. It never harvests any of the enormous cross-service state that a successful pod/secret/CRB/node read exposes \u2014 no env-var passwords into known_users/known_hashes, no CN/SAN, node hostname, container-image registry hostnames into known_hostnames/known_domains, no SA/CRB subject names into known_users.",
+  "existing_capabilities": [
+    "role() dispatch across kubelet 10250, kubelet-ro 10255, apiserver 6443/8443, etcd 2379; nmap-name fallback for 8080 kube-apiserver",
+    "kubelet /pods anonymous read with pod_count + TLS/plaintext auto-detect",
+    "kubelet /stats/summary probe (recon)",
+    "kubelet /run/{ns}/{pod}/{container} GET probe distinguishes 404 vs 405/401/403 to prove exec route is present without invoking exec",
+    "kubelet-ro /pods over plaintext (with TLS fallback)",
+    "apiserver /version -> gitVersion capture",
+    "apiserver anonymous LIST of /api/v1/namespaces + /secrets + /configmaps + /serviceaccounts + /nodes + /apis/rbac.authorization.k8s.io/v1/clusterrolebindings",
+    "apiserver anonymous pod list scanned for hostNetwork/hostPID/privileged/hostPath (escape_pod_counts, capped at 200 pods)",
+    "apiserver 403 detection -> 'anonymous auth enabled but RBAC blocked' finding",
+    "etcd /version -> etcdserver/etcdcluster version",
+    "etcd v2 /v2/keys/?recursive=true legacy check",
+    "etcd v3 POST /v3/maintenance/status confirms unauthenticated gRPC-gateway access",
+    "16 MB capped body read (avoids OOM but keeps multi-MB pod/secret dumps parseable)",
+    "String-fallback _is_podlist/_is_list for oversized/truncated JSON",
+    "Deterministic finding kinds (kubelet_exec, kubelet_anon, kubelet_ro, api_anon_list, api_anon_resources, k8s_escape_pods, api_anon_open, etcd_open) with CWEs, narratives, runbook steps, findings_to_vulns bridging"
+  ],
+  "cross_service_wire_gaps": [
+    "Kubelet /pods and apiserver /api/v1/pods responses contain env-var secrets (DB_PASSWORD, AWS_SECRET_ACCESS_KEY, JWT tokens); currently discarded \u2014 should feed known_users (user-part of DB URLs, 'app', 'admin' style names), known_hashes (bcrypt/sha512 crypt patterns) and vault-style tokens into future known_secrets",
+    "Apiserver /api/v1/serviceaccounts and /apis/rbac.authorization.k8s.io/v1/clusterrolebindings 'subjects' expose real usernames (Groups + Users, incl. OIDC upns like alice@corp.example) \u2014 module never seeds known_users",
+    "Container image refs in pod specs include private-registry hostnames (registry.corp.example, harbor.internal) \u2014 never seeded to known_hostnames/known_domains for later relay/enum",
+    "Anonymous /api/v1/nodes returns node .status.addresses (InternalIP + Hostname + InternalDNS + ExternalDNS) and .status.nodeInfo.osImage/kernelVersion \u2014 nothing is added to known_hostnames or fed to OS-fingerprint aggregation",
+    "TLS certificates on kubelet 10250 / apiserver 6443 carry CN + SAN populated with 'kube-apiserver', node names, service DNS (kubernetes.default.svc.cluster.local, api.<clustername>.k8s.local) \u2014 probe uses _create_unverified_context() and never grabs peer cert, so cluster naming and CN/SAN never reach known_hostnames/known_domains (probes.py does this for other services)",
+    "etcd v3 range-read (missing capability below) exposes /registry/secrets/<ns>/<name> paths which enumerate every namespace/service/SA name \u2014 feed into a cross-service inventory",
+    "apiserver /api/v1/namespaces list itself never seeded to any cross-service 'known_namespaces' or workload map used by later scoping",
+    "CoreDNS ConfigMap (kube-system/coredns) commonly reads upstream DNS resolvers ('forward . 10.0.0.10 8.8.8.8'), exposing internal DNS servers \u2014 not extracted, would feed known_hostnames",
+    "kubeconfig-style secrets (dockerconfigjson, kubernetes.io/service-account-token) inside anon-readable Secrets contain registry credentials + bearer tokens with a real 'kubernetes.io/service-account.name' annotation \u2014 nothing pulled into known_users / relay_targets"
+  ],
+  "priority_gaps": [
+    "Apiserver POST /apis/authorization.k8s.io/v1/selfsubjectrulesreview and /selfsubjectaccessreviews \u2014 one call answers 'exactly what can system:anonymous do here' incl. verbs the current LIST enumeration misses (create pods, exec, impersonate); no active exploitation needed",
+    "Apiserver node-proxy pivot: /api/v1/nodes/{node}/proxy/pods and /proxy/exec/... \u2014 the API server proxies to the kubelet with its own credentials, bypassing any kubelet firewall/anon-off (CVE-2018-1002105 lineage, CVE-2020-8558 boundary bypass). Never probed.",
+    "Apiserver pod/service proxy SSRF: /api/v1/namespaces/{ns}/services/{svc}/proxy/{path} and /pods/{pod}/proxy/... (CVE-2022-3172 aggregated apiserver SSRF). Reachable to any anon with 'get' on services/proxy \u2014 no probe.",
+    "Kubelet /logs/, /containerLogs/{ns}/{pod}/{container}, /exec, /attach, /portForward, /runningpods \u2014 the module only fingerprints /run. /containerLogs alone streams live secrets from stdout; /logs/ (CVE-2020-8557 DoS, CVE-2024-9042 Windows RCE) reads /var/log on the node.",
+    "Kubelet /configz and /metrics/cadvisor + /metrics/resource + /metrics/probes \u2014 /configz returns the entire kubelet config (auth mode, cluster DNS, static-pod path, cert paths), cAdvisor metrics leak every container's cgroup + memory + PID limits; both anon-readable when anonymous-auth=true and /metrics has its own authorization bit",
+    "Kubelet /checkpoint/{ns}/{pod}/{container} (CVE-2025-0426, alpha checkpointing feature) writes a full container memory dump to node disk unauthenticated \u2014 DoS + secret extraction primitive",
+    "etcd v3 POST /v3/kv/range with {\"key\":\"AA==\",\"range_end\":\"AA==\"} \u2014 the actual dump primitive. Current v3 probe only proves /maintenance/status, missing the READ that returns every /registry/... key incl. secrets, tokens, kubeconfigs",
+    "etcd peer port 2380 never probed (missing --peer-client-cert-auth = cluster split-brain / raft-injection); etcd /metrics + /debug/pprof + /debug/vars leak cluster ID + peer URLs",
+    "Missing control-plane ports: kube-scheduler 10259, kube-controller-manager 10257, kube-proxy 10249/10256 \u2014 each serves /metrics + /healthz over HTTPS with its own anonymous-auth bit and version fingerprint; kube-proxy /metrics leaks Service ClusterIPs and endpoints",
+    "Apiserver anonymous list of /apis/apps/v1/deployments + /daemonsets + /statefulsets + /apis/batch/v1/cronjobs (persistence surface \u2014 anonymous 'create cronjob' via SSRR check = permanent foothold) \u2014 currently unlisted",
+    "Apiserver /apis/admissionregistration.k8s.io/v1/mutating|validatingwebhookconfigurations \u2014 reveals MITM points (webhook URLs); an attacker-controllable webhook is a full cluster-hijack primitive",
+    "Apiserver /apis/certificates.k8s.io/v1/certificatesigningrequests + anon CSR approval check (CVE-2019-11253 lineage) \u2014 signed client cert = permanent cluster credential",
+    "Apiserver /apis and /openapi/v2 CRD discovery \u2014 inventories installed operators (Argo, Rancher, Tekton, Prometheus, cert-manager) each with their own CVEs; current module never enumerates the API surface it could reach",
+    "TLS handshake data ignored: no peer-cert CN/SAN capture, no TLS-version/cipher grading, no detection of self-signed vs cluster CA \u2014 probes.py already implements this for the rest of recce, kubernetes.py deliberately uses _create_unverified_context() and drops the cert",
+    "Impersonation-header check: does the apiserver honour Impersonate-User: system:admin from an anonymous caller (CVE-2020-8559 style)? \u2014 single-header probe, no exploitation",
+    "OpenShift-specific /apis/route.openshift.io/v1/routes, /apis/user.openshift.io/v1/users, /apis/security.openshift.io/v1/securitycontextconstraints \u2014 this module misses OpenShift entirely although OpenShift ships the same 6443 apiserver",
+    "Metrics-server 4443 / aggregated APIs (/apis/metrics.k8s.io/v1beta1) \u2014 separate TLS endpoint, own auth bit, CVE-2019-11253 range",
+    "Bearer-token acceptance check: send a random JWT to /api/v1/namespaces; a 200 or a leaky 401 body proves 'accepts any bearer' misconfig (broken oidc issuer)",
+    "Rancher/k3s/k0s port families (Rancher 6443 with different CN, k3s 6443 + 10254 traefik, kine 2379-compatible) not distinguished for downstream detection"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "SelfSubjectRulesReview / SelfSubjectAccessReview against anonymous",
+      "kind": "active",
+      "description": "POST /apis/authorization.k8s.io/v1/selfsubjectrulesreview with {\"spec\":{\"namespace\":\"default\"}} answers definitively what verbs system:anonymous holds across the cluster \u2014 replaces the current guess-and-list approach and catches create/exec/impersonate perms the LIST-only probes miss.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "protocol_reference": "authorization.k8s.io/v1 SelfSubjectRulesReview (Kubernetes API reference)"
+    },
+    {
+      "name": "Apiserver -> kubelet node proxy",
+      "kind": "active",
+      "description": "Probe /api/v1/nodes/{node}/proxy/pods and /proxy/exec/... using the anon-listed node names. The apiserver forwards to the kubelet with its OWN credentials, bypassing any kubelet firewall or --anonymous-auth=false. Historically the CVE-2018-1002105 primitive.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-441",
+        "CWE-918"
+      ],
+      "protocol_reference": "Kubernetes API reference: /api/v1/nodes/{name}/proxy (kubelet Proxy)"
+    },
+    {
+      "name": "Apiserver pod/service proxy SSRF",
+      "kind": "active",
+      "description": "GET /api/v1/namespaces/{ns}/services/{svc}/proxy/{path} and /api/v1/namespaces/{ns}/pods/{pod}/proxy/... \u2014 anon 'get services/proxy' grants request-smuggling into cluster-internal HTTP.",
+      "value": "high",
+      "cwe": [
+        "CWE-918"
+      ],
+      "protocol_reference": "Kubernetes API reference: services proxy verb; CVE-2022-3172"
+    },
+    {
+      "name": "etcd v3 KV range dump primitive",
+      "kind": "active",
+      "description": "POST /v3/kv/range with {\"key\":\"AA==\",\"range_end\":\"AA==\"} \u2014 the actual READ that dumps every /registry/... key incl. secrets. Currently module proves /maintenance/status only, so it says 'readable' without demonstrating the read that yields secrets.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-200"
+      ],
+      "protocol_reference": "etcd v3 gRPC-gateway kv.Range (etcd api reference)"
+    },
+    {
+      "name": "etcd peer port 2380 + /metrics + /debug",
+      "kind": "passive",
+      "description": "2380 without --peer-client-cert-auth allows raft injection/impersonation; /metrics + /debug/vars leak cluster ID, member peer URLs, dbSize.",
+      "value": "high",
+      "cwe": [
+        "CWE-306",
+        "CWE-200"
+      ],
+      "protocol_reference": "etcd peer/client TLS docs; etcd metrics endpoint"
+    },
+    {
+      "name": "Kubelet /containerLogs/{ns}/{pod}/{container}",
+      "kind": "active",
+      "description": "Streams container stdout/stderr unauthenticated when kubelet anon is on. Frequently contains secrets, tokens, connection strings \u2014 a pure recon primitive with no exec risk that the module already justifies elsewhere.",
+      "value": "high",
+      "cwe": [
+        "CWE-306",
+        "CWE-532"
+      ],
+      "protocol_reference": "kubelet API surface (docs.k8s.io kubelet-authn-authz)"
+    },
+    {
+      "name": "Kubelet /logs/ path traversal + Windows RCE",
+      "kind": "active",
+      "description": "/logs/ serves /var/log on the node. On Windows kubelets, CVE-2024-9042 turned this into unauthenticated RCE. On Linux, CVE-2020-8557 turns it into DoS. GET /logs/ + a 200 file listing = confirmed exposure.",
+      "value": "critical",
+      "cwe": [
+        "CWE-22",
+        "CWE-306",
+        "CWE-78"
+      ],
+      "protocol_reference": "kubelet /logs endpoint; CVE-2024-9042; CVE-2020-8557"
+    },
+    {
+      "name": "Kubelet /configz",
+      "kind": "passive",
+      "description": "Returns full kubelet configuration JSON: authentication.anonymous.enabled, authorization.mode, staticPodPath, tlsCertFile, clusterDNS. Confirms 'AlwaysAllow' authz mode without side-effects and hands over static-pod path for follow-up.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "kubelet /configz (documented debug endpoint)"
+    },
+    {
+      "name": "Kubelet cAdvisor metrics (/metrics/cadvisor, /metrics/resource, /metrics/probes)",
+      "kind": "passive",
+      "description": "Prometheus scraping surface. Anonymous-readable when kubelet /metrics authorization bit is not set; leaks every container's cgroup, memory limit, PID, image, cmdline in labels.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "kubelet metrics endpoints"
+    },
+    {
+      "name": "Kubelet /checkpoint (CVE-2025-0426)",
+      "kind": "active",
+      "description": "POST /checkpoint/{ns}/{pod}/{container} \u2014 alpha ContainerCheckpoint feature writes full memory image to /var/lib/kubelet/checkpoints. Unauthenticated on anon kubelets: DoS + memory-secret extraction primitive.",
+      "value": "high",
+      "cwe": [
+        "CWE-306",
+        "CWE-400",
+        "CWE-200"
+      ],
+      "protocol_reference": "KEP-2008 ContainerCheckpoint; CVE-2025-0426"
+    },
+    {
+      "name": "Kubelet /exec, /attach, /portForward, /runningpods, /debug/flags/v, /debug/pprof",
+      "kind": "active",
+      "description": "Module only fingerprints /run. The kubelet exposes /exec/{ns}/{pod}/{container} (WebSocket upgrade), /attach, /portForward (arbitrary port pivot into pod network), /runningpods (simpler list); /debug/flags/v allows RAISING kubelet log verbosity to 10 as an anonymous DoS/info-disclosure primitive.",
+      "value": "high",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "protocol_reference": "kubelet API surface"
+    },
+    {
+      "name": "Missing control-plane ports: kube-scheduler 10259, kube-controller-manager 10257, kube-proxy 10249+10256",
+      "kind": "passive",
+      "description": "Each ships /metrics + /healthz over HTTPS with its own anonymous-auth flag; leaks leader identity, election data, kube-proxy leaks all Service ClusterIPs + Endpoint IPs (a full internal net map).",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "kubernetes control-plane component ports (kubernetes.io/docs/reference/networking/ports-and-protocols)"
+    },
+    {
+      "name": "Apiserver /apis discovery + /openapi/v2 CRD inventory",
+      "kind": "passive",
+      "description": "Anon-readable on almost every apiserver (bootstrap-signer role). Reveals installed operators \u2014 Argo, Rancher, Tekton, cert-manager, Prometheus-operator \u2014 each with distinct CVE surfaces. Missing today.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "APIService discovery / OpenAPI (kubernetes.io/docs/reference/generated/kubernetes-api)"
+    },
+    {
+      "name": "Apiserver anonymous list of workload/persistence resources",
+      "kind": "passive",
+      "description": "Enumerate /apis/apps/v1/deployments, statefulsets, daemonsets, /apis/batch/v1/cronjobs \u2014 anonymous 'create cronjob' answered by SSRR is a permanent-persistence primitive. Also /apis/networking.k8s.io/v1/ingresses (external URL map + CVE-2025-1974 ingress-nginx surface).",
+      "value": "high",
+      "cwe": [
+        "CWE-284",
+        "CWE-200"
+      ],
+      "protocol_reference": "apps/v1, batch/v1, networking.k8s.io/v1 (Kubernetes API reference)"
+    },
+    {
+      "name": "Apiserver admission webhooks enumeration",
+      "kind": "passive",
+      "description": "/apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations + /validatingwebhookconfigurations reveal webhook URLs (often plain HTTP inside cluster) \u2014 an attacker-controllable webhook is a cluster-hijack primitive.",
+      "value": "high",
+      "cwe": [
+        "CWE-284"
+      ],
+      "protocol_reference": "admissionregistration.k8s.io/v1 MutatingWebhookConfiguration / ValidatingWebhookConfiguration"
+    },
+    {
+      "name": "Apiserver CSR enumeration + auto-approval check",
+      "kind": "active",
+      "description": "/apis/certificates.k8s.io/v1/certificatesigningrequests \u2014 list pending CSRs; if 'approve' verb is granted to anon via SSAR check, an attacker mints signed client certs (permanent cluster credentials).",
+      "value": "critical",
+      "cwe": [
+        "CWE-284",
+        "CWE-295"
+      ],
+      "protocol_reference": "certificates.k8s.io/v1 CertificateSigningRequest"
+    },
+    {
+      "name": "TLS peer certificate capture + CN/SAN cross-service seed",
+      "kind": "passive",
+      "description": "Module uses ssl._create_unverified_context() and drops the cert. Should extract CN/SAN \u2014 apiserver cert includes kubernetes.default.svc.<cluster>, node hostnames, service DNS \u2014 and feed known_hostnames/known_domains like probes.py does. Also detect self-signed vs Kubernetes bootstrap CA vs public CA.",
+      "value": "high",
+      "cwe": [
+        "CWE-295",
+        "CWE-200"
+      ],
+      "protocol_reference": "Kubernetes TLS bootstrapping (kubernetes.io/docs/reference/access-authn-authz/kubelet-tls-bootstrapping)"
+    },
+    {
+      "name": "Env-var and pod-spec secret harvesting into known_users/known_hashes/known_domains",
+      "kind": "passive",
+      "description": "Anonymous /pods responses contain env-vars, image registry hostnames, service-account tokens. Currently the module reads them for counts only and discards. Should seed known_users (DB URL user-parts, SA names, ClusterRoleBinding subjects), known_hostnames (registry, node addresses, coredns upstreams), known_domains (cluster DNS suffix, cluster name), known_hashes (bcrypt/sha512 crypt patterns found in env).",
+      "value": "high",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ],
+      "protocol_reference": "PodSpec.containers[].env / SecretList (core/v1)"
+    },
+    {
+      "name": "Impersonation-header acceptance check",
+      "kind": "active",
+      "description": "Send GET /api/v1/namespaces with header 'Impersonate-User: system:admin' from an anonymous socket; if a 200 comes back (or a distinct 403 that mentions the impersonated user), the apiserver honours impersonation from anon \u2014 the CVE-2020-8559 / broken RBAC family primitive.",
+      "value": "high",
+      "cwe": [
+        "CWE-287",
+        "CWE-269"
+      ],
+      "protocol_reference": "Kubernetes user-impersonation headers (docs.k8s.io/reference/access-authn-authz/authentication/#user-impersonation)"
+    },
+    {
+      "name": "Bearer-token acceptance / weak-issuer check",
+      "kind": "active",
+      "description": "Send a random self-signed JWT in Authorization: Bearer to /api/v1/namespaces; a 200 or an issuer-echoing 401 body flags apiservers that accept any bearer (broken --service-account-issuer or added public OIDC issuer).",
+      "value": "high",
+      "cwe": [
+        "CWE-287",
+        "CWE-345"
+      ],
+      "protocol_reference": "Kubernetes service-account tokens (projected volumes / OIDC)"
+    },
+    {
+      "name": "OpenShift-specific API enumeration",
+      "kind": "passive",
+      "description": "OpenShift ships the same 6443 apiserver but with route.openshift.io, user.openshift.io, security.openshift.io, oauth.openshift.io APIs \u2014 Routes reveal external hostnames (known_hostnames), SecurityContextConstraints reveal privileged-namespace policy, OAuth reveals identity providers. Module never distinguishes OpenShift.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "OpenShift API reference (docs.openshift.com/container-platform/latest/rest_api/)"
+    },
+    {
+      "name": "Metrics-server / aggregated APIs (metrics.k8s.io/v1beta1) on 4443",
+      "kind": "passive",
+      "description": "Aggregated API server on 4443 has its own auth pipeline. Anonymous /apis/metrics.k8s.io/v1beta1/nodes leaks per-node CPU/mem, and metrics-server pre-0.7 shipped exploitable CVEs.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200",
+        "CWE-306"
+      ],
+      "protocol_reference": "metrics.k8s.io/v1beta1 aggregated APIService"
+    },
+    {
+      "name": "CVE-2022-3172 apiserver aggregated-server SSRF",
+      "kind": "passive",
+      "description": "Anon caller with proxy verb on aggregated APIService can redirect the apiserver to any URL and receive the response with the apiserver's identity \u2014 direct chain to cluster-internal SSRF. Module should probe by listing /apis/apiregistration.k8s.io/v1/apiservices and checking whether a request through /apis/{group}/{version}/proxy/{path} is accepted.",
+      "value": "high",
+      "cwe": [
+        "CWE-918"
+      ],
+      "protocol_reference": "CVE-2022-3172"
+    },
+    {
+      "name": "CVE-2020-8557 kubelet /var/log DoS + CVE-2020-8558 localhost boundary",
+      "kind": "active",
+      "description": "Kubelet /logs/ streaming = disk-fill DoS with anon; --insecure-bind-address type localhost-boundary bypass reachable from adjacent pod network \u2014 probeable via specific paths.",
+      "value": "medium",
+      "cwe": [
+        "CWE-400",
+        "CWE-668"
+      ],
+      "protocol_reference": "CVE-2020-8557, CVE-2020-8558"
+    },
+    {
+      "name": "CVE-2024-9042 Windows kubelet /logs RCE",
+      "kind": "active",
+      "description": "Windows kubelet's /logs endpoint parameter injection = unauth RCE. Fingerprint via /nodeInfo os detection (nodes list) + /logs endpoint availability.",
+      "value": "critical",
+      "cwe": [
+        "CWE-78",
+        "CWE-306"
+      ],
+      "protocol_reference": "CVE-2024-9042"
+    },
+    {
+      "name": "CVE-2025-1974 ingress-nginx auth-controller RCE (probe surface)",
+      "kind": "passive",
+      "description": "Detect ingress-nginx deployment via /apis/networking.k8s.io/v1/ingresses ingressClassName; the auth webhook on port 8443/tcp of the ingress pod is unauthenticated. Version fingerprint from Deployment .spec.template.spec.containers[].image.",
+      "value": "high",
+      "cwe": [
+        "CWE-306",
+        "CWE-94"
+      ],
+      "protocol_reference": "CVE-2025-1974"
+    },
+    {
+      "name": "Bootstrap-token discovery in kube-system/bootstrap-token-* secrets",
+      "kind": "passive",
+      "description": "When anon secrets are readable, bootstrap-tokens (kubernetes.io/bootstrap-token) let an attacker mint node-joining credentials. Should be extracted from the already-parsed secrets list into a distinct high finding + relay_targets entry.",
+      "value": "high",
+      "cwe": [
+        "CWE-200",
+        "CWE-798"
+      ],
+      "protocol_reference": "TLS bootstrap tokens (kubernetes.io/docs/reference/access-authn-authz/bootstrap-tokens)"
+    }
+  ],
+  "notes": "Auth-weakness quick wins that are one-request probes: (a) SelfSubjectRulesReview replaces the six LIST enumerations with one authoritative answer; (b) impersonation-header spike; (c) bearer-random-JWT spike; (d) node-proxy pivot (piggybacks on node names already listed). Cross-service seeding is the single largest miss \u2014 every 200 response the module already collects (pods, secrets, configmaps, nodes, clusterrolebindings) is a dense source of known_users / known_hostnames / known_domains / known_hashes that recce discards. Cert capture alone would harvest cluster naming for free (kubernetes.default.svc.cluster.local + node names + service DNS) \u2014 noted that vsphere.py and pop3.py already implement this pattern."
+}

@@ -1,0 +1,231 @@
+{
+  "service": "winrm",
+  "module_files": [
+    "recce/services/winrm.py",
+    "tests/test_winrm.py"
+  ],
+  "summary": "recce/services/winrm.py does a WSMan Identify SOAP POST on 5985/5986 and pulls ProductVendor/ProductVersion/ProtocolVersion plus the WWW-Authenticate mechanism list. It emits three finding kinds: winrm_reachable (Evil-WinRM landing surface), winrm_basic_plaintext (Basic over 5985), winrm_basic (Basic over TLS), and winrm_credssp. That is roughly the surface RFC 8907 / MS-WSMV \u00a73 exposes anonymously via the /wsman endpoint on POST \u2014 but it stops at header sniffing. It does not initiate an NTLM Negotiate handshake, does not parse the Type-2 CHALLENGE_MESSAGE (MS-NLMP \u00a72.2.1.2 / \u00a72.2.2.1 AV_PAIRs), does not read the 5986 certificate, does not probe EPA/CBT posture (MS-WSMV \u00a73.1.4.1.30), does not probe port 47001 (WinRM compatibility listener) or the legacy 80/443 WinRM listener, does not parse the \"OS: X.Y.Z Stack: N.N\" substring into a structured build for CVE cross-reference, and never emits anything into cross-service feeds (known_users, hostnames, domains, hashes, relay_targets) even though the Type-2 challenge and TLS SAN would yield hostnames/domains/DNS names/OS build/timestamps and the NTLM+no-EPA posture is the canonical SMB->WinRM relay target.",
+  "existing_capabilities": [
+    "WSMan Identify SOAP POST on /wsman (MS-WSMV \u00a73.1.4.10 / DMTF wsmanidentity.xsd)",
+    "Extracts ProductVendor, ProductVersion, ProtocolVersion (raw strings only)",
+    "Parses WWW-Authenticate mechanism list \u2014 Basic, Negotiate, Kerberos, CredSSP",
+    "TLS auto-select for 5986/443 with unverified context (delegates chain analysis to probes module)",
+    "Findings: winrm_reachable, winrm_basic_plaintext (Basic + no TLS = high), winrm_basic (Basic + TLS = low), winrm_credssp",
+    "Service predicate covers 5985/5986 + wsman/winrm service names",
+    "Runbook emits nxc winrm / evil-winrm / curl -kv Identify",
+    "findings_to_vulns maps to source=winrm, port=5985"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "NTLM Type-2 CHALLENGE_MESSAGE harvest (info-disclosure)",
+      "kind": "passive",
+      "value": "critical",
+      "description": "Sending Authorization: Negotiate <Type1 NTLMSSP> against /wsman returns a Type-2 CHALLENGE (MS-NLMP \u00a72.2.1.2) that contains the TargetName (NetBIOS computer), and TargetInfo AV_PAIRs (MS-NLMP \u00a72.2.2.1): MsvAvNbComputerName, MsvAvNbDomainName, MsvAvDnsComputerName, MsvAvDnsDomainName, MsvAvDnsTreeName, MsvAvTimestamp, plus the Version field (OS major/minor/build/NTLMSSP revision). WinRM is the cheapest unauthenticated source of AD forest/domain/hostname/OS-build/clock-skew on the whole external surface. Module makes zero attempt.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "MS-NLMP \u00a72.2.1.2, \u00a72.2.2.1 AV_PAIR structure, MS-WSMV \u00a73.1.4.1.9 Negotiate",
+      "finding_kind": "winrm_ntlm_info"
+    },
+    {
+      "name": "Cross-service feed: hostname / domain / dns / os_build / kerberos_skew",
+      "kind": "chain",
+      "value": "critical",
+      "description": "Once (1) exists, the Type-2 AV_PAIRs and the 5986 certificate SAN should populate known hostnames, DNS names, NetBIOS/DNS domain, forest tree, and MsvAvTimestamp (Kerberos clock skew) into the cross-service store consumed by ldap/smb/kerberos/mssql modules. Currently nothing from winrm flows out.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "MS-NLMP \u00a72.2.2.1",
+      "finding_kind": "winrm_cross_service_feed"
+    },
+    {
+      "name": "Cross-service feed: relay_targets",
+      "kind": "chain",
+      "value": "critical",
+      "description": "WinRM speakers that advertise Negotiate/NTLM without EPA are canonical NTLM-relay victims (impacket ntlmrelayx -t http://host:5985/wsman). Every such host should be pushed into the relay_targets set for the SMB/HTTP relay planner. Module never emits.",
+      "cwe": [
+        "CWE-294",
+        "CWE-522"
+      ],
+      "protocol_reference": "MS-WSMV \u00a73.1.4.1.30 Channel Binding, [MS-NLMP] \u00a73.1.5.1.2",
+      "finding_kind": "winrm_relay_target"
+    },
+    {
+      "name": "EPA / Channel Binding Token posture on 5986 (CVE-2024-43532 class)",
+      "kind": "active",
+      "value": "high",
+      "description": "MS-WSMV \u00a73.1.4.1.30 requires the client MIC/CBT be bound to the TLS channel when RequireChannelBinding is on. Server posture is testable anonymously: send a Type-1 with vs without EPA gss_channel_bindings and compare Type-2 acceptance / final 401. CVE-2024-43532 (Windows Remote Registry / WinRM NTLM relay EoP, patched Oct 2024) hinges on WinRM falling back to unbound NTLM. Not probed.",
+      "cwe": [
+        "CWE-294"
+      ],
+      "protocol_reference": "MS-WSMV \u00a73.1.4.1.30; RFC 5929 tls-server-end-point",
+      "finding_kind": "winrm_no_epa"
+    },
+    {
+      "name": "CVE-2022-37958 SPNEGO NEGOEX pre-auth RCE detection",
+      "kind": "passive",
+      "value": "high",
+      "description": "SPNEGO NEGOEX heap RCE affects every Windows service exposing SPNEGO including WinRM/HTTP.sys, pre-auth. Detectable by parsing the ProductVersion string (currently stored as free text) into OS build and matching against the Sep 2022 rollup floor (10.0.20348.1006, 10.0.19041.2075, 10.0.17763.3532, 6.3.9600.20596). Nothing parses build.",
+      "cwe": [
+        "CWE-122"
+      ],
+      "protocol_reference": "RFC 4178 SPNEGO; NEGOEX in [MS-SPNG] \u00a73.1",
+      "finding_kind": "winrm_cve_2022_37958"
+    },
+    {
+      "name": "CVE-2021-31166 HTTP.sys pre-auth wormable UAF detection",
+      "kind": "passive",
+      "value": "high",
+      "description": "WinRM listens via HTTP.sys (same driver as IIS). CVE-2021-31166 hits Win10 20H1/20H2 + Server 2004/20H2. Same OS-build parse would flag. Currently version string is not structured.",
+      "cwe": [
+        "CWE-416"
+      ],
+      "protocol_reference": "HTTP.sys request parsing; kb5003173",
+      "finding_kind": "winrm_cve_2021_31166"
+    },
+    {
+      "name": "Server / X-Content-Type-Options / HTTP.sys banner capture",
+      "kind": "passive",
+      "value": "medium",
+      "description": "The 401 typically carries Server: Microsoft-HTTPAPI/2.0 and, on some rollups, HTTP.sys revision. GET / (405) and OPTIONS emit different banners. None captured \u2014 the response headers other than WWW-Authenticate are discarded.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 7231 \u00a77.4.2",
+      "finding_kind": "winrm_http_banner"
+    },
+    {
+      "name": "TLS certificate parsing on 5986 for SAN/CN -> hostname/domain feed",
+      "kind": "passive",
+      "value": "high",
+      "description": "5986 listener certificate CN/SAN is almost always the machine's FQDN and often a wildcard for the AD domain. Module uses _create_unverified_context() and never retrieves getpeercert() to feed hostnames/domains. High-yield cheap disclosure.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 5280 \u00a74.2.1.6 SAN",
+      "finding_kind": "winrm_tls_cert_info"
+    },
+    {
+      "name": "WinRM Certificate authentication advertisement / client-cert request",
+      "kind": "active",
+      "value": "medium",
+      "description": "WinRM supports Certificate auth (MS-WSMV \u00a73.1.4.1.14). Detectable via TLS CertificateRequest during handshake on 5986 (a mapping is configured) \u2014 separate posture flag; module ignores.",
+      "cwe": [
+        "CWE-284"
+      ],
+      "protocol_reference": "MS-WSMV \u00a73.1.4.1.14; RFC 8446 \u00a74.3.2",
+      "finding_kind": "winrm_cert_auth"
+    },
+    {
+      "name": "Legacy 47001/tcp WinRM compatibility listener",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Windows exposes an additional WSMan listener on 47001/tcp for WMI/CIM compat (Set-Item WSMan:\\localhost\\Service\\CompatibilityHttpListener). is_winrm() only matches 5985/5986. Missed on hosts where 47001 is open.",
+      "cwe": [
+        "CWE-284"
+      ],
+      "protocol_reference": "MS-WSMV \u00a73.1.4 default listener endpoints",
+      "finding_kind": "winrm_compat_47001"
+    },
+    {
+      "name": "Legacy 80/443 WinRM HTTP listener (pre-Win2008R2 default)",
+      "kind": "passive",
+      "value": "low",
+      "description": "Older listeners can be bound to 80/443. is_winrm() only picks these up if service string says wsman. Consider a WSMan Identify probe when port 80/443 advertises Microsoft-HTTPAPI/2.0.",
+      "cwe": [
+        "CWE-284"
+      ],
+      "protocol_reference": "MS-WSMV \u00a73.1.4",
+      "finding_kind": "winrm_legacy_port"
+    },
+    {
+      "name": "AllowUnencrypted misconfig on 5985 (Negotiate without message-level encryption)",
+      "kind": "active",
+      "value": "high",
+      "description": "MS-WSMV \u00a73.1.4.1.24: on HTTP, message-level encryption is required unless Service\\AllowUnencrypted=true. Sending a plain SOAP body with a valid unencrypted marker under Negotiate and observing 200 vs 500/401 fault reveals the misconfig \u2014 enables full cleartext sniff of PowerShell traffic.",
+      "cwe": [
+        "CWE-319"
+      ],
+      "protocol_reference": "MS-WSMV \u00a73.1.4.1.24",
+      "finding_kind": "winrm_allow_unencrypted"
+    },
+    {
+      "name": "Structured ProductVersion parse (os_build, sp, stack)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "'OS: 10.0.19041 SP: 0.0 Stack: 3.0' is stored as raw text so no CVE cross-reference can key off build number. Split into fields feeding os_build/stack for the CVE gates in (5), (6), and any future WSMan-stack CVE (WinRM stack 3.0 is the ceiling shipped on downlevel).",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "DMTF wsmanidentity.xsd ProductVersion",
+      "finding_kind": "winrm_version_structured"
+    },
+    {
+      "name": "Kerberos-only vs Negotiate/NTLM auth posture",
+      "kind": "passive",
+      "value": "medium",
+      "description": "A listener advertising Kerberos alone (no Negotiate, no NTLM downgrade) is relay-resistant and Kerberoasting-only. A listener offering Negotiate implies NTLM fallback and an HTTP/host SPN worth cross-referencing to the ldap/kerberos service for roasting/AS-REP targets. Not currently emitted.",
+      "cwe": [
+        "CWE-287"
+      ],
+      "protocol_reference": "MS-WSMV \u00a73.1.4.1.9, RFC 4559",
+      "finding_kind": "winrm_auth_posture"
+    },
+    {
+      "name": "PSRP plugin endpoint enumeration (Microsoft.PowerShell, Microsoft.Exchange, Microsoft.PowerShell32, JEA)",
+      "kind": "active",
+      "value": "medium",
+      "description": "Named endpoints (Get-PSSessionConfiguration) can be probed unauthenticated by POSTing an Identify to /wsman/ or by using the ResourceURI 'http://schemas.microsoft.com/powershell/Microsoft.Exchange' in a Get body \u2014 a 401 on a specific plugin vs 500 discriminates presence. Exchange endpoint especially valuable (indicates Exchange server, JEA presence). Not attempted.",
+      "cwe": [
+        "CWE-284"
+      ],
+      "protocol_reference": "MS-PSRP \u00a72.2.2",
+      "finding_kind": "winrm_plugin_endpoints"
+    },
+    {
+      "name": "CredSSP severity gating (client OS + patch posture)",
+      "kind": "passive",
+      "value": "low",
+      "description": "CredSSP over unpatched CVE-2018-0886 versions is remotely exploitable for RCE via MITM. Current finding is a flat medium; should upgrade to high when server ProductVersion pre-dates March-2018 CredSSP rollup.",
+      "cwe": [
+        "CWE-287"
+      ],
+      "protocol_reference": "MS-CSSP; CVE-2018-0886",
+      "finding_kind": "winrm_credssp_cve_2018_0886"
+    },
+    {
+      "name": "WSMan Enumerate probe against /wsman/subscriptions and event forwarding endpoints",
+      "kind": "active",
+      "value": "low",
+      "description": "Event Collector (WEC) uses WinRM subscription URIs. A 401 vs 404 discriminator identifies a WEC server \u2014 high-value pivot (all event data flows to it). Not probed.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "MS-WSMV \u00a73.1.4.14 (Enumerate)",
+      "finding_kind": "winrm_wec_endpoint"
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "hostnames: NetBIOS + DNS computer name from NTLM Type-2 AV_PAIRs and 5986 cert SAN \u2014 not emitted",
+    "domains: NetBIOS + DNS domain + DNS tree/forest from NTLM Type-2 AV_PAIRs \u2014 not emitted",
+    "kerberos_skew: MsvAvTimestamp from NTLM Type-2 \u2014 critical for golden/silver ticket generation, not captured",
+    "os_build: structured Windows build/stack from ProductVersion + NTLM Version field \u2014 needed for CVE-2022-37958, CVE-2021-31166, CVE-2024-43532 gating in this and other modules, not emitted",
+    "relay_targets: WinRM+NTLM+no-EPA listeners are the canonical impacket ntlmrelayx -t http://host:5985/wsman targets \u2014 set never populated",
+    "spn_targets: presence of Negotiate/Kerberos means HTTP/<fqdn> SPN exists \u2192 hand to ldap/kerberos module for kerberoasting cross-ref, not emitted",
+    "known_users: not directly available anonymously from WinRM (skip)",
+    "hashes: not directly harvested here (a captured NTLM Type-2 challenge is not a hash \u2014 skip)"
+  ],
+  "priority_gaps": [
+    "P0 NTLM Type-2 CHALLENGE_MESSAGE harvest (MS-NLMP \u00a72.2.1.2 / \u00a72.2.2.1) \u2014 one anonymous POST unlocks hostname/domain/DNS/forest/OS-build/kerberos-skew. Highest bang-for-buck disclosure primitive on the entire external surface.",
+    "P0 Cross-service feed emission (hostnames, domains, kerberos_skew, os_build, relay_targets) \u2014 dependent on P0 above; without it, findings die inside the winrm module.",
+    "P1 EPA/CBT posture probe (MS-WSMV \u00a73.1.4.1.30) + relay_targets emission \u2014 gates CVE-2024-43532 and every impacket ntlmrelayx WinRM chain.",
+    "P1 TLS certificate SAN/CN parse on 5986 \u2014 another cheap hostname/domain source, also feeds pivot planning.",
+    "P2 Structured ProductVersion (+ NTLM Version) parse and CVE gates for CVE-2022-37958 SPNEGO NEGOEX and CVE-2021-31166 HTTP.sys \u2014 both pre-auth.",
+    "P2 Port 47001 WinRM compat listener support in is_winrm() and analyze() target set.",
+    "P3 AllowUnencrypted misconfig detection on 5985.",
+    "P3 PSRP plugin endpoint enumeration (Microsoft.PowerShell / Microsoft.Exchange / JEA) \u2014 Exchange endpoint alone is a pivot beacon.",
+    "P3 CredSSP CVE-2018-0886 severity gating when server OS pre-dates March-2018 rollup.",
+    "P4 Kerberos-only vs Negotiate posture (SPN cross-ref for kerberoasting) and Server header capture."
+  ],
+  "notes": "Highest-value single change is the NTLM Type-1 send + Type-2 parse: one extra HTTP round-trip, stdlib-only NTLMSSP struct decode (fixed offsets, MS-NLMP \u00a72.2.1.2), and it unlocks nearly every cross-service feed the module is currently missing (hostnames, domains, DNS names, OS build, Kerberos clock skew). Second-highest is EPA/CBT posture + relay_targets emission \u2014 those turn winrm from a passive banner grabber into a live feeder for the SMB/HTTP relay planner and gate CVE-2024-43532. Both are read-only and airgap-safe."
+}

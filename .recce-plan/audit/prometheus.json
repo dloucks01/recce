@@ -1,0 +1,281 @@
+{
+  "service": "prometheus",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/prometheus.py",
+    "/home/kali/Desktop/projects/recce/tests/test_prometheus.py"
+  ],
+  "existing_capabilities": [
+    "Fingerprint via /-/healthy body match + /api/v1/status/buildinfo JSON parse (version extracted)",
+    "HTTP + HTTPS fallback via unverified SSL context",
+    "GET /api/v1/status/config \u2014 sets config_readable, coarse count of '- targets:' / 'static_configs:' blocks (scrape_targets_hint)",
+    "GET /api/v1/query?query=up \u2014 sets query_open (only the literal `up` query)",
+    "POST /-/reload \u2014 sets admin_writable (mis-attributed to --web.enable-admin-api; see gaps)",
+    "Findings: prom_admin_writable (CRITICAL), prom_config_readable (HIGH), prom_query_open (MEDIUM), prom_fingerprint (info)",
+    "Port match on 9090/9091/9092 + service/product string 'prometheus'",
+    "svcprobe.iter_probe budget/progress integration; analyze() returns targets/findings/runbooks/probes/stats",
+    "findings_to_vulns via svccommon"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "GET /federate?match[]={__name__=~\".+\"} \u2014 federation bulk exfil",
+      "kind": "passive",
+      "description": "Prometheus federation endpoint returns the current value of every matched series in one shot; permissive matcher dumps the entire live TSDB view (labels + values). Frequently left open even when /api/v1/query is fronted by auth. Not touched today. Largest metric-data exfil primitive.",
+      "value": "critical",
+      "protocol_reference": "Prometheus docs \u2014 Federation (/federate); CVE-2019-3826 (federate SSRF/XSS)",
+      "cwe": [
+        "CWE-200",
+        "CWE-306"
+      ]
+    },
+    {
+      "name": "GET /debug/pprof/cmdline (+ goroutine, heap, profile)",
+      "kind": "passive",
+      "description": "net/http/pprof is registered by default in Prometheus's promhttp mux. /debug/pprof/cmdline leaks full process argv \u2014 including --web.config.file, --storage.tsdb.path, and any secret passed via CLI flag. goroutine dump leaks internal state / upstreams. Not probed.",
+      "value": "critical",
+      "protocol_reference": "net/http/pprof (pkg.go.dev/net/http/pprof); Prometheus exposes pprof on the web listener",
+      "cwe": [
+        "CWE-200",
+        "CWE-215"
+      ]
+    },
+    {
+      "name": "POST /api/v1/admin/tsdb/delete_series?match[]=... \u2014 data destruction",
+      "kind": "active",
+      "description": "True --web.enable-admin-api endpoint. Deletes series matching match[] \u2014 erases evidence around a time window. Module misses it entirely and mis-attributes /-/reload to --web.enable-admin-api.",
+      "value": "critical",
+      "protocol_reference": "Prometheus HTTP API \u2014 'Delete Series' (/api/v1/admin/tsdb/delete_series)",
+      "cwe": [
+        "CWE-306",
+        "CWE-284",
+        "CWE-693"
+      ]
+    },
+    {
+      "name": "POST /api/v1/admin/tsdb/snapshot + clean_tombstones",
+      "kind": "active",
+      "description": "Snapshot forces full TSDB snapshot under --storage.tsdb.path; repeat calls fill disk (DoS) and produce on-disk artifacts an attacker with FS read can grab. clean_tombstones removes prior delete-series records so audit trail vanishes.",
+      "value": "high",
+      "protocol_reference": "Prometheus HTTP API \u2014 'Snapshot' and 'Clean Tombstones'",
+      "cwe": [
+        "CWE-306",
+        "CWE-400"
+      ]
+    },
+    {
+      "name": "POST /-/quit \u2014 lifecycle DoS",
+      "kind": "active",
+      "description": "Graceful shutdown endpoint. Gated by --web.enable-lifecycle (same flag as /-/reload, NOT --web.enable-admin-api as the current finding text says). If /-/reload accepts POST, /-/quit almost certainly does \u2014 full monitoring blackout on demand.",
+      "value": "high",
+      "protocol_reference": "Prometheus docs \u2014 Management API / --web.enable-lifecycle",
+      "cwe": [
+        "CWE-306",
+        "CWE-400"
+      ]
+    },
+    {
+      "name": "Finding-text bug: /-/reload attributed to --web.enable-admin-api",
+      "kind": "passive",
+      "finding_kind": "correctness",
+      "description": "prom_admin_writable finding + module docstring claim /-/reload maps to --web.enable-admin-api. Wrong flag: /-/reload and /-/quit are gated by --web.enable-lifecycle; /api/v1/admin/tsdb/* is what --web.enable-admin-api gates. Remediation will misdirect defenders.",
+      "value": "medium",
+      "protocol_reference": "prometheus.io/docs/prometheus/latest/management_api/",
+      "cwe": [
+        "CWE-1023"
+      ]
+    },
+    {
+      "name": "GET /api/v1/targets \u2014 full scrape topology without config",
+      "kind": "passive",
+      "description": "Returns every active/dropped scrape target with discovered labels, health, lastError, lastScrape. Frequently reachable even when /api/v1/status/config is blocked. Yields resolved IPs from SD (not just static hostnames); lastError often quotes internal URLs and TLS chain fragments.",
+      "value": "high",
+      "protocol_reference": "Prometheus HTTP API \u2014 'Targets' (/api/v1/targets)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "GET /api/v1/status/flags + /api/v1/status/runtimeinfo",
+      "kind": "passive",
+      "description": "flags returns every runtime flag value (config file path, TSDB path, retention, web listen addr); runtimeinfo returns CWD, hostname, GOMAXPROCS, chunk counts, storage retention. Not probed.",
+      "value": "high",
+      "protocol_reference": "Prometheus HTTP API \u2014 'Runtime Information' and 'Flag Values'",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "GET /api/v1/rules + /api/v1/alerts + /api/v1/alertmanagers",
+      "kind": "passive",
+      "description": "rules dumps recording+alerting rule bodies (thresholds reveal detection logic \u2014 stay under). alerts lists firing alerts (known-broken services = soft targets). alertmanagers returns every Alertmanager URL Prometheus pages \u2014 a direct pivot list.",
+      "value": "high",
+      "protocol_reference": "Prometheus HTTP API \u2014 'Rules', 'Alerts', 'Alertmanagers'",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "GET /api/v1/labels + /api/v1/label/{name}/values + /api/v1/series",
+      "kind": "passive",
+      "description": "Label enumeration returns every job/instance/namespace/cluster/pod known to the TSDB \u2014 internal architecture map even when `up` is blocked. /api/v1/series matches series without querying values (sometimes ACL'd separately from /query).",
+      "value": "medium",
+      "protocol_reference": "Prometheus HTTP API \u2014 'Getting label names', 'Querying label values', 'Finding series by label matchers'",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Host/OS fingerprint queries beyond `up`",
+      "kind": "passive",
+      "description": "When query_open, only `up` is queried. High-value queries not attempted: node_uname_info (kernel + hostname), node_dmi_info (BIOS vendor / product = cloud vs bare-metal), node_boot_time_seconds (uptime => patch level), node_filesystem_size_bytes (disk layout), process_start_time_seconds (per-service uptime), kube_pod_info / kube_node_info (k8s inventory), cloudwatch_*/aws_*/azure_* (cloud metadata). Passive fingerprint battery worth harvesting.",
+      "value": "high",
+      "protocol_reference": "node_exporter collectors; kube-state-metrics metrics",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Config-parse depth: extract embedded creds + SD backends",
+      "kind": "passive",
+      "description": "When config_readable, module only counts target blocks. Not extracted: bearer_token, bearer_token_file, basic_auth.password/password_file, authorization.credentials, tls_config.key_file, remote_write[].url+authorization, remote_read[].url, kubernetes_sd_configs (api_server + role + tls), consul_sd_configs (server + token), ec2/gce/azure/scaleway/digitalocean_sd (cloud IAM creds), oauth2.client_secret. Each is a movable secret and every SD backend URL is a new pivot host.",
+      "value": "critical",
+      "protocol_reference": "prometheus.io/docs/prometheus/latest/configuration/configuration/ \u2014 scrape_config, *_sd_configs, remote_write, remote_read",
+      "cwe": [
+        "CWE-522",
+        "CWE-798",
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "GET /metrics \u2014 Prometheus self-scrape endpoint",
+      "kind": "passive",
+      "description": "Prometheus exposes its own metrics on /metrics (self-scrape). Leaks prometheus_build_info (exact revision/branch/goversion, not just version), prometheus_config_last_reload_success_timestamp, prometheus_engine_query_duration_seconds (evidence of admin activity), prometheus_target_sync_length_seconds by scrape_job (job names). Often ungated even when /api/v1/* is proxied.",
+      "value": "medium",
+      "protocol_reference": "Prometheus instrumentation \u2014 /metrics on the same port",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Push Gateway probe (9091 detected but not exercised)",
+      "kind": "active",
+      "description": "is_prometheus() matches 9091/9092 but probe() only speaks Prometheus server API. Push Gateway on 9091: GET / lists all pushed job/instance groups; PUT/POST /metrics/job/<job>[/instance/<i>] accepts arbitrary metrics from anyone \u2014 inject fake up=1 for missing hosts (hide takedowns), invert SLO metrics (drown SOC). DELETE /metrics/job/<job> wipes existing groups.",
+      "value": "high",
+      "protocol_reference": "github.com/prometheus/pushgateway \u2014 HTTP API",
+      "cwe": [
+        "CWE-306",
+        "CWE-345"
+      ]
+    },
+    {
+      "name": "Auth-enforced state detection + credentialed trial",
+      "kind": "auth",
+      "description": "When endpoints return 401/403 the probe treats them as 'not open' and emits nothing. Should distinguish 'auth enforced' from 'endpoint absent'. Prometheus native web.config.file supports basic_auth_users since 2.24 and mTLS. analyze() takes creds but nothing consumes them \u2014 no Authorization: Basic trial, no bearer_token trial, no reuse of tokens harvested from sibling modules (Consul, k8s, Grafana).",
+      "value": "high",
+      "protocol_reference": "prometheus.io/docs/prometheus/latest/configuration/https/ \u2014 basic_auth_users, tls_server_config",
+      "cwe": [
+        "CWE-287",
+        "CWE-798"
+      ]
+    },
+    {
+      "name": "TLS server_config disclosure via /api/v1/status/config",
+      "kind": "passive",
+      "description": "When yaml is returned, tls_server_config fields (cert_file, key_file paths, client_ca_file, min_version) not extracted. Paths hint at PKI layout; client_ca_file is a direct pivot to the internal CA if FS becomes reachable.",
+      "value": "low",
+      "protocol_reference": "Prometheus HTTPS/Auth config",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Body cap of 200_000 bytes drops large configs / federate output silently",
+      "kind": "passive",
+      "finding_kind": "correctness",
+      "description": "Real prometheus.yml with k8s + many rule_files easily exceeds 200KB; /federate output is many MB. resp.read(200_000) truncates without a marker, then json.loads fails silently in except \u2014 config_readable stays False on the very deployments that leak the most. Chunk-read with a much larger cap on config/federate, or at minimum record 'truncated'.",
+      "value": "medium",
+      "protocol_reference": "n/a \u2014 implementation-level",
+      "cwe": [
+        "CWE-703"
+      ]
+    },
+    {
+      "name": "CORS Access-Control-Allow-Origin: * not checked",
+      "kind": "passive",
+      "description": "Prometheus supports --web.cors.origin which is commonly misconfigured to `.*`. Any authenticated user's browser can then be forced to query the API from an attacker page (drive-by exfil). Header not inspected.",
+      "value": "medium",
+      "protocol_reference": "Prometheus flag --web.cors.origin",
+      "cwe": [
+        "CWE-942",
+        "CWE-352"
+      ]
+    },
+    {
+      "name": "Version-to-CVE mapping absent",
+      "kind": "passive",
+      "description": "version is captured but never checked against Prometheus CVEs \u2014 e.g. CVE-2019-3826 (federate SSRF, <2.7.1), CVE-2023-2569 (resource consumption /api/v1/labels), CVE-2024-1394 (memory leak /api/v1/query). No CVE bucket emitted for downstream reporting.",
+      "value": "medium",
+      "protocol_reference": "cve.mitre.org \u2014 Prometheus advisories",
+      "cwe": [
+        "CWE-1104"
+      ]
+    },
+    {
+      "name": "Remote-write reload-abuse SSRF/exfil chain",
+      "kind": "chain",
+      "description": "admin_writable + config_readable together = attacker POSTs modified prometheus.yml (via any writable path referenced from it) and hits /-/reload to point remote_write at attacker URL. All metrics stream out over authenticated remote_write. Prose mentions exfil, but no chain finding is emitted for the attack-path graph.",
+      "value": "high",
+      "protocol_reference": "Prometheus remote_write spec",
+      "cwe": [
+        "CWE-918",
+        "CWE-441"
+      ]
+    },
+    {
+      "name": "PromQL DoS not surfaced when query_open",
+      "kind": "passive",
+      "description": "Open /api/v1/query permits expensive PromQL \u2014 e.g. `topk(1e6, {__name__=~\".+\"}[30d])`, unbounded range queries \u2014 which OOM or wedge the process. Distinct medium/high finding separate from the info-disc angle.",
+      "value": "medium",
+      "protocol_reference": "Prometheus PromQL evaluation limits (--query.max-samples etc.)",
+      "cwe": [
+        "CWE-400",
+        "CWE-770"
+      ]
+    }
+  ],
+  "priority_gaps": [
+    "P0: /federate bulk-exfil probe + finding (largest missing attack primitive)",
+    "P0: /debug/pprof/cmdline (leaks argv \u2192 often secrets; default-on)",
+    "P0: /api/v1/admin/tsdb/{delete_series,snapshot,clean_tombstones} \u2014 actual --web.enable-admin-api endpoints (module mis-attributes /-/reload here)",
+    "P0: Config-parse depth \u2014 lift bearer_token, basic_auth, remote_write.authorization, kubernetes_sd api_server, consul_sd token, ec2/gce/azure SD creds; feed cred store + pivot list",
+    "P1: /api/v1/targets \u2014 network map without needing config read",
+    "P1: /api/v1/status/flags + runtimeinfo (paths, retention, hostname, CWD)",
+    "P1: /-/quit lifecycle DoS + fix /-/reload lifecycle-vs-admin-api attribution",
+    "P1: /api/v1/rules + /alerts + /alertmanagers (Alertmanager pivot list, detection thresholds)",
+    "P1: Push Gateway (9091) \u2014 GET / and PUT /metrics/job/* metric-injection",
+    "P1: Auth-enforced state (401/403) as distinct outcome + credentialed trial via creds arg + harvested bearer tokens",
+    "P2: Passive host-fingerprint query battery (node_uname_info, node_dmi_info, kube_node_info, process_start_time_seconds) when query_open",
+    "P2: /api/v1/labels + label-values + /series for topology when /query is blocked",
+    "P2: /metrics self-scrape endpoint (build_info revision, job names, config-reload timestamps)",
+    "P2: 200KB body cap truncates real configs / federate silently \u2014 chunk-read + truncated flag",
+    "P2: --web.cors.origin=`.*` detection via Access-Control-Allow-Origin header",
+    "P2: Chain finding: admin_writable + config_readable \u2192 remote_write exfil / rule-file SSRF",
+    "P3: Version-to-CVE mapping for buildinfo.version (CVE-2019-3826 etc.)",
+    "P3: Query-DoS finding companion to query_open (expensive PromQL)"
+  ],
+  "cross_service_wire_gaps": [
+    "Bearer tokens + basic_auth creds parsed from prometheus.yml \u2192 cred store (currently only counted). Consumers: HTTP-auth trial, Kubernetes API, Grafana, Consul, Vault modules.",
+    "kubernetes_sd_configs.api_server URL + role + tls \u2192 Kubernetes service module as a new target (with its own creds).",
+    "consul_sd_configs.server + token \u2192 Consul service module target + Consul ACL token cred.",
+    "ec2_sd / gce_sd / azure_sd blocks \u2192 cloud-metadata / IAM cred store; consumed by other cloud modules.",
+    "remote_write[].url + authorization.credentials \u2192 Grafana Cloud / Cortex / Thanos / Mimir endpoint list; downstream observability-backend probe + bearer-cred entry.",
+    "/api/v1/alertmanagers \u2192 Alertmanager (9093) service module targets (exact URLs, not just hosts).",
+    "/api/v1/targets discovered scrape targets \u2192 host inventory as newly-observed IP:port with role-labels (node_exporter@9100, cadvisor@8080, blackbox_exporter@9115). Backfill Host/Port records.",
+    "blackbox_exporter targets discovered \u2192 SSRF-pivot candidate list (blackbox /probe is a classic SSRF gadget).",
+    "node_exporter targets discovered \u2192 node-exporter service module seed (no dedicated module today, but the target list is the seed).",
+    "Config paths from /api/v1/status/flags (--config.file, --storage.tsdb.path, --web.config.file) \u2192 filesystem-read post-exploitation module (what to grep for once shell is obtained).",
+    "prom_admin_writable + prom_config_readable together \u2192 attack-path graph edge 'metric-exfil-via-remote_write-swap' the exploit orchestrator should synthesize.",
+    "Push Gateway writable \u2192 alert/SOC-poisoning primitive for the exploit orchestrator (no path there today)."
+  ],
+  "summary": "Recce's prometheus module covers the four most-cited public-web attack surfaces (config read, query open, admin reload, buildinfo fingerprint) but misses the higher-value ones on the same daemon: /federate bulk exfil, /debug/pprof/cmdline argv leak, and the actual --web.enable-admin-api endpoints under /api/v1/admin/tsdb/* (delete_series, snapshot, clean_tombstones). Config parsing stops at target counts \u2014 the embedded bearer tokens, basic_auth, remote_write.authorization, and *_sd_configs cloud/consul/k8s creds that make Prometheus a credential goldmine are never lifted for the cred store or downstream modules. /-/reload is mis-attributed to --web.enable-admin-api (correct flag is --web.enable-lifecycle) which will misdirect remediation. Passive endpoints /api/v1/targets, /status/flags, /status/runtimeinfo, /rules, /alerts, /alertmanagers, /labels, and /metrics all leak topology and are not requested. Push Gateway (9091) is recognized by is_prometheus() but never probed \u2014 its unauth /metrics/job/* PUT is a distinct metric-injection primitive that poisons SOC alerts. Auth-enforced (401/403) is silently treated as 'closed' with no credentialed trial, and the analyze() creds arg is unused. Implementation caveat: 200KB body cap drops real configs and /federate output silently.",
+  "notes": "Fix required alongside gaps: docstring + prom_admin_writable finding attribute /-/reload to --web.enable-admin-api; correct flag is --web.enable-lifecycle. The real --web.enable-admin-api surface (/api/v1/admin/tsdb/*) is not probed. resp.read(200_000) truncates real configs and any /federate response, so the highest-value bodies are the ones most likely to be silently dropped. Tests only exercise happy-path + 403; no 401/auth-enforced case, no truncation case, no push-gateway case, no federation case \u2014 expanding coverage should follow module additions."
+}

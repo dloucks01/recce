@@ -1,0 +1,232 @@
+{
+  "service": "ipp",
+  "module_files": [
+    "recce/services/ipp.py"
+  ],
+  "existing_capabilities": [
+    "is_ipp() port/service match on 631, 'ipp', 'cups'",
+    "CUPS-Get-Printers (op 0x4002, RFC-6.2 CUPS extension) unauth POST",
+    "Best-effort IPP attribute walker (RFC 8010 \u00a73) \u2014 extracts printer-name and printer-uri-supported",
+    "Automatic TLS fallback on plain HTTP failure (single connect, undifferentiated)",
+    "Server-header sniff for 'CUPS/' token + numeric version extraction",
+    "Finding: unauth CUPS printer listing (CWE-200)",
+    "Finding: reachable CUPS reference to CVE-2024-47176 chain (declarative only, not verified)",
+    "Runbook: ipptool CUPS-Get-Printers, curl /printers/, review-only exploit note",
+    "svcprobe.iter_probe budget/state plumbing"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "Get-Printer-Attributes (op 0x000B) \u2014 CVE-2024-47176 ingress verification",
+      "kind": "active",
+      "value": "critical",
+      "description": "RFC 8011 \u00a74.2.5. The actual attacker primitive in the CUPS 2024 chain is a crafted Get-Printer-Attributes causing cups-browsed to add a rogue printer whose device-uri points at the attacker. Module only calls CUPS-Get-Printers (0x4002) and explicitly punts (`recce did NOT invoke that path`). Missing: send a benign Get-Printer-Attributes to /ipp/print (and /printers/<name>) to confirm the ingress endpoint is live and returns printer-uri-supported / device-uri; that answer is what upgrades the 'reachable' finding to a verified exposure gate.",
+      "protocol_reference": "RFC 8011 \u00a74.2.5; CVE-2024-47176",
+      "cwe": [
+        "CWE-78",
+        "CWE-306",
+        "CWE-918"
+      ]
+    },
+    {
+      "name": "cups-browsed 631/udp probe (BrowsePacket ingress)",
+      "kind": "active",
+      "value": "critical",
+      "description": "The 2024 chain enters via cups-browsed listening on 631/udp accepting a BrowsePacket that names an attacker-controlled ipp:// URI. `cups_lpd.probe_cups_browsed` already exists in the sibling module but `ipp.py` never invokes it or its own equivalent \u2014 so the ipp analyzer emits the CVE-2024-47176 finding on TCP presence alone, missing the true reachability signal (a UDP-triggered dial-back). Cross-wire this or duplicate: send a spoofed BROWSE packet and listen for the dial-back TCP connect.",
+      "protocol_reference": "CUPS Browsing protocol (legacy); CVE-2024-47176 ingress",
+      "cwe": [
+        "CWE-306",
+        "CWE-918"
+      ]
+    },
+    {
+      "name": "CUPS version gate (upstream/distro backport awareness)",
+      "kind": "passive",
+      "value": "high",
+      "description": "Module surfaces raw 'cups_version' but never gates the CVE-2024-47176 finding on it \u2014 every reachable CUPS box gets the same 'high' finding regardless of 2.4.9+ or Ubuntu/RHEL backport suffixes. Sibling `cups_lpd.cups_vulnerable()` already implements the SemVer + distro-suffix logic; ipp.py duplicates the finding without consulting it, producing FP-heavy output on patched Ubuntu 24.04.1 / RHEL op-backport hosts.",
+      "protocol_reference": "CUPS release matrix; Ubuntu USN-7028-1",
+      "cwe": [
+        "CWE-1035"
+      ]
+    },
+    {
+      "name": "Get-Jobs (op 0x000A) \u2014 job title / user / origin-host leak",
+      "kind": "active",
+      "value": "high",
+      "description": "RFC 8011 \u00a74.3.6. Reading the queue's jobs returns job-name (usually the source filename), job-originating-user-name, job-originating-host-name \u2014 high-signal recon (filenames, AD usernames, workstation hostnames). Sibling cups_lpd already has `_ipp_get_jobs` + `_parse_ipp_jobs`; ipp.py never calls it, so the module misses per-printer job enumeration and its finding population.",
+      "protocol_reference": "RFC 8011 \u00a74.3.6; IANA IPP job attribute registry",
+      "cwe": [
+        "CWE-200",
+        "CWE-359"
+      ]
+    },
+    {
+      "name": "CUPS-Get-Classes (op 0x4005) and CUPS-Get-Devices (op 0x4003)",
+      "kind": "active",
+      "value": "medium",
+      "description": "CUPS extensions that enumerate printer classes and the server's device-URI backend list (usb://, socket://, smb://, lpd://). Device-URIs frequently carry embedded credentials (smb://DOMAIN\\user:pass@fileserver) and reveal internal SMB/LPD infrastructure. Module only calls 0x4002; 0x4003/0x4005 cover the other half of the CUPS admin surface.",
+      "protocol_reference": "CUPS Implementation of IPP \u00a76.2 (CUPS operation IDs)",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ]
+    },
+    {
+      "name": "CUPS-Get-PPDs (op 0x400C) \u2014 model / firmware disclosure",
+      "kind": "active",
+      "value": "medium",
+      "description": "Returns the entire PPD catalog the server can install (ppd-make-and-model, ppd-product). Fingerprints attached hardware and driver versions \u2014 high-signal for correlating with printer-vendor CVEs and for locating foomatic/PS drivers that participate in the 2024 chain.",
+      "protocol_reference": "CUPS Implementation of IPP \u00a76.2",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "WWW-Authenticate scheme disclosure on /admin, /admin/conf, /jobs, /printers/",
+      "kind": "active",
+      "value": "high",
+      "description": "The IPP TCP port also serves the CUPS HTTP admin UI. Sibling `cups_lpd.probe_admin_endpoints` already probes /admin and /admin/conf; ipp.py never does. Missing: HEAD/GET the standard CUPS paths and record the WWW-Authenticate scheme (Basic / Digest / Negotiate) \u2014 that is the ingress for credential attack modules and reveals Kerberos-only hosts vs Basic-over-cleartext hosts.",
+      "protocol_reference": "CUPS scheduler HTTP interface; RFC 7235",
+      "cwe": [
+        "CWE-287",
+        "CWE-522"
+      ]
+    },
+    {
+      "name": "IPP-over-TLS distinction (Upgrade: TLS/1.2 vs implicit HTTPS on 631)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "RFC 8010 \u00a75 + RFC 7472 define both an IPP STARTTLS-style Upgrade and implicit ipps:// on 443/tcp. Module's tls fallback conflates the two and never records which one worked, never captures the cert, and never emits a finding when a printer offers only cleartext IPP (auth credentials cross the wire in the clear). Also misses the CVE-2018-4180 style TLS-downgrade surface.",
+      "protocol_reference": "RFC 8010 \u00a75; RFC 7472",
+      "cwe": [
+        "CWE-319",
+        "CWE-311"
+      ]
+    },
+    {
+      "name": "Print-Job / Validate-Job auth-required probe (op 0x0002 / 0x0004)",
+      "kind": "active",
+      "value": "high",
+      "description": "RFC 8011 \u00a74.2.1 / \u00a74.2.3. Sending a Validate-Job with no credentials distinguishes 'anyone can print' printers (IPP status 0x0000) from 'auth required' ones (0x0401 client-error-not-authenticated). An open-print printer is a spool-file write primitive + a launchpad for the foomatic filter chain \u2014 currently invisible to the module.",
+      "protocol_reference": "RFC 8011 \u00a74.2.1, \u00a74.2.3; status code registry",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ]
+    },
+    {
+      "name": "IPP status-code parsing (RFC 8011 \u00a75.1)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "The attribute walker reads only the operation-attributes-tag stream and ignores the 2-byte status-code at offset 2-3 of every IPP response. That code (0x0000 successful-ok vs 0x0400/0x0500 errors vs 0x0401 not-authenticated) is the definitive auth-gate signal; without it the module cannot tell 'unauthenticated 200 with empty body' from 'auth required'.",
+      "protocol_reference": "RFC 8011 \u00a75.1 (status codes)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "printer-privacy-attributes extraction (printer-location, printer-info, printer-contact-col, printer-organization)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "IANA IPP attribute registry: printer-location, printer-info, printer-organization, printer-organizational-unit, printer-geo-location, printer-contact-col carry building/floor/department/PII and OU strings \u2014 high-signal recon that is one op away (Get-Printer-Attributes). Walker only pulls printer-name and printer-uri-supported.",
+      "protocol_reference": "RFC 8011 \u00a75.4; PWG 5100.13",
+      "cwe": [
+        "CWE-200",
+        "CWE-359"
+      ]
+    },
+    {
+      "name": "device-uri credential extraction (smb://, ipp://, lpd:// with userinfo)",
+      "kind": "passive",
+      "value": "high",
+      "description": "CUPS printers frequently store backend credentials in device-uri (smb://user:pass@fs01/share, ipp://svc:pw@upstream). Currently walker returns raw strings but never separates userinfo or emits a credentials-in-config finding. This is the same class of leak as CVE-2015-1158 environment.",
+      "protocol_reference": "CUPS device-uri syntax; RFC 3986 userinfo",
+      "cwe": [
+        "CWE-522",
+        "CWE-798"
+      ]
+    },
+    {
+      "name": "Cross-service: hostnames/domains extracted from printer-uri / device-uri to known_domains + Host records",
+      "kind": "chain",
+      "value": "high",
+      "description": "printer-uri-supported and device-uri authorities are FQDNs (`print01.corp.local`, `fs01.hq.corp.local`) that other services (DNS, LDAP, SMB, NTLM) would consume for target expansion. `cups_lpd.harvest_uris` already exists; ipp.py returns raw printer dicts and never emits harvested hosts/domains into the analyze() output, so downstream modules never see the enumeration. Wire gap: emit `hostnames` / `domains` on the analyze() result and feed them into the shared discovery pool.",
+      "protocol_reference": "RFC 8011 \u00a75.4.2; internal known_domains contract"
+    },
+    {
+      "name": "Cross-service: SMB device-uri creds \u2192 smb module",
+      "kind": "chain",
+      "value": "high",
+      "description": "Extracted smb://user:pass@host device-uris are directly usable by the SMB analyzer for authenticated share enumeration, but ipp.py currently emits no credential facts. Producer/consumer wire: ipp analyze() should populate a creds-like dict keyed by service that smb (and rpc/wmi) can consume."
+    },
+    {
+      "name": "Cross-service: CUPS admin HTTP paths \u2192 http_endpoints",
+      "kind": "chain",
+      "value": "medium",
+      "description": "The 631/tcp HTTP surface (/, /admin, /jobs, /printers/, /classes/, /help, /admin/conf, /admin/log/error_log) is a legitimate HTTP asset that the http/web module could crawl and auth-fuzz. ipp.py does not surface these paths as HTTP endpoints, so web-tier scanners never see them."
+    },
+    {
+      "name": "IPP Notify-Subscription / Create-Job-Subscriptions (RFC 3995)",
+      "kind": "active",
+      "value": "medium",
+      "description": "Notifications let an attacker register a URL that CUPS calls back over HTTP whenever a job event fires \u2014 an SSRF / OOB primitive on any endpoint reachable from the print server. Not currently probed or flagged.",
+      "protocol_reference": "RFC 3995 \u00a74 (Create-Printer-Subscription op 0x0016)",
+      "cwe": [
+        "CWE-918"
+      ]
+    },
+    {
+      "name": "Historical CVE gates (CVE-2015-1158 filter symlink, CVE-2022-26691 auth bypass, CVE-2018-4180 debug-log write)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Only CVE-2024-47176 chain is checked. Older CUPS RCE / auth-bypass CVEs would be triggered by the same version string that is already parsed. A version-range table (like cups_vulnerable but multi-CVE) is missing.",
+      "protocol_reference": "CUPS security advisory index",
+      "cwe": [
+        "CWE-59",
+        "CWE-287"
+      ]
+    },
+    {
+      "name": "Vendor-printer fingerprinting on non-CUPS servers (HP, Xerox, Canon, Ricoh IPP stacks)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "`is_cups` is the only branch \u2014 hardware printers (HP FutureSmart, Xerox EIP, Canon MEAP, Ricoh @Remote, Konica Bizhub) all speak IPP with distinct Server headers and printer-make-and-model strings that map to vendor CVEs (e.g. CVE-2022-3942 HP Web Jetadmin, CVE-2023-27528 Lexmark). Non-CUPS reachable printers currently produce no finding at all.",
+      "protocol_reference": "RFC 8011 printer-make-and-model; vendor advisory pages",
+      "cwe": [
+        "CWE-200",
+        "CWE-1035"
+      ]
+    },
+    {
+      "name": "Attribute walker robustness \u2014 collection (0x34) / begCollection / octetString handling",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Walker treats every value tag as a UTF-8 string with a 2-byte length. IPP collection type (0x34 begCollection\u2026endCollection) and the 1setOf pattern break the naive loop \u2014 the walker `break`s or misassigns names, silently discarding printer-supply-info, printer-alert, media-col-database, and printer-icons attributes. That is where a lot of the modern IPP recon lives.",
+      "protocol_reference": "RFC 8010 \u00a73.1.4 (collection encoding); PWG 5100.7",
+      "cwe": [
+        "CWE-1287"
+      ]
+    },
+    {
+      "name": "Duplication / consolidation with cups_lpd",
+      "kind": "passive",
+      "value": "medium",
+      "description": "cups_lpd.py implements Get-Jobs, admin probing, cups-browsed UDP, URI harvest and version gating \u2014 all logically ipp.py capabilities. ipp.py currently ships as a strictly weaker sibling and its findings do not cross-reference or reuse them. Either module should call into the other, or ipp.py's scope should be documented as 'CUPS-Get-Printers only, everything else in cups_lpd'."
+    }
+  ],
+  "priority_gaps": [
+    "Wire cups-browsed 631/udp BrowsePacket probe into ipp.analyze() (currently emits CVE-2024-47176 finding on TCP presence alone; the actual ingress verifier already exists in cups_lpd.probe_cups_browsed but ipp.py never calls it).",
+    "Gate the CVE-2024-47176 'high' finding on cups_lpd.cups_vulnerable(version, server_header) instead of firing on every reachable CUPS \u2014 currently every patched Ubuntu 24.04.1 / RHEL op-backport host is a false positive.",
+    "Send Get-Printer-Attributes (op 0x000B) to /ipp/print and /printers/<name> \u2014 the actual attacker primitive in the 2024 chain and the source of device-uri, printer-location, PPD hints.",
+    "Parse the IPP status-code (offset 2-3 of every response) so unauth vs auth-required can be distinguished; today anything with a body is treated the same.",
+    "Emit harvested hostnames / domains and smb:// device-uri credentials from analyze() so DNS/SMB/known_domains consumers see the recon; producer/consumer wiring is currently absent."
+  ],
+  "cross_service_wire_gaps": [
+    "hostnames and domain suffixes parsed from printer-uri-supported / device-uri / printer-more-info never reach the shared discovery/known_domains pool (cups_lpd.harvest_uris exists but ipp.py doesn't call it).",
+    "smb:// device-uri userinfo credentials never reach the SMB module (or a shared creds bag) for authenticated share enumeration.",
+    "The CUPS HTTP admin surface on 631/tcp (/admin, /jobs, /printers/, /classes/, /admin/conf, /admin/log/error_log) is never emitted as HTTP endpoints, so web/http scanners don't crawl or auth-test it.",
+    "job-originating-user-name / job-originating-host-name (from Get-Jobs) never reach the AD/user-enumeration or hosts consumers \u2014 cups_lpd already extracts them but ipp.py's analyze() has no jobs pipeline.",
+    "ppd-make-and-model / printer-make-and-model fingerprints never reach a vendor-CVE correlation consumer."
+  ],
+  "summary": "recce/services/ipp.py is a thin CUPS-Get-Printers probe with a declarative CVE-2024-47176 finding. It does not invoke the actual 2024 ingress path (Get-Printer-Attributes on /ipp/print or the 631/udp cups-browsed BrowsePacket), does not gate the finding on version, does not parse IPP status codes, does not enumerate jobs, admin endpoints, classes, devices, PPDs, notifications, or auth schemes, and does not surface harvested hostnames / device-uri credentials to sibling modules. A functionally richer implementation of most of these already exists in the sibling cups_lpd.py module \u2014 the primary attack-value gap is that ipp.py neither consumes nor cross-wires those primitives, so both scoring (FP-heavy CVE-2024-47176 finding, missing critical browsed-verified variant) and cross-service pivot (DNS/SMB/HTTP handoff) are weaker than the surrounding scanner suggests.",
+  "notes": "Sibling recce/services/cups_lpd.py already implements Get-Jobs (0x000A), admin endpoint probing, cups-browsed UDP dial-back detection, URI/host harvest, and CUPS version gating with distro-backport awareness. ipp.py duplicates none of this and calls none of it. The audit's highest-leverage recommendation is not net-new code but reusing cups_lpd primitives from ipp.analyze() and wiring their outputs into the shared discovery/creds pipeline. New primitives worth adding beyond that: Get-Printer-Attributes (0x000B) call, IPP status-code parser, Validate-Job (0x0004) auth-gate probe, Create-Printer-Subscription (0x0016) SSRF primitive, collection-tag (0x34) support in the attribute walker, and a multi-CVE version table (CVE-2015-1158, CVE-2018-4180, CVE-2022-26691 alongside the 2024 chain). Cite RFC 8010 \u00a73 for encoding, RFC 8011 \u00a74.2/\u00a74.3.6/\u00a75.1 for operations and status codes, RFC 3995 \u00a74 for subscriptions, RFC 7472 for IPP-over-TLS, PWG 5100.7/5100.13 for Everywhere/Job Extensions, CUPS \"Implementation of IPP\" \u00a76.2 for CUPS extension op IDs."
+}

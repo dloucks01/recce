@@ -1,0 +1,233 @@
+{
+  "service": "redis",
+  "module_files": [
+    "recce/services/db/redis.py",
+    "tests/test_db_engines.py:705-751"
+  ],
+  "existing_capabilities": [
+    "resp2-parser (simple str, error, integer, bulk string, array; nested/limits)",
+    "ping-pong-fingerprint",
+    "info-parse-server-section",
+    "info-parse-keyspace-key-count",
+    "info-parse-replication (role, connected_slaves, master_host)",
+    "unauth-detection (INFO with no AUTH)",
+    "config-get-dir-dbfilename",
+    "config-get-requirepass-protected-mode",
+    "config-get-save-appendonly (persistence flag)",
+    "module-list-enumeration",
+    "module-load-availability-flag",
+    "acl-whoami",
+    "acl-list-default-nopass-detection",
+    "eol-version-flag (<6.0)",
+    "finding-redis-unauth (critical, CWE-306/284)",
+    "finding-redis-version (medium, CWE-1104)",
+    "runbook-scaffold (recon/enumerate/loot/escalate)",
+    "proof-html-reuse (mssql style)",
+    "read-only-guarantee (never writes keys, config, SAVE)"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "auth-credential-spray",
+      "kind": "auth",
+      "description": "Module never attempts AUTH. Redis supports two forms: legacy 'AUTH password' (requirepass) and ACL 'AUTH user password' (Redis 6+, RESP2/3). recce should attempt a small default list against -NOAUTH endpoints ('', 'foobared', 'redis', 'password', 'admin', product/hostname derived) and consume creds from the credential store. Currently a locked instance is dead-ended as 'reachable but not a finding'.",
+      "value": "high",
+      "protocol_reference": "Redis commands: AUTH (https://redis.io/commands/auth/); ACL AUTH form since 6.0",
+      "finding_kind": "redis_weak_auth",
+      "cwe": [
+        "CWE-521",
+        "CWE-798"
+      ]
+    },
+    {
+      "name": "cve-2022-0543-lua-sandbox-escape",
+      "kind": "active",
+      "description": "Debian/Ubuntu-packaged Redis leaves package.loadlib reachable from the Lua sandbox, giving unauth RCE via EVAL. A one-shot probe 'EVAL \"if package and package.loadlib then return 1 else return 0 end\" 0' cleanly distinguishes vulnerable builds. High-signal, actively exploited (Muhstik/Redigo botnets).",
+      "value": "critical",
+      "protocol_reference": "CVE-2022-0543 (Debian bug #1005787); EVAL command",
+      "finding_kind": "redis_cve_2022_0543",
+      "cwe": [
+        "CWE-1188",
+        "CWE-269"
+      ]
+    },
+    {
+      "name": "slaveof-replicaof-write-probe",
+      "kind": "active",
+      "description": "Detect whether SLAVEOF/REPLICAOF is reachable \u2014 the redis-rogue-server / RedisModule-Load-over-replication chain (Pavel Toporkov, 2018) is the primary Redis-master-slave RCE. Sending 'REPLICAOF NO ONE' is a benign, reversible read-only probe: -NOPERM/renamed \u2192 hardened; +OK \u2192 the rogue-master RCE primitive is reachable. Currently the finding claims 'SLAVEOF ... role=master' by inference alone.",
+      "value": "high",
+      "protocol_reference": "Redis REPLICAOF/SLAVEOF (https://redis.io/commands/replicaof/); Pavel Toporkov 'You got pwned by 6379'",
+      "finding_kind": "redis_replication_open",
+      "cwe": [
+        "CWE-284",
+        "CWE-732"
+      ]
+    },
+    {
+      "name": "cluster-nodes-topology",
+      "kind": "passive",
+      "description": "'CLUSTER NODES' / 'CLUSTER SHARDS' returns full cluster peer list: node-id, ip:port, master/slave flags, slot ranges. Every peer is a new attack target (identical AUTH, same requirepass, often same modules). Currently uncalled \u2014 cluster deployments are enumerated as one host.",
+      "value": "high",
+      "protocol_reference": "Redis Cluster spec \u00a78 Command Overview: CLUSTER NODES/SHARDS (https://redis.io/docs/reference/cluster-spec/)",
+      "finding_kind": "redis_cluster_topology",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "sentinel-port-and-commands",
+      "kind": "passive",
+      "description": "Redis Sentinel runs on TCP 26379 and answers a different command set: SENTINEL MASTERS / SENTINEL SLAVES <name> / SENTINEL SENTINELS <name> / SENTINEL CKQUORUM. Reveals monitored master ip/port, replica ip/port, peer sentinel addrs, and \u2014 critically \u2014 the 'auth-pass' field (replication password stored in cleartext in sentinel's view of a master). Port 26379 is not in _PORTS and no sentinel branch exists.",
+      "value": "high",
+      "protocol_reference": "Redis Sentinel documentation, Sentinel API (https://redis.io/docs/management/sentinel/)",
+      "finding_kind": "redis_sentinel_exposed",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ]
+    },
+    {
+      "name": "client-list-source-harvest",
+      "kind": "passive",
+      "description": "'CLIENT LIST' returns id/addr/laddr/name/cmd for every connected client. addr= is a real internal IP:port using this Redis (feeds relay_targets/host graph); name= often includes the app identifier. Not called.",
+      "value": "medium",
+      "protocol_reference": "Redis CLIENT LIST (https://redis.io/commands/client-list/)",
+      "finding_kind": "redis_client_addr_leak",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "config-get-masterauth-and-secrets",
+      "kind": "passive",
+      "description": "'CONFIG GET masterauth' returns the replication password in plaintext; 'CONFIG GET *' also leaks 'notify-keyspace-events', 'unixsocket', 'tls-cert-file', 'aclfile', 'user' directives. masterauth in particular is a real credential worth feeding into the hash/known_password store.",
+      "value": "high",
+      "protocol_reference": "redis.conf directive 'masterauth', CONFIG GET (https://redis.io/commands/config-get/)",
+      "finding_kind": "redis_masterauth_leak",
+      "cwe": [
+        "CWE-256",
+        "CWE-522"
+      ]
+    },
+    {
+      "name": "acl-getuser-and-user-enumeration",
+      "kind": "passive",
+      "description": "'ACL LIST' is scanned but only for 'default nopass'. 'ACL USERS' returns every configured username; 'ACL GETUSER <name>' returns per-user passwords (hashed via SHA-256, feedable to hashcat -m 1400), enabled commands, key patterns, and channel ACLs. Currently discards every user beyond 'default' \u2014 a rich known_users + hash feed is left on the wire.",
+      "value": "high",
+      "protocol_reference": "Redis ACL (https://redis.io/docs/management/security/acl/); ACL USERS / GETUSER",
+      "finding_kind": "redis_acl_users",
+      "cwe": [
+        "CWE-200",
+        "CWE-916"
+      ]
+    },
+    {
+      "name": "rename-command-hardening-detection",
+      "kind": "passive",
+      "description": "'COMMAND COUNT' + 'COMMAND INFO' / 'COMMAND LIST' reveals whether CONFIG, FLUSHALL, SAVE, MODULE, DEBUG, SHUTDOWN, EVAL, SLAVEOF have been renamed or disabled via redis.conf rename-command. The finding currently claims all four RCE primitives are reachable when it may just be MODULE \u2014 differentiating hardened vs open sharpens severity and runbook.",
+      "value": "medium",
+      "protocol_reference": "Redis COMMAND / COMMAND INFO (https://redis.io/commands/command/); redis.conf rename-command",
+      "finding_kind": "redis_rename_command_present"
+    },
+    {
+      "name": "keyspace-scan-and-sample-loot",
+      "kind": "passive",
+      "description": "SCAN cursor + TYPE + (GET/HGETALL/LRANGE/SMEMBERS/JSON.GET) on a sample of keys \u2014 recce currently reports the key count but never samples. Cached session tokens, JWTs, Django/Flask session dicts (SESSION_*, sess:*), Sidekiq/Celery payloads with credentials, and RediSearch indexes are all standard finds. Runbook mentions it; module never does it. Cross-feeds hashes/known_users/tokens.",
+      "value": "high",
+      "protocol_reference": "Redis SCAN (https://redis.io/commands/scan/); TYPE, GET, HGETALL, LRANGE, SMEMBERS",
+      "finding_kind": "redis_key_loot",
+      "cwe": [
+        "CWE-312"
+      ]
+    },
+    {
+      "name": "hello-resp3-and-tls-negotiation",
+      "kind": "passive",
+      "description": "'HELLO' (Redis 6+) returns server version, mode, role, id, and \u2014 with 'HELLO 2 AUTH user pass' \u2014 supports auth in the handshake plus RESP3 downgrade signaling. Also useful to detect TLS-only listeners on 6380: recce's doc even lists 'ssl' as a return field but the code never populates it. No STARTTLS-style probe or ssl.wrap_socket fallback on 6380/16379.",
+      "value": "medium",
+      "protocol_reference": "Redis HELLO (https://redis.io/commands/hello/); TLS support (https://redis.io/docs/management/security/encryption/)",
+      "finding_kind": "redis_tls_transport"
+    },
+    {
+      "name": "module-fingerprint-and-known-cves",
+      "kind": "passive",
+      "description": "MODULE LIST returns module name+version but the module never maps them to known-vulnerable versions: RediSearch <2.6 (CVE-2023-31655), RedisGraph <2.10.3 (CVE-2023-31655/CVE-2022-24735 GRAPH.QUERY sandbox), RedisJSON path traversal, RedisBloom versions. Reported modules today feed only the string list.",
+      "value": "medium",
+      "protocol_reference": "RediSearch/RedisGraph/RedisJSON module CVE list (redis.io/docs/stack)",
+      "finding_kind": "redis_module_vulnerable",
+      "cwe": [
+        "CWE-1035"
+      ]
+    },
+    {
+      "name": "cve-2023-41056-rdb-integer-overflow",
+      "kind": "passive",
+      "description": "Redis 7.0.x < 7.0.13 and 7.2.x < 7.2.1 have an integer overflow in string handling reachable by any authenticated user; combined with unauth this is a pre-auth crash/RCE. Version comparison currently only checks <6.0 EOL; the 7.x CVE band is silently ignored.",
+      "value": "medium",
+      "protocol_reference": "CVE-2023-41056",
+      "finding_kind": "redis_cve_2023_41056",
+      "cwe": [
+        "CWE-190"
+      ]
+    },
+    {
+      "name": "cve-2024-31449-lua-bit-library-bof",
+      "kind": "passive",
+      "description": "Redis < 7.2.5 / < 7.4.0 has a stack buffer overflow in the Lua bit library reachable via EVAL. Version-range check; not currently in _old_version()'s scope.",
+      "value": "medium",
+      "protocol_reference": "CVE-2024-31449",
+      "finding_kind": "redis_cve_2024_31449",
+      "cwe": [
+        "CWE-121"
+      ]
+    },
+    {
+      "name": "debug-command-availability",
+      "kind": "passive",
+      "description": "'DEBUG SLEEP 0' / 'DEBUG OBJECT <key>' presence reveals whether DEBUG has been renamed. DEBUG SEGFAULT is a free DoS; DEBUG RELOAD forces RDB round-trip. A benign 'DEBUG SLEEP 0' probe classifies hardening.",
+      "value": "low",
+      "protocol_reference": "Redis DEBUG (https://redis.io/commands/debug/)",
+      "finding_kind": "redis_debug_open"
+    },
+    {
+      "name": "pubsub-and-keyspace-notification-leak",
+      "kind": "passive",
+      "description": "'CONFIG GET notify-keyspace-events' + 'PSUBSCRIBE __keyspace@*__:*' on an idle window reveals live app events (SET session:<id>, DEL token:*) \u2014 session hijack material in real time. Not attempted.",
+      "value": "low",
+      "protocol_reference": "Redis Keyspace Notifications (https://redis.io/docs/manual/keyspace-notifications/)",
+      "finding_kind": "redis_keyspace_events"
+    },
+    {
+      "name": "info-all-sections",
+      "kind": "passive",
+      "description": "Only default INFO is fetched (Server/Clients/Memory/Stats/Replication/CPU/Keyspace). 'INFO everything' adds commandstats (hot commands, telling app fingerprint), latencystats, and errorstats. Missed richer fingerprint context.",
+      "value": "low",
+      "protocol_reference": "Redis INFO (https://redis.io/commands/info/)"
+    },
+    {
+      "name": "protected-mode-vs-bind-signal",
+      "kind": "passive",
+      "description": "CONFIG GET bind is not read. protected-mode-yes + bind 0.0.0.0 is the exact 'safe' misconfig where AUTH still isn't required from loopback \u2014 reading bind narrows the false-positive band on the unauth finding.",
+      "value": "low",
+      "protocol_reference": "redis.conf 'bind', 'protected-mode'"
+    }
+  ],
+  "priority_gaps": [
+    "cve-2022-0543-lua-sandbox-escape \u2014 one-shot EVAL probe, most-exploited Redis RCE in the wild, currently invisible",
+    "auth-credential-spray \u2014 no AUTH attempts at all; add small default list + credential-store consumption so locked instances become findings",
+    "acl-getuser-and-user-enumeration \u2014 leaks usernames + SHA-256 hashes hostile to hashcat -m 1400; direct known_users + hashes feed",
+    "cluster-nodes-topology + sentinel-port-26379 \u2014 cluster/sentinel peers currently invisible; feeds hosts/relay_targets and (via sentinel auth-pass) plaintext replication creds"
+  ],
+  "cross_service_wire_gaps": [
+    "known_users: ACL USERS and ACL GETUSER output (usernames + per-user allowed commands/keys) \u2014 currently discarded past 'default nopass' scan",
+    "hashes: ACL GETUSER returns per-user SHA-256 password hashes (hashcat -m 1400) \u2014 never harvested",
+    "hashes/known_passwords: CONFIG GET masterauth returns replication password in plaintext \u2014 never fetched",
+    "hashes/known_passwords: SENTINEL MASTER <name> exposes monitored master's auth-pass in plaintext \u2014 sentinel branch missing entirely",
+    "relay_targets/hosts: CLUSTER NODES / CLUSTER SHARDS output enumerates every cluster peer ip:port \u2014 never fetched",
+    "relay_targets/hosts: CLIENT LIST addr= gives internal IPs of every app currently talking to this Redis \u2014 never fetched",
+    "hosts: INFO replication slaveN=ip=...,port=... lines are only summarised (connected_slaves count) \u2014 individual replica IPs discarded",
+    "loot/known_secrets: SCAN + GET/HGETALL of session:*, token:*, jwt:*, cred:* keys yields live session tokens and API keys \u2014 module never samples the keyspace it counts",
+    "service-catalog: MODULE LIST names (RediSearch, RedisGraph, RedisJSON, RedisBloom) should route to module-specific CVE checks and query surfaces"
+  ],
+  "summary": "recce/services/db/redis.py handles the unauth-INFO case with a clean stdlib RESP2 parser and the ACL/MODULE/replication side-signals, but the entire attack surface beyond 'is INFO answering?' is untouched: no AUTH attempts (credential spray, credential-store integration), no keyspace sampling (SCAN + GET/HGETALL for session/token loot), no Lua-sandbox CVE probe (CVE-2022-0543 \u2014 the most-exploited Redis RCE), no rogue-master replication probe, no Cluster/Sentinel enumeration (Sentinel port 26379 isn't even in _PORTS), no CLIENT LIST peer harvest, no ACL USERS/GETUSER user+hash extraction, no CONFIG masterauth pull, no rename-command hardening check, no TLS handshake on 6380 despite the docstring promising an 'ssl' field, and version-band CVEs after 6.0 (CVE-2023-41056, CVE-2024-31449) are ignored by _old_version. The highest-ROI additions are the CVE-2022-0543 probe, an AUTH default-cred spray, ACL user/hash enumeration, and Cluster+Sentinel topology (all four also close cross-service wire gaps into known_users/hashes/hosts/relay_targets that no other module can supply).",
+  "notes": "Sentinel port 26379 is not in _PORTS \u2014 is_redis() misses sentinel entirely; SENTINEL command family and Sentinel auth-pass leak are downstream of that gap. The docstring in probe() lists 'ssl' as a returned key but the code never sets it \u2014 either drop the promise or add ssl.wrap_socket fallback on 6380/16379. _old_version()'s [6,0] cutoff is EOL-only and ignores post-6.0 CVEs; consider replacing with a per-CVE version-range matcher (CVE-2022-0543 hits all Debian-packaged versions regardless of upstream fix, so a Debian/Ubuntu 'os' hint from INFO would sharpen it). REPLICAOF NO ONE is safe to send against an already-master and is the canonical hardening probe for the SLAVEOF branch \u2014 the finding currently asserts SLAVEOF-reachable purely on role=master, which is a false positive whenever slaveof/replicaof has been renamed."
+}

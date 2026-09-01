@@ -1,0 +1,291 @@
+{
+  "service": "dns",
+  "module_files": [
+    "recce/services/dns.py",
+    "tests/test_dns_module.py",
+    "recce/scripts/services/dns.sh"
+  ],
+  "summary": "recce/services/dns.py implements the classic passive/exposure trio for DNS/53 \u2014 AXFR against derived zones, NSEC chain walking on signed zones, version.bind CH TXT fingerprint \u2014 and layers on an email-security posture check (SPF / DMARC / 10 common DKIM selectors). Findings cover AXFR leak, NSEC enumeration, BIND version disclosure, missing/weak SPF, and missing/monitor-only DMARC. TCP-only transport (no UDP), no NSEC3, no dynamic update probe, no SRV / MX / NS extraction to feed other modules, no reverse-PTR sweep, no cache snooping / open-recursion check, no non-BIND fingerprint, and no CVE-shaped detections (KeyTrap, NXNSAttack, DNSpooq, SAD DNS). AXFR success even counts records but discards the returned names \u2014 a large cross-service wire loss.",
+  "existing_capabilities": [
+    "AXFR (RFC 5936) attempt over TCP against zones derived from already-discovered hostnames \u2014 records counted, ok/rcode reported",
+    "NSEC (RFC 4034) chain-walk enumeration on DNSSEC-signed zones with a 500-step cap and wrap detection",
+    "CHAOS TXT version.bind fingerprint (matches only literal 'bind' string)",
+    "SPF TXT lookup at zone apex, with weak-terminator (+all/?all) detection",
+    "DMARC TXT lookup at _dmarc.<zone>, with p=none monitor-only detection",
+    "DKIM lookup across 10 selectors (default/google/selector1-2/mail/k1-2/s1-2/dkim), informational only",
+    "Wire-format DNS name decoder with compression-pointer handling (RFC 1035 \u00a74.1.4) bounded to 30 hops",
+    "Zone-set derivation from Host.hostnames (no brute forcing)",
+    "Findings mapped through svccommon.findings_to_vulns; runbook + analyze() plumbed into svcprobe budget/progress",
+    "TCP transport only (length-prefixed msg per RFC 1035 \u00a74.2.2), 5-second default timeout"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "NSEC3 zone walking / hash harvesting (RFC 5155 \u00a77-8)",
+      "kind": "passive",
+      "value": "critical",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 5155 \u00a77 (NSEC3 records), \u00a712.1.4 (offline dictionary attack)",
+      "description": "Module only walks NSEC (RFC 4034). Modern DNSSEC-signed zones almost universally use NSEC3 with hashed owner names; recce currently gets nothing on them. Need to (a) detect NSEC3 vs NSEC on first no-such-name response, (b) harvest hash+salt+iterations from every NSEC3 RR seen while asking for random labels under the zone, (c) surface hashes for offline cracking (john --format=nsec3 / hashcat -m 8300), and (d) flag misconfigs: opt-out flag missing on delegation-heavy zones, iterations < RFC 9276 \u00a73.1 SHOULD (0), unusual salt length. Zero-touch enumeration primitive equivalent to AXFR against signed zones."
+    },
+    {
+      "name": "AXFR response-body parsing \u2192 known_hosts / hostnames wire-out",
+      "kind": "chain",
+      "value": "critical",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 5936 \u00a73 (AXFR message format), RFC 1035 \u00a73.2 (RR wire format)",
+      "description": "axfr() returns only {ok, records, rcode} \u2014 the AN records are discarded. A successful AXFR should walk every RR (A/AAAA/CNAME/PTR/MX/NS/SRV/TXT) and (1) add each name to a discovered_hostnames pool the recon layer can iterate, (2) add each A/AAAA IP as a new Host candidate for downstream scanning, (3) surface MX/NS/SRV records as service discovery (mail servers, DCs). Currently the module is the biggest hostname producer that produces nothing."
+    },
+    {
+      "name": "SRV / MX / NS record enumeration (RFC 2782, RFC 1035)",
+      "kind": "passive",
+      "value": "critical",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 2782 (_service._proto.name), RFC 1035 \u00a73.3.9 (MX), \u00a73.3.11 (NS)",
+      "description": "For every discovered zone, actively query well-known SRV names \u2014 _ldap._tcp.<zone>, _kerberos._tcp.<zone>, _kerberos._udp.<zone>, _kpasswd._tcp.<zone>, _gc._tcp.<zone>, _msdcs.<zone>, _autodiscover._tcp.<zone>, _sip._tcp/_udp.<zone>, _sipfederationtls._tcp.<zone>, _matrix._tcp.<zone>, _minecraft._tcp \u2014 plus MX, NS, SOA. This is how an AD domain controller / Exchange / SIP infra is located from a single domain name. Currently there is NO SRV code path at all; feeds domains/known_hosts and unblocks the smb/ldap/kerberos/exchange modules."
+    },
+    {
+      "name": "Dynamic DNS Update probe (RFC 2136) \u2014 unauthenticated update",
+      "kind": "active",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "protocol_reference": "RFC 2136 \u00a72, \u00a73.4 (UPDATE opcode = 5), RFC 3007 (secure updates)",
+      "description": "Send an UPDATE (opcode 5) prerequisite-only message (or a low-impact add of a probe TXT with immediate delete) against each discovered zone. NOERROR = zone accepts unauthenticated updates \u2014 an attacker can register arbitrary A/AAAA/CNAME/SRV records, hijacking WPAD, AD SRV lookups, name-based routing, mail flow. This is arguably the highest-impact DNS finding possible and it is not attempted. Watch for REFUSED (5) vs NOTAUTH (9) vs NOERROR distinction. Air-gap safe with a benign no-op prereq."
+    },
+    {
+      "name": "Reverse PTR sweep of internal address space",
+      "kind": "passive",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1035 \u00a73.5 (in-addr.arpa), RFC 3596 \u00a72.5 (ip6.arpa)",
+      "description": "For each RFC1918 /24 seen in scoped hosts, iterate .1-.254 PTR queries against the authoritative server. Reverse zones are commonly forgotten in ACLs; PTR sweep gives host-inventory even when AXFR is blocked. Names discovered fold into known_hosts. Also probes for whether the server responds authoritatively (AA bit set) to reverse zones \u2014 reveals internal DNS hierarchy."
+    },
+    {
+      "name": "IXFR fallback (RFC 1995)",
+      "kind": "active",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1995 \u00a73 (opcode=IXFR=251), \u00a74 (fallback behavior)",
+      "description": "When AXFR is REFUSED, retry with IXFR carrying SOA serial = 0. RFC 1995 \u00a74 mandates fallback to full-zone answer, and many BIND ACLs allow-transfer only checks AXFR opcode strings \u2014 IXFR sometimes slips through. Same disclosure severity as AXFR."
+    },
+    {
+      "name": "Cache snooping via non-recursive queries (RD=0)",
+      "kind": "passive",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Grangeia 2004 'DNS Cache Snooping'; RFC 1034 \u00a73.7",
+      "description": "Send RD=0 queries for high-signal names (windowsupdate.com, o365.microsoft.com, salesforce.com, google.com, aws.amazon.com, github.com, common malware C2 sinkholes) to any resolver reachable. If NOERROR + AA=0 with an answer, the name is cached \u2014 telling you what services this organization's users actually reach. Currently no open-recursion / cache-snoop code path."
+    },
+    {
+      "name": "Open recursion + DNS amplification factor measurement",
+      "kind": "active",
+      "value": "high",
+      "cwe": [
+        "CWE-406",
+        "CWE-284"
+      ],
+      "protocol_reference": "RFC 5358 \u00a72, US-CERT TA13-088A",
+      "description": "Send RD=1 for a name in a foreign zone; if RA=1 and answer returned, resolver is open. Measure amplification factor with ANY / large TXT / DNSKEY queries \u2014 response/query byte ratio \u2265 20\u00d7 is a DDoS reflector. High operational-abuse finding + reputational risk."
+    },
+    {
+      "name": "Extended CHAOS fingerprint set (RFC 4892)",
+      "kind": "passive",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 4892 \u00a72 (id.server), BIND ARM (hostname.bind, authors.bind, version.server)",
+      "description": "version_bind() only probes version.bind and only matches the literal 'bind' \u2014 dnsmasq/PowerDNS/Knot/Unbound/NSD/Microsoft DNS all disclose distinct strings and support id.server (RFC 4892), hostname.bind, authors.bind, version.server. Fingerprint set should be expanded and matched against a signature table so non-BIND servers also generate a finding (currently zero coverage of the entire non-BIND install base)."
+    },
+    {
+      "name": "CVE-2020-8616 NXNSAttack detection (BIND resolver)",
+      "kind": "active",
+      "value": "high",
+      "cwe": [
+        "CWE-400"
+      ],
+      "protocol_reference": "CVE-2020-8616; BIND 9.11.19/9.16.3",
+      "description": "For any resolver identified as BIND < 9.11.19 / 9.16.3, flag NXNSAttack exposure (unbounded NS chase \u2192 DoS amplification against downstream servers). Version-shaped finding driven by expanded fingerprint above."
+    },
+    {
+      "name": "CVE-2023-50387 KeyTrap DNSSEC validation resource exhaustion",
+      "kind": "active",
+      "value": "high",
+      "cwe": [
+        "CWE-770",
+        "CWE-405"
+      ],
+      "protocol_reference": "CVE-2023-50387; RFC 4035 \u00a75",
+      "description": "Any DNSSEC-validating resolver with fingerprinted version below the patch line (BIND 9.16.48/9.18.24, Unbound 1.19.1, PowerDNS Recursor 4.8.6, Knot Resolver 5.7.1) should surface KeyTrap. Purely fingerprint-driven; no aggressive PoC needed."
+    },
+    {
+      "name": "CVE-2020-25681/25682/25683/25687 DNSpooq (dnsmasq cache poison)",
+      "kind": "active",
+      "value": "high",
+      "cwe": [
+        "CWE-345",
+        "CWE-121"
+      ],
+      "protocol_reference": "JSOF DNSpooq advisory; dnsmasq < 2.83",
+      "description": "dnsmasq fingerprint via CHAOS + banner + behavior; dnsmasq < 2.83 responses. Ubiquitous on embedded/IoT/routers \u2014 high hit rate in enterprise-fringe scans."
+    },
+    {
+      "name": "Wildcard-response detection",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-451"
+      ],
+      "protocol_reference": "RFC 4592 \u00a72 (wildcard synthesis)",
+      "description": "Query a random 12-char label at each zone; if it resolves, zone has a wildcard. Directly affects NSEC/NSEC3 walk truthfulness (records may be synthesized), and affects downstream host de-dup \u2014 every random subdomain will resolve, poisoning any brute-force / discovery pass. Currently no wildcard probe."
+    },
+    {
+      "name": "DNS Cookies support probe (RFC 7873, RFC 9018)",
+      "kind": "active",
+      "value": "medium",
+      "cwe": [
+        "CWE-345"
+      ],
+      "protocol_reference": "RFC 7873 \u00a75.1 (OPT COOKIE=10)",
+      "description": "Send an EDNS0 OPT with a client cookie; server that ignores or errors on COOKIE is materially more spoofable and cache-poison-prone. No EDNS0/OPT code path exists at all \u2014 module never sends OPT."
+    },
+    {
+      "name": "TSIG posture probe (RFC 8945)",
+      "kind": "auth",
+      "value": "medium",
+      "cwe": [
+        "CWE-327",
+        "CWE-287"
+      ],
+      "protocol_reference": "RFC 8945 \u00a75 (TSIG error codes: BADKEY 17, BADSIG 16, BADTIME 18)",
+      "description": "Send an AXFR carrying a bogus TSIG with algorithm hmac-md5.sig-alg.reg.int; a BADKEY/BADSIG response confirms TSIG is enforced (good), NOTAUTH/REFUSED tells nothing, NOERROR + zone is catastrophic (already covered by plain AXFR) \u2014 but a NOTIMP on modern hmac-sha256 with hmac-md5 accepted is a downgrade finding. Also flag TSIG algorithm inventory when observable."
+    },
+    {
+      "name": "CAA record inspection (RFC 8659)",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-295"
+      ],
+      "protocol_reference": "RFC 8659 \u00a74",
+      "description": "Query CAA at zone apex; missing CAA = any public CA can issue a cert for the domain. Weak CAA (issue \";\" absent, iodef missing) is a finding. Feeds the TLS/PKI attack-path for related web-tier modules."
+    },
+    {
+      "name": "DNSSEC validation status: DS/DNSKEY inspection",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-347",
+        "CWE-327"
+      ],
+      "protocol_reference": "RFC 4034 \u00a72 (DNSKEY), \u00a75 (DS); RFC 8624 \u00a73 (algorithm deprecation)",
+      "description": "Fetch DNSKEY and DS; flag: no DS in parent (unsigned delegation), RSA/SHA-1 (algo 5) or DSA (algo 3/6) \u2014 deprecated by RFC 8624, ZSK bit length < 2048, KSK never rolled (inception > 2y). Also confirms whether NSEC/NSEC3 walking will work at all."
+    },
+    {
+      "name": "Split-horizon detection",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "N/A (operational primitive)",
+      "description": "When both external recursor and internal authoritative reachable, compare answers for same name \u2014 divergence reveals hidden internal names that public recursors mask. Uses discovered zones + host inventory already in scope."
+    },
+    {
+      "name": "SPF include: / redirect / MX macro chain expansion",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 7208 \u00a75 (mechanisms), \u00a711.1 (10-lookup limit \u2192 PermError)",
+      "description": "SPF is stored as a string but not walked. Should expand include:/redirect=/exists: chains \u2014 (a) discovers infrastructure (Mailchimp/SendGrid/GoDaddy IP ranges), feeding known_hosts / ASN pivots; (b) detects the RFC 7208 \u00a711.1 10-lookup PermError condition which silently breaks SPF for the whole domain (widespread misconfig \u2014 high defensive value)."
+    },
+    {
+      "name": "TXT record dumping (secret / verification-token harvest)",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-200",
+        "CWE-798"
+      ],
+      "protocol_reference": "RFC 1035 \u00a73.3.14",
+      "description": "Enumerate all TXT at apex and common labels (_acme-challenge, _github-challenge, _atlassian-domain-verification, ms=/MS=, google-site-verification, apple-domain-verification, adobe-sign-verification). Reveals SaaS footprint (which cloud tenancies belong to this org \u2014 critical for scoping) and occasionally leaks internal IPs / dev URLs / API tokens in stray TXT."
+    },
+    {
+      "name": "DoT (853) / DoH (443 /dns-query) reachability",
+      "kind": "passive",
+      "value": "low",
+      "cwe": [
+        "CWE-319"
+      ],
+      "protocol_reference": "RFC 7858 (DoT), RFC 8484 (DoH)",
+      "description": "Probe port 853 / HTTPS /dns-query on discovered resolvers. Fingerprint informs whether the resolver enforces encrypted transport internally (defensive posture), and identifies DoH endpoints that can bypass egress DNS logging (exfil channel discovery)."
+    },
+    {
+      "name": "EDNS0 OPT support / buffer-size / NSID (RFC 6891, 5001)",
+      "kind": "passive",
+      "value": "low",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 6891 \u00a76.1, RFC 5001 (NSID)",
+      "description": "No OPT is sent by any code path \u2014 probe with EDNS0 + NSID option; response identifies the specific backend instance in an anycast cluster, and reveals whether server supports COOKIES / large UDP payloads. Foundation for several of the above (cookies, KeyTrap)."
+    },
+    {
+      "name": "Non-BIND version fingerprint gate",
+      "kind": "passive",
+      "value": "low",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "N/A",
+      "description": "findings() emits dns_version only if version string contains 'bind'. Windows DNS (banner absent but distinct behavior on hostname.bind), PowerDNS ('PowerDNS Authoritative Server X.Y.Z'), Knot ('Knot DNS 3.x'), Unbound ('unbound 1.x'), NSD, dnsmasq are all silently dropped. Trivial fix, but currently zero-coverage."
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "AXFR success returns only a record COUNT \u2014 the underlying answers (A/AAAA/CNAME/MX/NS/SRV/PTR) are parsed away. Should walk the RRs and (a) append every A/AAAA target as a Host candidate, (b) push every owner-name into the shared hostname pool, (c) surface MX/NS/SRV as service hints (mail, DC, sipsvr)",
+    "NSEC walk collects owner names but only stores them in the probe blob for a finding \u2014 no cross-service registration into hostnames/domains, so smb/ldap/kerberos/http modules do not benefit from a completed walk",
+    "No SRV enumeration path \u2014 _kerberos._tcp / _ldap._tcp / _msdcs / _autodiscover / _gc._tcp are the canonical AD/Exchange discovery vector and would auto-feed the AD, Exchange, SIP scanners once one domain is known",
+    "MX / NS records never queried \u2014 mail server hostnames and authoritative-nameserver hostnames should register as high-value new hosts for follow-on scanning (SMTP scanner, further AXFR retries against the true master)",
+    "SPF include:/redirect= tokens not expanded \u2014 the third-party sender infra they name (SendGrid, Mailchimp, etc.) never becomes ASN/IP intel for the engagement",
+    "DMARC rua/ruf targets not extracted \u2014 recipient email addresses (often IT / soc distribution lists) never feed known_users / hostnames",
+    "Reverse PTR sweep of scoped RFC1918 /24s would generate more hostname discoveries than any other module in recce; currently no PTR path",
+    "TXT verification tokens (ms=, google-site-verification, atlassian-domain-verification\u2026) not harvested \u2014 these authoritatively identify SaaS tenancies belonging to the target org and should register as related_services",
+    "CAA records unread \u2014 TLS/PKI attack-path modules never learn which CAs the org authorized",
+    "Discovered nameserver hostnames (NS RRs) not folded into the host list, so recce may never AXFR against the actual zone master because it only tests the DNS servers it found via port scan"
+  ],
+  "priority_gaps": [
+    "P0 \u2014 Parse AXFR answer body and emit A/AAAA/CNAME/MX/NS/SRV/PTR into shared hostname + host_candidate pools (RFC 5936 \u00a73). Biggest cross-service loss in the whole module today.",
+    "P0 \u2014 SRV enumeration for AD/Exchange/SIP anchors (_kerberos._tcp, _ldap._tcp, _msdcs.<zone>, _gc._tcp, _autodiscover._tcp, _sip._tcp/_udp, _sipfederationtls._tcp) \u2014 RFC 2782. Unblocks smb/ldap/kerberos/exchange downstream.",
+    "P0 \u2014 NSEC3 walking + hash harvest for offline cracking (RFC 5155 \u00a77, \u00a712.1.4) + NSEC3 misconfig flags per RFC 9276 \u00a73.1. Modern signed zones are unreachable by current NSEC-only walker.",
+    "P0 \u2014 Dynamic DNS UPDATE probe (RFC 2136, opcode 5) with a benign prereq. Unauthenticated update = full-zone write primitive \u2014 arguably the highest-impact DNS finding possible and completely absent.",
+    "P1 \u2014 Reverse PTR sweep of scoped RFC1918 /24s (RFC 1035 \u00a73.5). Cheapest way to double the hostname pool.",
+    "P1 \u2014 IXFR fallback (RFC 1995 \u00a74) whenever AXFR returns REFUSED. Same severity leak, distinct ACL path.",
+    "P1 \u2014 Cache snooping via RD=0 probes against reachable recursors. Reveals internal user browsing / SaaS footprint.",
+    "P1 \u2014 Expanded fingerprint set (id.server, hostname.bind, authors.bind, version.server per RFC 4892) plus non-BIND signature table (Windows DNS, PowerDNS, Knot, Unbound, NSD, dnsmasq). Currently 'bind'-only string match drops the entire non-BIND install base.",
+    "P1 \u2014 CVE fingerprint bindings: NXNSAttack (CVE-2020-8616), KeyTrap (CVE-2023-50387), DNSpooq (CVE-2020-25681..25687), SAD DNS (CVE-2020-25705).",
+    "P2 \u2014 Open-recursion + amplification-factor measurement (RFC 5358).",
+    "P2 \u2014 Wildcard-response detection (RFC 4592) \u2014 prerequisite for trusting NSEC/NSEC3 results and any subdomain discovery.",
+    "P2 \u2014 TSIG posture probe (RFC 8945) + hmac-md5 downgrade detection.",
+    "P2 \u2014 EDNS0 OPT / DNS Cookies support probe (RFC 6891, RFC 7873).",
+    "P2 \u2014 CAA (RFC 8659) + DNSSEC algorithm inspection (DS/DNSKEY, RFC 8624).",
+    "P3 \u2014 SPF include: chain expansion with RFC 7208 \u00a711.1 10-lookup PermError detection; TXT harvest for SaaS-tenancy verification tokens.",
+    "P3 \u2014 DoT/DoH probes on 853 and 443 /dns-query (RFC 7858, RFC 8484)."
+  ],
+  "notes": "The module is a clean, small AXFR/NSEC/version/email-security implementation but stops well short of DNS's full attack surface. Two categories dominate: (1) cross-service data wiring \u2014 recce's DNS module is the natural producer of hostnames, MX/NS/SRV service hints, PTR-derived hosts, and CAA/TSIG posture, yet almost none of that is emitted (AXFR discards its own answer body), so downstream scanners never benefit; (2) modern DNSSEC / auth-weakness primitives \u2014 NSEC3 walking, RFC 2136 unauthenticated updates, DNS-cookies posture, TSIG-downgrade \u2014 are the highest-impact recent DNS attacks and are entirely absent. Version fingerprint is BIND-only, dropping every non-BIND server; adding an id.server / hostname.bind / signature-table pass plus binding known CVEs (NXNSAttack, KeyTrap, DNSpooq, SAD DNS) to fingerprints would materially expand coverage with no new PoC risk."
+}

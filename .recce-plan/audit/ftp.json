@@ -1,0 +1,221 @@
+{
+  "service": "ftp",
+  "module_files": [
+    "recce/services/ftp.py",
+    "tests/test_service_fidelity.py",
+    "tests/test_hostile_server_fidelity.py"
+  ],
+  "existing_capabilities": [
+    "banner_grab_multiline_220",
+    "feat_probe_auth_tls_advertised",
+    "anonymous_login_attempt",
+    "syst_command",
+    "banner_backdoor_map_vsftpd_234_and_proftpd_133c",
+    "banner_regex_proftpd_modcopy_1_3_0_to_5",
+    "anon_ftp_finding",
+    "cleartext_ftp_finding",
+    "writable_dir_proof_stor_dele_reversible",
+    "cred_and_credfree_runbooks",
+    "proof_html_transcript"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "ftp_bounce_active_probe",
+      "kind": "active",
+      "value": "high",
+      "description": "RFC 959 Section 5.2 PORT command lets client name an arbitrary host:port for the data connection. Historic FTP bounce (CVE-1997-0163 class; nmap ftp-bounce): send PORT with a non-client IP/port and issue LIST/RETR \u2014 a permissive server proxies TCP connects to arbitrary internal hosts, turning it into an internal port scanner and firewall-bypass relay. Module never issues PORT and never checks whether the server rejects non-client PORT targets. High ROI: converts one FTP box into a pivot for the entire adjacent subnet.",
+      "protocol_reference": "RFC 959 Sec 4.1.2 (PORT) / Sec 5.2; nmap ftp-bounce",
+      "cwe": [
+        "CWE-441"
+      ],
+      "finding_kind": "ftp_bounce_relay"
+    },
+    {
+      "name": "site_cpfr_cpto_active_probe",
+      "kind": "active",
+      "value": "critical",
+      "description": "CVE-2015-3306 / CVE-2019-12815 mod_copy detection is banner-only and only matches 'ProFTPD 1.3.[0-5]'. Many vulnerable installs strip or reformat the banner, and CVE-2019-12815 was a re-break with different affected ranges. An active probe \u2014 issue SITE HELP and look for CPFR/CPTO, or attempt SITE CPFR /etc/passwd \u2192 check response \u2014 would confirm exploitability regardless of banner. Same for SITE EXEC (wu-ftpd class), SITE CHMOD, SITE INDEX.",
+      "protocol_reference": "RFC 959 SITE; ProFTPD mod_copy; CVE-2015-3306 / CVE-2019-12815",
+      "cwe": [
+        "CWE-78",
+        "CWE-284"
+      ],
+      "finding_kind": "ftp_site_copy_exposed"
+    },
+    {
+      "name": "pasv_internal_ip_leak",
+      "kind": "passive",
+      "value": "medium",
+      "description": "227 response to PASV encodes the server-chosen data-channel IP: '227 Entering Passive Mode (10,0,0,5,196,3)'. A server bound behind NAT frequently returns its RFC1918 address, disclosing internal topology (dual-homed hosts, DMZ layout, container IPs). Module never issues PASV/EPSV. Feed the leaked internal IP as an additional host fact.",
+      "protocol_reference": "RFC 959 Sec 4.1.2 (PASV); RFC 2428 (EPSV)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "ftp_pasv_internal_ip"
+    },
+    {
+      "name": "auth_tls_actually_negotiate",
+      "kind": "active",
+      "value": "high",
+      "description": "Module only checks FEAT for 'AUTH TLS' text. Doesn't send AUTH TLS and complete the handshake, so cannot detect: (a) advertised-but-broken TLS, (b) accepted SSLv3/TLS1.0/weak ciphers, (c) expired/self-signed/wildcard/hostname-mismatch cert, (d) CCC (Clear Command Channel) permitted post-AUTH which downgrades back to cleartext, (e) PROT P / PBSZ not enforced so data channel stays cleartext despite AUTH TLS on the control channel. RFC 4217 Sec 4/9.",
+      "protocol_reference": "RFC 4217 Sec 4 (AUTH TLS), Sec 9 (PROT/PBSZ), Sec 6.3 (CCC)",
+      "cwe": [
+        "CWE-319",
+        "CWE-326",
+        "CWE-295"
+      ],
+      "finding_kind": "ftp_tls_weak_or_downgraded"
+    },
+    {
+      "name": "credential_brute_force_and_defaults",
+      "kind": "auth",
+      "value": "high",
+      "description": "Only 'anonymous' is tried. No sweep of vendor defaults (ftp:ftp, admin:admin, root:root, user:user, guest:guest, cisco:cisco, tomcat:tomcat), no password-spray, no reuse against known_credentials facts. FTP is one of the classic brute-force targets and this module skips it entirely. Should also try the SITE-derived usernames and any usernames emitted by known_users.",
+      "protocol_reference": "RFC 959 USER/PASS; standard credential-attack surface",
+      "cwe": [
+        "CWE-521",
+        "CWE-798"
+      ],
+      "finding_kind": "ftp_weak_default_creds"
+    },
+    {
+      "name": "cwd_user_enumeration_differential",
+      "kind": "active",
+      "value": "medium",
+      "description": "Wu-FTPd / older ProFTPD leak valid usernames via response differential to CWD ~user or USER <name> before PASS (530 vs 331 timing/text differences). Module doesn't probe. When it finds a valid user, feed to known_users.",
+      "protocol_reference": "RFC 959 CWD; wu-ftpd user-enum technique",
+      "cwe": [
+        "CWE-204",
+        "CWE-203"
+      ],
+      "finding_kind": "ftp_user_enum"
+    },
+    {
+      "name": "implicit_ftps_990",
+      "kind": "passive",
+      "value": "medium",
+      "description": "is_ftp() only matches port 21 or service name containing 'ftp'. Implicit FTPS on TCP 990 (starts TLS immediately, no AUTH command) is not detected as an FTP target, so no cert collection, no cleartext-vs-encrypted comparison, no cross-referencing with plaintext 21.",
+      "protocol_reference": "RFC 4217 Appendix A; historical implicit FTPS",
+      "cwe": [
+        "CWE-311"
+      ],
+      "finding_kind": "ftp_implicit_tls_untested"
+    },
+    {
+      "name": "help_and_stat_and_site_help_fingerprint",
+      "kind": "passive",
+      "value": "medium",
+      "description": "HELP and SITE HELP reveal full command sets (identifies vendor even when banner is stripped/faked, and enumerates dangerous SITE verbs \u2014 EXEC, CHMOD, CPFR, INDEX, WHO, ZONE). STAT with no argument returns server state including current transfers, uptime, and sometimes connected users. Module issues neither.",
+      "protocol_reference": "RFC 959 Sec 4.1.3 HELP/STAT",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "ftp_extra_commands_disclosed"
+    },
+    {
+      "name": "anon_write_during_passive_probe",
+      "kind": "active",
+      "value": "high",
+      "description": "prove_writable exists but only runs when analyze() explicitly calls it with the anon creds \u2014 the credfree probe() never tests write. An anonymous-writable FTP root is one of the most common footholds (upload \u2192 web-shell / poisoned firmware bundle) and should be tested on every anon success automatically, then emitted as a critical finding.",
+      "protocol_reference": "RFC 959 STOR/DELE",
+      "cwe": [
+        "CWE-732",
+        "CWE-434"
+      ],
+      "finding_kind": "anon_writable_ftp"
+    },
+    {
+      "name": "recent_vendor_cves_missed",
+      "kind": "passive",
+      "value": "critical",
+      "description": "Banner map covers only vsftpd 2.3.4, ProFTPD 1.3.3c, and ProFTPD mod_copy. Missing: CrushFTP CVE-2024-4040 unauth VFS escape + template RCE (banner 'CrushFTP'); CrushFTP CVE-2023-43177; SolarWinds Serv-U CVE-2021-35211 pre-auth RCE (banner 'Serv-U'); Serv-U CVE-2024-28995 path traversal; ProFTPD CVE-2019-12815 mod_copy unauth; ProFTPD CVE-2020-9273 UAF; ProFTPD CVE-2023-51713; FileZilla Server CVE-2023-48795 (Terrapin); Pure-FTPd CVE-2019-20176 DoS; vsftpd 3.0.3 privesc chain; WS_FTP CVE-2023-40044 pre-auth RCE. These are the FTP CVEs currently used by ransomware crews.",
+      "protocol_reference": "Vendor advisories 2019-2024",
+      "cwe": [
+        "CWE-22",
+        "CWE-78",
+        "CWE-94"
+      ],
+      "finding_kind": "ftp_known_bad_build"
+    },
+    {
+      "name": "cwd_directory_traversal_probe",
+      "kind": "active",
+      "value": "medium",
+      "description": "CWD / , CWD .., CWD /etc, CWD C:\\ \u2014 some misconfigured jails let the client escape the chroot. Module never probes. A successful traversal to /etc or /root is a critical-severity file-disclosure primitive; the subsequent RETR /etc/shadow feeds hashes into the credentials sink.",
+      "protocol_reference": "RFC 959 CWD; chroot-escape class",
+      "cwe": [
+        "CWE-22"
+      ],
+      "finding_kind": "ftp_chroot_escape"
+    },
+    {
+      "name": "tls_cert_collection",
+      "kind": "passive",
+      "value": "medium",
+      "description": "When AUTH TLS succeeds, the server certificate CN/SAN, issuer, notBefore/notAfter, and fingerprint are prime hostname/domain sources. Module never collects the cert, so hostnames sink never receives them and known_hostnames/domains stay empty on TLS-fronted FTP.",
+      "protocol_reference": "RFC 4217; X.509",
+      "cwe": [],
+      "finding_kind": "ftp_tls_cert_captured"
+    },
+    {
+      "name": "mirror_content_hash_extraction",
+      "kind": "exploit",
+      "value": "high",
+      "description": "Runbook says 'mirror the tree for offline secret hunting' but nothing in the module actually retrieves anything or scans the retrieved files. When anon-readable, the module should pull well-known loot filenames (backup.tar, config.xml, web.config, .git/config, id_rsa, wp-config.php, /etc/passwd, /etc/shadow, sam._, ntds.dit) and hand extracted hashes/creds to the hashes and known_credentials facts. This is where FTP feeds the rest of the toolchain.",
+      "protocol_reference": "RFC 959 RETR",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ],
+      "finding_kind": "ftp_loot_extracted"
+    },
+    {
+      "name": "syst_and_banner_os_hint",
+      "kind": "passive",
+      "value": "low",
+      "description": "SYST reply and 220 banner ('UNIX Type: L8', 'Windows_NT', 'AIX') carry a clean OS identifier that feeds host os_hint and downstream service selection. probe() captures syst but analyze() only stashes it on the target dict \u2014 never emits it as an os-fingerprint fact.",
+      "protocol_reference": "RFC 959 SYST",
+      "cwe": [],
+      "finding_kind": "ftp_os_hint"
+    },
+    {
+      "name": "eprt_epsv_ipv6",
+      "kind": "passive",
+      "value": "low",
+      "description": "RFC 2428 EPRT/EPSV \u2014 IPv6-capable data channel negotiation. Module ignores it; on v6-only or dual-stack targets the module can miss the entire session establishment path and EPSV can leak the v6 address the server advertises for data.",
+      "protocol_reference": "RFC 2428",
+      "cwe": [],
+      "finding_kind": "ftp_epsv_v6"
+    },
+    {
+      "name": "port_command_bounce_guard_check",
+      "kind": "active",
+      "value": "medium",
+      "description": "Even when active bounce fails (server enforces the same-client-IP rule from RFC 2577), the module could report on the enforcement state \u2014 servers that accept PORT 127,0,0,1,... but not third-party IPs still enable localhost-only attacks against services bound to loopback. Distinguish 'bounce-blocked', 'bounce-loopback-only', 'bounce-anywhere'.",
+      "protocol_reference": "RFC 2577 Sec 3 (bounce guard)",
+      "cwe": [
+        "CWE-441"
+      ],
+      "finding_kind": "ftp_bounce_guard_state"
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "anon-success should emit anonymous:anonymous (and the actual PASS token used) into known_credentials as a confirmed working credential \u2014 currently the fact never leaves the module",
+    "SYST + 220 banner carry a clean OS hint ('UNIX Type: L8', 'Windows_NT', 'AIX') that should feed the host os_hint sink but is only kept on the target dict",
+    "220 banner often contains an admin email (root@host.example.com) and sometimes a FQDN \u2014 should feed known_hostnames / known_domains and known_users",
+    "227 PASV reply reveals server-side (often internal RFC1918) IP that should be added as a host fact for topology mapping",
+    "AUTH TLS certificate CN/SAN (once negotiated) should feed hostnames/domains \u2014 the module never negotiates so this sink is starved",
+    "a passing ftp-bounce (or bounce-loopback) probe should register the server as a relay_target for internal port-scanning / firewall bypass",
+    "any files retrieved (once mirror-loot is implemented) that match /etc/shadow, SAM, wp-config, id_rsa should be parsed and posted into hashes / known_credentials",
+    "CWD-user-enum successes should push validated usernames into known_users so downstream Kerberos/SMB/RDP brute uses them",
+    "vendor identification from HELP/SITE HELP (CrushFTP, Serv-U, WS_FTP) should refine the product/version fact even when the banner was stripped by the sysadmin"
+  ],
+  "priority_gaps": [
+    "ftp_bounce_active_probe \u2014 one probe converts an FTP target into an internal-network relay (relay_targets fact) and firewall-bypass port-scanner; nothing comparable elsewhere in the tool",
+    "credential_brute_force_and_defaults \u2014 anon is the only auth attempt today; add default-creds sweep and password-spray using known_users / known_credentials facts (huge foothold ROI)",
+    "recent_vendor_cves_missed \u2014 banner map is stuck in 2011-2015; missing CrushFTP CVE-2024-4040, Serv-U CVE-2021-35211 / CVE-2024-28995, WS_FTP CVE-2023-40044, ProFTPD CVE-2019-12815 \u2014 all currently exploited in the wild",
+    "active site_cpfr_cpto probe + mirror_content_hash_extraction \u2014 turn 'we can read/write' into hashes/creds/config files that fan out to the rest of the fact graph"
+  ],
+  "summary": "The FTP module is a competent credential-free triage layer (banner-based backdoor map, anonymous-login check, FEAT-only AUTH-TLS posture, and a reversible STOR/DELE write proof) but stops well short of what RFC 959/2228/2389/2428/3659/4217 and modern FTP-server CVE research make available. The biggest missing primitives are: FTP bounce (active PORT-relay probe, would feed relay_targets), an actual credential attack surface (only 'anonymous' is tried \u2014 no default-creds sweep, no password-spray, no reuse of known_credentials), active SITE HELP / SITE CPFR probing (banner-only mod_copy detection misses many patched-banner installs of CVE-2015-3306 / CVE-2019-12815), real AUTH TLS negotiation (currently only checks FEAT text \u2014 no cert capture, no weak-cipher / CCC / PROT-not-enforced detection), and a modern CVE catalog for CrushFTP (2024-4040), Serv-U (2021-35211), WS_FTP (2023-40044) and ProFTPD (2019-12815, 2020-9273). Cross-service wiring is thin: anon success does not emit a working credential, SYST/banner os_hint is not published, PASV internal-IP leaks and TLS cert CN/SAN never reach hostnames/domains, and although a mirror runbook is printed, nothing actually retrieves files or extracts hashes from them.",
+  "notes": "Confirmed test coverage in tests/test_service_fidelity.py (anonymous+cleartext detection, vsftpd 2.3.4 backdoor banner match, multi-service host enumeration) and tests/test_hostile_server_fidelity.py (probe survives hostile responses). No tests exist for PASV parsing, SITE HELP, FTP bounce, TLS negotiation, or credential brute \u2014 confirming these code paths are absent, not merely untested."
+}

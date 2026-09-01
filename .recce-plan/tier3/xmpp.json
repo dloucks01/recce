@@ -1,0 +1,243 @@
+{
+  "capabilities": [
+    {
+      "name": "port_and_service_recognition",
+      "kind": "passive",
+      "description": "Register XMPP ports (5222 c2s, 5223 legacy TLS, 5269 s2s) in svcdetect.PORT_NAMES and add signatures for XMPP stream responses. Add a byte-signature entry matching '<?xml' followed by '<stream:stream' or 'jabber:client'/'jabber:server' XML namespace declarations returned after sending a stream-open nudge. Populate serviceenum._NAME and _PORT mapping for 'xmpp-client', 'xmpp-server', 'jabber' names and the three ports.",
+      "value": "medium",
+      "cwe": [],
+      "protocol_reference": "RFC 6120 sec 4 (Stream negotiation), IANA service registry (xmpp-client/xmpp-server)",
+      "notes": "5222 and 5269 both use the XML streaming protocol; 5223 is legacy implicit-TLS (deprecated but common in IoT/gateways). Nudge for 5222 is a c2s stream-open; nudge for 5269 is s2s. Update PORT_NAMES with 5222=('xmpp-client','XMPP client-to-server'), 5223=('xmpps','XMPP legacy TLS'), 5269=('xmpp-server','XMPP server-to-server')."
+    },
+    {
+      "name": "stream_feature_probe",
+      "kind": "active",
+      "description": "Open a stream by sending the appropriate stream-open (<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' to=$target version='1.0'>) on 5222 (or xmlns='jabber:server' on 5269), read the server's <stream:features/> response. Parse and record: advertised SASL mechanisms, STARTTLS presence and required attribute, register (JEP-0077 in-band registration) presence, compression, bind, session, and reported stream:version. This is the foundation for every other XMPP capability.",
+      "value": "high",
+      "cwe": [],
+      "protocol_reference": "RFC 6120 sec 4.3 (Stream Features), sec 5 (STARTTLS), sec 6 (SASL)",
+      "notes": "Response is XML; parse defensively \u2014 many implementations stream partial features. Timeout ~4s. Emit dict {sasl_mechs: [], starttls_offered, starttls_required, features:{register,bind,session,compression}, stream_version, from_domain}."
+    },
+    {
+      "name": "server_fingerprint_via_stream_error",
+      "kind": "passive",
+      "description": "Trigger a stream error by opening a stream with a bogus 'to' domain, then read the server-emitted <stream:error/> and any greeting elements. Prosody emits distinctive text/@lang and 'host-unknown' condition wording; ejabberd includes 'ejabberd' string in some error text and its Erlang-style logging; OpenFire (Jive/Ignite) exposes 'openfire' in some feature/version elements. Also parse the 'from' attribute of the initial <stream:stream> response \u2014 it echoes the configured server hostname.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 6120 sec 4.9 (Stream Errors), XEP-0092 (Software Version)",
+      "notes": "Populates Port.product / Port.version so the CVE mapper (svcdetect._PRODUCT_RE) can key on 'Prosody 0.11.x', 'ejabberd 21.x', 'OpenFire 4.x'. Add product regexes for these three families."
+    },
+    {
+      "name": "starttls_posture",
+      "kind": "passive",
+      "description": "Finding when 5222/5269 stream features advertise no <starttls/> at all, or advertise it without the <required/> child. Also finding when the implementation permits plaintext SASL PLAIN/LOGIN before STARTTLS negotiation. Cleartext c2s exposes user credentials; cleartext s2s exposes routed messages and dialback.",
+      "value": "high",
+      "cwe": [
+        "CWE-319",
+        "CWE-326"
+      ],
+      "finding_kind": "xmpp_starttls_missing",
+      "protocol_reference": "RFC 6120 sec 5.4.1 (STARTTLS Support), RFC 7590 (TLS mandatory)",
+      "notes": "5223 (legacy implicit TLS) is itself a smell \u2014 recommend migration to 5222+STARTTLS with modern ciphers. Reuse the TLS analyzer already used by SMTP/IMAP if one exists in svccommon; else emit as posture finding without cipher-detail."
+    },
+    {
+      "name": "in_band_registration_open",
+      "kind": "active",
+      "description": "After negotiating a stream (with STARTTLS if offered), send an IQ get for jabber:iq:register (XEP-0077) to detect whether unauthenticated account creation is permitted. If the server returns a <query xmlns='jabber:iq:register'/> with a form (rather than <not-authorized/>), unauthenticated attackers can spawn accounts at will \u2014 spam/abuse pivot, and often a foothold for authenticated features like MUC and file transfer.",
+      "value": "high",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "finding_kind": "xmpp_ibr_open",
+      "protocol_reference": "XEP-0077 (In-Band Registration)",
+      "notes": "Do NOT actually submit a registration \u2014 the form-availability probe alone is proof. Prosody's mod_register and ejabberd's mod_register default to allow unless explicitly restricted."
+    },
+    {
+      "name": "anonymous_sasl_check",
+      "kind": "auth",
+      "description": "If ANONYMOUS is in the advertised SASL mechanisms, complete a full anonymous bind and record the assigned JID. Anonymous XMPP servers permit any unauthenticated peer to send messages / join MUC rooms / probe rosters, and are typical of dev instances left exposed.",
+      "value": "high",
+      "cwe": [
+        "CWE-287",
+        "CWE-306"
+      ],
+      "finding_kind": "xmpp_anon_bind",
+      "protocol_reference": "RFC 6120 sec 6, RFC 4505 (SASL ANONYMOUS)",
+      "notes": "One IQ round-trip; the assigned JID (from resource binding) is the concrete proof to include in the finding."
+    },
+    {
+      "name": "weak_sasl_mechanisms",
+      "kind": "passive",
+      "description": "Flag PLAIN or LOGIN advertised before STARTTLS negotiation, and flag DIGEST-MD5 / CRAM-MD5 (deprecated per RFC 6331) advertised on any transport. Track whether a modern mechanism (SCRAM-SHA-1, SCRAM-SHA-256, SCRAM-SHA-256-PLUS with channel binding) is present.",
+      "value": "medium",
+      "cwe": [
+        "CWE-327",
+        "CWE-319"
+      ],
+      "finding_kind": "xmpp_weak_sasl",
+      "protocol_reference": "RFC 6120 sec 6.3.3 (Mechanism Preferences), RFC 6331 (Deprecation of DIGEST-MD5)",
+      "notes": "Compare mechanism list before/after STARTTLS if TLS negotiates \u2014 plaintext SASL exposure is only real when advertised on the plaintext channel."
+    },
+    {
+      "name": "s2s_dialback_posture",
+      "kind": "active",
+      "description": "On 5269, check whether server-dialback (XEP-0220) is offered without TLS/DNSSEC. Legacy dialback without TLS relies purely on DNS trust and is trivially spoofable on shared/untrusted networks; combined with lack of PKIX cert validation this allows federation-level impersonation.",
+      "value": "medium",
+      "cwe": [
+        "CWE-295",
+        "CWE-345"
+      ],
+      "finding_kind": "xmpp_s2s_dialback_weak",
+      "protocol_reference": "XEP-0220 (Server Dialback), RFC 6120 sec 13.8",
+      "notes": "Also detect an s2s that accepts an inbound stream with a self-signed / mismatched cert \u2014 chain into cross-service TLS-cert facts."
+    },
+    {
+      "name": "software_version_query",
+      "kind": "active",
+      "description": "After (or during anonymous, if allowed) session bind, send IQ get for jabber:iq:version (XEP-0092) to the server JID to retrieve <name/>, <version/>, and <os/>. This concretely names Prosody/ejabberd/OpenFire with a version string, which drives CVE mapping and feeds Host.software.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "XEP-0092 (Software Version)",
+      "notes": "Often returned even to anonymous or pre-auth peers depending on server policy. Feed the result into parse_product_version equivalent so CVE mapper picks it up."
+    },
+    {
+      "name": "service_discovery_enum",
+      "kind": "active",
+      "description": "Send IQ get for http://jabber.org/protocol/disco#items and #info (XEP-0030) against the bare server domain. Enumerates exposed components: MUC (conference.example), PubSub, HTTP-Upload (XEP-0363 endpoint URL \u2014 a cross-service HTTP pivot), proxy65 SOCKS5 bytestreams, and admin/adhoc modules. Each component becomes a probe surface for further capabilities.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "XEP-0030 (Service Discovery), XEP-0363 (HTTP File Upload), XEP-0065 (SOCKS5 Bytestreams)",
+      "notes": "This is the highest-value active probe \u2014 it single-handedly reveals every downstream target (MUC rooms, upload endpoint, admin adhoc). Requires an authenticated or anonymous session on many servers."
+    },
+    {
+      "name": "muc_room_enumeration",
+      "kind": "active",
+      "description": "If a MUC (Multi-User Chat) component is discovered, disco#items against it to list public rooms; then disco#info per room to record name, occupancy, whether it is password-protected, moderated, or logged. Public chat-room lists frequently leak internal team names, hostnames, and project codenames.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "xmpp_muc_public_rooms",
+      "protocol_reference": "XEP-0045 (Multi-User Chat)",
+      "notes": "Only lists \u2014 do NOT join rooms or read message history (that would be intrusive). The room list plus title/subject is the informational finding."
+    },
+    {
+      "name": "credentialed_login_and_roster",
+      "kind": "auth",
+      "description": "If XMPP credentials are supplied (creds bag with kind 'xmpp' or generic user/pass), complete SASL SCRAM authentication, bind a resource, and dump the account's roster (RFC 6121). Enumerates contact JIDs (often internal usernames and full email addresses) and provides authenticated proof for the report.",
+      "value": "medium",
+      "cwe": [
+        "CWE-522"
+      ],
+      "protocol_reference": "RFC 6121 sec 2 (Roster)",
+      "notes": "Roster JIDs are gold: they name internal accounts. Feed into cross-service username wire (see below)."
+    },
+    {
+      "name": "legacy_tls_5223_posture",
+      "kind": "passive",
+      "description": "When 5223 is open, connect with a stdlib TLS wrapper and record cert SANs, expiry, and issuer; flag if only 5223 is exposed without any 5222 companion (implying no STARTTLS path) and if the certificate subject/SAN doesn't match the stream 'from' domain.",
+      "value": "low",
+      "cwe": [
+        "CWE-295"
+      ],
+      "protocol_reference": "RFC 6120 App B (legacy SSL ports)",
+      "notes": "Also fingerprint OpenFire \u2014 historically the biggest 5223 offender."
+    },
+    {
+      "name": "brute_force_and_user_enum_pivot",
+      "kind": "exploit",
+      "description": "Once IBR is confirmed open (or the SASL error taxonomy differentiates 'not-authorized' for bad password from 'invalid-mechanism'/'aborted' for missing user), record the timing/response oracle as a user-enum channel. Feed known usernames from LDAP/SMB/SMTP to test which JIDs exist without needing to brute-force passwords.",
+      "value": "medium",
+      "cwe": [
+        "CWE-204",
+        "CWE-307"
+      ],
+      "protocol_reference": "RFC 6120 sec 6.5 (SASL Errors)",
+      "notes": "Do not attempt password brute-force in the tier2 probe itself \u2014 surface as a runbook/command."
+    },
+    {
+      "name": "runbook_and_findings_wiring",
+      "kind": "passive",
+      "description": "Standard analyze() wire: emit targets, per-target probe dict, findings via svccommon._finding, runbooks with credfree (nmap --script xmpp-info,xmpp-brute; openssl s_client -starttls xmpp; python -c stream) and credentialed (roster dump, admin-adhoc if authorized) commands. findings_to_vulns via svccommon at default port 5222.",
+      "value": "medium",
+      "cwe": [],
+      "protocol_reference": "recce/services/svccommon.py",
+      "notes": "Follows the smtp.py / imap.py / sip.py shape exactly. analyze(hosts, creds, active, budget, progress, wordlist)."
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "server_domain: the 'from' attribute of the <stream:stream/> response is the authoritative XMPP domain for this host \u2014 feed into recce.core.known_domains for use by LDAP/SMB/kerberos realm inference and by DNS enumeration (SRV records _xmpp-client._tcp / _xmpp-server._tcp).",
+    "hostnames_from_disco: sub-domain JIDs revealed by disco#items (conference.example.internal, upload.example.internal, proxy.example.internal, pubsub.example.internal) are new hostname facts \u2014 feed into recce.core.known_hostnames so DNS/HTTP/web modules can pivot to them.",
+    "http_upload_url: the XEP-0363 HTTP-Upload component publishes an HTTPS endpoint URL \u2014 feed into services/http.py as a new target (often a separate host / vhost with directory-listing or auth-token weaknesses).",
+    "socks5_proxy_endpoint: XEP-0065 proxy65 hosts/ports (typically 7777/tcp) \u2014 feed into svcdetect as a new port target and to any SOCKS/proxy handling.",
+    "usernames_from_roster: authenticated roster contacts and MUC room affiliations are JID localparts \u2014 feed into the shared credential-spray/user list consumed by SSH/SMB/LDAP/SMTP/HTTP-login modules (same pool SMTP user_enum populates).",
+    "email_addresses: XMPP JIDs shaped like user@corp.tld are often also mail addresses \u2014 publish to the same known-usernames sink SMTP populates so spray targets across all services stay consistent.",
+    "tls_certificate_facts: STARTTLS/legacy-TLS certificate SANs on 5222/5223/5269 are extra hostname facts and reveal internal PKI issuer names \u2014 feed into the shared TLS/cert bag (same one HTTPS/SMTPS/IMAPS/LDAPS populate).",
+    "software_and_version: Prosody/ejabberd/OpenFire product+version from XEP-0092 and stream-error fingerprints \u2014 feed into Port.product/Port.version so the CVE mapper picks up XMPP-family CVEs (e.g. OpenFire admin-console RCE CVE-2023-32315).",
+    "sasl_mechanisms: mechanism list \u2014 feed into a shared 'auth-posture' sink so the report can correlate weak-SASL patterns across SMTP/IMAP/LDAP/XMPP in one place.",
+    "s2s_federation_peers: any peer domains observed responding to dialback/verify on 5269 \u2014 feed into known_domains as related infrastructure worth DNS-enumerating."
+  ],
+  "default_ports": [
+    "5222/tcp",
+    "5223/tcp (legacy implicit TLS)",
+    "5269/tcp (s2s)",
+    "7777/tcp (XEP-0065 proxy65, discovered)"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [],
+    "notes": "No XMPP coverage anywhere in recce. svcdetect.py PORT_NAMES has no 5222/5223/5269 entries and _SIGNATURES has no XMPP stream pattern. serviceenum.py _NAME and _PORT have no xmpp/jabber mappings. No recce/services/xmpp.py, no scripts/recce-service.sh xmpp handler (grep for xmpp|jabber|5222|5269 across recce/ returns nothing except the 'xmpp' subdomain wordlist entry at recce/data/wordlists/subdomains-common.txt:1081). The wordlist entry is inert \u2014 it will not produce or consume XMPP facts. This is a green-field capability."
+  },
+  "implementation_notes": "Model on smtp.py (276 lines) \u2014 it is the closest exemplar for text-protocol negotiate/STARTTLS/SASL/user-enum shape. sip.py is another close shape for a text-based negotiation service. Ship as recce/services/xmpp.py with: is_xmpp(), probe(ip, port, is_s2s), enum_muc_rooms(), enum_disco(), xmpp_targets(hosts), findings(hosts, probes), runbook(ip, port), findings_to_vulns() via svccommon, and analyze(hosts, creds, active, budget, progress, wordlist). No non-stdlib dependency needed (airgap constraint): construct stream XML manually and drive a socket + ssl.wrap_socket for STARTTLS \u2014 matches svcdetect.grab_banner's stdlib-only pattern. Parse features with xml.etree.ElementTree, guarded against defused-XML concerns (the server bytes are untrusted, so use defusedxml if already vendored; otherwise disable entity resolution \u2014 check recce/core/parser.py for existing pattern). Also add: (1) svcdetect.PORT_NAMES entries for 5222/5223/5269, (2) an _SIGNATURES entry matching '<stream:stream' or 'xmlns=[\\\"'']jabber:', (3) serviceenum _NAME entries for 'xmpp-client','xmpp-server','jabber' and _PORT entries for the three ports, (4) _PRODUCT_RE entries in svcdetect for 'Prosody', 'ejabberd', 'Openfire' product/version extraction, (5) a scripts/recce-service.sh xmpp handler for the shell driver. Budget: streamopen + features probe ~1s; disco enum adds ~2s; MUC listing ~2s; total per-target ~5-8s well within svcprobe budgets. All probes must respect proxy.scaled() for pivot latency. Follow airgap: no external CVE lookups, no online SASL libraries \u2014 everything stdlib.",
+  "recommended_findings": [
+    {
+      "severity": "high",
+      "title": "XMPP in-band registration open (XEP-0077)"
+    },
+    {
+      "severity": "high",
+      "title": "XMPP anonymous SASL bind accepted"
+    },
+    {
+      "severity": "high",
+      "title": "XMPP STARTTLS not offered / not required (cleartext c2s)"
+    },
+    {
+      "severity": "medium",
+      "title": "XMPP weak/plaintext SASL mechanism exposed (PLAIN/LOGIN pre-TLS, DIGEST-MD5)"
+    },
+    {
+      "severity": "medium",
+      "title": "XMPP s2s dialback without TLS (spoofable federation)"
+    },
+    {
+      "severity": "medium",
+      "title": "XMPP MUC public room list discloses internal names"
+    },
+    {
+      "severity": "medium",
+      "title": "XMPP service discovery exposes admin/adhoc component unauthenticated"
+    },
+    {
+      "severity": "low",
+      "title": "XMPP legacy implicit-TLS port 5223 exposed (RFC 6120 App B)"
+    },
+    {
+      "severity": "low",
+      "title": "XMPP software version disclosure (XEP-0092) drives CVE mapping (Prosody/ejabberd/OpenFire)"
+    },
+    {
+      "severity": "low",
+      "title": "XMPP TLS certificate SAN mismatch vs stream 'from' domain"
+    }
+  ],
+  "service": "XMPP",
+  "summary": "XMPP (RFC 6120) is completely absent from recce \u2014 no port recognition (svcdetect.PORT_NAMES lacks 5222/5223/5269, _SIGNATURES has no XML-stream pattern), no serviceenum mapping, no recce/services/xmpp.py, no shell-driver handler. The only trace is a 'xmpp' subdomain entry in a wordlist. This is a green-field build: a stdlib-only module modeled on smtp.py (text negotiation, STARTTLS, SASL, user enum) with an SIP-style feature-probe layer. Fifteen capabilities are proposed spanning passive port/fingerprint recognition, active stream-feature probing (SASL mechanisms, STARTTLS posture, in-band registration availability), server product ID (Prosody/ejabberd/OpenFire) for CVE mapping, anonymous-bind and credentialed-roster enumeration, service discovery (XEP-0030) to reveal MUC, HTTP-Upload, proxy65, and pubsub components, and TLS/s2s dialback posture. Cross-service wire is unusually rich: the stream 'from' authorises a canonical XMPP domain (feeds LDAP/Kerberos realm inference and DNS SRV enum), disco#items reveals sub-domain hostnames (feeds known_hostnames and HTTP module), XEP-0363 upload endpoints yield new HTTP targets, XEP-0065 proxy65 hosts yield new port targets, and roster JIDs feed the shared username/email pool consumed by SSH/SMB/LDAP/SMTP/HTTP-login spraying."
+}

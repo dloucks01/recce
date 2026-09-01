@@ -1,0 +1,187 @@
+{
+  "service": "DNP3",
+  "default_ports": [
+    "20000/tcp",
+    "20000/udp"
+  ],
+  "summary": "DNP3 (IEEE 1815) is a SCADA/OT master-outstation protocol dominant in North American electric/water utilities. Base protocol has no authentication (Secure Authentication SAv2/SAv5 is an optional bolt-on rarely enabled), so any reachable outstation exposes physical process data and control functions (Operate/Direct Operate, Cold/Warm Restart) to anyone on the link. A DNP3 device on a corporate/DMZ segment is by itself a segmentation gap. recce has zero coverage today \u2014 port 20000 is missing from svcdetect and serviceenum and there is no services/dnp3.py \u2014 so a DNP3 outstation shows up in a scan as an unlabeled port and gets no per-service enumeration. The recce opportunity is a read-only probe modelled on modbus.py that positively identifies DNP3 via the 0x0564 link-layer sync + CRC-16-DNP, reads Class 0 static data (FC1, g60v1) to prove liveness, extracts vendor/product/firmware/site-name from Group 0 device attributes, harvests the outstation source address + master DFC/DIR bits, and flags reachability, missing SA, and any restart-bit / device-trouble IIN state \u2014 all without ever emitting a write, operate, restart, or unsolicited-toggle frame.",
+  "existing_coverage": {
+    "detected": false,
+    "files": [],
+    "notes": "Zero coverage. Port 20000 is absent from recce/services/svcdetect.py PORT_NAMES (Modbus 502 is present via services/modbus.py, S7 102 via inferred label, but nothing for DNP3/20000). Absent from recce/services/serviceenum.py _PORT and _NAME (no dnp3 script mapping). No recce/services/dnp3.py exists. No dnp3 script under recce/scripts/. Full case-insensitive grep for dnp3/1815 across recce/ returns nothing."
+  },
+  "capabilities": [
+    {
+      "name": "dnp3_link_layer_id",
+      "kind": "passive",
+      "description": "Confirm the port speaks DNP3 by sending a Data-Link REQUEST_LINK_STATUS (FC9) or reading the 0x05 0x64 sync + CRC-16-DNP on the reply \u2014 positive protocol ID, distinguishes DNP3 from arbitrary services on 20000/tcp.",
+      "value": "high",
+      "protocol_reference": "IEEE 1815-2012 \u00a78.2 (frame format), \u00a78.3.1 (RESET_LINK_STATES/REQUEST_LINK_STATUS)",
+      "finding_kind": "dnp3_reachable",
+      "notes": "Frame layout: 0x05 0x64 | LEN | CTRL | DST(2 LE) | SRC(2 LE) | CRC(2). CRC-16-DNP polynomial 0x3D65 over the header, then per-16-byte data block. Reuse this parser for every capability below."
+    },
+    {
+      "name": "dnp3_read_class0_static",
+      "kind": "active",
+      "description": "Send Application FC1 (Read) with object header g60v1 (Class 0 data) to enumerate the outstation's static analog/binary/counter points and prove the device is a real DNP3 outstation, not a proxy.",
+      "value": "high",
+      "protocol_reference": "IEEE 1815-2012 \u00a74.4.3 (Class data), \u00a711.7 (object group 60)",
+      "finding_kind": "dnp3_class0_readable",
+      "notes": "This is the hint's recommended probe. Read-only, no side effects. Parse the response's object headers to count binary/analog/counter/frozen-counter groups (1, 30, 20, 21) \u2014 a real outstation always returns at least one."
+    },
+    {
+      "name": "dnp3_device_attributes",
+      "kind": "active",
+      "description": "Read Group 0 device-attribute variations (240 SoftwareVersion, 242 DeviceManufacturersName, 243 DeviceLocation, 250 UserAssignedDeviceName, 252 SerialNumber) via FC1 to fingerprint vendor/firmware for CVE mapping.",
+      "value": "high",
+      "protocol_reference": "IEEE 1815-2012 \u00a711.2 (object group 0 device attributes)",
+      "finding_kind": "dnp3_device_id",
+      "notes": "Fills Port.product/version so the CVE mapper keys on it. g0v242 typically holds strings like 'SEL', 'GE Multilin', 'Siemens SICAM', 'Schweitzer'."
+    },
+    {
+      "name": "dnp3_outstation_address_disclosure",
+      "kind": "passive",
+      "description": "Extract the outstation source address (SRC field, 2 bytes LE) and destination address it accepted from any reply \u2014 needed for every subsequent DNP3 command and is often a per-substation identifier.",
+      "value": "medium",
+      "protocol_reference": "IEEE 1815-2012 \u00a78.2.3 (DL addresses), \u00a710.2 (addressing)",
+      "finding_kind": "dnp3_addressing",
+      "notes": "Address 0 = master default, 1-65519 = station addresses, 0xFFFD/E/F = broadcast. Try dst=1..16 (common), 100, 1024 if the default returns no response \u2014 many outstations reject frames for wrong addresses silently."
+    },
+    {
+      "name": "dnp3_missing_secure_auth",
+      "kind": "passive",
+      "description": "Confirm the outstation accepts an FC1 Read without an Authentication Request (g120vN) preceding it \u2014 proves IEEE 1815 \u00a77 Secure Authentication (SAv2/SAv5) is not enforced.",
+      "value": "critical",
+      "protocol_reference": "IEEE 1815-2012 \u00a77 (Secure Authentication), object group 120",
+      "finding_kind": "dnp3_no_secure_auth",
+      "cwe": [
+        "CWE-306",
+        "CWE-287"
+      ],
+      "notes": "Base DNP3 has no auth. SA is the only defense; if the outstation answers a plain Read it is running without it. Do NOT test with a WRITE \u2014 reachability of unauthenticated Read is already the finding."
+    },
+    {
+      "name": "dnp3_iin_flags_parse",
+      "kind": "passive",
+      "description": "Parse the 16-bit IIN (Internal Indications) field in every response and flag Device Restart (IIN1.7), Device Trouble (IIN1.6), Need Time (IIN1.4), Local Control (IIN1.5), and Config Corrupt (IIN2.5).",
+      "value": "medium",
+      "protocol_reference": "IEEE 1815-2012 \u00a74.4.1 (Internal Indications)",
+      "finding_kind": "dnp3_iin_state",
+      "notes": "Device Restart bit indicates uptime reset since last CLEAR \u2014 an attacker who saw it before you did may have already issued FC13/14."
+    },
+    {
+      "name": "dnp3_broadcast_response",
+      "kind": "active",
+      "description": "Send an FC1 Read to broadcast destination 0xFFFD (with confirmation) \u2014 an outstation that answers a broadcast leaks its address without any prior knowledge and permits sweep-style enumeration.",
+      "value": "medium",
+      "protocol_reference": "IEEE 1815-2012 \u00a710.2.3 (broadcast addresses 0xFFFD/E/F)",
+      "finding_kind": "dnp3_broadcast_reachable",
+      "notes": "0xFFFD requires application-layer confirmation, 0xFFFE requires DL confirmation, 0xFFFF no confirmation. Well-designed outstations ignore broadcast reads."
+    },
+    {
+      "name": "dnp3_unsolicited_probe",
+      "kind": "passive",
+      "description": "Listen briefly after link identification for unsolicited response frames (App Control UNS bit set) \u2014 an outstation configured for unsolicited reporting to a wrong/absent master will spray event data to whoever answers.",
+      "value": "medium",
+      "protocol_reference": "IEEE 1815-2012 \u00a74.4.2 (unsolicited responses), \u00a75.2.4",
+      "finding_kind": "dnp3_unsolicited_leak",
+      "notes": "Do NOT send FC20/21/22 (Enable/Disable Unsolicited) \u2014 that changes device state. Just read for a few seconds after connect."
+    },
+    {
+      "name": "dnp3_control_functions_supported",
+      "kind": "passive",
+      "description": "Infer supported dangerous function codes (FC3 Select, FC4 Operate, FC5 Direct Operate, FC6 Direct Operate No Ack, FC13/14 Cold/Warm Restart, FC18 Stop Application) from the response to FC1 g60v1 without ever invoking them.",
+      "value": "high",
+      "protocol_reference": "IEEE 1815-2012 \u00a75.3 (function codes), Table 5-1",
+      "finding_kind": "dnp3_control_surface",
+      "notes": "Never emit FC3/4/5/6/13/14/18 \u2014 those change plant state. Report their potential availability as risk context alongside dnp3_no_secure_auth."
+    },
+    {
+      "name": "dnp3_udp_variant",
+      "kind": "active",
+      "description": "Repeat the link-layer probe on 20000/udp \u2014 DNP3-over-UDP is defined in IEEE 1815 \u00a77.2 and is sometimes deployed on wireless SCADA links but often overlooked in firewall rules.",
+      "value": "medium",
+      "protocol_reference": "IEEE 1815-2012 \u00a77.2 (UDP mapping)",
+      "finding_kind": "dnp3_udp_reachable",
+      "notes": "Single datagram, same 0x0564 frame. Reuse svcdetect's inferred label for 20000/udp."
+    },
+    {
+      "name": "dnp3_svcdetect_registration",
+      "kind": "passive",
+      "description": "Add 20000/tcp and 20000/udp to svcdetect.PORT_NAMES (label 'dnp3', 'DNP3 SCADA outstation (IEEE 1815)') so unlabeled scans no longer report the port as unknown.",
+      "value": "medium",
+      "protocol_reference": "recce/services/svcdetect.py PORT_NAMES",
+      "notes": "Trivial two-line change. Also add 'dnp3' -> 'dnp3' to serviceenum._NAME and 20000 -> 'dnp3' to serviceenum._PORT so `recce services` emits the enum command for the port."
+    },
+    {
+      "name": "dnp3_signature_bytes",
+      "kind": "passive",
+      "description": "Add a servicefp signature for the 0x0564 start-bytes so nmap-captured servicefp on non-standard ports (e.g. DNP3 on 20001/20002 for multiple RTUs) also labels as DNP3.",
+      "value": "low",
+      "protocol_reference": "IEEE 1815-2012 \u00a78.2 (start bytes)",
+      "notes": "Regex ^\\x05\\x64 in svcdetect._SIGNATURES. Very low FP rate \u2014 0x0564 is a stable, unique sync."
+    },
+    {
+      "name": "dnp3_delay_measurement",
+      "kind": "active",
+      "description": "Optionally send FC23 (Delay Measurement) to characterise round-trip time to the outstation \u2014 a benign read-only frame that also proves master-side timing works.",
+      "value": "low",
+      "protocol_reference": "IEEE 1815-2012 \u00a75.3.14 (Delay Measurement)",
+      "finding_kind": "dnp3_delay_measured",
+      "notes": "Purely informational, but useful as a second-source liveness check when g60v1 is empty on a spare device."
+    },
+    {
+      "name": "dnp3_runbook_output",
+      "kind": "passive",
+      "description": "Emit a per-target runbook of the safe-first tools a tester should run (nmap dnp3-info NSE, opendnp3 dnp3ctl, DNP3 dissector in Wireshark) mirroring modbus.py's runbook() pattern.",
+      "value": "low",
+      "protocol_reference": "recce/services/modbus.py runbook() pattern",
+      "notes": "e.g. 'nmap -sU -sT -p 20000 --script dnp3-info', 'python3 -m pydnp3 read-class0 {ip}:20000 --dst 1'. Keeps the tool consistent with how modbus/mssql/etc surface next-step commands."
+    }
+  ],
+  "recommended_findings": [
+    {
+      "title": "DNP3 SCADA outstation reachable on the scanned network",
+      "severity": "high"
+    },
+    {
+      "title": "DNP3 outstation accepts Read without Secure Authentication (IEEE 1815 \u00a77)",
+      "severity": "critical"
+    },
+    {
+      "title": "DNP3 device identification extracted (vendor/product/firmware)",
+      "severity": "info"
+    },
+    {
+      "title": "DNP3 outstation responds to broadcast address 0xFFFD",
+      "severity": "medium"
+    },
+    {
+      "title": "DNP3 IIN flags indicate device restart / trouble / config corrupt",
+      "severity": "medium"
+    },
+    {
+      "title": "DNP3 unsolicited responses observed on connect (misconfigured event target)",
+      "severity": "medium"
+    },
+    {
+      "title": "DNP3 over UDP reachable on 20000/udp",
+      "severity": "medium"
+    },
+    {
+      "title": "Port 20000 unlabeled (missing svcdetect entry for DNP3)",
+      "severity": "low"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "vendor / product / firmware version from Group 0 device attributes (g0v240 SoftwareVersion, g0v242 DeviceManufacturersName, g0v250 UserAssignedDeviceName, g0v252 SerialNumber) \u2014 feeds Port.product/version and the CVE mapper for vendor-specific SCADA CVEs (SEL, GE Multilin, Schweitzer, Siemens SICAM, Schneider SCADAPack)",
+    "outstation user-assigned device name (g0v250) \u2014 hostname-like identifier, feeds known_hostnames and helps correlate the same RTU across masters and across engineering-workstation SMB shares",
+    "device location string (g0v243) \u2014 site name / substation identifier, justifies a NEW shared surface (known_sites / known_substations) that would let recce correlate DNP3 outstations with the DMS/SCADA HMI hostnames on the corporate side",
+    "outstation DNP3 source address (2-byte LE) \u2014 feeds a NEW shared surface (dnp3_addresses) so a second scan of the same subnet can reuse addresses rather than re-sweep, and so an engineering-workstation loot pass can cross-check DNP3 addresses embedded in project files",
+    "list of dangerous function codes the outstation appears to support (FC3/4/5/13/14/18) \u2014 feeds relay_targets style context so the attack-path builder can rank DNP3 outstations by blast radius (control-capable vs read-only IEDs)",
+    "whether Secure Authentication (g120) is enforced \u2014 a boolean that other services (engineering workstation, HMI web UI, historian) can use to prioritise credential harvesting where SA keys might be extractable",
+    "master address(es) the outstation ACKs frames from \u2014 leaks the SCADA master IP addressing plan, feeds known_hosts / known_masters for lateral movement targeting"
+  ],
+  "recommended_hashcat_modes": [],
+  "implementation_notes": "Model on recce/services/modbus.py exactly \u2014 same shape: is_dnp3(port), _build_*() PDU builders, _parse_*_response(), probe(), <service>_targets(), findings(), runbook(), findings_to_vulns() via svccommon, analyze() using svcprobe.iter_probe. Airgap-safe stdlib only (socket + struct). CRITICAL protocol quirks: (1) All Data-Link addresses are LITTLE-endian 2-byte, application layer is byte-oriented \u2014 do NOT reuse Modbus's '>H' packing globally. (2) CRC-16-DNP uses polynomial 0x3D65 (reflected 0xA6BC), computed over the 8-byte header alone, then over each 16-byte user-data block; a stub _crc_dnp() of ~15 lines suffices. (3) Frames larger than 16 bytes of user data need multiple CRC-bearing blocks \u2014 the FC1 g60v1 request fits in one block, but responses often do not, so the parser must strip CRCs every 18 bytes (16 data + 2 CRC). (4) Application layer adds an Application Control byte with FIR/FIN/CON/UNS/SEQ \u2014 set FIR=FIN=1, CON=0, UNS=0, SEQ rotates 0-15. (5) Transport layer adds one byte between DL header and app layer (FIN/FIR/SEQ 0-63) \u2014 easy to forget, breaks every reply. (6) Default src=1 (master), dst=1..10 (outstation) \u2014 try 1 first, then 2, 3, 4, 10, 100 if silent. (7) NEVER emit FC3 Select, FC4 Operate, FC5 Direct Operate, FC6 Direct Operate No Ack, FC13 Cold Restart, FC14 Warm Restart, FC15 Initialize Data, FC16 Initialize App, FC17 Start App, FC18 Stop App, FC20/21/22 (Enable/Disable/Assign Unsolicited), FC31 Save Config \u2014 these change plant state and can trip protection relays. Read-only means FC1 (Read), FC23 (Delay Measurement), and Data-Link FC9 (Request Link Status) only. (8) Register 20000/tcp + 20000/udp in svcdetect.PORT_NAMES, add 'dnp3' entry to serviceenum._NAME/_PORT, and add ^\\\\x05\\\\x64 signature to svcdetect._SIGNATURES in the same PR. (9) Add is_dnp3() variant check for stray ports (some deployments run multiple RTUs on 20001, 20002, ..., 20009 on the same IP \u2014 accept 20000-20009 range as a hint, but require a valid 0x0564 reply before labelling)."
+}

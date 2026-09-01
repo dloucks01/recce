@@ -1,0 +1,224 @@
+{
+  "service": "BACnet/IP",
+  "default_ports": [
+    "47808/udp"
+  ],
+  "summary": "BACnet (ASHRAE 135) is the building-automation protocol running HVAC, lighting, access control, fire panels and metering in nearly every commercial and industrial site; BACnet/IP wraps its NPDU/APDU in a 4-byte BVLC header on UDP/47808. It is entirely unauthenticated by default (secure-BACnet is rare in the field), broadcast-heavy, and rich in identity metadata (vendor, model, firmware, object-name/facility name, object list, priority arrays). For recce this is a passive-first goldmine (Who-Is/I-Am and ReadProperty of the Device object give vendor/model/firmware for a CPE-style CVE feed and a facility name that is almost always the real site name), plus a high-severity active surface (BBMD topology dumps, Foreign-Device registration, DeviceCommunicationControl / ReinitializeDevice denial-of-service, WriteProperty of AV/BV priority-1 which is a physical-process attack). No BACnet module exists today; the port is only listed in the UDP amplifier port group in scanner.py and is absent from svcdetect PORT_NAMES and serviceenum.py.",
+  "existing_coverage": {
+    "detected": false,
+    "files": [
+      "/home/kali/Desktop/projects/recce/recce/core/scanner.py"
+    ],
+    "notes": "47808/udp appears only as a target port in the UDP amplifier/high-value port group in core/scanner.py (line 976, comment line 973). svcdetect.py PORT_NAMES does NOT include 47808 (contrast 623/ipmi, 102/iso-tsap which are mapped), so a raw scan currently leaves the port with no service label. serviceenum.py has no BACnet entry in _NAME or _PORT. No recce/services/bacnet.py exists. Nothing in recce/scripts/ handles it. Modbus/IPMI are the nearest siblings in shape (UDP or short-frame TCP, ICS/OOB, stdlib socket + struct)."
+  },
+  "capabilities": [
+    {
+      "name": "bvlc_port_fingerprint",
+      "kind": "passive",
+      "value": "high",
+      "description": "Detect BACnet/IP on 47808/udp (and non-default 47809-47823) by sending a unicast Who-Is (APDU 0x08) inside a BVLC 0x81/0x0A Original-Unicast-NPDU and matching the I-Am reply (APDU 0x00) - one round trip, no broadcast, positively distinguishes BACnet from other UDP services so svcdetect can label the port and enrich_port sets detect_source=banner.",
+      "protocol_reference": "ASHRAE 135 Annex J (BACnet/IP), Clause 20 (APDU), Clause 16.10 (Who-Is/I-Am)",
+      "finding_kind": "bacnet_reachable",
+      "cwe": []
+    },
+    {
+      "name": "device_object_readprop_identity",
+      "kind": "active",
+      "value": "high",
+      "description": "Issue ReadProperty (APDU 0x0C) against the Device object (object-type 8, instance from the I-Am) for object-name (77), vendor-name (121), vendor-identifier (120), model-name (70), firmware-revision (44) and application-software-version (12) - gives a concrete vendor/model/firmware tuple that feeds the CPE/CVE mapper and a facility/site name for known_hostnames.",
+      "protocol_reference": "ASHRAE 135 Clause 12.11 (Device Object), Clause 15.5 (ReadProperty Service), Clause 21 (property identifiers)",
+      "finding_kind": "bacnet_device_identity",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "object_list_walk",
+      "kind": "active",
+      "value": "medium",
+      "description": "Read Device.object-list (property 76) then walk each object's object-name (77), present-value (85) and description (28) via ReadPropertyMultiple (0x0E) to enumerate every point (AV/BV/AI/AO/BI/BO/Loop/Schedule/Trend), which reveals the physical process (chillers, dampers, door strikes, occupancy) mapped by name and lets an operator target WriteProperty candidates.",
+      "protocol_reference": "ASHRAE 135 Clause 15.7 (ReadPropertyMultiple), Clause 12 (Object Types)",
+      "finding_kind": "bacnet_object_inventory",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "bbmd_bdt_dump",
+      "kind": "active",
+      "value": "high",
+      "description": "Send BVLC Read-Broadcast-Distribution-Table (0x02) and parse the 0x03 reply to enumerate every peer BBMD (IP + mask + port) - one packet against a single BBMD maps the entire multi-subnet BACnet internetwork including sites behind NAT, giving recce a free network-topology feed for pivot planning.",
+      "protocol_reference": "ASHRAE 135 Annex J.2.2 / J.2.3 (Write-BDT, Read-BDT, Read-BDT-Ack)",
+      "finding_kind": "bacnet_bbmd_topology_disclosure",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "bbmd_fdt_dump",
+      "kind": "active",
+      "value": "medium",
+      "description": "Send BVLC Read-Foreign-Device-Table (0x06) and parse the 0x07 reply to list every currently-registered foreign device (its IP, port, TTL) - reveals remote engineering laptops / cloud gateways that touch the BAS and are themselves reachable pivot targets.",
+      "protocol_reference": "ASHRAE 135 Annex J.2.6 / J.2.7 (Read-FDT, Read-FDT-Ack)",
+      "finding_kind": "bacnet_fdt_disclosure",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "foreign_device_registration_open",
+      "kind": "active",
+      "value": "high",
+      "description": "Attempt BVLC Register-Foreign-Device (0x05) with a short TTL and confirm the BVLC-Result (0x00) success code - a successful registration means any unauthenticated Internet-reachable host can receive every broadcast on the target BACnet segment and inject Distribute-Broadcast-to-Network (0x09) frames, which is remote write-access to the whole site.",
+      "protocol_reference": "ASHRAE 135 Annex J.2.5 (Register-Foreign-Device), J.4 (Foreign-Device operation)",
+      "finding_kind": "bacnet_foreign_device_registration_permitted",
+      "cwe": [
+        "CWE-284",
+        "CWE-306"
+      ]
+    },
+    {
+      "name": "who_is_amplification_ratio",
+      "kind": "active",
+      "value": "medium",
+      "description": "Measure the reply amplification of a directed Who-Is (unbounded low/high range) - a single ~15-byte request commonly triggers dozens of ~50-byte I-Am replies from every device on the segment, so BACnet/IP is a reflective UDP amplifier the operator should flag when the port is Internet-exposed.",
+      "protocol_reference": "ASHRAE 135 Clause 16.10 (Who-Is), Annex J.2.11 (Original-Broadcast-NPDU); US-CERT TA14-017A (UDP amplification list)",
+      "finding_kind": "bacnet_amplification_reflector",
+      "cwe": [
+        "CWE-406"
+      ]
+    },
+    {
+      "name": "unauth_writeproperty_dry_run",
+      "kind": "exploit",
+      "value": "critical",
+      "description": "Prove unauthenticated write access WITHOUT changing physical state: read priority-array (87) of an Analog-Value object, then issue WriteProperty (0x0F) of present-value at priority 16 (lowest, override-safe) with the SAME value already present, and confirm SimpleAck - a positive result means an attacker can WriteProperty at priority 1 (life-safety) to any point on the site.",
+      "protocol_reference": "ASHRAE 135 Clause 15.9 (WriteProperty), Clause 19.2 (Priority Array / Commandable Properties)",
+      "finding_kind": "bacnet_unauth_write",
+      "cwe": [
+        "CWE-306",
+        "CWE-862"
+      ]
+    },
+    {
+      "name": "device_communication_control_default_password",
+      "kind": "exploit",
+      "value": "high",
+      "description": "Try DeviceCommunicationControl (confirmed service 0x11) with an empty password and the vendor defaults ('bacnet', 'filsinger', '12345678') for a duration of 1 minute - a positive SimpleAck DoSes the device for that window; the same primitive with duration 0 disables it indefinitely and is the classic BAS blackout.",
+      "protocol_reference": "ASHRAE 135 Clause 16.1 (DeviceCommunicationControl)",
+      "finding_kind": "bacnet_dcc_default_password",
+      "cwe": [
+        "CWE-521",
+        "CWE-1188"
+      ]
+    },
+    {
+      "name": "reinitialize_device_probe",
+      "kind": "exploit",
+      "value": "high",
+      "description": "Try ReinitializeDevice (confirmed service 0x14) with WARMSTART and empty/vendor-default password - any reply other than an 'invalid password' error confirms remote reboot is possible; recce never actually restarts, it only sends the request with an intentionally bad password bytecount to elicit the differentiating error class.",
+      "protocol_reference": "ASHRAE 135 Clause 16.4 (ReinitializeDevice)",
+      "finding_kind": "bacnet_reinitialize_permitted",
+      "cwe": [
+        "CWE-306",
+        "CWE-521"
+      ]
+    },
+    {
+      "name": "atomic_read_file_dump",
+      "kind": "active",
+      "value": "medium",
+      "description": "For every File object (type 10) found in the object list, issue AtomicReadFile (service 0x06) at offset 0 with a small count and record the first bytes plus the file's object-name - controllers commonly expose config/backup/log files this way with no auth, and the filenames alone identify vendor-specific tooling paths.",
+      "protocol_reference": "ASHRAE 135 Clause 14.1 (AtomicReadFile), Clause 12.13 (File Object)",
+      "finding_kind": "bacnet_atomic_file_read",
+      "cwe": [
+        "CWE-200",
+        "CWE-306"
+      ]
+    },
+    {
+      "name": "segmentation_and_max_apdu_fingerprint",
+      "kind": "passive",
+      "value": "low",
+      "description": "Extract max-APDU-length-accepted (property 62), segmentation-supported (107), APDU-timeout (11) and number-of-APDU-retries (73) from the Device object - small max-APDU + segmented-both is a fingerprint of low-end controllers whose stacks have known parser DoS bugs (BACnet stack CVEs - Contemporary Controls, Cimetrics, Tridium).",
+      "protocol_reference": "ASHRAE 135 Clause 12.11 (Device Object properties 11/62/73/107)",
+      "finding_kind": "bacnet_stack_fingerprint",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "bacnet_sc_downgrade_check",
+      "kind": "passive",
+      "value": "low",
+      "description": "When both BACnet/IP (47808) and BACnet/SC (typically 47820/tcp, TLS) are open on the same host, flag that the plaintext /IP port is still reachable - BACnet/SC is the ASHRAE-135 Annex AB TLS-authenticated replacement and leaving /IP up defeats it (downgrade path).",
+      "protocol_reference": "ASHRAE 135 Annex AB (BACnet Secure Connect)",
+      "finding_kind": "bacnet_sc_downgrade",
+      "cwe": [
+        "CWE-757",
+        "CWE-319"
+      ]
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames: Device object-name (property 77) is almost always the operator-assigned facility/asset name (e.g. 'AHU-1_MECH_ROOF', 'BLDG-42-CHILLER') - high-value hostname/label candidates the rest of recce should attach to an IP.",
+    "known_domains: vendor-name (121) + vendor-identifier (120) map to a manufacturer, feeding vendor-CVE lookups (Tridium/Niagara, Delta Controls, Siemens Desigo, Johnson Controls Metasys, Schneider EcoStruxure, Honeywell) shared across the report.",
+    "new shared surface: known_bacnet_devices = {ip, device_instance, object_name, vendor_id, model, firmware} - needed because Device instance IDs are globally unique per BACnet internetwork and are the routing key the operator must use for any follow-up; multiple recce modules (bacnet, snmp locationName, HTTP admin portals of Niagara/Metasys front-ends) all learn pieces of the same identity.",
+    "new shared surface: known_bacnet_networks = {bbmd_ip, network_number, mask, port} from BDT/FDT dumps - feeds attackpath by identifying subnets behind the local BBMD that recce cannot reach directly but could pivot to via foreign-device registration.",
+    "relay_targets: FDT entries that show a registered foreign device (typically an engineer's laptop or a cloud gateway) become pivot / lateral-movement candidates for the attackpath map.",
+    "cpe_hints: (vendor_name, model_name, firmware_revision) tuple is a direct CPE match for the CVE feed used by http/snmp/generic version findings.",
+    "known_facility_names (new): object-name of the top Device typically encodes site + building + room - often re-used as SNMP sysLocation, HTTP page titles on the vendor front-end, and RDP/SMB hostnames, giving a correlation key across services."
+  ],
+  "recommended_findings": [
+    {
+      "title": "BACnet/IP endpoint reachable (unauthenticated building-automation control plane)",
+      "severity": "high"
+    },
+    {
+      "title": "BACnet device identity disclosed (vendor / model / firmware / facility name)",
+      "severity": "info"
+    },
+    {
+      "title": "BACnet object inventory readable without authentication",
+      "severity": "medium"
+    },
+    {
+      "title": "BACnet BBMD Broadcast-Distribution-Table readable (network topology disclosure)",
+      "severity": "high"
+    },
+    {
+      "title": "BACnet BBMD Foreign-Device-Table readable (remote-peer disclosure)",
+      "severity": "medium"
+    },
+    {
+      "title": "BACnet Foreign-Device registration accepted from arbitrary host",
+      "severity": "high"
+    },
+    {
+      "title": "BACnet/IP acts as UDP amplification reflector (Who-Is/I-Am ratio)",
+      "severity": "medium"
+    },
+    {
+      "title": "BACnet WriteProperty accepted without authentication (physical-process write)",
+      "severity": "critical"
+    },
+    {
+      "title": "BACnet DeviceCommunicationControl accepted with empty/default password (DoS primitive)",
+      "severity": "high"
+    },
+    {
+      "title": "BACnet ReinitializeDevice reachable without valid password (remote reboot)",
+      "severity": "high"
+    },
+    {
+      "title": "BACnet AtomicReadFile returned file contents without authentication",
+      "severity": "medium"
+    },
+    {
+      "title": "BACnet Secure Connect (BACnet/SC) present alongside plaintext BACnet/IP (downgrade path)",
+      "severity": "low"
+    }
+  ],
+  "recommended_hashcat_modes": [],
+  "implementation_notes": "Style match: model the module on recce/services/ipmi.py (UDP + stdlib socket + struct + os.urandom for invoke-IDs, is_bacnet()/probe()/findings()/analyze() shape, ipmi_targets-style targets(), svcprobe.iter_probe for budget/progress, _finding helper). Modbus.py is the closer OT-flavoured sibling for tone. Concrete wiring gaps to close in the same commit: (1) add 47808: ('bacnet', 'BACnet/IP building automation (ASHRAE 135)') to PORT_NAMES in services/svcdetect.py so the port stops coming back unlabelled; (2) add 'bacnet' entry to _NAME and 47808 to _PORT in services/serviceenum.py so `recce services` proposes the script; (3) BVLC header is fixed 4 bytes (0x81, function, length hi, length lo) and the length INCLUDES the header itself - easy off-by-two; (4) APDU invoke-ID is 1 byte, wrap with modulo 256; (5) tag-encoded property values are ASN.1-ish context/application tags - write one small BER-lite decoder (application tag 7 = character string with a leading encoding byte, tag 2 = unsigned int, tag 12 = BACnetObjectIdentifier packed as 22-bit type + 10-bit instance) rather than pulling bacpypes (would break airgap dep policy). (6) SAFETY: NEVER send WriteProperty with a value that differs from the read-back present-value, and NEVER send ReinitializeDevice with a correct/likely-correct password - recce must guarantee no physical actuation, mirror modbus.py's read-only stance. (7) Broadcast Who-Is is off by default; unicast Who-Is to the target IP is the safe default, --broadcast opts into the segment sweep. (8) BACnet/SC (Annex AB) is TCP+TLS and out of scope for the initial UDP module - leave a TODO. (9) Reuse svccommon.findings_to_vulns and svcprobe.iter_probe exactly as ipmi.py does; wire known_hostnames update from the Device object-name discovery (parallels how ipmi.analyze consumes creds.known_users)."
+}

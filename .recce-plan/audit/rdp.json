@@ -1,0 +1,168 @@
+{
+  "service": "rdp",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/rdp.py",
+    "/home/kali/Desktop/projects/recce/tests/test_rdp_vnc.py"
+  ],
+  "summary": "recce/services/rdp.py is intentionally minimal: one X.224 Connection Request PDU, parses the RDP Negotiation Response/Failure ([MS-RDPBCGR] 2.2.1.2), and emits two findings \u2014 rdp_no_nla (Standard RDP accepted) and rdp_fingerprint. That is roughly nmap's rdp-enum-encryption stage 1 and nothing else. Everything past the security-negotiation PDU \u2014 Basic Settings Exchange (MCS Connect Initial/GCC), TLS/CredSSP layer, NTLMSSP inside CredSSP, active BlueKeep channel probe, server encryption level, restricted-admin flag, TLS cert data \u2014 is entirely absent. The module also produces zero cross-service facts: hostname, DNS domain, OS build, and NetBIOS name are trivially extractable from the CredSSP/NTLMSSP CHALLENGE_MESSAGE and would seed known_users/hostnames/domains/relay_targets for SMB, LDAP, and Kerberos scanners, but nothing is emitted today. BlueKeep is named in the finding text but never actively probed. No credentialed path (spray/validate) exists despite creds being passed to analyze().",
+  "existing_capabilities": [
+    "x224_cr_cc_handshake",
+    "rdp_neg_response_parse",
+    "rdp_neg_failure_parse",
+    "nla_required_detection",
+    "standard_rdp_accepted_detection",
+    "protocol_bitmap_decode (STANDARD/SSL/CredSSP/CredSSP-Ex)",
+    "bluekeep_candidate_text (name-only, no active probe)",
+    "fingerprint_finding",
+    "runbook (nmap rdp-enum-encryption + xfreerdp fallback)"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "rdp_ntlm_info_extraction",
+      "kind": "passive",
+      "value": "critical",
+      "protocol_reference": "[MS-RDPBCGR] 5.4.5 Enhanced Security; [MS-CSSP] 3.1.5; [MS-NLMP] 2.2.1.2 CHALLENGE_MESSAGE (TargetInfo AV_PAIRs: MsvAvNbComputerName, MsvAvNbDomainName, MsvAvDnsComputerName, MsvAvDnsDomainName, MsvAvDnsTreeName, MsvAvTargetName; Version field = OS major/minor/build)",
+      "description": "After selecting CredSSP/Hybrid, complete TLS then send NTLMSSP NEGOTIATE_MESSAGE inside the CredSSP TSRequest.negoTokens. The server's CHALLENGE_MESSAGE leaks NetBIOS hostname, NetBIOS domain, DNS FQDN, DNS domain, DNS forest, and OS build (e.g. 10.0.19041). This is what nmap rdp-ntlm-info does and it is the single highest-ROI RDP recon primitive. Currently zero of this is captured.",
+      "finding_kind": "rdp_ntlm_info",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "bluekeep_active_probe_cve_2019_0708",
+      "kind": "active",
+      "value": "critical",
+      "protocol_reference": "[MS-RDPBCGR] 2.2.1.8 Client MCS Channel Join Request; MS_T120 static virtual channel (name 'MS_T120', channel id 0x1F). PoC by @zerosum0x0 / metasploit auxiliary/scanner/rdp/cve_2019_0708_bluekeep.",
+      "description": "Module NAMES BlueKeep in the rdp_no_nla finding but never probes it. Real detection: complete X.224 + MCS Connect Initial with a client-mcs-channel-def that includes MS_T120 in Client Network Data, join it twice, and infer patched/vulnerable from the disconnect provider ultimatum PDU (unpatched sends 0x00000005 on second join; patched drops or returns different code). Delivers a definitive CVE-2019-0708 verdict instead of a candidate-by-banner guess.",
+      "finding_kind": "rdp_bluekeep_vulnerable",
+      "cwe": [
+        "CWE-416"
+      ]
+    },
+    {
+      "name": "tls_certificate_extraction",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "[MS-RDPBCGR] 5.4.5.1 TLS Security; RFC 5246. Same primitive already used by the ssl scanner.",
+      "description": "When SSL/CredSSP is negotiated, wrap the socket with ssl.SSLContext (verify_mode=NONE) and pull peer cert: subject CN, SANs, issuer, notBefore/notAfter, key size, signature alg, self-signed. Feeds hostnames and domains cross-service, and produces the standard weak-cert findings (self-signed default 'WMSvc-*', expired, sha1WithRSA, RSA<2048). None of this is done today.",
+      "finding_kind": "rdp_tls_cert / rdp_self_signed_cert",
+      "cwe": [
+        "CWE-295",
+        "CWE-327"
+      ]
+    },
+    {
+      "name": "credentialed_nla_spray_validate",
+      "kind": "auth",
+      "value": "high",
+      "protocol_reference": "[MS-CSSP] 3.1.5 TSRequest exchange with SPNEGO/NTLM authInfo; xfreerdp /u /p /d supports validation via NLA.",
+      "description": "analyze() accepts creds but ignores them. A one-shot NLA authenticate \u2014 either via socket-level NTLMSSP AUTHENTICATE_MESSAGE inside CredSSP or by shelling xfreerdp with a 0-sec grace timeout \u2014 yields authoritative valid-creds proof AND detects Restricted Admin acceptance (pass-the-hash surface). Compare with rdesktop-style RC4 fallback probing for Standard RDP servers.",
+      "finding_kind": "rdp_valid_credentials / rdp_restricted_admin_enabled",
+      "cwe": [
+        "CWE-287",
+        "CWE-522"
+      ]
+    },
+    {
+      "name": "mcs_connect_initial_server_data_parse",
+      "kind": "passive",
+      "value": "high",
+      "protocol_reference": "[MS-RDPBCGR] 2.2.1.4 (Server MCS Connect Response), 2.2.1.4.2 Server Core Data (rdpVersion, clientRequestedProtocols, earlyCapabilityFlags), 2.2.1.4.3 Server Security Data (encryptionMethod, encryptionLevel, serverRandom, serverCertificate \u2014 Proprietary RSA cert w/ RC4 key or X.509)",
+      "description": "After X.224 selects Standard RDP, send Client MCS Connect Initial + GCC ConferenceCreateRequest with Client Core/Security/Network Data blocks. Parse Server Core Data for RDP version (0x00080005 = RDP 8.1, 0x00080004 = RDP 8.0 etc.) and Server Security Data for encryption level (NONE=0, LOW=1, CLIENT_COMPATIBLE=2, HIGH=3, FIPS=4) and encryption method (40/56/128-bit RC4 or FIPS). LOW/40-bit are CWE-327 findings; also gives exact server version for BlueKeep/DejaBlue confidence.",
+      "finding_kind": "rdp_weak_encryption_level / rdp_version",
+      "cwe": [
+        "CWE-327",
+        "CWE-326"
+      ]
+    },
+    {
+      "name": "rdp_neg_req_flags_restricted_admin_probe",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "[MS-RDPBCGR] 2.2.1.1.1 RDP Negotiation Request negReqFlags: 0x01 RESTRICTED_ADMIN_MODE_REQUIRED, 0x02 REDIRECTED_AUTHENTICATION_MODE_REQUIRED, 0x08 CORRELATION_INFO_PRESENT.",
+      "description": "Current _X224_CR hardcodes flags=0x00. Sending 0x01 (RESTRICTED_ADMIN) or 0x02 (REDIRECTED_AUTH) and observing whether the server accepts the negotiation vs. returns a NEG_FAILURE reveals whether Restricted Admin / Remote Credential Guard is enabled \u2014 Restricted Admin allows pass-the-hash and is a direct lateral-movement enabler once you get NT hashes from another module.",
+      "finding_kind": "rdp_restricted_admin_supported",
+      "cwe": [
+        "CWE-287"
+      ]
+    },
+    {
+      "name": "credssp_version_cve_2018_0886",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "[MS-CSSP] 2.2.1 TSRequest.version field (value 2 = pre-patch, 3 = March-2018 CredSSP RCE patch, 4/5/6 = later); CVE-2018-0886.",
+      "description": "The TSRequest that CredSSP wraps around NTLM carries a version integer. A server that still negotiates version <= 2 is missing the CVE-2018-0886 patch and is vulnerable to the CredSSP logon-cred injection RCE. Requires wrapping TLS + issuing a minimal TSRequest and reading back the version \u2014 same connection you'd use for rdp_ntlm_info.",
+      "finding_kind": "rdp_credssp_unpatched",
+      "cwe": [
+        "CWE-287",
+        "CWE-346"
+      ]
+    },
+    {
+      "name": "dejablue_version_gating",
+      "kind": "passive",
+      "value": "medium",
+      "protocol_reference": "CVE-2019-1181 / CVE-2019-1182 / CVE-2019-1222 / CVE-2019-1226 \u2014 RDS pre-auth RCE affecting Win7 SP1 through Server 2019 pre-Aug-2019.",
+      "description": "Once OS build is extracted via rdp_ntlm_info, gate a DejaBlue-candidate finding on build < August-2019 patch levels (10.0.17763.720, 10.0.17134.984, 10.0.16299.1358, 10.0.15063.2021, 10.0.14393.3181, 6.1.7601.24499). Wins the confidence-vs-noise fight because it uses observed build rather than banner.",
+      "finding_kind": "rdp_dejablue_candidate",
+      "cwe": [
+        "CWE-416"
+      ]
+    },
+    {
+      "name": "tls_cipher_and_protocol_enumeration",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "RFC 8446/5246; RDP TLS is an unmodified TLS stream after X.224 selects SSL.",
+      "description": "Enumerate offered TLS versions (SSLv3/TLS1.0/1.1 acceptance) and cipher suites (RC4, 3DES, NULL, EXPORT, CBC-only) once inside the TLS wrap. Same primitives as ssl_scan; RDP TLS is a common holdout of TLS1.0 and RC4 on older Windows RDS.",
+      "finding_kind": "rdp_weak_tls_version / rdp_weak_cipher",
+      "cwe": [
+        "CWE-327",
+        "CWE-326"
+      ]
+    },
+    {
+      "name": "rdp_udp_transport_detection",
+      "kind": "active",
+      "value": "low",
+      "protocol_reference": "[MS-RDPEUDP] 3389/UDP with SYN datagram (0x01 flag) \u2014 reveals Reliable/Lossy UDP transport support.",
+      "description": "Purely 3389/tcp today. UDP transport is an alternate fastpath channel and its presence hints at RDS 8.1+ deployments. Low value but trivial once a UDP-capable probe framework exists.",
+      "finding_kind": "rdp_udp_supported",
+      "cwe": []
+    },
+    {
+      "name": "rd_gateway_bluegate_cve_2020_0609",
+      "kind": "active",
+      "value": "medium",
+      "protocol_reference": "CVE-2020-0609/0610 \u2014 Remote Desktop Gateway UDP handshake bug on 3391/UDP.",
+      "description": "Not on 3389 but a natural sibling scan when RDP appears \u2014 probe 3391/udp for RDG DTLS handshake and version gate. Module today ignores RDG entirely.",
+      "finding_kind": "rdgateway_bluegate_candidate",
+      "cwe": [
+        "CWE-787"
+      ]
+    },
+    {
+      "name": "smartcard_redir_and_rd_channels_enum",
+      "kind": "passive",
+      "value": "low",
+      "protocol_reference": "[MS-RDPBCGR] 2.2.1.3.4 Client Network Data \u2014 server echoes accepted static channels in Server Network Data 2.2.1.4.4; virtual channel names hint at feature set (rdpsnd, drdynvc, cliprdr, rdpdr).",
+      "description": "Cheap enumeration of which RDP virtual channels a server accepts (clipboard, drive, printer, smartcard) \u2014 informational, but useful for post-exploitation planning."
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "hostnames: NetBIOS + DNS computer name from NTLMSSP CHALLENGE_MESSAGE AV_PAIRs (MsvAvNbComputerName, MsvAvDnsComputerName) \u2014 never emitted; would feed SMB, LDAP, Kerberos scanners and cred_quickconnect",
+    "domains: DNS domain + forest tree from NTLMSSP CHALLENGE_MESSAGE (MsvAvDnsDomainName, MsvAvDnsTreeName) \u2014 never emitted; would seed Kerberos realm and LDAP baseDN discovery",
+    "hostnames: TLS certificate subject CN + SAN when SSL/CredSSP negotiated \u2014 never captured",
+    "relay_targets: NLA-off servers (Standard RDP accepted) are cleartext-cred receivers of on-path attacks; a Restricted-Admin-enabled server is a PtH relay target \u2014 neither is emitted as a relay_targets fact",
+    "os_fingerprint: NTLMSSP Version field yields exact OS major.minor.build (e.g. 10.0.17763) \u2014 never emitted; today's rdp_bluekeep_candidate has to guess from nmap banner",
+    "known_users: none directly, but a valid-cred find from NLA spray would seed known_users with (user, domain) \u2014 module ignores creds entirely",
+    "hashes: NLA/CredSSP NTLMSSP exchange technically produces an NTLMv2 challenge/response pair on the wire during authenticated probes; if we ever perform NLA cred validation, capturing our own outbound response is moot but a MITM/relay-mode probe (relay recce) could stash server challenges \u2014 currently unimplemented"
+  ],
+  "priority_gaps": [
+    "rdp_ntlm_info_extraction \u2014 one TLS wrap + one CredSSP TSRequest + parse NTLMSSP CHALLENGE_MESSAGE AV_PAIRs. Yields hostname, DNS domain, forest, and exact OS build. Feeds hostnames/domains/os across the whole fabric. Highest ROI by a wide margin.",
+    "bluekeep_active_probe_cve_2019_0708 \u2014 MS_T120 channel-join probe turns the current name-only 'candidate' finding into a real CONFIRMED CVE-2019-0708 verdict; matches metasploit auxiliary scanner behavior.",
+    "tls_certificate_extraction \u2014 reuse existing ssl-scan cert parsing to pull CN/SAN/self-signed/expiry/keysize once CredSSP or SSL is negotiated; seeds hostnames cross-service and yields the standard weak-cert findings.",
+    "credentialed_nla_spray_validate + restricted_admin negReqFlag probe \u2014 analyze() already receives creds and ignores them; adding NLA validation gives valid-cred proof and (via negReqFlags=0x01) tells us whether Restricted Admin is on, which is the RDP-PtH lateral movement gate."
+  ],
+  "notes": "Module is 217 lines and does essentially one PDU. All post-negotiation intelligence ([MS-RDPBCGR] MCS Connect, [MS-CSSP] TSRequest, [MS-NLMP] AV_PAIRs, TLS layer) is unimplemented. BlueKeep is verbally referenced in the rdp_no_nla finding text but never actively probed \u2014 this is the single most misleading current behavior because it reads as a check but is not. There is no credentialed code path despite the analyze() signature accepting creds. There is no emission into the cross-service known_users/hostnames/domains/relay_targets pipeline even though CredSSP/NTLMSSP would trivially yield hostname, DNS domain, forest, and OS build."
+}

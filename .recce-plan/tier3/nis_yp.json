@@ -1,0 +1,246 @@
+{
+  "service": "NIS / YP (Network Information Service, Sun Yellow Pages)",
+  "summary": "NIS/YP is registered through rpcbind/portmap on 111 (ypbind = program 100007, ypserv = program 100004) and typically served on ephemeral TCP+UDP ports. recce already speaks ONC RPC over TCP in `recce/services/nfs.py` (portmap DUMP + GETPORT, XDR cursor, record marking) and enumerates every program registered on 111, so ypserv/ypbind are already surfaced as raw numeric program IDs when NFS's `nfs_rpc` low finding fires \u2014 but there is NO NIS/YP-aware follow-up: no ypserv/ypbind program name recognition, no NIS domain discovery, no YPPROC_MAPLIST enumeration, and no YPPROC_ALL map dump. This is a large legacy-Unix credential-theft gap: on Solaris 8/9/10, HP-UX, AIX 5, and IRIX NIS masters the passwd.byname / passwd.byuid maps still ship crypt(3)-style hashes (DES or $1$/$5$/$6$) that anyone able to name the NIS domain can dump with `ypcat`. The domain name is often the DNS domain, the hostname suffix, or a well-known default; once known, `ypcat -d DOMAIN passwd` returns hashes offline-crackable in minutes and immediately reusable against SSH / telnet / rlogin / SMB on the same estate. New module `recce/services/nisyp.py` should mirror `nfs.py`'s shape: reuse `portmap_dump` and `getport` (both are already in nfs.py \u2014 factor them into `svccommon` or import), add a UDP RPC transport (NFS is TCP-only today; NIS is commonly UDP-only), issue YPPROC_DOMAIN with a candidate domain-name list, and on ACK enumerate maps and dump the credential-bearing ones. All read-only; no map writes, no ypset.",
+  "default_ports": [
+    "111/tcp (rpcbind \u2014 how ypserv/ypbind are located)",
+    "111/udp (rpcbind \u2014 UDP is the common transport for portmap/NIS)",
+    "ephemeral (ypserv 100004, ypbind 100007 \u2014 port learned via GETPORT, historically often 600-1023 privileged range)",
+    "714/udp, 717/tcp, 834/udp (occasional fixed ports for ypserv on Solaris configurations)"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "notes": "No NIS/YP-specific code exists. Grep for `ypserv|ypbind|ypall|ypproc|100004|100007|passwd\\.byname` across recce/*.py returns zero hits. The portmapper DUMP in `recce/services/nfs.py` (`portmap_dump`, `getport`, ONC-RPC-over-TCP with record marking, XDR `_Cur` cursor, `_pack_call`) already sees program 100004/100007 when they register, but treats them as anonymous numeric program IDs and folds them into the `nfs_rpc` low-severity finding when no NFS exports are present. `serviceenum.py` has no 'nis'/'yp' hint and no `100004`/`100007` mapping. `svcdetect.py` port table lists 111 as 'rpcbind' but does not surface any NIS association. The port-registered-but-unnamed case means an ypserv on a Solaris host today shows up as a generic RPC program number, not as 'ypserv/NIS' with the credential-dump narrative that makes it actionable.",
+    "files": [
+      "recce/services/nfs.py",
+      "recce/services/serviceenum.py",
+      "recce/services/svcdetect.py",
+      "recce/services/msrpc.py"
+    ]
+  },
+  "capabilities": [
+    {
+      "name": "portmap_nis_recognition",
+      "kind": "passive",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1057 \u00a7A.1 (portmapper PMAPPROC_DUMP); Sun YP protocol \u2014 program 100004 (ypserv), 100007 (ypbind), 100009 (yppasswdd), 100028 (ypupdated)",
+      "description": "In the portmap DUMP already collected by nfs.probe, name programs 100004 as ypserv, 100007 as ypbind, 100009 as yppasswdd, 100028 as ypupdated. Emit a distinct NIS-present signal instead of the current generic 'nfs_rpc' bucket. Feeds every downstream capability and lets the finding narrative say 'NIS master reachable' before any active probe.",
+      "notes": "Cheapest possible win: pure data-driven, no new wire traffic \u2014 the numbers are already in probes['programs']. Best implemented by having nisyp.py consume nfs.probe()'s output (or by lifting portmap_dump to svccommon so both modules call it)."
+    },
+    {
+      "name": "onc_rpc_udp_transport",
+      "kind": "passive",
+      "value": "high",
+      "cwe": [],
+      "protocol_reference": "RFC 1057 \u00a710 (RPC over UDP)",
+      "description": "Add a UDP RPC send/recv path parallel to nfs.py's TCP record-marking path. NIS is very frequently UDP-only (portmap DUMP on UDP/111 \u2192 GETPORT UDP \u2192 ypserv on UDP). Reuse _pack_call from nfs.py verbatim (no record marker on UDP \u2014 one datagram per call). Bound reply size (say 64 KiB) and reject truncated datagrams.",
+      "notes": "Prerequisite for every NIS probe below on real Solaris/HP-UX hosts. Also enables portmap DUMP on UDP/111 for hosts that firewall 111/tcp but leave 111/udp open (common). This is a general-purpose transport addition \u2014 factor to svccommon so future modules (rpcinfo-over-UDP, NIS+, mountd-over-UDP) can share it."
+    },
+    {
+      "name": "ypserv_getport",
+      "kind": "active",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1057 \u00a7A.1 PMAPPROC_GETPORT",
+      "description": "For each host with 100004 registered, issue PMAPPROC_GETPORT (prog=100004, vers=2, prot=UDP|TCP) to resolve ypserv's actual listening port. Record the resolved (host, port, prot, vers) so downstream YPPROC_* calls hit the right endpoint. Try v2 first (RFC 1094-era), then v1.",
+      "notes": "Reuse nfs.getport with prot=17 (UDP) added. No credential required."
+    },
+    {
+      "name": "ypbind_getdomain",
+      "kind": "active",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Sun YPBIND protocol \u2014 YPBINDPROC_DOMAIN (proc 1)",
+      "description": "Query ypbind with a candidate domain (see next capability). YPBINDPROC_DOMAIN returns YPBIND_SUCC_VAL and the ypserv binding info (address/port of the master/slave for that domain), or YPBIND_FAIL_VAL with reason NOMAP/RESOURCE/NODOMAIN. A SUCC reply proves the domain name is correct without touching ypserv itself.",
+      "notes": "Read-only. Do NOT call YPBINDPROC_SETDOM \u2014 that is the ypset write path (mostly restricted, but never call it)."
+    },
+    {
+      "name": "nis_domain_discovery",
+      "kind": "active",
+      "value": "high",
+      "cwe": [
+        "CWE-521",
+        "CWE-798"
+      ],
+      "protocol_reference": "SunOS ypserv(1M) \u2014 domain-name gating; ypserv rejects every request whose domain does not match a served domain",
+      "description": "The NIS domain name is the only 'auth' between an attacker and the credential maps. Build a candidate list and probe YPPROC_DOMAIN (proc 1) \u2014 a TRUE reply means that domain is served. Candidates: (a) the host's DNS domain from reverse DNS / hostname, (b) the first label of the hostname, (c) the resolver domain from /etc/resolv.conf if seen elsewhere in recce, (d) recce's inferred site name, (e) short list of well-known defaults ('nis', 'nisdomain', 'yp', 'sun', 'default', 'ypdomain', the site name from LDAP/AD findings if present). Cap attempts to ~16 per host with an exponential-backoff timeout to avoid syslog flood.",
+      "notes": "This is the make-or-break capability \u2014 without a valid domain nothing else works. Wire in known domain names harvested by other recce modules (SMB workgroup, LDAP base DN, Kerberos realm, resolv.conf/DNS zone) via the shared analyze-context so hits are not left to chance."
+    },
+    {
+      "name": "yp_maplist",
+      "kind": "active",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "nis_maplist",
+      "protocol_reference": "Sun YP \u2014 YPPROC_MAPLIST (proc 11): returns every map name in a domain",
+      "description": "Once a domain is confirmed, call YPPROC_MAPLIST to enumerate every map served in it. The list itself is a strong information leak: presence of passwd.byname/passwd.byuid/shadow.byname/netgroup.byname/hosts.byname/services.byname tells the operator exactly which follow-on ypall targets are worth pulling.",
+      "notes": "Cheap (single RPC), high-signal, safe. Emits its own finding even if map-dump fails."
+    },
+    {
+      "name": "yp_all_passwd_dump",
+      "kind": "exploit",
+      "value": "critical",
+      "cwe": [
+        "CWE-522",
+        "CWE-256",
+        "CWE-319"
+      ],
+      "finding_kind": "nis_passwd_hashes",
+      "protocol_reference": "Sun YP \u2014 YPPROC_ALL (proc 8): streams every (key, value) pair in a map back to the caller",
+      "description": "For each interesting map (passwd.byname, passwd.byuid, shadow.byname, security/passwd.adjunct.byname on Solaris) issue YPPROC_ALL and stream the response. Parse getpwent-format lines (`name:hash:uid:gid:gecos:home:shell`) and count records whose second field is a real crypt hash (`$1$`, `$5$`, `$6$`, or a 13-char DES field \u2014 anything other than 'x', '*', '!'). CRITICAL severity when hashed passwords are recovered. Write hashes to the credentials store (see cross_service_wire_candidates) so the crack loop / password-spray to SSH/telnet/rlogin/SMB picks them up.",
+      "notes": "This is THE reason NIS is on the tier-2 list. On legacy Solaris/HP-UX/IRIX with default configurations these hashes are unauthenticatedly retrievable given only the domain name. Bound the streamed record count (say 5000) and total bytes (say 8 MiB) with the same guards nfs.py uses for portmap DUMP. Store hashes in the encrypted creds cache, not the on-disk findings JSON \u2014 the finding narrative should reference the count, sample usernames, and a hash-format fingerprint, not the raw hashes."
+    },
+    {
+      "name": "yp_all_group_dump",
+      "kind": "exploit",
+      "value": "high",
+      "cwe": [
+        "CWE-522",
+        "CWE-732"
+      ],
+      "finding_kind": "nis_group_hashes",
+      "protocol_reference": "Sun YP \u2014 YPPROC_ALL on group.byname / group.bygid",
+      "description": "Dump group.byname and group.bygid. Some sites (especially HP-UX Trusted Mode migrations, old Solaris) also carry hashed group passwords. More importantly: `wheel`, `sudo`, `sys`, `bin`, `adm` membership tells the operator exactly which user accounts to target with the cracked passwd hashes for privilege gain.",
+      "notes": "Feed group membership into the finding narrative \u2014 'user X in wheel is present in passwd.byname with a DES hash' is a far stronger finding than either half alone."
+    },
+    {
+      "name": "yp_all_netgroup_dump",
+      "kind": "exploit",
+      "value": "high",
+      "cwe": [
+        "CWE-284",
+        "CWE-269"
+      ],
+      "finding_kind": "nis_netgroup_trust",
+      "protocol_reference": "Sun YP \u2014 YPPROC_ALL on netgroup, netgroup.byhost, netgroup.byuser",
+      "description": "Dump netgroup maps. Netgroups are `(host, user, domain)` triples used by /etc/exports, /etc/hosts.equiv, .rhosts, and NFS export ACLs to grant host-to-host or user-to-host trust. A netgroup that names 'root' or '-' as user is a lateral-movement primitive: any host in that netgroup can rlogin/rsh as that user without a password on any host that trusts the netgroup. This is the classic NIS trust-graph leak.",
+      "notes": "Cross-link findings: NFS module already reports world-mountable exports; if an export's ACL references a netgroup we dumped, the two findings should co-cite. Same for rservices (rlogin/rsh) \u2014 a netgroup + rservices port open is a chained-medium-to-high."
+    },
+    {
+      "name": "yp_all_host_and_service_maps",
+      "kind": "active",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "nis_topology_leak",
+      "protocol_reference": "Sun YP \u2014 YPPROC_ALL on hosts.byname/hosts.byaddr, services.byname, ethers.byname, networks.byname, ypservers",
+      "description": "Dump the non-credential maps for scope expansion: hosts.byname/byaddr = additional IPs to add to scope, services.byname = site-specific service naming, ethers.byname = MAC-to-hostname (VLAN / subnet inference), ypservers = every NIS slave (each of which is another ypserv reachable with the same domain name). These are 'infrastructure recon' rather than credential dumps.",
+      "notes": "Feed discovered hosts.byname entries into recce's target expander (behind a --allow-scope-expand or notes-only flag \u2014 do not silently rescan)."
+    },
+    {
+      "name": "ypbind_domain_ack_without_maps",
+      "kind": "auth",
+      "value": "medium",
+      "cwe": [
+        "CWE-306"
+      ],
+      "finding_kind": "nis_domain_leak",
+      "protocol_reference": "Sun YPBIND \u2014 YPBINDPROC_DOMAIN success vs. YPPROC_DOMAIN with a non-served name",
+      "description": "Some hardened deployments run `securenets` \u2014 ypserv answers YPPROC_DOMAIN with TRUE (or replies YP_TRUE to a NULL) yet refuses YPPROC_ALL from non-authorised clients. Distinguish the two states: 'domain leaks / maps refused' is a medium finding + narrative telling the operator to run ypall from a source IP inside securenets (e.g., after gaining a foothold). 'domain leaks + maps dump' is the critical one above.",
+      "notes": "Prevents a false-negative miss where the scan says 'NIS not exploitable' when the truth is 'not exploitable from THIS source IP.'"
+    },
+    {
+      "name": "yppasswdd_present",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-284",
+        "CWE-306"
+      ],
+      "finding_kind": "nis_yppasswdd",
+      "protocol_reference": "Sun yppasswdd \u2014 program 100009; yppasswd(1) protocol",
+      "description": "If 100009 (yppasswdd) is registered, emit a finding: yppasswdd accepts password-change RPCs and on many legacy configurations validates only the old password (which we may have just cracked) before writing the new one. Historical CVEs (CVE-2001-0779 buffer overflow, CVE-2015-1391 solaris yppasswdd) also apply. Do NOT invoke it \u2014 just record its presence.",
+      "notes": "Pure passive detection from the portmap dump; the finding cross-cites the passwd-hash finding as its enabler."
+    },
+    {
+      "name": "ypupdated_present",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-77",
+        "CWE-306"
+      ],
+      "finding_kind": "nis_ypupdated",
+      "protocol_reference": "Sun ypupdated \u2014 program 100028; CVE-1999-0208 (rpc.ypupdated command injection via crafted map name)",
+      "description": "If 100028 (rpc.ypupdated) is registered, emit a HIGH finding \u2014 historically this daemon has been an unauthenticated RCE vector (map-name interpolated into a shell). Report presence + version if extractable via NULL proc; do not exploit.",
+      "notes": "The 'presence alone is a finding' pattern from msrpc.py's coercion-interface enumeration is the model."
+    },
+    {
+      "name": "nis_domain_via_broadcast_hint",
+      "kind": "passive",
+      "value": "low",
+      "cwe": [
+        "CWE-200"
+      ],
+      "description": "When a UDP-broadcast recon step is available in recce's scope, note that YPBINDPROC_DOMAIN to 255.255.255.255:portmap will make any ypbind on the LAN reply with its domain + ypserv binding \u2014 a one-packet discovery of every NIS domain served on the segment. Documented in the runbook (ypcat / ypwhich / ypbroadcast) rather than executed by default.",
+      "notes": "Broadcast probing is out-of-scope for the current per-target model but worth calling out in the runbook so operators know it exists."
+    },
+    {
+      "name": "credential_wire_to_ssh_telnet_rlogin_smb",
+      "kind": "chain",
+      "value": "critical",
+      "cwe": [
+        "CWE-522",
+        "CWE-798"
+      ],
+      "description": "After yp_all_passwd_dump, the extracted (username, hash) tuples MUST flow through the same credentials store the SSH/telnet/rlogin/SMB modules read from (see recce/services/rservices.py, ssh.py, telnet.py, smb.py). Once hashcat/john has cracked any subset, the next scan iteration should spray them against every SSH/telnet/rlogin/SMB target discovered \u2014 the same estate that runs a NIS master almost always shares its credential base. This is the finding that turns 'we dumped hashes' into 'we have shells.'",
+      "notes": "This is why the finding must not just print hashes into a text file: recce's crack loop / crediblock needs a first-class hook. Model on the existing pattern used by SNMPv3 user harvest \u2192 SNMP write, or SMB null-session user harvest \u2192 smb.py spray."
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "hashed passwords (crypt DES / $1$MD5 / $5$SHA-256 / $6$SHA-512) from passwd.byname / passwd.byuid / shadow.byname \u2192 credential store consumed by ssh.py / telnet.py / rservices.py (rlogin/rsh) / smb.py / ftp.py / pop3.py / imap.py / http basic-auth / db modules (mssql/mysql/postgres/oracle) after offline crack",
+    "plaintext usernames (whether or not the hash cracks) \u2192 username-only spray lists for ssh.py, smb.py, ldap.py, kerberos AS-REP roasting if present, rservices.py, ftp.py",
+    "UID / GID membership (wheel, sudo, sys, bin, adm, root) \u2192 prioritise cracked-hash spray against privileged accounts first",
+    "netgroup triples (host, user, domain) \u2192 trust-graph edges feeding nfs.py (exports ACL by netgroup), rservices.py (hosts.equiv / .rhosts by netgroup), sshd AllowGroups. A finding on one end should cite the netgroup edge that reaches it.",
+    "hosts.byname / hosts.byaddr entries \u2192 scope-expansion candidates for the discovery module (behind an opt-in flag); each is potentially another portmap/NIS-slave/NFS-server target",
+    "ypservers map entries \u2192 additional ypserv targets (every NIS slave answers the same domain with the same maps \u2014 one dump per slave for redundancy / to work around securenets)",
+    "NIS domain name \u2192 context enrichment for ldap.py (may match AD short-name), kerberos (may match realm lowercased), smb.py workgroup, and sendmail/postfix banner correlation",
+    "rpcbind program-map deltas (100004/100007/100009/100028 all seen on the same host) \u2192 sharpens the msrpc.py-style 'known dangerous interface' finding for the Unix RPC side; today the portmap dump is only consumed by nfs.py",
+    "ethers.byname (MAC \u2194 hostname) \u2192 cross-reference with any ARP / DHCP data recce collects for VLAN inference and identifying dual-homed hosts",
+    "encrypted-hash format fingerprint (DES vs MD5-crypt vs SHA-crypt) \u2192 age indicator that feeds the OS-fingerprint / EOL-detection finding: a host still shipping 13-char DES passwd is Solaris \u22649 / HP-UX 11.11 territory, which recce should call out on its own as unsupported"
+  ],
+  "recommended_findings": [
+    {
+      "title": "NIS/YP master reachable \u2014 credential maps enumerable (passwd hashes exposed)",
+      "severity": "critical"
+    },
+    {
+      "title": "NIS domain leaks (ypserv answers YPPROC_DOMAIN) but map dumps refused \u2014 securenets partially applied",
+      "severity": "medium"
+    },
+    {
+      "title": "NIS group / netgroup maps reveal privileged trust graph (wheel membership, host-to-host trust)",
+      "severity": "high"
+    },
+    {
+      "title": "rpc.yppasswdd (100009) registered \u2014 accepts password-change RPCs (chains with cracked hashes)",
+      "severity": "medium"
+    },
+    {
+      "title": "rpc.ypupdated (100028) registered \u2014 historical unauthenticated RCE vector (CVE-1999-0208 class)",
+      "severity": "high"
+    },
+    {
+      "title": "NIS hosts.byname / ypservers leak internal topology (scope expansion)",
+      "severity": "medium"
+    },
+    {
+      "title": "Legacy crypt(3) hash format in NIS passwd maps indicates unsupported OS (Solaris \u22649 / HP-UX 11.11 / IRIX)",
+      "severity": "medium"
+    },
+    {
+      "title": "rpcbind (111) surfaces ypserv/ypbind/yppasswdd program IDs without authentication (upgrade the existing generic nfs_rpc low finding to a named NIS RPC finding)",
+      "severity": "low"
+    }
+  ],
+  "implementation_notes": "Build `recce/services/nisyp.py` mirroring `recce/services/nfs.py`'s shape (module docstring naming what leaks and why, `is_nis(port)`, `probe(ip)`, `nis_targets(hosts)`, `_NARRATIVE` dict, `finding_builder`, `findings()`, `runbook()`, `findings_to_vulns()`, `analyze()`). Reuse \u2014 do not re-implement \u2014 `_pack_call`, `_rpc`, `_recv_record`, `_parse_reply`, `_Cur`, `_xdr_pad`, `portmap_dump`, `getport` from `nfs.py` by lifting them into `svccommon.py` (or importing directly and marking the coupling in a comment). New code required: (1) a UDP-datagram sibling of `_rpc` (no record marker, one call per datagram, 64 KiB reply cap); (2) YPPROC_DOMAIN (proc 1) sender/parser \u2014 returns bool; (3) YPPROC_MAPLIST (proc 11) sender \u2014 returns list[str]; (4) YPPROC_ALL (proc 8) sender \u2014 streams key/value pairs with the same MAX_LIST / MAX_RECORD guards nfs.py already carries, but note YPPROC_ALL uses a callback-style streaming protocol over TCP that continues until the server signals YP_NOMORE, so the receiver must loop rather than read a single record; (5) `_getpwent_parse(line)` splitting on ':' and classifying the hash field. Register nisyp in `serviceenum.py` (map 'ypserv','ypbind' hints to a 'nis' bucket) and in `svcdetect.py` if a dedicated fixed port shows up. Add candidate-domain plumbing: extend the `analyze(hosts, creds, active, budget, progress, context=None)` signature so orchestrator can pass an already-known domain list (from LDAP baseDN, Kerberos realm, DNS zone, SMB workgroup, resolv.conf strings picked up elsewhere) \u2014 this makes the difference between a hit-rate of 0.5% and 60%+. Wire the credential-store handoff on the pattern already used by SNMPv3 user harvest \u2014 the yp_all_passwd_dump finding should call the same `creds.add(...)` API and reference the resulting cred-id in its detail so the follow-up SSH/telnet/rlogin/SMB spray picks the hashes up on the next analyze pass. Testing: capture a ypserv session against a real Solaris VM (available in most defensive-Unix VM archives), record the XDR wire, and stand up a stub ypserv in tests/ (proc 1/8/11 hard-coded) so the parser is exercised offline. Do NOT implement YPBINDPROC_SETDOM (ypset), YPPROC_XFR (map transfer initiate), or any yppasswdd change RPC \u2014 those are write paths and outside recce's read-only remit."
+}

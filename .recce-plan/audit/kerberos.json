@@ -1,0 +1,181 @@
+{
+  "service": "kerberos",
+  "module_files": [
+    "recce/ad/kerberos.py",
+    "tests/test_kerberoast.py",
+    "recce/scripts/services/kerberos.sh"
+  ],
+  "summary": "recce/ad/kerberos.py is a hand-rolled ASN.1 DER Kerberos client (TCP/88 only) that covers the pre-auth-less trio \u2014 AS-REP roasting, username enumeration, and PA-ETYPE-INFO2 preflight \u2014 plus RC4-HMAC credentialed Kerberoasting (with AES 17/18 accepted from the KDC but not encryptable client-side). Missing: every attack primitive that requires AES-CTS-HMAC-SHA1 crypto, PKINIT, or S4U/U2U message building; pre-auth password spraying; PAC parsing; and every 2020-2022 name-service CVE (noPac, Bronze Bit, RC4 downgrade). It also does not feed confirmed usernames, salts, cracked hashes, or realm-confirmations back into recce's cross-service stores.",
+  "existing_capabilities": [
+    "asrep_roast_no_preauth",
+    "user_enum_via_preauth_error",
+    "pa_etype_info2_preflight_rc4_vs_aes",
+    "credentialed_kerberoast_rc4",
+    "kerberoast_accepts_aes_reply_hash_format",
+    "rc4_hmac_crypto_encrypt_decrypt",
+    "kerb_checksum_hmacmd5",
+    "der_asn1_encode_decode",
+    "realm_derivation_from_known_domains",
+    "dc_ip_discovery_via_port_88",
+    "well_known_user_fallback_list",
+    "hashcat_18200_13100_19600_19700_formatting",
+    "candidate_users_from_ldap_bloodhound",
+    "findings_asrep_and_user_enum"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "Kerberos pre-auth password spraying (AS-REQ + PA-ENC-TIMESTAMP)",
+      "kind": "auth",
+      "value": "critical",
+      "description": "The module has all the primitives (rc4_encrypt + _build_as_req_preauth) to send a real pre-authenticated AS-REQ but never uses them for spraying a candidate password against the enumerated user list. KDC_ERR_PREAUTH_FAILED (24) vs a returned AS-REP is a clean success/fail oracle that raises event 4771 (usually unmonitored), NOT 4625 (SMB spray), and does not increment the SMB lockout counter on most policies \u2014 the quietest domain spray primitive available. This is the natural chain after user_enum: recce confirms 50 usernames, then it should spray 'Winter2026!' against them right there.",
+      "protocol_reference": "RFC 4120 \u00a75.4.1 (AS-REQ), \u00a77.5.3 (KDC_ERR_PREAUTH_FAILED=24)",
+      "finding_kind": "kerberos_spray_success",
+      "cwe": [
+        "CWE-521",
+        "CWE-307"
+      ]
+    },
+    {
+      "name": "AES-CTS-HMAC-SHA1 client-side crypto (etypes 17/18)",
+      "kind": "auth",
+      "value": "critical",
+      "description": "Module states explicitly 'RC4-only (etype 23) \u2014 stdlib-friendly (no AES in the standard library).' Consequence: any AS-REQ with pre-auth against an account where msDS-SupportedEncryptionTypes disables RC4 (Windows Server 2022+ default; explicitly hardened tenants) cannot be crafted, so credentialed kerberoast, spraying, and S4U all fail against modern AD. AES128/256-CTS-HMAC-SHA1-96 with PBKDF2 (RFC 3962) is implementable in stdlib (hashlib.pbkdf2_hmac + a CTS mode helper). Without it recce is a legacy-RC4 tool.",
+      "protocol_reference": "RFC 3961 \u00a76.3, RFC 3962 \u00a74 (aes256-cts-hmac-sha1-96, iter count 4096, PBKDF2-HMAC-SHA1 string-to-key)",
+      "finding_kind": "kerberoast_aes",
+      "cwe": [
+        "CWE-327"
+      ]
+    },
+    {
+      "name": "noPac / sAMAccountName spoofing (CVE-2021-42278 + CVE-2021-42287)",
+      "kind": "exploit",
+      "value": "critical",
+      "description": "Rename a computer account (or created machine via MachineAccountQuota) to 'DC01' with no trailing $, request a TGT for it, then rename it back and use S4U2Self to obtain a TGT for a Domain Admin against the real DC01$ (KDC falls back on prefix lookup). recce has AS-REQ, KRB-ERROR classification, and TGS-REQ primitives; adding the rename-race + S4U2Self step turns Kerberos foothold into instant domain compromise on any DC missing the Nov-2021 KB. No detection of unpatched KDCs today.",
+      "protocol_reference": "MS-KILE \u00a73.3.5.6.1 (name canonicalization), MSRC KB5008380 / KB5008602",
+      "finding_kind": "nopac_vulnerable",
+      "cwe": [
+        "CWE-287",
+        "CWE-284"
+      ]
+    },
+    {
+      "name": "S4U2Self / S4U2Proxy (MS-SFU) \u2014 constrained delegation & Bronze Bit",
+      "kind": "exploit",
+      "value": "critical",
+      "description": "No PA-FOR-USER (S4U2Self) or additional-tickets (S4U2Proxy) message construction. With a service-account credential recce cannot impersonate a Domain Admin against that service's SPN (the standard delegation abuse chain: printerbug/webclient coerce -> RBCD write -> S4U). Also blocks Bronze Bit (CVE-2020-17049): flip forwardable bit on the returned ticket, S4U2Proxy against a target that would otherwise refuse \u2014 protection-level test AND primitive. Both are the top-tier AD escalation attacks currently unrepresented.",
+      "protocol_reference": "[MS-SFU] \u00a73.2.5.1 (S4U2self), \u00a73.2.5.2 (S4U2proxy); MSRC CVE-2020-17049",
+      "finding_kind": "delegation_abuse",
+      "cwe": [
+        "CWE-287",
+        "CWE-269"
+      ]
+    },
+    {
+      "name": "PKINIT (RFC 4556) + UnPAC-the-hash",
+      "kind": "auth",
+      "value": "high",
+      "description": "No PA-PK-AS-REQ construction. Shadow-Credentials attack (msDS-KeyCredentialLink write from a lesser-priv, then PKINIT-auth as the target) currently has no auth path inside recce \u2014 the LDAP side of the write is doable elsewhere but recce cannot then obtain the TGT. UnPAC-the-hash (PKINIT -> U2U TGS -> PAC_CREDENTIAL_INFO decrypts to the target's NT hash) is likewise unreachable. This is the standard modern (post-'ain't-my-fault-msDS-KeyCredentialLink-is-writable') AD path from cert to NT hash.",
+      "protocol_reference": "RFC 4556 \u00a73.2 (PA-PK-AS-REQ/REP), MS-PAC \u00a72.6 PAC_CREDENTIAL_INFO, MS-KILE \u00a73.2.5.6 (User2User)",
+      "finding_kind": "shadow_credentials_pkinit",
+      "cwe": [
+        "CWE-295",
+        "CWE-287"
+      ]
+    },
+    {
+      "name": "PAC parsing on AS-REP / TGS-REP",
+      "kind": "passive",
+      "value": "high",
+      "description": "asrep_hash captures cipher bytes for cracking but no code decrypts (RC4-side we CAN, we have the key from PA-ENC-TS spray) or parses the PAC. Parsing PAC_LOGON_INFO gives primary group RID, SID history, group SID array, logon domain \u2014 a free BloodHound-lite group dump per successful auth. PAC_CREDENTIAL_INFO (PKINIT branch) gives the NT hash. Currently zero PAC awareness even though recce holds the session key on the credentialed path.",
+      "protocol_reference": "MS-PAC \u00a72.5 PAC_LOGON_INFO, \u00a72.6 PAC_CREDENTIAL_INFO, \u00a72.4 PAC_INFO_BUFFER; RFC 4757 \u00a73",
+      "finding_kind": "pac_group_disclosure",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "RC4-HMAC etype downgrade detection & policy check",
+      "kind": "passive",
+      "value": "high",
+      "description": "PA-ETYPE-INFO2 preflight reports has_rc4/aes_only per user but there is no domain-wide roll-up: how many accounts still allow RC4? A domain that ships krbtgt with RC4 enabled (default until Nov-2022 hardening / CVE-2022-37966) means every TGT can be forged with an NT hash instead of AES key \u2014 the classic Golden Ticket precondition. Also: no detection of DES (etype 1/3) still being accepted, which is a hard fail against modern CIS baselines.",
+      "protocol_reference": "RFC 4120 \u00a77.5.1 etype table; MSRC CVE-2022-37966 (RC4 removal); CIS AD Domain L1 2.3.11.1",
+      "finding_kind": "kerberos_rc4_still_enabled",
+      "cwe": [
+        "CWE-327"
+      ]
+    },
+    {
+      "name": "AS-REP roasting for machine accounts and DONT_REQ_PREAUTH on krbtgt/trust accounts",
+      "kind": "passive",
+      "value": "high",
+      "description": "candidate_users explicitly filters '$' names ('# skip machine accounts'). Computer accounts with pre-auth disabled DO exist (rare but real, and trust-account $ names \u2014 DOMAIN$ trust-in \u2014 are AS-REP roastable and yield the trust key -> full inter-realm ticket forging). Also no explicit probe for krbtgt/OLD or krbtgt with DONT_REQ_PREAUTH set (a badly staged password reset can leave it that way). One-line fix but zero coverage.",
+      "protocol_reference": "MS-KILE \u00a73.1.5.1, [MS-ADTS] \u00a76.1.6.7.9 (trust account naming)",
+      "finding_kind": "asrep_trust_account",
+      "cwe": [
+        "CWE-262",
+        "CWE-522"
+      ]
+    },
+    {
+      "name": "KDC time-skew disclosure + fingerprinting",
+      "kind": "passive",
+      "value": "medium",
+      "description": "KRB_AP_ERR_SKEW (37) responses include the KDC's ctime/cusec \u2014 an unauthenticated server-clock oracle useful for cache-timing / replay windows and for detecting a KDC drifting off NTP (attacker-controlled DHCP+NTP scenarios). Also nothing distinguishes MIT/Heimdal/AD KDCs \u2014 behavioral fingerprinting via error codes (AD emits STATUS_ codes in e-data, Heimdal does not) drives which follow-on attacks apply.",
+      "protocol_reference": "RFC 4120 \u00a75.9.1 KRB-ERROR ctime/cusec, \u00a77.5.9 (KRB_AP_ERR_SKEW=37)",
+      "finding_kind": "kdc_fingerprint",
+      "cwe": [
+        "CWE-200",
+        "CWE-208"
+      ]
+    },
+    {
+      "name": "Kerberos over UDP + fragmentation (RFC 4120 \u00a77.2.1)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "_send_recv is TCP-only. UDP/88 is the default for many MIT/Heimdal deployments and some AD sites; a firewall that permits UDP/88 but drops TCP/88 currently reads as 'no KDC'. UDP is also the classic path for the KRB-ERROR truncation fingerprint (an AS-REP over the MTU forces KRB_ERR_RESPONSE_TOO_BIG=52) \u2014 a reliable AD-vs-MIT signal.",
+      "protocol_reference": "RFC 4120 \u00a77.2.1 (UDP/TCP transport, KRB_ERR_RESPONSE_TOO_BIG)",
+      "finding_kind": "kerberos_udp_fallback",
+      "cwe": [
+        "CWE-693"
+      ]
+    },
+    {
+      "name": "kpasswd probe (TCP/UDP 464)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "The Kerberos password-change protocol on port 464 is often exposed alongside 88 and supports a set-password variant that requires only a valid TGT and the target principal (no old password) \u2014 the exact primitive Impacket's changepasswd.py uses after AS-REP-roasting or noPac. recce does not scan for or interact with 464 today, so a critical post-crack pivot is invisible.",
+      "protocol_reference": "RFC 3244 (Microsoft set-password extension), MS-KILE \u00a73.2.5.7",
+      "finding_kind": "kpasswd_exposed",
+      "cwe": [
+        "CWE-306"
+      ]
+    },
+    {
+      "name": "FAST / armoring detection (RFC 6113)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "FAST-armored AS-REQ hides PA-ENC-TIMESTAMP inside a FAST tunnel, defeating pre-auth password spraying and preventing PA-ETYPE-INFO2 leakage. Detecting whether the KDC advertises PA-FX-FAST (PA-DATA type 136) tells the operator whether spraying is even viable and, conversely, whether AS-REP roasting is still the ONLY path. Zero awareness currently.",
+      "protocol_reference": "RFC 6113 \u00a75.4 (PA-FX-FAST=136), MS-KILE \u00a73.1.5.7 (armored FAST)",
+      "finding_kind": "kerberos_fast_enforced",
+      "cwe": [
+        "CWE-693"
+      ]
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "Confirmed valid usernames (state='valid') from roast_user do not feed a cross-service known_users store \u2014 LDAP anonymous, SMB spray, HTTP form login all re-derive names instead of consuming this authoritative list.",
+    "AS-REP hashes ($krb5asrep$23$\u2026) and TGS hashes ($krb5tgs$\u2026) captured in results/findings are not registered into a hashes/credentials store \u2014 the crack pipeline is on the operator, not orchestrated, and a later cracked password does not automatically re-fan out into SMB/LDAP/MSSQL spray.",
+    "Salt strings from parse_etype_info2 leak the canonical sAMAccountName case AND the realm (salt = REALMsAMAccountName for user accounts, host/fqdn@REALM for computer accounts) \u2014 free feed for known_hostnames and known_domains but not published.",
+    "The KDC's confirmed realm from a KRB-ERROR reply (crealm field) is authoritative and could seed known_domains with source='kerberos', but analyze() only consumes known_domains, never writes back.",
+    "SPNs used successfully in kerberoast_spn (host/fqdn:port, MSSQLSvc/fqdn:1433, HTTP/fqdn, CIFS/fqdn) name real listening services \u2014 should register the fqdn side into known_hostnames and the port hint into a services-to-probe queue (mssql/http/smb).",
+    "Detected pre-auth-disabled accounts are prime relay victims when they are computer accounts \u2014 should be flagged in relay_targets with the extra signal 'DONT_REQ_PREAUTH', which strengthens NTLM/Kerberos relay outcomes.",
+    "KDC identity (the DC's IP/fqdn) confirmed by an AS-REP is the authoritative DC pointer \u2014 currently used only locally in the module, not published as 'domain_controller' role into hosts metadata for LDAPS/SMB modules to prioritise."
+  ],
+  "priority_gaps": [
+    "Kerberos pre-auth password spray (AS-REQ + PA-ENC-TIMESTAMP against enumerated users) \u2014 highest-ROI: primitives already exist in the module, one loop + KDC_ERR_PREAUTH_FAILED (24) classification, quiet vs SMB spray, chains directly off the existing user_enum finding.",
+    "AES-CTS-HMAC-SHA1-96 client-side crypto (RFC 3962 PBKDF2 + CTS mode) \u2014 unblocks kerberoast/spray/S4U against RC4-disabled AD tenants which is now the default; without it recce silently degrades against modern domains.",
+    "noPac (CVE-2021-42278/42287) + S4U2Self/S4U2Proxy PA-FOR-USER message construction \u2014 the two dominant credential-to-DA escalation paths in AD pentests; both are pure DER + KDC exchange work atop what recce already builds.",
+    "PAC parsing on the credentialed path \u2014 recce already holds the session key on kerberoast_spn; decrypting the PAC yields group SIDs, admin membership, and (via PKINIT/U2U) the NT hash. Free intelligence per successful roast, and prerequisite for UnPAC-the-hash."
+  ],
+  "notes": "Module is well-scoped for the credential-less trio but architecturally pinned to RC4 ('no AES in the standard library'); the single most impactful investment is a stdlib AES-CTS implementation because it unblocks half of the other listed gaps (spray, S4U, PKINIT UnPAC on modern KDCs). Cross-service publishing is the second-biggest hole: everything the module learns (realm, users, salts, hashes, SPN-derived hostnames, DC role) stays local and forces every other module to rediscover it."
+}

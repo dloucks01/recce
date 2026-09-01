@@ -1,0 +1,293 @@
+{
+  "service": "WebDAV",
+  "default_ports": [
+    "inside HTTP (80/443/8080/8443/5985 etc.)"
+  ],
+  "summary": "WebDAV (RFC 4918) is an HTTP extension that turns a web server into a read/write filesystem via extra verbs (PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK) and PUT/DELETE. To an attacker an internet-facing WebDAV mount is a filesystem: it enumerates paths a normal spider can't reach (PROPFIND Depth:1/infinity), and where write verbs are unauthenticated it collapses straight to arbitrary file write and \u2014 on a server that also executes uploaded scripts (IIS ASP/ASPX, PHP handlers, JSP) \u2014 pre-auth RCE. Recce today only sends a single Depth:1 PROPFIND against seven hard-coded paths and reports a single 'WebDAV enabled' finding; it never enumerates the full verb allow-list from OPTIONS, never abuses Depth:infinity, never chains PUT+GET+execution, never tries MKCOL/COPY/MOVE, and never fingerprints the backend (mod_dav_fs vs mod_dav_svn vs SabreDAV vs IIS WebDAV vs nginx dav_ext). Promoting webdav_probe to services/webdav.py lets us treat WebDAV as a first-class service with its own tab, its own findings, and a per-mount attack path \u2014 a genuine exploit chain rather than a one-line 'enabled' info leak.",
+  "existing_coverage": {
+    "detected": true,
+    "notes": "WebDAV rides on HTTP, so svcdetect/serviceenum recognise it via the underlying HTTP port \u2014 no separate detector needed. Real coverage today: (a) webdav_probe() at recce/services/http.py:1277 fires a single Depth:1 PROPFIND against ['/','/webdav/','/dav/','/share/','/public/','/files/','/uploads/'] and reports 207/multistatus as a medium 'http-webdav' finding; (b) recce/services/web/__init__.py:184-213 enumerates OPTIONS Allow and, when PUT is listed and active, runs _prove_put (checks.py:399) \u2014 a PUT->GET->DELETE roundtrip that emits 'Arbitrary file write via HTTP PUT (proven)'. Nothing else: no PROPFIND Depth:infinity, no MKCOL/COPY/MOVE/LOCK enum, no XXE via the PROPFIND request body (Content-Type: application/xml is sent but empty), no PUT->execute chain (only PUT->read), no anonymous vs authenticated differential, no Sabre/IIS/mod_dav banner fingerprint, no upload-through-COPY (IIS 6.0 CVE-2017-7269 double-extension trick), no lock-null-resource enum. The 'http-webdav-scan' constant in parser.py/scanner.py is an nmap NSE script id, not a native probe.",
+    "files": [
+      "recce/services/http.py:1273-1314 (webdav_probe)",
+      "recce/services/http.py:1605-1621 (dav_hits caller in enum_findings)",
+      "recce/services/web/__init__.py:184-213 (Allow-header method enum + PUT proof)",
+      "recce/services/web/checks.py:223 (_DANGEROUS_METHODS)",
+      "recce/services/web/checks.py:399-417 (_prove_put PUT/GET/DELETE roundtrip)",
+      "recce/core/parser.py:285-286 (nmap http-webdav-scan mapping)",
+      "recce/core/scanner.py:225 (http-webdav-scan in nmap script list)",
+      "recce/report/docx.py:507 (CWE map for http-webdav-scan)"
+    ]
+  },
+  "capabilities": [
+    {
+      "name": "options_dav_header_enum",
+      "kind": "passive",
+      "description": "Parse OPTIONS response DAV: header (values 1/2/3) plus Allow: to fingerprint the WebDAV compliance class and the full server-declared verb set before touching state.",
+      "value": "medium",
+      "protocol_reference": "RFC 4918 \u00a710.1, \u00a718",
+      "finding_kind": "webdav_enabled",
+      "notes": "DAV: 1 = base, 2 = locking, 3 = revisions/versioning (RFC 3253). No verb tried yet \u2014 pure header read, folds MS-Author-Via and Public: too."
+    },
+    {
+      "name": "propfind_depth_infinity_enum",
+      "kind": "active",
+      "description": "PROPFIND with Depth: infinity against each accepting mount to recursively enumerate the entire tree in one request \u2014 reveals directory layout normal spiders never see.",
+      "value": "high",
+      "protocol_reference": "RFC 4918 \u00a79.1, \u00a79.1.4",
+      "cwe": [
+        "CWE-548",
+        "CWE-538"
+      ],
+      "finding_kind": "webdav_directory_enum",
+      "notes": "A server that honours Depth:infinity is BOTH an information disclosure AND a self-inflicted DoS surface (\u00a79.1.4 explicitly warns). Cap the parsed response at ~2 MiB so a huge tree doesn't wedge the scan."
+    },
+    {
+      "name": "verb_allowlist_enum",
+      "kind": "active",
+      "description": "Send each RFC 4918 verb (PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK) with a benign body against a discovered mount and record which return 2xx/207/401 vs 405 \u2014 the real allow list, not just OPTIONS.",
+      "value": "high",
+      "protocol_reference": "RFC 4918 \u00a79",
+      "cwe": [
+        "CWE-650"
+      ],
+      "finding_kind": "webdav_verbs_enabled",
+      "notes": "Servers routinely lie in OPTIONS: mod_dav advertises MKCOL/COPY/MOVE even when Limit blocks them. Empirical enum is the truth. Use a temporary /recce_dav_probe_<rand>/ collection created via MKCOL and torn down via DELETE \u2014 never touch existing paths."
+    },
+    {
+      "name": "anonymous_put_probe",
+      "kind": "exploit",
+      "description": "Attempt unauthenticated PUT of a small text marker to each writable-looking mount, GET it back to confirm write->read roundtrip, then DELETE \u2014 proves anonymous arbitrary file write.",
+      "value": "critical",
+      "protocol_reference": "RFC 4918 \u00a79.7; RFC 7231 \u00a74.3.4",
+      "cwe": [
+        "CWE-434",
+        "CWE-306",
+        "CWE-650"
+      ],
+      "finding_kind": "webdav_anon_put",
+      "notes": "Extend the existing _prove_put helper: run WITHOUT Authorization first, then WITH creds if provided, so anonymous vs credentialed writes surface as separate findings. Cleanup via DELETE (\u00a79.6) or MOVE to /trash-<rand>/."
+    },
+    {
+      "name": "put_webshell_chain",
+      "kind": "chain",
+      "description": "When anonymous PUT is confirmed AND the server signature or file-extension mapping indicates a script handler (PHP/ASP/ASPX/JSP), PUT a language-appropriate one-liner and issue a single benign command (echo <computed nonce>) to prove RCE \u2014 cleanup via DELETE.",
+      "value": "critical",
+      "protocol_reference": "RFC 4918 \u00a79.7; MS-WDV; CVE-2017-7269 (IIS 6.0)",
+      "cwe": [
+        "CWE-434",
+        "CWE-94",
+        "CWE-78"
+      ],
+      "finding_kind": "webdav_put_rce",
+      "notes": "Gate on the same --exploit / upload_shell flag the web package already uses (recce/services/web/__init__.py:127). Nonce must be a computed value (e.g. shell arithmetic) so plain reflection can't false-positive. Try the classic IIS 6.0 `.asp;.txt`/`;.jpg` bypass and `.aspx` where server=Microsoft-IIS/6.0."
+    },
+    {
+      "name": "mkcol_writable_collection",
+      "kind": "active",
+      "description": "MKCOL /recce_dav_probe_<rand>/ against each candidate root \u2014 a 201 Created proves the tester can create arbitrary directories, a write primitive and a prerequisite for COPY-based staging.",
+      "value": "high",
+      "protocol_reference": "RFC 4918 \u00a79.3",
+      "cwe": [
+        "CWE-434",
+        "CWE-650"
+      ],
+      "finding_kind": "webdav_mkcol_allowed",
+      "notes": "Followed by DELETE for cleanup. Distinguish 201 (created) from 405/409 (parent missing) to avoid noise."
+    },
+    {
+      "name": "copy_move_upload_bypass",
+      "kind": "exploit",
+      "description": "Upload a benign resource with an inert extension via PUT (e.g. .txt), then COPY/MOVE it to a script extension (.asp/.php/.jsp) inside a writable collection \u2014 proves the classic IIS 6.0 CVE-2017-7269 / mod_dav upload-filter bypass.",
+      "value": "critical",
+      "protocol_reference": "RFC 4918 \u00a79.8 (COPY), \u00a79.9 (MOVE); CVE-2017-7269",
+      "cwe": [
+        "CWE-434",
+        "CWE-73"
+      ],
+      "finding_kind": "webdav_copy_bypass",
+      "notes": "Cleanup: DELETE both source and destination. Only fire when server-signature or DAV: header indicates IIS or Apache mod_dav, to keep FP rate low."
+    },
+    {
+      "name": "propfind_xxe_probe",
+      "kind": "exploit",
+      "description": "Send a PROPFIND with an XML body that references an external entity (file:///etc/hostname or an internal callback URL) \u2014 a legacy Sabre/DAV or Xerces-based parser that resolves it echoes the content back inside the multistatus response.",
+      "value": "high",
+      "protocol_reference": "RFC 4918 \u00a714.20; CVE-2015-3648 (SabreDAV), CVE-2013-1899",
+      "cwe": [
+        "CWE-611",
+        "CWE-918"
+      ],
+      "finding_kind": "webdav_xxe",
+      "notes": "The existing webdav_probe sends an EMPTY XML body \u2014 trivially extend it. Reuse recce/services/web/checks.py _XXE_LINUX/_XXE_HIT helpers so the file-read proof is consistent with other XXE findings. Only fire the external-DNS variant when an OOB callback host is configured (env var), never invent a random one."
+    },
+    {
+      "name": "auth_scheme_and_realm_enum",
+      "kind": "passive",
+      "description": "Read WWW-Authenticate on a 401 PROPFIND to record realm, offered schemes (Basic/Digest/NTLM/Negotiate), and Digest algorithm/qop/nonce reuse; Basic-over-cleartext on WebDAV feeds the credential-quickconnect path.",
+      "value": "medium",
+      "protocol_reference": "RFC 7235 \u00a74.1; RFC 7616 (Digest); RFC 4559 (Negotiate)",
+      "cwe": [
+        "CWE-319",
+        "CWE-522"
+      ],
+      "finding_kind": "webdav_auth_scheme",
+      "notes": "Realm string often names the mount (e.g. 'SVN Repository') \u2014 that name is a domain/host hint worth wiring to known_hostnames."
+    },
+    {
+      "name": "backend_fingerprint",
+      "kind": "passive",
+      "description": "Fingerprint the WebDAV implementation (Apache mod_dav_fs / mod_dav_svn, IIS WebDAV, nginx dav_ext, SabreDAV, Nephele, Nextcloud/ownCloud) via Server:, X-Dav-Powered-By:, MS-Author-Via:, and response-body namespaces \u2014 steers subsequent CVE mapping.",
+      "value": "medium",
+      "protocol_reference": "RFC 4918 \u00a718; vendor headers (SabreDAV X-Sabre-Version)",
+      "finding_kind": "webdav_fingerprint",
+      "notes": "The identified product/version should be pushed back onto Port.product so it flows into the existing offline CVE DB pivot."
+    },
+    {
+      "name": "lock_null_resource_enum",
+      "kind": "active",
+      "description": "LOCK against a non-existent path to detect lock-null-resource behaviour and to prove locking is unauthenticated \u2014 an attacker can create a lock-null resource that persists and blocks legitimate PUT/MKCOL.",
+      "value": "medium",
+      "protocol_reference": "RFC 4918 \u00a77.3, \u00a79.10",
+      "cwe": [
+        "CWE-400",
+        "CWE-732"
+      ],
+      "finding_kind": "webdav_lock_open",
+      "notes": "Extract the Lock-Token from the response and immediately UNLOCK to leave no state behind."
+    },
+    {
+      "name": "svn_repo_probe",
+      "kind": "active",
+      "description": "When mod_dav_svn is fingerprinted, request /!svn/vcc/default and /.svn/entries for the repository root revision and the anonymous-checkout allow bit \u2014 full source-tree leak if either responds 200.",
+      "value": "high",
+      "protocol_reference": "Subversion HTTP protocol (svn/libsvn_ra_serf); RFC 3253",
+      "cwe": [
+        "CWE-538",
+        "CWE-527"
+      ],
+      "finding_kind": "webdav_svn_exposed",
+      "notes": "Overlaps with the gitdump module \u2014 call a gitdump-style enumerator when a repo root responds, so recovered author emails feed known_users."
+    },
+    {
+      "name": "if_header_auth_bypass",
+      "kind": "exploit",
+      "description": "Some legacy IIS/mod_dav stacks skip URL canonicalisation when an `If:` header supplies a resource token \u2014 retry a 401 PROPFIND with a bogus If: to test the CVE-2017-7269-adjacent bypass class.",
+      "value": "high",
+      "protocol_reference": "RFC 4918 \u00a710.4; CVE-2017-7269, CVE-2016-3225",
+      "cwe": [
+        "CWE-287",
+        "CWE-284"
+      ],
+      "finding_kind": "webdav_if_header_bypass",
+      "notes": "Low-noise: one extra request per 401 mount. Only escalate to a write attempt when the bypass returns 207 where the plain request returned 401."
+    },
+    {
+      "name": "cross_mount_pivot",
+      "kind": "passive",
+      "description": "After PROPFIND enumeration, feed every discovered href back through the HTTP path-enum queue and the recce config-backup detector \u2014 .git/, backup/, .env, wp-config.php often sit inside DAV mounts invisible to a plain crawl.",
+      "value": "medium",
+      "cwe": [
+        "CWE-538"
+      ],
+      "finding_kind": "webdav_href_leak",
+      "notes": "Pure re-use of recce/services/http.py:path_enum classifier; no new network cost beyond the PROPFIND that already ran."
+    }
+  ],
+  "recommended_findings": [
+    {
+      "title": "WebDAV enabled (OPTIONS/PROPFIND accepted)",
+      "severity": "low"
+    },
+    {
+      "title": "WebDAV directory tree disclosed via PROPFIND Depth:infinity",
+      "severity": "high"
+    },
+    {
+      "title": "WebDAV dangerous verbs accepted: {verbs}",
+      "severity": "high"
+    },
+    {
+      "title": "Anonymous WebDAV PUT \u2014 arbitrary file write (proven)",
+      "severity": "critical"
+    },
+    {
+      "title": "WebDAV PUT -> script execution (RCE proven)",
+      "severity": "critical"
+    },
+    {
+      "title": "WebDAV MKCOL \u2014 writable collection creation allowed",
+      "severity": "high"
+    },
+    {
+      "title": "WebDAV COPY/MOVE upload-filter bypass (IIS 6.0 / mod_dav)",
+      "severity": "critical"
+    },
+    {
+      "title": "WebDAV PROPFIND XML External Entity (XXE)",
+      "severity": "high"
+    },
+    {
+      "title": "WebDAV Basic auth over cleartext channel",
+      "severity": "medium"
+    },
+    {
+      "title": "WebDAV backend fingerprint: {product/version}",
+      "severity": "info"
+    },
+    {
+      "title": "WebDAV LOCK accepts unauthenticated lock-null resources",
+      "severity": "medium"
+    },
+    {
+      "title": "mod_dav_svn repository exposed (anonymous checkout)",
+      "severity": "high"
+    },
+    {
+      "title": "WebDAV If: header authentication bypass",
+      "severity": "high"
+    },
+    {
+      "title": "WebDAV hrefs disclose sensitive paths (.git, backup, wp-config)",
+      "severity": "medium"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames: WWW-Authenticate realm strings frequently name the mount ('SVN Repository', 'intranet-fs') and href responses leak internal hostnames in absolute Location: headers",
+    "known_users: mod_dav_svn PROPFIND responses embed <D:creator-displayname> for every file \u2014 SVN authors become usernames; Nextcloud/ownCloud DAV surfaces expose owner UIDs the same way",
+    "known_hashes: an in-tree /passwd, /.htpasswd, or /web.config recovered via PROPFIND+GET yields Basic/Digest/NTLM hashes \u2014 route into the shared hash surface so hashcat picks them up",
+    "known_domains: SVN commit-author emails and Nextcloud user emails found via PROPFIND properties",
+    "relay_targets: a confirmed anonymous-write WebDAV mount is a payload staging host for other services (SMB->WebDAV mapping, download-then-execute) \u2014 should be published as a relay/staging target the exploit-session-wiring layer can consume",
+    "NEW surface \u2014 known_uploaded_shells: when webdav_put_rce fires, record the URL of every uploaded shell so the P5 persistence-cleanup sweep can DELETE it if the run is aborted before local cleanup"
+  ],
+  "recommended_hashcat_modes": [
+    {
+      "mode": 900,
+      "description": "MD4 \u2014 legacy WebDAV NTLM raw"
+    },
+    {
+      "mode": 1000,
+      "description": "NTLM \u2014 recovered from web.config <credentials> or IIS WebDAV backends"
+    },
+    {
+      "mode": 1600,
+      "description": "Apache $apr1$ MD5 \u2014 .htpasswd files that PROPFIND+GET recovers from a mod_dav_fs mount"
+    },
+    {
+      "mode": 1500,
+      "description": "descrypt \u2014 legacy /etc/passwd style, when PROPFIND on a misconfigured / mount exposes a passwd file"
+    },
+    {
+      "mode": 500,
+      "description": "md5crypt \u2014 same route, modern Apache htpasswd -m"
+    },
+    {
+      "mode": 5500,
+      "description": "NetNTLMv1 \u2014 captured from a Negotiate/NTLM WebDAV challenge if the module logs the full exchange"
+    },
+    {
+      "mode": 5600,
+      "description": "NetNTLMv2 \u2014 same"
+    }
+  ],
+  "implementation_notes": "Refactor path: create recce/services/webdav.py containing a WebdavProbe class, move webdav_probe + _prove_put logic there, and reduce recce/services/http.py:webdav_probe + recce/services/web/__init__.py PUT-proof block to thin shims that import and delegate \u2014 matches the pattern already used for db/ wrappers (commit 27e29e3). Style-match recce/services/ftp.py: a module docstring naming the two layers (unauth passive vs credentialed/anonymous active), a _KNOWN_BAD table for CVE-mapped backend signatures (SabreDAV <1.7.11 XXE, IIS 6.0 CVE-2017-7269, mod_dav_svn CVE-2013-1849), and a single build_findings(host_ip, port, active, upload_shell) entry point returning list[Vuln] via svccommon.finding_builder. Reuse recce/services/web/checks.py _fetch/_prove_put \u2014 do not re-implement urllib boilerplate. Every state-changing verb MUST use a randomised path prefix (recce_dav_probe_<8-hex>) and guarantee cleanup in a try/finally so an interrupt never leaves droppings \u2014 feeds the P5 persistence-cleanup sweep. Depth:infinity responses must be size-capped (2 MiB) to prevent scan wedging. XXE and RCE probes MUST gate on the existing --exploit / active flag; nothing else should escalate past --active. No new dependencies \u2014 stdlib urllib + xml.etree.ElementTree (defusedxml if already in the tree). Keep 'http-webdav' as an alias script_id so historical scan diffs don't break; new findings adopt 'webdav-*' ids and get their own tab in the docx/xlsx reports."
+}

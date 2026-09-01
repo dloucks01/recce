@@ -1,0 +1,303 @@
+{
+  "service": "ldap",
+  "module_files": [
+    "recce/services/ldap.py"
+  ],
+  "existing_capabilities": [
+    "anon-simple-bind",
+    "rootdse-read",
+    "naming-context-anon-read",
+    "cleartext-389-flag",
+    "ldaps-tls-wrap",
+    "ntlm-sasl-pth-bind (GSS-SPNEGO)",
+    "sign+seal-wrap-post-bind",
+    "simplepagedresults-control",
+    "user-enum (UAC bits: disabled/spn/asrep/deleg/admincount)",
+    "computer-enum (delegation only)",
+    "domain-object-read (MAQ, lockout, minPwdLength, maxPwdAge)",
+    "description-password-hint-scan",
+    "ldap3-fallback-client",
+    "runbook-generation (credfree+credentialed)"
+  ],
+  "summary": "The LDAP module is competent at unauth RootDSE recon, anonymous-bind/read, cleartext-389 flagging, and one flavour of authenticated user/computer enumeration (persons + computers-with-delegation, plus the domain object). It is thin everywhere else that the MS-ADTS / RFC 4511-4519 surface actually pays: no group / trust / GPO / OU / schema / site enumeration, no AD-CS (ESC1-8) template reads, no LAPS / gMSA password harvesting, no RBCD detection, no DCSync-right check, no fine-grained password policy, no LDAP signing / channel-binding probe (the module flags cleartext but never actually tests whether a signed bind is *required*), no StartTLS probe on 389, no SASL \"ANONYMOUS\" / GSSAPI negotiation quirks, and no fanout of the discovered users / hostnames / domain to the shared registries other modules feed from.",
+  "missing_capabilities": [
+    {
+      "name": "ldap-signing-not-required probe",
+      "kind": "active",
+      "description": "Attempt a NTLM SASL bind WITHOUT sign+seal on cleartext 389 and observe whether the DC accepts it. When it does, ntlmrelayx-to-LDAP relay works end-to-end (RBCD, Shadow-Credentials, DCSync grants) - a hard 'high' finding. Currently the module always seals on 389 and only flags cleartext as a general medium; it never proves the enforcement gap.",
+      "value": "high",
+      "protocol_reference": "MS-ADTS 5.1.1.1 (LDAP Signing), Microsoft ADV190023",
+      "finding_kind": "ldap_signing_not_required"
+    },
+    {
+      "name": "LDAP channel-binding (EPA) not enforced probe",
+      "kind": "active",
+      "description": "On LDAPS/3269, perform an NTLM SASL bind WITHOUT the tls-server-end-point channel-binding token in the AV_PAIRS of the AUTHENTICATE message and observe acceptance. When accepted, cross-protocol NTLM relay to LDAPS is viable - the whole point of ADV190023 / KB4520412. The wire library is already there (recce/ad/ntlm); the module just never omits CBT to test.",
+      "value": "high",
+      "protocol_reference": "MS-NLMP 2.2.2.1 MsvChannelBindings, MS-ADTS LdapEnforceChannelBinding",
+      "cwe": [
+        "CWE-940"
+      ],
+      "finding_kind": "ldap_no_channel_binding"
+    },
+    {
+      "name": "StartTLS extended-op probe (1.3.6.1.4.1.1466.20037)",
+      "kind": "active",
+      "description": "Send an ExtendedRequest for OID 1.3.6.1.4.1.1466.20037 on 389. If StartTLS is unsupported, 389 has no in-band upgrade at all - stronger cleartext finding. If supported, capture the served cert (SAN, notAfter, issuer, self-signed) as the same fingerprint any other TLS probe would.",
+      "value": "medium",
+      "protocol_reference": "RFC 4511 4.14, RFC 4513 3",
+      "finding_kind": "ldap_starttls_absent"
+    },
+    {
+      "name": "SASL mechanism analysis (ANONYMOUS / DIGEST-MD5 / CRAM-MD5 downgrade surface)",
+      "kind": "passive",
+      "description": "supportedSASLMechanisms is fetched into pr['sasl'] but nothing looks at it. Presence of 'ANONYMOUS' (RFC 4505), 'DIGEST-MD5', 'CRAM-MD5', or 'PLAIN' on a DC indicates a legacy / mis-hardened directory. Also enumerate what is MISSING - a DC without GSSAPI at all is an ADAM/AD LDS non-domain instance.",
+      "value": "medium",
+      "protocol_reference": "RFC 4422, RFC 4505, RFC 2831 (DIGEST-MD5), RFC 2195 (CRAM-MD5)",
+      "finding_kind": "ldap_weak_sasl_mech"
+    },
+    {
+      "name": "SASL ANONYMOUS mechanism bind attempt",
+      "kind": "active",
+      "description": "Try SASL 'ANONYMOUS' bind (trace token in credentials) separately from an empty simple bind. Some servers reject empty simple binds but accept SASL ANONYMOUS - a distinct RFC 4505 path.",
+      "value": "low",
+      "protocol_reference": "RFC 4505",
+      "finding_kind": "ldap_sasl_anonymous"
+    },
+    {
+      "name": "Groups enumeration (Domain Admins, Enterprise Admins, DnsAdmins, Exchange trustees)",
+      "kind": "active",
+      "description": "Module enumerates users and computers but never runs (objectCategory=group). Missing the privileged-group memberships needed to build the actual admin roster (Domain Admins, Enterprise Admins, Schema Admins, Backup Operators, Server Operators, Account Operators, DnsAdmins, Organization Management). member/memberOf resolution today is truncated to memberOf on the user - loses the reverse direction.",
+      "value": "high",
+      "protocol_reference": "MS-ADTS 6.1.1.4, RFC 4519 groupOfNames",
+      "finding_kind": "ldap_priv_groups"
+    },
+    {
+      "name": "Nested membership via LDAP_MATCHING_RULE_IN_CHAIN (1.2.840.113556.1.4.1941)",
+      "kind": "active",
+      "description": "Effective membership requires (memberOf:1.2.840.113556.1.4.1941:=<groupDN>) to walk the group graph transitively - the standard AD trick for finding all effective Domain Admins including nested ones. Not used anywhere.",
+      "value": "medium",
+      "protocol_reference": "MS-ADTS 3.1.1.3.4.4.3",
+      "finding_kind": "ldap_nested_admins"
+    },
+    {
+      "name": "Trusts enumeration (trustedDomain objects)",
+      "kind": "active",
+      "description": "Search System container for (objectClass=trustedDomain) to read trustPartner, trustDirection, trustAttributes, trustType, flatName, securityIdentifier. Trusts with SID-history-not-filtered (trustAttributes & QUARANTINED_DOMAIN = 0) or FOREST_TRANSITIVE across weak boundaries are prime lateral-movement pivots (foreign-security-principal abuse).",
+      "value": "high",
+      "protocol_reference": "MS-ADTS 6.1.6, [MS-LSAD] 2.2.7.9",
+      "finding_kind": "ldap_trusts"
+    },
+    {
+      "name": "GPO enumeration + SYSVOL cpassword pointer",
+      "kind": "active",
+      "description": "Search (objectClass=groupPolicyContainer) for cn/displayName/gPCFileSysPath. Each gPCFileSysPath is a UNC to \\\\domain\\SYSVOL\\...\\Policies\\{GUID}\\ where Groups.xml / Services.xml historically held MS14-025 cpassword blobs. The module never lists GPOs, so downstream SMB module has no map to walk.",
+      "value": "high",
+      "protocol_reference": "MS-GPOL 2.4, MS14-025",
+      "cwe": [
+        "CWE-522"
+      ],
+      "finding_kind": "ldap_gpo_enum"
+    },
+    {
+      "name": "AD-CS enrollment services + certificate templates (ESC1-ESC8 preconditions)",
+      "kind": "active",
+      "description": "Read CN=Configuration,DC=...,CN=Services,CN=Public Key Services: (objectClass=pKIEnrollmentService) for CA hosts + (objectClass=pKICertificateTemplate). Templates with msPKI-Certificate-Name-Flag ENROLLEE_SUPPLIES_SUBJECT + msPKI-Enrollment-Flag lacking PEND_ALL_REQUESTS + Client Authentication EKU + low-priv enroll ACE = ESC1. This is a Certipy-class of finding that the module currently produces zero of.",
+      "value": "critical",
+      "protocol_reference": "MS-WCCE 2.2.2.6, MS-CRTD, SpecterOps 'Certified Pre-Owned'",
+      "cwe": [
+        "CWE-269",
+        "CWE-284"
+      ],
+      "finding_kind": "ldap_adcs_esc"
+    },
+    {
+      "name": "LAPS password read (ms-Mcs-AdmPwd, msLAPS-Password, msLAPS-EncryptedPassword)",
+      "kind": "active",
+      "description": "For each computer where the bound principal can read ms-Mcs-AdmPwd (legacy) or msLAPS-Password / msLAPS-EncryptedPassword (Windows LAPS), pull it. A single readable value is a local-admin credential fanout - hash-fuel for the shared credential store. The module reads dNSHostName/OS but never asks for LAPS attrs.",
+      "value": "critical",
+      "protocol_reference": "Microsoft LAPS schema (KB4557607), MS-LAPS",
+      "cwe": [
+        "CWE-522",
+        "CWE-284"
+      ],
+      "finding_kind": "ldap_laps_readable"
+    },
+    {
+      "name": "gMSA password blob read (msDS-ManagedPassword on msDS-GroupManagedServiceAccount)",
+      "kind": "active",
+      "description": "Search (objectClass=msDS-GroupManagedServiceAccount) with msDS-ManagedPassword and msDS-GroupMSAMembership requested. Any principal in msDS-GroupMSAMembership receives the KDS-blob (MS-GKDI); the NT hash is derived offline - persistent creds for the service. Not attempted.",
+      "value": "high",
+      "protocol_reference": "MS-ADTS 2.2.20, MS-GKDI",
+      "cwe": [
+        "CWE-522"
+      ],
+      "finding_kind": "ldap_gmsa_read"
+    },
+    {
+      "name": "RBCD attribute enumeration (msDS-AllowedToActOnBehalfOfOtherIdentity)",
+      "kind": "active",
+      "description": "The module reads msDS-AllowedToDelegateTo (constrained TO) but never msDS-AllowedToActOnBehalfOfOtherIdentity (constrained FROM = RBCD). An RBCD ACL on a computer with an attacker-controlled principal in the security descriptor is one Rubeus s4u away from SYSTEM on that box.",
+      "value": "high",
+      "protocol_reference": "MS-ADTS 3.1.1.11.2.2, KB4487563",
+      "finding_kind": "ldap_rbcd"
+    },
+    {
+      "name": "DCSync right probe (GetChanges + GetChangesAll on domain-DN ACL)",
+      "kind": "active",
+      "description": "Read nTSecurityDescriptor of the domain NC and look for the bound principal (or a group they are in) holding the extended-rights GUIDs 1131f6aa-9c07-11d1-f79f-00c04fc2dcd2 (DS-Replication-Get-Changes) and 1131f6ad-9c07-11d1-f79f-00c04fc2dcd2 (DS-Replication-Get-Changes-All). Requires the SACL/DACL SD_FLAGS control (1.2.840.113556.1.4.801) with value 0x7. When present -> secretsdump.py -just-dc-user path.",
+      "value": "critical",
+      "protocol_reference": "MS-DRSR 4.1.10, MS-ADTS 6.1.1.6, LDAP SDFlags control (KB2645631)",
+      "cwe": [
+        "CWE-269"
+      ],
+      "finding_kind": "ldap_dcsync_right"
+    },
+    {
+      "name": "Fine-Grained Password Policies (msDS-PasswordSettings / PSO)",
+      "kind": "active",
+      "description": "Read CN=Password Settings Container,CN=System,<domainDN> for (objectClass=msDS-PasswordSettings) - each PSO carries msDS-LockoutThreshold, msDS-MinimumPasswordLength, msDS-PasswordSettingsPrecedence and msDS-PSOAppliesTo (principals it targets). A permissive PSO applied to Domain Admins negates a strict domain default entirely.",
+      "value": "medium",
+      "protocol_reference": "MS-ADTS 3.1.1.5.3.2, Windows 2008 FGPP",
+      "finding_kind": "ldap_fgpp"
+    },
+    {
+      "name": "AdminSDHolder ACL diff / adminCount=1 stragglers",
+      "kind": "active",
+      "description": "adminCount=1 on principals who are no longer members of protected groups (post-SDPROP) is the AdminSDHolder-persistence signature - Mimikatz / SDPropagator abuse leaves it behind. Also read CN=AdminSDHolder,CN=System,<domainDN>'s nTSecurityDescriptor and diff for non-default trustees.",
+      "value": "medium",
+      "protocol_reference": "MS-ADTS 6.1.1.4.3, Microsoft KB4457131",
+      "finding_kind": "ldap_adminsdholder_persist"
+    },
+    {
+      "name": "Site / subnet / DC topology enumeration (configurationNamingContext)",
+      "kind": "active",
+      "description": "Read Sites, Subnets, and Servers under configurationNamingContext to map every DC in the forest, their site, and the subnets that trust them. This produces a full replication topology - the input to picking a DC to relay to / DCSync from, and a superset of what nltest /dclist gives.",
+      "value": "medium",
+      "protocol_reference": "MS-ADTS 6.1.1.2.2 (Configuration NC)",
+      "finding_kind": "ldap_topology"
+    },
+    {
+      "name": "Schema enumeration (schemaNamingContext)",
+      "kind": "active",
+      "description": "Read schemaNamingContext for classSchema/attributeSchema entries with lDAPDisplayName - reveals custom attributes (frequently used to store secrets, e.g. 'appPassword', 'apiKey', 'legacyCred'). Also picks up whether ms-Mcs-AdmPwd or msLAPS-* schema extensions are present (LAPS deployed).",
+      "value": "medium",
+      "protocol_reference": "MS-ADTS 3.1.1.2, RFC 4512 4.1",
+      "finding_kind": "ldap_schema_recon"
+    },
+    {
+      "name": "Password-age / stale-account / never-expires triage",
+      "kind": "active",
+      "description": "Users are enumerated but pwdLastSet, lastLogonTimestamp, badPwdCount, and DONT_EXPIRE_PASSWORD (0x10000) are not surfaced. Accounts with pwdLastSet older than the domain maxPwdAge (or > 5y) or DONT_EXPIRE_PASSWORD set are password-spray gold; badPwdCount != 0 indicates prior spray. Cheap to add - attrs are already in the paged rows we would ask for.",
+      "value": "medium",
+      "protocol_reference": "MS-ADTS 2.2.16 UAC, MS-ADTS 3.1.1.4.5 (lastLogonTimestamp)",
+      "finding_kind": "ldap_stale_accounts"
+    },
+    {
+      "name": "Pre-Windows 2000 Compatible Access group check",
+      "kind": "active",
+      "description": "Membership of well-known SID S-1-5-32-554 (Pre-Windows 2000 Compatible Access) containing 'Anonymous' or 'Authenticated Users' downgrades LDAP anonymous read semantics to the Windows 2000 model - explains a lot of otherwise-inexplicable anon reads and is a legacy footgun.",
+      "value": "medium",
+      "protocol_reference": "MS-ADTS 6.1.1.6.1 well-known SIDs",
+      "finding_kind": "ldap_prewin2k_compat"
+    },
+    {
+      "name": "Kerberos-only accounts / DES-only accounts (msDS-SupportedEncryptionTypes)",
+      "kind": "active",
+      "description": "msDS-SupportedEncryptionTypes = 0x1|0x2 (DES) or missing AES bits on a service account = weak Kerberoast crackable in seconds and RC4 downgrade surface. Not surfaced.",
+      "value": "medium",
+      "protocol_reference": "MS-KILE 2.2.7, MS-ADTS 2.2.10",
+      "finding_kind": "ldap_weak_krb_etypes"
+    },
+    {
+      "name": "MS-ADTS SPN duplicates / SPN-on-user-with-weak-pw kerberoast target quality",
+      "kind": "passive",
+      "description": "The module lists SPNs on users but doesn't score them - accounts with SPN AND (DONT_EXPIRE_PASSWORD OR pwdLastSet very old OR RC4-only etypes) are 'high-value kerberoast' - the target picker for the offline crack. Score and rank rather than dumping the flat list.",
+      "value": "low",
+      "protocol_reference": "MS-ADTS 2.2.16 + MS-KILE",
+      "finding_kind": "ldap_kerberoast_rank"
+    },
+    {
+      "name": "Foreign Security Principal enumeration (cross-domain SID history)",
+      "kind": "active",
+      "description": "CN=ForeignSecurityPrincipals,<domainDN>: principals from other domains/forests referenced locally. Paired with the trust enumeration above, reveals cross-forest attack pivots and SID-history abuse (Kerberos golden-ticket cross-forest).",
+      "value": "medium",
+      "protocol_reference": "MS-ADTS 6.1.1.4.10, MS-PAC 2.5",
+      "finding_kind": "ldap_fsp"
+    },
+    {
+      "name": "CVE-2021-42278 / CVE-2021-42287 (sAMAccountName spoofing / noPac) patch signal",
+      "kind": "passive",
+      "description": "Correlate operatingSystemVersion / operatingSystemHotfix on DC computer objects against the November-2021 patch baseline. Unpatched DCs are the noPac / sAMAccountName-spoofing target. Data already retrievable via LDAP; not correlated today.",
+      "value": "high",
+      "protocol_reference": "MSRC CVE-2021-42278, CVE-2021-42287",
+      "cwe": [
+        "CWE-287"
+      ],
+      "finding_kind": "ldap_nopac_vulnerable"
+    },
+    {
+      "name": "MS-ADTS DirSync / Repl metadata attempt (CVE-2022-26923 style Certifried adjuncts)",
+      "kind": "active",
+      "description": "Request DirSync control (1.2.840.113556.1.4.841) with LDAP_DIRSYNC_OBJECT_SECURITY = 0x1 - normally requires DS-Replication-Get-Changes; server response 'success' quietly is another DCSync-right signal orthogonal to the ACL read.",
+      "value": "medium",
+      "protocol_reference": "MS-ADTS 3.1.1.3.4.1.3 DirSync Control",
+      "finding_kind": "ldap_dirsync_ok"
+    },
+    {
+      "name": "Anonymous OtherWellKnownObjects/DomainDNS SD read on non-AD LDAP (389DS / OpenLDAP / eDirectory)",
+      "kind": "passive",
+      "description": "Module is entirely AD-centric. supportedCapabilities OIDs distinguish AD (1.2.840.113556.1.4.800/1791/1935/2080/2237) from 389-DS (2.16.840.1.113730.3.4.9 VLV) / OpenLDAP (1.3.6.1.4.1.4203.*). Non-AD directories have their own anonymous ACIs (aci: allow(read) userdn='ldap:///anyone') that this module never exercises.",
+      "value": "medium",
+      "protocol_reference": "RFC 4511 4.1.9, vendor OIDs",
+      "finding_kind": "ldap_non_ad_enum"
+    },
+    {
+      "name": "PagedResults refusal / MaxPageSize sniff",
+      "kind": "passive",
+      "description": "If a directory refuses SimplePagedResults (control unsupported) the enum currently silently gets the first N objects. Detect and report - and switch to VLV (Virtual List View 2.16.840.1.113730.3.4.9) when advertised.",
+      "value": "low",
+      "protocol_reference": "RFC 2696 (paged), RFC 2891 (SSS), IETF draft-ietf-ldapext-ldapv3-vlv",
+      "finding_kind": "ldap_paged_missing"
+    },
+    {
+      "name": "LDAP referrals (SearchResRef 0x73) follow / disclosure",
+      "kind": "passive",
+      "description": "The reader ignores searchResRef PDUs (tag 0x73). Referrals leak internal LDAP URLs (ldap://internal.dc.corp:389/...) - a routable-hostname disclosure. At minimum log them; ideally follow when in-scope.",
+      "value": "low",
+      "protocol_reference": "RFC 4511 4.5.3",
+      "finding_kind": "ldap_referral_leak"
+    },
+    {
+      "name": "LDAP injection surface / relative-DN escape (self-defense of the builder)",
+      "kind": "active",
+      "description": "f_equal() takes raw str values and BER-encodes without RFC 4515 metacharacter validation. Not exploitable server-side (BER not text) but the credfree_runbook echoes attacker-controlled server strings into an ldapsearch string filter - a text LDAP filter injection primitive when pasted. Should escape * ( ) \\ NUL per RFC 4515 3.",
+      "value": "low",
+      "protocol_reference": "RFC 4515 3 (StringRepresentation)",
+      "cwe": [
+        "CWE-90"
+      ],
+      "finding_kind": "ldap_filter_escape"
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "Enumerated sAMAccountName / userPrincipalName list is not pushed into the shared known_users registry that spray, SMB, SSH, WinRM, MSSQL, and Kerberos AS-REP roasting modules consume - each currently either re-enumerates or works from an empty user pool.",
+    "dNSHostName on computer objects is not published to the shared hostname/DNS registry - other services never learn the domain-joined FQDN of hosts scanned by IP.",
+    "domain and forest DNS names (already captured in probe result) are not fed to a shared 'domains' registry for kerberos/SMB/WinRM modules to auto-scope authentication realms.",
+    "servicePrincipalName values embed 'host/foo.corp/', 'MSSQLSvc/db.corp:1433', 'HTTP/web.corp' - these are service+host tuples that should populate the port/service inventory for hosts recce never scanned directly and pre-stage the kerberoast target list.",
+    "trustedDomain objects (once enumerated) should register partner-domain names + SIDs into a cross-forest registry used by kerberos/SMB.",
+    "gPCFileSysPath from GPO enumeration should hand SYSVOL UNC targets to the SMB module for MS14-025 cpassword hunts.",
+    "Cleartext-389 and (once implemented) 'signing-not-required' / 'no-channel-binding' DCs are prime NTLM-relay targets but the module never appends them to the shared relay_targets list that the ntlmrelayx-runbook / coerce chain consumes.",
+    "LAPS/gMSA passwords (once read) are hashes/plaintext credentials that should land in the shared credential store keyed by target host - not just narrated in a finding.",
+    "Site/subnet map (from configurationNamingContext) should feed the netmap module's known-subnets so recce discovers previously-unseen network segments.",
+    "operatingSystem/operatingSystemVersion on computer objects should update host OS fingerprints for hosts recce touched only via LDAP referrals."
+  ],
+  "priority_gaps": [
+    "AD-CS templates (ESC1-8) enumeration via pKIEnrollmentService + pKICertificateTemplate - single highest-ROI unauth-to-DA path currently invisible to recce.",
+    "LAPS + gMSA password reads (ms-Mcs-AdmPwd / msLAPS-Password / msDS-ManagedPassword) - one authenticated bind can bulk-harvest local-admin creds; module currently ignores the attributes entirely.",
+    "DCSync right probe (GetChanges/GetChangesAll ACE via SD_FLAGS control 1.2.840.113556.1.4.801) plus RBCD detection (msDS-AllowedToActOnBehalfOfOtherIdentity) - the two escalation primitives every AD engagement checks first, both cheap to add given the existing paged-search plumbing.",
+    "LDAP signing / channel-binding enforcement PROBE (send an unsigned NTLM bind on 389 and a no-CBT NTLM bind on 636 and observe acceptance) - upgrades the current generic 'cleartext' medium into a proven ntlmrelayx-to-LDAP high, which is the actual finding operators care about post-ADV190023.",
+    "Group + trust + GPO enumeration - without groups the module cannot say who is actually a Domain Admin, without trusts it cannot see cross-forest pivots, and without GPOs the downstream SMB SYSVOL sweep has no map."
+  ],
+  "notes": "Module is well-engineered on the wire (hand-rolled BER, sign+seal wrap, paged results, ldap3 fallback) but the enumeration semantics stop at Users+Computers+DomainObject - roughly the 2015 kerberoast toolset. The 2020-2024 AD-attack canon (ADCS, LAPS, gMSA, RBCD, DCSync-ACL, channel-binding enforcement) is entirely absent. No tests/*ldap* file exists; LDAP behaviour is only asserted incidentally via test_ad_fp_fixes.py, test_pipeline_ad.py, test_credentialed_ad_integration.py and test_hostile_server_fidelity.py - meaning any new capability added here has room to be TDD'd against a fresh tests/test_ldap.py without disturbing existing fixtures."
+}

@@ -1,0 +1,245 @@
+{
+  "capabilities": [
+    {
+      "name": "banner_and_product_grab",
+      "kind": "passive",
+      "description": "Read the mandatory +OK greeting (RFC 1939 \u00a74), pull product/version (Dovecot/Courier/Cyrus/qpopper/Exchange) so it feeds the offline CVE DB.",
+      "value": "medium",
+      "protocol_reference": "RFC 1939 \u00a74, \u00a77",
+      "finding_kind": "pop3_banner",
+      "notes": "svcdetect already extracts Dovecot/Courier/Cyrus via parse_product_version \u2014 reuse that same regex table."
+    },
+    {
+      "name": "apop_timestamp_disclosure",
+      "kind": "passive",
+      "description": "Any APOP-capable server emits a <processid.timestamp@hostname> token in the greeting (RFC 1939 \u00a77) \u2014 the hostname suffix leaks internal FQDN/domain and is a first-class known_hostnames/known_domains input.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1939 \u00a77",
+      "finding_kind": "pop3_apop_timestamp"
+    },
+    {
+      "name": "capa_enumeration",
+      "kind": "active",
+      "description": "Issue CAPA (RFC 2449) to enumerate advertised features \u2014 STLS, SASL, USER, PIPELINING, TOP, UIDL, LOGIN-DELAY, EXPIRE, RESP-CODES, IMPLEMENTATION \u2014 driving every downstream decision.",
+      "value": "high",
+      "protocol_reference": "RFC 2449 \u00a75",
+      "finding_kind": "pop3_capa"
+    },
+    {
+      "name": "implementation_disclosure",
+      "kind": "passive",
+      "description": "The IMPLEMENTATION capability (RFC 2449 \u00a76.9) explicitly returns a product/version string that supplements the greeting banner and often gives a version when the banner does not.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 2449 \u00a76.9",
+      "finding_kind": "pop3_implementation"
+    },
+    {
+      "name": "stls_missing_on_110",
+      "kind": "active",
+      "description": "Absence of the STLS capability on port 110 (RFC 2595) means the AUTHORIZATION phase can only run in cleartext \u2014 a definite cleartext-credential exposure independent of any successful auth.",
+      "value": "high",
+      "cwe": [
+        "CWE-319",
+        "CWE-326"
+      ],
+      "protocol_reference": "RFC 2595 \u00a74",
+      "finding_kind": "pop3_no_stls"
+    },
+    {
+      "name": "user_enum_differential",
+      "kind": "active",
+      "description": "Send USER <name> for a known-bad and a known-good name (or known_users feed) and diff the +OK/-ERR response and latency \u2014 RFC 1939 \u00a75 lets servers reject USER before PASS, which is the classic username oracle (Dovecot user_query, Exchange 'user unknown').",
+      "value": "high",
+      "cwe": [
+        "CWE-204",
+        "CWE-203"
+      ],
+      "protocol_reference": "RFC 1939 \u00a75",
+      "finding_kind": "pop3_user_enum"
+    },
+    {
+      "name": "sasl_mechanism_enum",
+      "kind": "active",
+      "description": "Issue AUTH with no argument (RFC 1734/5034) to list SASL mechanisms \u2014 PLAIN/LOGIN/CRAM-MD5/DIGEST-MD5/SCRAM-SHA-*/NTLM/GSSAPI \u2014 so the runbook picks the right offline-crackable or relayable path.",
+      "value": "medium",
+      "protocol_reference": "RFC 1734, RFC 5034",
+      "finding_kind": "pop3_sasl_mechs"
+    },
+    {
+      "name": "cleartext_auth_accepted",
+      "kind": "active",
+      "description": "USER/PASS or AUTH PLAIN/LOGIN accepted before STLS is negotiated \u2014 proves credentials cross the wire in cleartext and are sniffable.",
+      "value": "high",
+      "cwe": [
+        "CWE-319"
+      ],
+      "protocol_reference": "RFC 2595 \u00a74, RFC 1939 \u00a77",
+      "finding_kind": "pop3_cleartext_auth"
+    },
+    {
+      "name": "ntlm_auth_type2_leak",
+      "kind": "active",
+      "description": "Where AUTH NTLM is advertised, send a Type-1 blob and decode the returned Type-2 challenge \u2014 it discloses NetBIOS name, DNS hostname, DNS domain, forest DNS name (same primitive smtp NTLM info exploits) \u2014 huge feed into known_hostnames/known_domains.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 4752 + [MS-NLMP] \u00a72.2.2.10",
+      "finding_kind": "pop3_ntlm_info"
+    },
+    {
+      "name": "implicit_tls_cert_inspect",
+      "kind": "passive",
+      "description": "On 995 (implicit TLS, RFC 8314) grab the server certificate \u2014 CN/SANs feed known_hostnames and known_domains, expiry/self-signed status becomes a finding.",
+      "value": "medium",
+      "protocol_reference": "RFC 8314",
+      "finding_kind": "pop3s_cert"
+    },
+    {
+      "name": "apop_offline_crack_chain",
+      "kind": "chain",
+      "description": "APOP responses are md5(timestamp || password); a captured or replayed APOP transcript (timestamp from the greeting + APOP <user> <digest>) is offline-crackable \u2014 hashcat mode 11500 style workflow, feeds known_hashes/relay-adjacent surface.",
+      "value": "high",
+      "protocol_reference": "RFC 1939 \u00a77",
+      "finding_kind": "pop3_apop_crackable"
+    },
+    {
+      "name": "credentialed_mailbox_dump",
+      "kind": "auth",
+      "description": "With a valid login (from cred-quickconnect / known_users + spray), STAT/LIST/UIDL/TOP/RETR to prove read access and pull message headers (From/To/Received) \u2014 each Received header seeds known_hostnames and known_domains, each From/To seeds known_users.",
+      "value": "high",
+      "cwe": [
+        "CWE-522"
+      ],
+      "protocol_reference": "RFC 1939 \u00a75-\u00a76",
+      "finding_kind": "pop3_mailbox_read"
+    },
+    {
+      "name": "known_cve_by_banner",
+      "kind": "passive",
+      "description": "Map the extracted product/version to POP3-specific pre-auth CVEs (Dovecot CVE-2019-11500 out-of-bounds write, CVE-2020-12100 RCE, Cyrus SASL memcached, qpopper 4.0.x) \u2014 critical-severity findings without touching auth.",
+      "value": "critical",
+      "cwe": [
+        "CWE-119",
+        "CWE-787"
+      ],
+      "protocol_reference": "vendor advisories",
+      "finding_kind": "pop3_known_cve"
+    },
+    {
+      "name": "login_delay_aware_spray",
+      "kind": "exploit",
+      "description": "Time-boxed password spray against known_users; LOGIN-DELAY from CAPA (RFC 2449 \u00a76.5) is honoured so we don't self-DOS or trip lockouts. One password / many users, then one user / small list.",
+      "value": "high",
+      "cwe": [
+        "CWE-521",
+        "CWE-307"
+      ],
+      "protocol_reference": "RFC 2449 \u00a76.5",
+      "finding_kind": "pop3_weak_password"
+    },
+    {
+      "name": "auth_downgrade_detection",
+      "kind": "active",
+      "description": "After STLS negotiate, re-issue CAPA \u2014 if the plaintext mechanism set is still advertised (i.e. server never drops PLAIN/LOGIN inside TLS) that is a hardening finding; also detect servers where STLS is offered but broken (RFC 2595 \u00a74).",
+      "value": "medium",
+      "cwe": [
+        "CWE-757"
+      ],
+      "protocol_reference": "RFC 2595 \u00a74",
+      "finding_kind": "pop3_stls_broken"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames <- APOP greeting timestamp <pid.time@HOST> (RFC 1939 \u00a77): the @HOST suffix is often an internal FQDN not otherwise discovered.",
+    "known_hostnames + known_domains <- POP3S (995) TLS certificate CN and Subject Alternative Names.",
+    "known_hostnames + known_domains <- NTLM Type-2 challenge Target Info AV_PAIRs (MsvAvNbComputerName, MsvAvDnsComputerName, MsvAvDnsDomainName, MsvAvDnsTreeName) \u2014 same primitive already harvested from SMTP NTLM info.",
+    "known_users <- valid usernames confirmed by USER-command differential (RFC 1939 \u00a75) or by successful spray, before any real password is known.",
+    "known_users + known_domains <- credentialed RETR of message headers: every From:/To:/Cc:/Received-by mailbox seeds users@domain across the whole environment.",
+    "known_hashes (new sub-surface: apop_challenges) <- captured/replayed APOP timestamps and APOP <user> <digest> lines are offline-crackable as md5(challenge||password); feeds hashcat -m 11500-style workflow.",
+    "relay_targets (new sub-surface: ntlm_endpoints) <- any POP3 port advertising AUTH NTLM is a candidate for NTLM relay targeting alongside SMB/LDAP/HTTP/SMTP/IMAP.",
+    "cred_quickconnect <- POP3 is a fast, low-noise verify surface for a captured mailbox credential (a single AUTH PLAIN round-trip proves it) \u2014 should register alongside SMTP submission and IMAP."
+  ],
+  "default_ports": [
+    "110/tcp",
+    "995/tcp"
+  ],
+  "existing_coverage": {
+    "detected": true,
+    "files": [
+      "recce/services/svcdetect.py",
+      "recce/services/serviceenum.py",
+      "recce/core/scanner.py"
+    ],
+    "notes": "svcdetect.py L95 signature-matches '+OK' to service 'pop3'; parse_product_version() at L134-135 pulls Dovecot/Courier/Cyrus product+version from the banner (feeds the offline CVE DB). serviceenum.py maps pop3/pop3s/imap/imaps names AND ports 110/143/993/995 to a shared 'pop-imap' bash script under scripts/recce-service.sh. core/scanner.py L238 acknowledges the nmap script names 'pop3-capabilities' and 'pop3-ntlm-info' in NSE runs. There is NO dedicated recce/services/pop3.py module \u2014 no CAPA parser, no STLS/user-enum/AUTH-mech probe, no SASL / NTLM info extractor, no finding builder, no runbook, no analyze() entry point. This is the gap this punch list is planning."
+  },
+  "recommended_findings": [
+    {
+      "title": "POP3 known-vulnerable product version (banner-matched CVE)",
+      "severity": "critical"
+    },
+    {
+      "title": "POP3 accepts USER/PASS in cleartext (no STLS)",
+      "severity": "high"
+    },
+    {
+      "title": "POP3 STLS not advertised on port 110",
+      "severity": "high"
+    },
+    {
+      "title": "POP3 username enumeration via differential USER response",
+      "severity": "high"
+    },
+    {
+      "title": "POP3 AUTH NTLM leaks NetBIOS/DNS names (Type-2 challenge)",
+      "severity": "high"
+    },
+    {
+      "title": "POP3 APOP timestamp discloses internal hostname/domain",
+      "severity": "medium"
+    },
+    {
+      "title": "POP3 APOP hash captured (offline-crackable md5(timestamp||pass))",
+      "severity": "high"
+    },
+    {
+      "title": "POP3 SASL PLAIN/LOGIN still offered inside TLS (no downgrade lockout)",
+      "severity": "medium"
+    },
+    {
+      "title": "POP3 weak/reused credentials confirmed by spray",
+      "severity": "high"
+    },
+    {
+      "title": "POP3 credentialed mailbox read (RETR proof)",
+      "severity": "high"
+    },
+    {
+      "title": "POP3S (995) certificate is self-signed / expired / mismatched",
+      "severity": "low"
+    },
+    {
+      "title": "POP3 IMPLEMENTATION capability leaks product/version",
+      "severity": "low"
+    }
+  ],
+  "recommended_hashcat_modes": [
+    {
+      "mode": 11500,
+      "description": "APOP challenge/response \u2014 md5($challenge.$pass) family; the APOP timestamp is the challenge, the APOP <digest> is the response."
+    },
+    {
+      "mode": 500,
+      "description": "If credentialed RETR pulls a Dovecot passwd-file or a /etc/shadow-like backup out of a mailbox attachment, md5crypt (Dovecot's default MD5-CRYPT scheme) is directly crackable."
+    }
+  ],
+  "implementation_notes": "Model the module on recce/services/ftp.py (text-banner, control-channel probe, finding_builder from svccommon) and on recce/services/smtp.py where the NTLM Type-2 info leak, CAPA-style enumeration, and STARTTLS/STLS posture are basically the same primitives \u2014 reuse svccommon.finding_builder and svcprobe.iter_probe. Stdlib only (poplib exists but is thin; a raw socket + line reader is what ftp.py uses and matches the airgap constraint). Send commands in the RFC 1939 order \u2014 CAPA first (never assume it exists; some ancient qpopper builds -ERR it), then USER for a known-bad, then STLS if advertised, then AUTH. Time every USER response and diff \u2014 LOGIN-DELAY from CAPA must be respected so the probe does not self-throttle or lock accounts. On 995 wrap the socket in ssl.create_default_context(check_hostname=False) and grab getpeercert(binary_form=True) for cert facts. Route valid usernames + captured APOP transcripts into the shared cross-service surfaces described above (known_users, known_hostnames, apop_challenges) via the same wire code smtp/ldap use. Do NOT collide with the existing pop-imap bash script \u2014 the Python module owns findings + programmatic probes; the bash script stays as the tester-facing 'what do I type here' helper (serviceenum still points at it).",
+  "service": "POP3",
+  "summary": "POP3 (RFC 1939) is a plaintext line-based mailbox-retrieval protocol on 110/tcp, with implicit TLS on 995/tcp (RFC 8314) and opportunistic STLS on 110 (RFC 2595); capability discovery is via CAPA (RFC 2449) and authentication is USER/PASS, APOP (RFC 1939 \u00a77), or SASL AUTH (RFC 1734/5034). What an attacker cares about: (1) the mandatory +OK greeting and the CAPA/IMPLEMENTATION strings pin the product/version for CVE mapping; (2) APOP timestamps leak internal hostnames/domains and are offline-crackable when a transcript is captured; (3) USER-before-PASS is a textbook username enumeration oracle; (4) STLS-not-advertised on 110 is definitive cleartext-credential exposure; (5) AUTH NTLM leaks NetBIOS/DNS names in the Type-2 challenge (same primitive we already harvest from SMTP); (6) with a valid credential, mailbox headers seed a massive users/hostnames/domains graph. recce already recognises the port (svcdetect signature-matches +OK and parse_product_version pulls Dovecot/Courier/Cyrus banners) and hands the tester a shared pop-imap bash script, but there is no dedicated recce/services/pop3.py \u2014 no CAPA parser, no STLS/user-enum/SASL/NTLM-info probe, no finding builder, no runbook, no cross-service wire \u2014 so this service currently contributes nothing to the vulnerability sheet or to the shared known_* surfaces. The punch list below closes that gap."
+}

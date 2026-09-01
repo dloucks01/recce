@@ -1,0 +1,290 @@
+{
+  "service": "nomad",
+  "summary": "recce/services/nomad.py currently only lists jobs (name/type/status), counts allocations/nodes, reads /v1/agent/self, and flags ACL-off vs ACL-on. Against the full Nomad HTTP API (developer.hashicorp.com/nomad/api-docs) it is missing the entire secret-disclosure surface (job specs, Variables, logs, fs), the RCE primitives (alloc/exec, job submit, raw_exec), the ACL-abuse primitive (bootstrap-if-uninitialized), and the cross-service handoff (Vault/Consul tokens in agent config, secrets embedded in Env/Templates, node IPs \u2192 discovery). It also ignores the passed `creds` dict \u2014 no X-Nomad-Token support at all.",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/nomad.py",
+    "/home/kali/Desktop/projects/recce/tests/test_nomad.py"
+  ],
+  "existing_capabilities": [
+    "Endpoint fingerprinting via /v1/agent/self (version, ACL.Enabled)",
+    "Anonymous listing of /v1/jobs (name, type, status only \u2014 no spec)",
+    "Counts /v1/allocations and /v1/nodes items",
+    "Fallback to /v1/status/leader when agent/self is ACL-gated",
+    "HTTPS fallback with unverified context",
+    "Findings: nomad_unauth_read (critical), nomad_authed (info)",
+    "Runbook mentions dumping /v1/job/<id> but probe never does it",
+    "Port detection on 4646/4647/4648 or 'nomad' service/product string"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "ACL bootstrap primitive not attempted",
+      "kind": "exploit",
+      "value": "critical",
+      "description": "POST /v1/acl/bootstrap returns the initial management token whenever ACLs are enabled but never bootstrapped (common in freshly-provisioned or partially-configured clusters). This yields a cluster-god token in a single unauthenticated call and is exactly the state the module currently mis-labels as 'ACL enforcing (info)'. Should probe with an idempotent GET on /v1/acl/tokens/self first, then attempt the bootstrap POST only when reads are gated but no tokens exist.",
+      "protocol_reference": "Nomad ACL HTTP API \u2014 POST /v1/acl/bootstrap (developer.hashicorp.com/nomad/api-docs/acl/tokens#bootstrap-token)",
+      "cwe": [
+        "CWE-306",
+        "CWE-1188"
+      ],
+      "finding_kind": "nomad_acl_bootstrap_available"
+    },
+    {
+      "name": "Nomad Variables (secret store) not enumerated",
+      "kind": "passive",
+      "value": "critical",
+      "description": "Nomad 1.4+ ships a native Variables secret store at /v1/vars and /v1/var/:path. Anonymous or default-ACL clusters expose every namespace's stored secrets in cleartext. Module never touches /v1/vars \u2014 this is the single highest-value info-disclosure endpoint on modern Nomad. Iterate namespaces (see below) and GET /v1/var/<path> for each returned item.",
+      "protocol_reference": "Nomad Variables HTTP API \u2014 /v1/vars, /v1/var/:path (developer.hashicorp.com/nomad/api-docs/variables)",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ],
+      "finding_kind": "nomad_variables_readable"
+    },
+    {
+      "name": "Full job spec never fetched \u2014 secrets stay hidden",
+      "kind": "passive",
+      "value": "critical",
+      "description": "GET /v1/job/:job_id returns Templates{}, Env{}, Vault{Policies,Namespace}, Consul{}, and DispatchPayload \u2014 where DB passwords, API keys, cloud creds, and TLS material actually live in Nomad. Module lists 50 job IDs but never fetches the specs, so its own 'job specs commonly embed secrets' claim is unsupported. Also miss TaskGroup Constraints and Meta which carry environment/tenant hints.",
+      "protocol_reference": "Nomad Jobs HTTP API \u2014 GET /v1/job/:job_id (developer.hashicorp.com/nomad/api-docs/jobs#read-job)",
+      "cwe": [
+        "CWE-200",
+        "CWE-522",
+        "CWE-798"
+      ],
+      "finding_kind": "nomad_job_spec_secrets"
+    },
+    {
+      "name": "Alloc exec (interactive shell into any task) not surfaced",
+      "kind": "exploit",
+      "value": "critical",
+      "description": "GET /v1/client/allocation/:alloc_id/exec is a WebSocket upgrade that gives an interactive shell inside a live task container. With ACLs disabled or with an alloc-exec policy, this is unauthenticated RCE on every running workload without needing to submit a job. Module doesn't flag this capability, doesn't test the upgrade handshake, and doesn't enumerate allocs beyond a count. Even a rejected WebSocket upgrade tells you whether ACLs gate the endpoint.",
+      "protocol_reference": "Nomad Client HTTP API \u2014 /v1/client/allocation/:alloc_id/exec (developer.hashicorp.com/nomad/api-docs/allocations#exec-allocation)",
+      "cwe": [
+        "CWE-284",
+        "CWE-306",
+        "CWE-78"
+      ],
+      "finding_kind": "nomad_alloc_exec"
+    },
+    {
+      "name": "Allocation FS read + log tail not exercised",
+      "kind": "passive",
+      "value": "high",
+      "description": "/v1/client/fs/ls/:alloc_id, /v1/client/fs/cat/:alloc_id?path=, /v1/client/fs/logs/:alloc_id?task=&type=stderr expose arbitrary file reads inside the alloc directory and full stdout/stderr streams. Logs frequently leak Bearer tokens, DB URIs, and traceback secrets. None are probed.",
+      "protocol_reference": "Nomad Client HTTP API \u2014 /v1/client/fs/{ls,cat,stat,logs}/:alloc_id (developer.hashicorp.com/nomad/api-docs/client)",
+      "cwe": [
+        "CWE-200",
+        "CWE-532",
+        "CWE-22"
+      ],
+      "finding_kind": "nomad_client_fs_read"
+    },
+    {
+      "name": "Job submission (raw_exec / exec driver) \u2014 arbitrary code on any client node",
+      "kind": "exploit",
+      "value": "critical",
+      "description": "PUT /v1/jobs registers a new job. On a cluster with raw_exec enabled (default in dev, common in prod) or the exec/docker drivers, an attacker submits a job whose Task runs `/bin/sh -c <cmd>` and Nomad schedules it onto a client node as root. Module documents this in prose ('scheduler's entire state is readable') but never confirms write access \u2014 a bounded HEAD/OPTIONS or dry-run `POST /v1/jobs/parse` distinguishes read-only ACL from full write.",
+      "protocol_reference": "Nomad Jobs HTTP API \u2014 PUT /v1/jobs, POST /v1/jobs/parse (developer.hashicorp.com/nomad/api-docs/jobs#create-job)",
+      "cwe": [
+        "CWE-306",
+        "CWE-94",
+        "CWE-78"
+      ],
+      "finding_kind": "nomad_job_submit_rce"
+    },
+    {
+      "name": "Namespaces not enumerated \u2014 probe only sees the default namespace",
+      "kind": "passive",
+      "value": "high",
+      "description": "GET /v1/namespaces lists all Nomad namespaces (Enterprise + OSS 1.0+). Jobs, Variables, Allocations are all namespace-scoped: without ?namespace=* or per-namespace iteration, the probe silently misses everything outside `default`. Multi-tenant clusters routinely put prod workloads in dedicated namespaces.",
+      "protocol_reference": "Nomad Namespaces HTTP API \u2014 /v1/namespaces, `namespace` query param (developer.hashicorp.com/nomad/api-docs/namespaces)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "nomad_namespace_scope_miss"
+    },
+    {
+      "name": "Vault + Consul integration tokens in agent/self never extracted",
+      "kind": "passive",
+      "value": "critical",
+      "description": "/v1/agent/self returns config.Vault.{Address,Token,Namespace} and config.Consul.{Address,Token,Auth} when the operator embedded them (extremely common). Module parses only Version and ACL.Enabled \u2014 it reads the body and discards the exact strings recce's vault.py and consul.py would consume. This is the single biggest cross-service wire gap in the module.",
+      "protocol_reference": "Nomad Agent HTTP API \u2014 /v1/agent/self.config.{Vault,Consul} (developer.hashicorp.com/nomad/api-docs/agent#query-self)",
+      "cwe": [
+        "CWE-522",
+        "CWE-200"
+      ],
+      "finding_kind": "nomad_integration_token_leak"
+    },
+    {
+      "name": "Operator/keyring \u2014 Serf gossip encryption keys disclosure",
+      "kind": "passive",
+      "value": "high",
+      "description": "GET /v1/operator/keyring returns the Serf gossip encryption keys used on port 4648. On default-ACL clusters this hands over the symmetric key that decrypts inter-node gossip. Also /v1/operator/raft/configuration lists all server IPs/IDs \u2014 expands scan surface. Never queried.",
+      "protocol_reference": "Nomad Operator HTTP API \u2014 /v1/operator/keyring, /v1/operator/raft/configuration (developer.hashicorp.com/nomad/api-docs/operator)",
+      "cwe": [
+        "CWE-200",
+        "CWE-321"
+      ],
+      "finding_kind": "nomad_keyring_disclosure"
+    },
+    {
+      "name": "Agent members / regions \u2014 cluster topology and next-hop discovery",
+      "kind": "passive",
+      "value": "medium",
+      "description": "/v1/agent/members returns every Serf peer's Addr, Port, Status, Tags (dc, region, build, role). /v1/regions returns federated regions. Feeds host discovery for other services and reveals whether this Nomad is a leaf or hub. Not touched.",
+      "protocol_reference": "Nomad Agent HTTP API \u2014 /v1/agent/members, /v1/regions (developer.hashicorp.com/nomad/api-docs/agent#list-members)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "nomad_topology"
+    },
+    {
+      "name": "ACL token / policy / role / auth-method enumeration",
+      "kind": "auth",
+      "value": "high",
+      "description": "/v1/acl/tokens, /v1/acl/policies, /v1/acl/roles, /v1/acl/auth-methods, /v1/acl/binding-rules \u2014 with a mis-scoped anonymous policy (very common: operators grant `policy = \"read\"` to `anonymous`), these dump every token's Accessor+Name+Policies, every policy's HCL rules, and every OIDC/JWT auth-method config (issuer URL, client_id). Module also ignores GET /v1/acl/token/self which validates any token found elsewhere in the scan.",
+      "protocol_reference": "Nomad ACL HTTP API \u2014 /v1/acl/{tokens,policies,roles,auth-methods,token/self} (developer.hashicorp.com/nomad/api-docs/acl)",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ],
+      "finding_kind": "nomad_acl_metadata_leak"
+    },
+    {
+      "name": "CSI plugins + host volumes \u2014 mount surface",
+      "kind": "passive",
+      "value": "medium",
+      "description": "/v1/plugins and /v1/volumes list every CSI plugin and volume the cluster can mount; /v1/node/:node_id.HostVolumes reveals host-path mounts (e.g. /etc, /var/run/docker.sock). A raw_exec job that mounts a leaked host_volume gives immediate node root without needing driver escape.",
+      "protocol_reference": "Nomad CSI HTTP API \u2014 /v1/plugins, /v1/volumes, /v1/node/:id (developer.hashicorp.com/nomad/api-docs/plugins)",
+      "cwe": [
+        "CWE-200",
+        "CWE-732"
+      ],
+      "finding_kind": "nomad_csi_surface"
+    },
+    {
+      "name": "Prometheus /v1/metrics endpoint not scraped",
+      "kind": "passive",
+      "value": "medium",
+      "description": "GET /v1/metrics?format=prometheus is anonymous by default (separate flag from ACL) and leaks job counts, driver mix, evaluation queue depth, and often job/task labels that mirror service names. Also a version banner via nomad_agent_metric.",
+      "protocol_reference": "Nomad Metrics HTTP API \u2014 /v1/metrics (developer.hashicorp.com/nomad/api-docs/metrics)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "nomad_metrics_open"
+    },
+    {
+      "name": "Search API \u2014 resource enumeration without listing",
+      "kind": "passive",
+      "value": "low",
+      "description": "POST /v1/search and /v1/search/fuzzy return matches across jobs/allocations/nodes/vars given a prefix, and work even when broad list endpoints are policy-denied but individual reads are permitted. Useful ACL-partial fallback the module doesn't try.",
+      "protocol_reference": "Nomad Search HTTP API \u2014 /v1/search, /v1/search/fuzzy (developer.hashicorp.com/nomad/api-docs/search)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "nomad_search_fallback"
+    },
+    {
+      "name": "creds dict passed to analyze() but ignored \u2014 no X-Nomad-Token support",
+      "kind": "auth",
+      "value": "high",
+      "description": "analyze() accepts `creds` but _http() never emits `X-Nomad-Token`. A SecretID looted from Vault, agent config, env vars, or ACL-bootstrap cannot be re-used against this endpoint from within recce. Also blocks credentialed runbook rows (runbook returns `credentialed: []` unconditionally).",
+      "protocol_reference": "Nomad HTTP API auth header \u2014 X-Nomad-Token (developer.hashicorp.com/nomad/api-docs#authentication)",
+      "cwe": [
+        "CWE-287"
+      ],
+      "finding_kind": "nomad_no_token_support"
+    },
+    {
+      "name": "Known-CVE version mapping absent",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Module extracts version but never maps it. Notable: CVE-2023-3300 (ACL bypass via crafted RPC, \u22641.5.6/1.6.0), CVE-2024-1329 / CVE-2024-1330 (workload identity/JWT verification bypasses), CVE-2022-24685 (task-driver arg injection), CVE-2021-32574 (raw_exec escape). Version + is-vulnerable comparison is a cheap add.",
+      "protocol_reference": "HashiCorp Nomad security bulletins (discuss.hashicorp.com/c/security/52)",
+      "cwe": [
+        "CWE-284",
+        "CWE-1104"
+      ],
+      "finding_kind": "nomad_known_cve"
+    },
+    {
+      "name": "TLS-only listener + mTLS posture not distinguished",
+      "kind": "passive",
+      "value": "low",
+      "description": "Nomad's `tls { http = true, verify_https_client = true }` mode requires client certs. Module's HTTPS fallback silently uses an unverified context and never records whether the server demanded mTLS, was plain HTTP, or accepted anonymous TLS \u2014 a security-posture fact worth surfacing separately from the reachability boolean.",
+      "protocol_reference": "Nomad TLS config \u2014 verify_https_client (developer.hashicorp.com/nomad/docs/configuration/tls)",
+      "cwe": [
+        "CWE-295",
+        "CWE-311"
+      ],
+      "finding_kind": "nomad_tls_posture"
+    },
+    {
+      "name": "Port 4647 (RPC) / 4648 (Serf) claimed as nomad but never probed",
+      "kind": "passive",
+      "value": "low",
+      "description": "is_nomad() matches 4647 and 4648, but probe() only speaks HTTP on the given port. 4647 is Nomad RPC (msgpack over TCP, TLS-optional) and 4648 is Serf gossip (TCP+UDP). Even a banner/TLS-hello read distinguishes 'nomad server' from 'nomad client' and confirms encrypted-gossip posture. Currently these ports get mis-attempted as HTTP and fail silently.",
+      "protocol_reference": "Nomad Ports Used (developer.hashicorp.com/nomad/docs/install/production/requirements#ports-used)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "nomad_rpc_serf_probe"
+    },
+    {
+      "name": "Deployment/evaluation history not read",
+      "kind": "passive",
+      "value": "low",
+      "description": "/v1/deployments and /v1/evaluations expose recent job changes with timestamps and status transitions \u2014 useful for identifying recently-updated targets and rollback-window opportunities. Not queried.",
+      "protocol_reference": "Nomad Deployments/Evaluations HTTP API (developer.hashicorp.com/nomad/api-docs/deployments)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "nomad_deploy_history"
+    },
+    {
+      "name": "Runbook advertises capability the probe lacks",
+      "kind": "passive",
+      "value": "low",
+      "description": "runbook() step 3 tells the operator to `curl /v1/job/<job-id>` but the probe never fetches that itself, so recce never proves whether the endpoint is anonymous or lists the discovered secrets in the finding. This is the visible symptom of the 'full job spec' gap above.",
+      "protocol_reference": "self-inconsistency with GET /v1/job/:job_id",
+      "cwe": [
+        "CWE-1059"
+      ],
+      "finding_kind": "nomad_runbook_vs_probe_gap"
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "agent/self.config.Vault.Token + Vault.Address \u2192 recce/services/vault.py should be seeded with the discovered Vault target and a candidate token; today nomad discards both.",
+    "agent/self.config.Consul.Token + Consul.Address \u2192 recce/services/consul.py; same story.",
+    "/v1/nodes[].Address + /v1/agent/members[].Addr \u2192 host discovery / new scan targets; currently only a count is kept.",
+    "/v1/operator/raft/configuration[].Address \u2192 additional server IPs (usually inside private subnets) for lateral scanning.",
+    "Job spec Env{} and Templates{} \u2192 recce credentials store: AWS_*, DB_URL, GITHUB_TOKEN, DOCKER_AUTH_CONFIG, etc., consumable by aws/postgres/mysql/redis/github/docker-registry modules. Currently unfetched.",
+    "Nomad Variables (/v1/var/:path) values \u2192 credentials store (same downstream consumers).",
+    "Job spec TaskConfig.image (docker driver) \u2192 docker registry enumeration hint for a registry module.",
+    "ACL bootstrap response .SecretID \u2192 recce should register this as a management token available to any later credentialed runbook against the same target.",
+    "Operator keyring key \u2192 could seed a serf/gossip-decrypt helper if one exists (or motivate one).",
+    "Known-good port 4647/4648 discovery \u2192 topology graph other services consume; today those ports are matched but produce no facts.",
+    "exploit-session-wiring subagent expects a `token` fact per host \u2014 nomad produces none even when it recovers one via bootstrap or reads one from agent/self."
+  ],
+  "priority_gaps": [
+    "P0 \u2014 POST /v1/acl/bootstrap probe (single call, hands over cluster-root token when un-bootstrapped)",
+    "P0 \u2014 /v1/vars + /v1/var/:path enumeration (Nomad's native secret store, cleartext read)",
+    "P0 \u2014 extract Vault.Token / Vault.Address / Consul.Token / Consul.Address from agent/self and wire to vault.py + consul.py",
+    "P0 \u2014 full /v1/job/:job_id fetch to actually pull the Env/Templates/Vault secrets the finding text already promises",
+    "P1 \u2014 alloc exec + client fs/cat/logs endpoints (RCE + arbitrary file/log read on running workloads)",
+    "P1 \u2014 job-submit write-access confirmation via POST /v1/jobs/parse (distinguish read-only anon from full-cluster-RCE anon)",
+    "P1 \u2014 namespace enumeration + iterate jobs/vars per namespace (default-only view misses multi-tenant clusters)",
+    "P1 \u2014 honor `creds` dict; send X-Nomad-Token; populate runbook `credentialed`",
+    "P2 \u2014 ACL tokens/policies/roles/auth-methods dump for anonymous-read misconfigurations",
+    "P2 \u2014 /v1/operator/raft/configuration + /v1/agent/members \u2192 new host targets + server enumeration",
+    "P2 \u2014 /v1/operator/keyring (Serf gossip key disclosure)",
+    "P2 \u2014 CSI /v1/plugins + /v1/volumes + node HostVolumes (mount-abuse surface)",
+    "P3 \u2014 /v1/metrics Prometheus scrape (anonymous by separate flag)",
+    "P3 \u2014 CVE version mapping (2023-3300, 2024-1329/1330, 2022-24685, 2021-32574)",
+    "P3 \u2014 TLS posture distinction (plain HTTP vs anonymous TLS vs mTLS-required)",
+    "P3 \u2014 actual behavior on 4647/4648 (currently matched then mis-probed as HTTP)",
+    "P3 \u2014 search API fallback when list endpoints are policy-denied but reads permitted",
+    "P3 \u2014 reconcile runbook step 3 with probe (probe should already have the job spec it tells the operator to fetch)"
+  ],
+  "notes": "Test coverage confirms only the three basics (ACL-off list, ACL-on leader fallback, dead port). No test exercises Variables, ACL bootstrap, job spec dump, alloc endpoints, namespaces, or credentialed paths \u2014 matching the module's gaps. The unauth-read finding is mis-scoped for modern Nomad: 'jobs listed' with no spec-fetch understates severity when Variables are also world-readable, and the info-severity 'ACL enforcing' path can silently hide an un-bootstrapped-ACL cluster that would hand over a management token on one POST. Highest per-line-of-code payoff additions are (a) the ACL bootstrap probe, (b) /v1/vars enumeration, and (c) extracting Vault/Consul tokens from the agent/self body that's already being parsed."
+}

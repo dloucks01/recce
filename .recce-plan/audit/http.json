@@ -1,0 +1,405 @@
+{
+  "service": "http",
+  "existing_capabilities": [
+    "stdlib http.client GET/OPTIONS/TRACE/PUT/DELETE/PATCH/CONNECT/PROPFIND probe with per-request TLS, close-connection, small timeouts",
+    "path enum against ~110 curated paths with SPA catch-all suppression via two junk-canary probes",
+    "user-supplied wordlist merge from arg + RECCE_HTTP_WORDLIST env var",
+    "root fingerprint: title, generator meta, Server/X-Powered-By, cookie-name framework hints, ~35 body-regex tech signatures",
+    "header hygiene: version-disclosure header list + CSP grader (unsafe-inline, unsafe-eval, wildcard, missing frame-ancestors/object-src)",
+    "JS <script src> extractor + same-host bundle secret grep (AWS, GitHub, GitLab, Slack, Stripe, JWT, Google API, Firebase, Bearer, endpoint URLs)",
+    "backup-variant probing (.bak/.old/.orig/~/.swp/.backup/.save/.copy/1/.1) of disclosed paths",
+    "autoindex directory-listing detection on discovered surface paths",
+    "HTML form discovery across ~13 login-adjacent paths; login-form classification (password field + username field + CSRF hidden field detection); default-cred lookup for ~18 apps",
+    "HTTP method probe: OPTIONS Allow + direct-verb probe with GET-/ baseline suppression + TRACE reflection => XST finding",
+    "CORS reflection probe (Origin: attacker.example -> ACO reflect + creds)",
+    "robots.txt/sitemap.xml free-path harvest",
+    "OpenAPI/Swagger discovery across ~10 known paths + rough endpoint count; GraphQL __schema introspection POST",
+    "Spring Boot Actuator deep-enum (env, heapdump>100KB, configprops, mappings, beans, threaddump, loggers, trace, httptrace) under both /actuator and /",
+    "nginx alias-traversal probe (CVE-2018-16843 shape) against 8 common static mounts using /etc/passwd marker",
+    "cache-poisoning header reflection probe (X-Forwarded-Host/Proto/Scheme, X-Original-URL, X-Rewrite-URL) into body or Location-family headers",
+    "WebDAV PROPFIND enum against 7 candidate mounts + <multistatus> check"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "Log4Shell (CVE-2021-44228) probe on ingest headers",
+      "kind": "exploit",
+      "description": "No injection of ${jndi:ldap://recce.canary/x} into User-Agent, Referer, X-Api-Version, X-Forwarded-For, or discovered form fields. Log4Shell is one of the highest-value trivially-detectable RCEs still in the wild (Struts/Elastic/VMware/Apache appliances). Detection requires only an out-of-band callback listener, but even a callback-less version (POST to a suspected sink and diff timing/response) is meaningful. Airgap-friendly variant: use a DNS-recording collaborator that recce already hosts in-scope; otherwise flag the class by injecting the payload into every enumerated form field and mark as untestable but candidate.",
+      "value": "critical",
+      "cwe": [
+        "CWE-502",
+        "CWE-917"
+      ],
+      "protocol_reference": "RFC 7230 \u00a75.5 (header semantics); CVE-2021-44228; JNDI Lookup in log4j2 <=2.14"
+    },
+    {
+      "name": "HTTP request smuggling (CL.TE / TE.CL / TE.TE) probe",
+      "kind": "exploit",
+      "description": "No test for desync between reverse proxy and origin. Send two malformed requests: (a) Content-Length + Transfer-Encoding: chunked with an early 0\\r\\n\\r\\n and a smuggled prefix; (b) TE header obfuscation (Transfer-Encoding: xchunked, TE :\\tchunked). Time-differential or response-body-echo confirms. Applies to nginx CVE-2019-20372, Apache CVE-2019-10098, HAProxy CVE-2021-40346, Cloudflare, AWS ALB.",
+      "value": "critical",
+      "cwe": [
+        "CWE-444"
+      ],
+      "protocol_reference": "RFC 7230 \u00a73.3.3 Content-Length vs Transfer-Encoding precedence"
+    },
+    {
+      "name": "HTTP/2 support + rapid-reset (CVE-2023-44487) / smuggling detection",
+      "kind": "active",
+      "description": "Module is HTTP/1.1 stdlib only \u2014 never negotiates ALPN h2 nor detects HTTP/2 support. Missing: ALPN probe to enumerate h2/h3, rapid-reset DoS surface, HTTP/2 desync (CVE-2023-25690 mod_proxy), HTTP/2 CONTINUATION flood (CVE-2024-27316).",
+      "value": "high",
+      "cwe": [
+        "CWE-400",
+        "CWE-444"
+      ],
+      "protocol_reference": "RFC 9113 \u00a75.1 (stream states); RFC 7301 ALPN"
+    },
+    {
+      "name": "Reverse-proxy path-confusion / smuggling primitives",
+      "kind": "active",
+      "description": "No probes for /..;/admin (Tomcat CVE-2020-1938 Ghostcat AJP surface hint), /;/manager/html, /%2e%2e/, /%2f..%2f, URL-encoded traversal (CVE-2021-42013 Apache double-encoding). These frequently bypass proxy auth in front of internal apps.",
+      "value": "critical",
+      "cwe": [
+        "CWE-22",
+        "CWE-436"
+      ],
+      "protocol_reference": "RFC 3986 \u00a73.3 (dot-segments); RFC 7230 \u00a75.3 request-target normalisation"
+    },
+    {
+      "name": "Host header injection / password-reset poisoning",
+      "kind": "active",
+      "description": "cache_poisoning_probe covers X-Forwarded-Host but never mutates the primary Host: header itself. Password-reset flows, email links, and canonical <link rel> commonly reflect Host verbatim (Django, Rails, WordPress). Send Host: recce.canary and grep body + Location.",
+      "value": "high",
+      "cwe": [
+        "CWE-644",
+        "CWE-20"
+      ],
+      "protocol_reference": "RFC 7230 \u00a75.4 Host header"
+    },
+    {
+      "name": "Open redirect / URL-parameter redirect probe",
+      "kind": "active",
+      "description": "No test for /login?next=, /redirect?url=, /out?to=, /go?u=, /r?url=. Open redirects are trivial to detect (send https://recce.canary and follow Location), high in phishing/OAuth-token-theft chains, and universally in-scope.",
+      "value": "high",
+      "cwe": [
+        "CWE-601"
+      ]
+    },
+    {
+      "name": "CRLF header injection probe",
+      "kind": "active",
+      "description": "No test of %0d%0a in path/query. Detect by requesting /?x=%0d%0aX-Recce:%20canary and inspecting response headers for injected X-Recce. Enables cache poisoning, session fixation, XSS via Set-Cookie injection.",
+      "value": "high",
+      "cwe": [
+        "CWE-93",
+        "CWE-113"
+      ],
+      "protocol_reference": "RFC 7230 \u00a73.2 header-field ABNF"
+    },
+    {
+      "name": "SSTI probe on discovered forms",
+      "kind": "active",
+      "description": "discover_forms() catalogs inputs but never probes them. Send {{7*7}}, ${7*7}, <%= 7*7 %>, #{7*7}, {{'7'*7}} against non-login GET/POST params; response body containing 49 (Jinja2/Twig), 7777777 (Ruby), or 823543 (Handlebars) confirms SSTI => generally direct RCE.",
+      "value": "critical",
+      "cwe": [
+        "CWE-1336",
+        "CWE-94"
+      ]
+    },
+    {
+      "name": "SSRF sink probe",
+      "kind": "active",
+      "description": "No detection of common SSRF query names (url=, uri=, dest=, image=, callback=, target=, load=, fetch=, redirect=, next=, host=, path=, file=). Probe against 127.0.0.1:22 / metadata IP 169.254.169.254 and observe response signal. High value on AWS/Azure/GCP-hosted apps (metadata creds => root of cloud tenant).",
+      "value": "critical",
+      "cwe": [
+        "CWE-918"
+      ]
+    },
+    {
+      "name": "Spring4Shell (CVE-2022-22965) probe",
+      "kind": "exploit",
+      "description": "Detect via class.module.classLoader.resources.context.parent.pipeline.first.pattern query \u2014 response 500 vs 400 differentiates vulnerable Spring MVC + JDK9+ + Tomcat. Trivial single-request test.",
+      "value": "critical",
+      "cwe": [
+        "CWE-94"
+      ],
+      "protocol_reference": "CVE-2022-22965; Spring Framework <5.3.18/5.2.20"
+    },
+    {
+      "name": "Struts2 OGNL Content-Type (CVE-2017-5638) probe",
+      "kind": "exploit",
+      "description": "Detect by sending Content-Type: %{(#_='multipart/form-data').(<benign OGNL>)}. Response echo/timing confirms. Still found on legacy WebSphere/OFBiz appliances.",
+      "value": "critical",
+      "cwe": [
+        "CWE-20",
+        "CWE-917"
+      ]
+    },
+    {
+      "name": "ShellShock (CVE-2014-6271) probe on CGI endpoints",
+      "kind": "exploit",
+      "description": "Send User-Agent: () { :;}; echo; echo recce-canary against any CGI (/cgi-bin/*, .cgi, .pl paths) and check for canary reflection or blocked-response signature. Still surfaces on router admin UIs and legacy embedded devices.",
+      "value": "high",
+      "cwe": [
+        "CWE-78"
+      ]
+    },
+    {
+      "name": "HTTP Basic/NTLM/Negotiate auth on 401 endpoints",
+      "kind": "auth",
+      "description": "When a 401 arrives, WWW-Authenticate carries Basic/NTLM/Negotiate/Digest scheme + realm. Currently ignored. Should (a) surface realm as recon fact, (b) probe common Basic creds against detected app (admin:admin, root:root, printer defaults), (c) parse NTLM type-2 challenge for domain/hostname/DNS-domain/DNS-tree/timestamp -> feeds known_hostnames/known_domains without SMB access. This is a known-good primitive for internal recon.",
+      "value": "high",
+      "cwe": [
+        "CWE-521",
+        "CWE-798"
+      ],
+      "protocol_reference": "RFC 7617 (Basic), RFC 7616 (Digest), RFC 4559 (SPNEGO), [MS-NLMP] \u00a72.2.2.5 NTLM Type-2"
+    },
+    {
+      "name": "OAuth/OIDC & JWKS discovery",
+      "kind": "passive",
+      "description": "No probe of /.well-known/openid-configuration, /.well-known/oauth-authorization-server, /.well-known/jwks.json. These leak issuer URL (often internal hostname), token/authorization endpoints, supported algs (alg=none exposure), and JWKS with signing keys. Should feed known_hostnames (issuer host) and known_users (sub_claim examples in userinfo).",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 8414 \u00a73, OpenID Connect Discovery 1.0 \u00a74"
+    },
+    {
+      "name": "Recent-CVE path fingerprints",
+      "kind": "exploit",
+      "description": "Wordlist misses high-signal recent-CVE probes: /mgmt/tm/util/bash (F5 CVE-2022-1388), /api/v2/cmdb/system/admin?access_token= (Fortinet CVE-2022-40684), /autodiscover/autodiscover.json (Exchange ProxyShell CVE-2021-34473), /owa/auth/logon.aspx (ProxyLogon CVE-2021-26855), /setup/setupadministrator.action (Confluence CVE-2023-22515), /users/password (GitLab CVE-2023-7028), /remote/logincheck (Fortinet SSL-VPN CVE-2023-27997), /dana-na/auth/url_default/welcome.cgi (Ivanti CVE-2024-21887), /moveitisapi/moveitisapi.dll (MOVEit CVE-2023-34362), /oauth/idp/.well-known/openid-configuration (Citrix Bleed CVE-2023-4966), /actuator/gateway/routes (Spring Cloud Gateway CVE-2022-22947).",
+      "value": "critical",
+      "cwe": [
+        "CWE-1395"
+      ]
+    },
+    {
+      "name": "Terraform state + cloud/CI config disclosure paths",
+      "kind": "passive",
+      "description": "Wordlist missing extraordinarily high-value modern secrets: /terraform.tfstate (leaks every cloud resource + often plaintext secrets in output blocks), /.terraform.lock.hcl, /.aws/credentials, /.ssh/id_rsa, /.npmrc, /.pypirc, /.docker/config.json, /package.json, /package-lock.json, /composer.lock, /Gemfile.lock, /requirements.txt, /Pipfile.lock, /pom.xml, /.gitlab-ci.yml, /.github/workflows/, /docker-compose.yml, /Dockerfile, /.vscode/settings.json, /.idea/workspace.xml. Also /.git/index and /.git/logs/HEAD (index alone lets git-dumper reconstruct the full tree, HEAD does not).",
+      "value": "critical",
+      "cwe": [
+        "CWE-538",
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Debug / profiler / runtime introspection endpoints",
+      "kind": "passive",
+      "description": "Missing: /debug/pprof/, /debug/pprof/goroutine, /debug/vars (Go expvar), /metrics (Prometheus - leaks internal hostnames, IPs, DB URIs in labels), /-/debug/, /_status/vars (CockroachDB), /solr/admin/cores, /rest/api/latest/serverInfo (Jira), /_cluster/settings (Elasticsearch), /_cat/indices, /jolokia/list (JMX-over-HTTP -> often RCE via MLet), /kv/v1/secret/ (Vault path guess), /api/v1/pods (kubelet no-auth).",
+      "value": "critical",
+      "cwe": [
+        "CWE-200",
+        "CWE-497"
+      ]
+    },
+    {
+      "name": "Actuator gaps + writable-endpoint POST probes",
+      "kind": "exploit",
+      "description": "actuator_probe missing: /actuator/logfile (raw log tail), /actuator/dump (Boot 1.x thread dump), /actuator/liquibase, /actuator/flyway, /actuator/scheduledtasks, /actuator/gateway/routes (CVE-2022-22947 SpEL RCE via POST), /actuator/refresh (POST reload), /actuator/restart, /actuator/jolokia/list, /actuator/prometheus. Loggers is listed but never POSTed to demonstrate writability. Env is fetched but not parsed for password/secret keys => misses the biggest single credential source in Java stacks.",
+      "value": "critical",
+      "cwe": [
+        "CWE-200",
+        "CWE-306",
+        "CWE-1188"
+      ]
+    },
+    {
+      "name": "Framework debug-page / stack-trace passive fingerprinting",
+      "kind": "passive",
+      "description": "No detection of DEBUG=True error pages (Django yellow, Werkzeug console => /console can be an RCE surface, Flask/Sanic tracebacks, Rails BetterErrors, ASP.NET yellow-screen with query/session/cookies dumped). Trigger by requesting /<random-500-inducing-path> and grep body for framework-specific traceback markers. Werkzeug console with debugger PIN sometimes brute-forceable.",
+      "value": "high",
+      "cwe": [
+        "CWE-209",
+        "CWE-215"
+      ]
+    },
+    {
+      "name": "Session-cookie hygiene audit",
+      "kind": "passive",
+      "description": "Cookies are parsed for framework fingerprint only. Never audited for missing Secure, missing HttpOnly, missing SameSite, or SameSite=None without Secure. On TLS ports especially, absence of Secure on a session cookie is a real finding.",
+      "value": "medium",
+      "cwe": [
+        "CWE-1004",
+        "CWE-614",
+        "CWE-1275"
+      ]
+    },
+    {
+      "name": "CORS misconfig completeness",
+      "kind": "active",
+      "description": "Only tests reflect-arbitrary-origin + wildcard-with-creds. Missing: Origin: null (opens sandboxed iframe / data: attack), Origin: https://target.attacker.com (subdomain-suffix bug), pre-flight OPTIONS with Access-Control-Request-Method: PUT/DELETE + Access-Control-Request-Headers: Authorization to enumerate which methods/headers the target actually permits cross-origin.",
+      "value": "high",
+      "cwe": [
+        "CWE-346",
+        "CWE-942"
+      ],
+      "protocol_reference": "Fetch Living Standard \u00a73.7 CORS"
+    },
+    {
+      "name": "Web cache deception (Omer Gil pattern)",
+      "kind": "active",
+      "description": "Distinct from cache_poisoning_probe. Request /account.php/nonexistent.css / /profile/attacker.jpg and check whether the CDN caches the private response. Very common on nginx+cache and CloudFront defaults.",
+      "value": "high",
+      "cwe": [
+        "CWE-524"
+      ]
+    },
+    {
+      "name": "GraphQL abuse beyond introspection",
+      "kind": "active",
+      "description": "api_spec_probe hits __schema but does not check for (a) batching support (query alias flood -> DoS + brute force), (b) suggestions ('Did you mean field xyz?') that leak private schema even with introspection off, (c) POST/GET method mismatch bypass, (d) universal /v1/graphql /api/graphql /query paths.",
+      "value": "high",
+      "cwe": [
+        "CWE-400",
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "WebDAV write-path probe",
+      "kind": "active",
+      "description": "webdav_probe confirms PROPFIND but never attempts a safe COPY/MOVE to a scratch name or an OPTIONS on the WebDAV mount to confirm PUT is routed. Also missing MKCOL. A writable WebDAV endpoint = direct file upload (CVE-2017-7269 IIS 6, common on lighttpd/nginx dav_ext).",
+      "value": "critical",
+      "cwe": [
+        "CWE-434",
+        "CWE-284"
+      ],
+      "protocol_reference": "RFC 4918 \u00a79.7 (PROPFIND), \u00a79.7.1 (MKCOL), \u00a79.8 (COPY)"
+    },
+    {
+      "name": "Trailing / null-byte / dot-suffix bypass on protected paths",
+      "kind": "active",
+      "description": "When a 401/403 hits on a disclosure path (e.g. /wp-config.php returns 403), never retries /wp-config.php., /wp-config.php%20, /wp-config.php%00.jpg, /wp-config.php/., /wp-config.php%23. Same for /admin (403) vs /admin/. Very common ACL-bypass idiom on IIS + reverse-proxied apps.",
+      "value": "high",
+      "cwe": [
+        "CWE-436",
+        "CWE-22"
+      ]
+    },
+    {
+      "name": "JWT extracted from JS/cookies parsed for weak alg",
+      "kind": "passive",
+      "description": "jwt regex captures the token as evidence but never base64-decodes header to flag alg=none, alg=HS256 with kid path-traversal (CVE-2019-7644), or exp/iat far in past. High-signal, offline, no extra request.",
+      "value": "medium",
+      "cwe": [
+        "CWE-347"
+      ]
+    },
+    {
+      "name": "HSTS / Permissions-Policy / Referrer-Policy audit",
+      "kind": "passive",
+      "description": "header_hygiene_findings only covers Server-family + CSP. Missing: HSTS presence/max-age/includeSubDomains/preload on TLS ports; Referrer-Policy (no-referrer-when-downgrade default leaks path across origins); Permissions-Policy / Feature-Policy; X-Content-Type-Options: nosniff; X-Frame-Options fallback where CSP frame-ancestors absent; Cross-Origin-Opener-Policy / Cross-Origin-Embedder-Policy.",
+      "value": "low",
+      "cwe": [
+        "CWE-693",
+        "CWE-319"
+      ],
+      "protocol_reference": "RFC 6797 (HSTS)"
+    },
+    {
+      "name": "Hostname/domain harvest into known_hostnames/known_domains",
+      "kind": "chain",
+      "description": "HTTP surface leaks FQDNs in ALL of: Set-Cookie Domain=, Location redirects, HSTS report-uri, CSP source lists (script-src example.com), <link rel=canonical>, <meta property=og:url>, <a href=mailto:>, JS absolute-URL endpoint hints (already extracted!), sitemap.xml external <loc>, OpenAPI spec 'host'/'servers' fields, WWW-Authenticate NTLM Type-2 payload. None are fed to core/known_hostnames.py. Cross-service value: cert/SMB/DNS/LDAP modules consume these for AS-REP roasting, cert-covers checks, SPN candidates, vhost brute.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Username harvest into known_users",
+      "kind": "chain",
+      "description": "/wp-json/wp/v2/users is probed as a path enum hit but the JSON is never parsed for 'slug'/'name' user list. /wp-json/oembed/1.0/embed?url=... and ?rest_route=/wp/v2/users likewise. Additionally: mailto: links in root HTML, security.txt Contact:, comments in HTML (WordPress <link rel=author>), /?author=1 iterated (WordPress author enum), Jenkins /people/, GitLab /users.json, /api/v2/users (Nextcloud), Gitea /api/v1/users/search. All feed known_users for downstream spray/AS-REP roasting.",
+      "value": "high",
+      "cwe": [
+        "CWE-204"
+      ]
+    },
+    {
+      "name": "Login-form + Basic-auth realm feed into relay_targets / cred-spray queue",
+      "kind": "chain",
+      "description": "discover_forms emits findings but never registers the login endpoint as a credential-spray target for the session bus, nor does 401-with-Basic get registered. Password-only endpoints on HTTPS on internal hosts are prime SMB-relay pre-work: same creds usually work in AD.",
+      "value": "high",
+      "cwe": [
+        "CWE-521"
+      ]
+    },
+    {
+      "name": "HTTP proxy / open-relay detection",
+      "kind": "active",
+      "description": "When port 8080/3128/8118 respond, no test of full-URL GET (GET http://recce.canary/ HTTP/1.1) nor CONNECT recce.canary:443 to detect open forward-proxy => internal-network pivot + outbound egress bypass. High attacker value.",
+      "value": "critical",
+      "cwe": [
+        "CWE-441"
+      ]
+    },
+    {
+      "name": "XML/SOAP endpoint XXE probe",
+      "kind": "active",
+      "description": "No probe for /services/, /axis2/, /ws/, .asmx endpoints; no test of Content-Type: text/xml with DOCTYPE external entity => XXE. Common on legacy Java/.NET internal services.",
+      "value": "high",
+      "cwe": [
+        "CWE-611"
+      ]
+    },
+    {
+      "name": "HTTP/0.9 & method-verb-tampering ACL bypass",
+      "kind": "active",
+      "description": "When /admin returns 403 to GET, retry with HEAD, POST, X-HTTP-Method-Override: GET header, or method-verb HTMLFORMGET. Many frameworks only ACL-check GET/POST. Historically found on Tomcat/JBoss/Node express-basic-auth.",
+      "value": "high",
+      "cwe": [
+        "CWE-284",
+        "CWE-436"
+      ]
+    },
+    {
+      "name": "ETag / Last-Modified inode disclosure",
+      "kind": "passive",
+      "description": "nginx sends ETag as \\\"<mtime>-<inode>\\\" in hex \u2014 inode disclosure is CVE-worthy (CVE-2017-7529 range and inode-leak on stale builds). Currently not surfaced. Cheap: parse root response ETag.",
+      "value": "low",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "CDN / WAF fingerprinting",
+      "kind": "passive",
+      "description": "No detection of Cloudflare (cf-ray, __cfduid), Akamai (Server: AkamaiGHost, akamai-x-cache-on), Fastly, CloudFront (X-Amz-Cf-Id), Sucuri, Imperva, AWS ALB (X-Amzn-Trace-Id). Knowing what's fronting the origin scopes every downstream test (which of the probes above will actually reach the real app).",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ]
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "Hostnames extracted from Set-Cookie Domain=, Location redirects, CSP source lists, <link rel=canonical>, <meta og:url>, HSTS includeSubDomains hints, JS absolute-URL endpoints (already parsed for secrets!), sitemap external <loc>, OpenAPI 'host'/'servers', NTLM Type-2 challenge payload (DnsDomainName/DnsComputerName/DnsTreeName) \u2014 none fed into core/known_hostnames.py despite ipmi.py/telnet.py/vault.py/vsphere.py etc. doing so",
+    "Domains extracted from mailto: links, security.txt Contact:, WWW-Authenticate realm, and NTLM Type-2 \u2014 never fed into known_domains",
+    "Usernames from /wp-json/wp/v2/users JSON (probed but not parsed), /?author=N iteration, Jenkins /people/, Gitea /api/v1/users/search, GitLab /users.json, mailto: local-parts, HTML author metadata \u2014 never fed into known_users",
+    "Login-form endpoints (already fully catalogued by discover_forms) and Basic-auth-protected paths never registered as credential-spray targets on the session bus, so cross-service modules that would try same creds against SMB/LDAP have no queue entry",
+    "JWTs recovered from JS bundles (already emitted as findings) never fed into a token/hash queue for downstream analysis or replay",
+    "OpenAPI/Swagger 'servers' entries and GraphQL __schema type names (probed but discarded) never fed as additional URL surface into path_enum second-pass"
+  ],
+  "priority_gaps": [
+    "1. Log4Shell + Spring4Shell + Struts2 OGNL header/body injection probes \u2014 highest-signal detectable RCEs in modern engagements; module has zero exploit-primitive coverage beyond nginx alias-traversal",
+    "2. Recent-CVE fingerprint paths (F5 CVE-2022-1388, Fortinet CVE-2022-40684, Exchange ProxyShell/ProxyLogon, Confluence CVE-2023-22515, GitLab CVE-2023-7028, MOVEit, Ivanti, Citrix Bleed, Spring Cloud Gateway CVE-2022-22947) \u2014 every single one is a one-request GET",
+    "3. Terraform tfstate + cloud CI secrets wordlist expansion (/.terraform.tfstate, /.aws/credentials, /.ssh/id_rsa, /.git/index, package/composer/Gemfile locks, /.github/workflows/, /.gitlab-ci.yml) \u2014 highest-impact static-file disclosure gap",
+    "4. Cross-service fact feed: hostname/domain harvest from Location/CSP/Set-Cookie/JS/NTLM, and username harvest from /wp-json/wp/v2/users JSON, /?author=N iteration, Jenkins/Gitea/GitLab user APIs => known_users / known_hostnames / known_domains",
+    "5. Reverse-proxy path-confusion bypass suite (/..;/, /%2e%2e/, /admin. , /admin%00 , /admin/., X-HTTP-Method-Override) as an automatic retry against every 401/403 disclosure path already found",
+    "6. HTTP request smuggling CL.TE/TE.CL probe + HTTP/2 rapid-reset detection \u2014 the two largest attack primitives absent",
+    "7. SSRF sink probe (url=/uri=/redirect=/fetch=/host= against 127.0.0.1 & 169.254.169.254) + SSTI probe on discovered form fields \u2014 direct RCE / cloud-metadata credential capture",
+    "8. Auth surface: WWW-Authenticate Basic/Digest/NTLM/Negotiate parser => realm as recon fact + NTLM Type-2 challenge decode for domain/hostname (SMB-adjacent recon without SMB), plus OIDC/JWKS discovery paths",
+    "9. Debug/profiler/runtime endpoints (/debug/pprof/, /metrics, /jolokia/list, /_cluster/settings, /api/v1/pods) \u2014 every one is a common oversight",
+    "10. Actuator writable endpoints (/actuator/gateway/routes CVE-2022-22947, /actuator/loggers POST demo, /actuator/env value parsing for password/secret keys) + missing Actuator paths (logfile, jolokia, refresh, restart)",
+    "11. Open-redirect, CRLF injection, Host header injection, web-cache deception \u2014 each a well-known single-request primitive with high phishing/session-hijack value",
+    "12. Session-cookie hygiene (Secure/HttpOnly/SameSite audit) + HSTS/COOP/COEP/Referrer-Policy header audit \u2014 no new requests needed, derived from existing fp['headers']",
+    "13. Trailing/null-byte/dot bypass retry on any disclosure path returning 401/403 \u2014 cheap follow-through that turns half of the module's 'restricted' downgrades into real hits",
+    "14. HTTP forward-proxy open-relay detection (full-URL GET + CONNECT recce.canary:443) when a proxy-shaped port is scanned",
+    "15. Framework debug-page detection (Django DEBUG=True, Werkzeug console, Rails BetterErrors, ASP.NET yellow-screen) \u2014 triggered by a single 500-inducing request"
+  ],
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/http.py",
+    "/home/kali/Desktop/projects/recce/tests/test_services_http.py",
+    "/home/kali/Desktop/projects/recce/recce/core/known_hostnames.py",
+    "/home/kali/Desktop/projects/recce/recce/core/relay_targets.py"
+  ],
+  "notes": "Module is broad (1624 LOC, 15+ probe functions) and covers most defensive-hygiene / info-disclosure ground, but has essentially no offensive RCE-primitive coverage beyond nginx alias-traversal, no CVE-2021+ fingerprint paths, and \u2014 most striking for a scanner where other services (ipmi/telnet/vault/vsphere/nrpe) actively feed cross-service fact bus \u2014 HTTP feeds nothing into known_users/known_hostnames/known_domains/relay_targets despite being the single richest source of hostnames (Location, Set-Cookie Domain=, CSP, JS URLs) and usernames (/wp-json/wp/v2/users, /?author=N, mailto:) in the whole scanner. That fact-bus gap is the highest-ROI structural improvement; the CVE/exploit-primitive coverage is the highest-value new-capability set.",
+  "summary": "HTTP module has broad coverage of info-disclosure, header hygiene, path enum, form discovery, actuator, CORS reflection, cache-poisoning header reflection, nginx alias traversal, WebDAV PROPFIND, JS secret scan, and default-cred hints, but is missing: (1) modern RCE primitives (Log4Shell/Spring4Shell/Struts2/SSTI/SSRF/smuggling/path-confusion), (2) 10+ high-signal 2021-2024 CVE fingerprint paths, (3) high-value modern secrets wordlist (Terraform state, .aws, CI configs, /.git/index), (4) any cross-service fact feed \u2014 hostnames from Location/CSP/Set-Cookie/JS, usernames from /wp-json/wp/v2/users JSON and /?author=N, NTLM Type-2 decode, none reach known_hostnames/known_users/known_domains despite peer modules doing so, (5) auth-scheme detection (Basic/NTLM/Negotiate/OIDC/JWKS), (6) 403/401 bypass retries, session-cookie hygiene, HSTS/Referrer/COOP audits, GraphQL abuse beyond introspection, forward-proxy open-relay test, framework debug pages."
+}

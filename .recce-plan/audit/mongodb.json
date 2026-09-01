@@ -1,0 +1,276 @@
+{
+  "service": "mongodb",
+  "module_files": [
+    "recce/services/db/mongodb.py",
+    "recce/scripts/services/mongodb.sh",
+    "recce/data/wordlists/creds-mongodb.txt",
+    "tests/test_db_engines.py",
+    "tests/test_pipeline_db.py"
+  ],
+  "summary": "The MongoDB module is well-developed on the read/enum side (OP_MSG + BSON hand-rolled, hello/buildInfo/listDatabases, SCRAM-SHA-1/256 with mutual verification, usersInfo hash extraction as hashcat 24100/24200, replSetGetStatus/replSetGetConfig, getShardMap, getCmdLineOpts, getParameter(scripting), listCollections inventory, datamine with secret-field regex + embedded conn-string harvest, replica-set member lateral pivot). Gaps cluster in three areas: (1) info-disclosure commands the wire protocol supports but recce never calls (hostInfo, getLog:startupWarnings, connectionStatus, currentOp, rolesInfo, serverStatus, listCommands, whatsmyuri, dbStats), (2) high-value collections the datamine deliberately skips or under-mines (local.oplog.rs recent writes, local.system.keys / admin.system.keys cluster keyfile secret, admin.system.version, admin.system.roles), and (3) auth-mechanism gaps (saslSupportedMechs discovery in hello, per-user SCRAM-SHA-1 downgrade preference for cracking, MONGODB-CR legacy hash extraction, MONGODB-X509 / GSSAPI / PLAIN / MONGODB-AWS mechanism detection). Cross-service wire gaps are the biggest miss: usernames from usersInfo, hostnames from hostInfo/replset/shard/CN-SAN, and the keyfile-derived internal cluster credential all die inside the mongodb result rather than feeding known_users/known_hostnames/relay_targets.",
+  "existing_capabilities": [
+    "op_msg_wire",
+    "bson_encode_decode",
+    "hello_buildinfo",
+    "listDatabases_unauth_probe",
+    "scram_sha1_and_sha256_mutual_auth",
+    "weak_default_cred_sweep",
+    "wordlist_cred_sweep",
+    "usersInfo_with_showCredentials_scram_hashcat",
+    "replSetGetStatus_members",
+    "replSetGetConfig",
+    "getShardMap_hosts",
+    "getCmdLineOpts_bindip_auth_configured",
+    "getParameter_scripting",
+    "listCollections_inventory",
+    "datamine_secret_field_regex",
+    "datamine_embedded_connstring_harvest",
+    "replica_member_lateral_pivot",
+    "eol_version_flag",
+    "opreply_legacy_compat"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "hostInfo_command_disclosure",
+      "kind": "passive",
+      "description": "The `hostInfo` command returns system.hostname, os.name/version, os.type, and current time \u2014 a full OS fingerprint with hostname/FQDN. Unauth-readable on exposed instances and readable by any authenticated principal with hostManager or clusterMonitor role. Currently never called. Would feed cross-service known_hostnames and known_domains and let recce distinguish Linux vs Windows hosts for follow-up (SSH vs SMB spray).",
+      "value": "high",
+      "protocol_reference": "MongoDB Server docs: db.hostInfo() / hostInfo command",
+      "finding_kind": "mongo_hostinfo"
+    },
+    {
+      "name": "getLog_startupWarnings",
+      "kind": "passive",
+      "description": "`getLog: 'startupWarnings'` returns the server's own list of insecurely-configured warnings \u2014 'access control is not enabled', 'listening on all interfaces', THP disabled/enabled, mmapv1 deprecated, low ulimits, X.509 CN mismatch, insecure TLS ciphers, etc. It is the server telling you what is wrong. `getLog: 'global'` returns the recent log ring buffer (auth failures, source IPs, queries). Unauth-readable on exposed instances; readable by clusterMonitor role otherwise. Not currently called.",
+      "value": "high",
+      "protocol_reference": "MongoDB manual: db.adminCommand({getLog:'startupWarnings'|'global'|'rs'|'oplog'})",
+      "finding_kind": "mongo_startup_warnings",
+      "cwe": [
+        "CWE-532"
+      ]
+    },
+    {
+      "name": "local_oplog_rs_mining",
+      "kind": "passive",
+      "description": "datamine() explicitly excludes 'local' and 'config' databases (safety), but `local.oplog.rs` is the replica-set operations log \u2014 every insert/update in recent history, including credential rows, session tokens, PII writes, and full document contents for creates. A read-only find on it dwarfs the sampled collection scan the datamine does today. Only auth-worthy caveat: needs `local` read; unauth exposed instances satisfy that trivially, and any account with `read` on `local` (common for backup users) also does.",
+      "value": "high",
+      "protocol_reference": "MongoDB Replication Internals: oplog collection `local.oplog.rs`",
+      "finding_kind": "mongo_oplog_leak",
+      "cwe": [
+        "CWE-200",
+        "CWE-312"
+      ]
+    },
+    {
+      "name": "cluster_keyfile_secret_extraction",
+      "kind": "passive",
+      "description": "`local.system.keys` and `admin.system.keys` (post-3.6 internal auth) store the cluster-internal auth secret that mongod nodes use to authenticate to each other. Reading them yields the `keyId` + `key` payload that can be replayed with the reserved `__system` account to impersonate any node in the replica set / shard \u2014 cluster-wide RCE-adjacent lateral move. Also readable is `security.keyFile` path via getCmdLineOpts.parsed.security.keyFile (currently ignored). Not attempted.",
+      "value": "critical",
+      "protocol_reference": "MongoDB Manual: security.keyFile / internal auth; local.system.keys collection",
+      "finding_kind": "mongo_cluster_keyfile",
+      "cwe": [
+        "CWE-798",
+        "CWE-522"
+      ]
+    },
+    {
+      "name": "saslSupportedMechs_enumeration_and_downgrade_preference",
+      "kind": "passive",
+      "description": "The `hello` command accepts an optional `saslSupportedMechs: '<db>.<user>'` field. The reply then lists exactly which SCRAM mechs that specific user has credentials for \u2014 so you can (a) enumerate whether a target account exists (differential response) and (b) detect users that still have SCRAM-SHA-1 credentials alongside SHA-256 so cracking prefers the weaker 24100 mode. Recce currently always tries 256 then 1 blindly and always emits both hash rows when both are stored \u2014 no per-user mechanism map, no downgrade preference recorded in findings/loot.",
+      "value": "high",
+      "protocol_reference": "MongoDB Manual: hello command `saslSupportedMechs`; SERVER-27937",
+      "finding_kind": "mongo_scram_downgrade",
+      "cwe": [
+        "CWE-757"
+      ]
+    },
+    {
+      "name": "mongodb_cr_legacy_hash_extraction",
+      "kind": "passive",
+      "description": "Users provisioned pre-3.0 (or upgraded from 2.x with legacy creds retained) still have a `MONGODB-CR` block in credentials \u2014 a raw MD5(username + ':mongo:' + password) hex string. Recce's _scram_hashcat only handles SCRAM-SHA-1 / SCRAM-SHA-256; a MONGODB-CR credential falls on the floor. Format is directly hashcat-crackable as MD5 with a fixed salt shape or a custom rule; even publishing the MD5 to the hash loot with a note is a win.",
+      "value": "medium",
+      "protocol_reference": "MongoDB Manual (deprecated): MONGODB-CR authentication",
+      "finding_kind": "mongo_cr_hash",
+      "cwe": [
+        "CWE-916",
+        "CWE-327"
+      ]
+    },
+    {
+      "name": "non_scram_mechanism_attempts",
+      "kind": "auth",
+      "description": "Recce only implements SCRAM-SHA-1 / SCRAM-SHA-256. MongoDB Enterprise/Atlas also accepts `PLAIN` (LDAP proxy \u2014 plaintext credential over TLS), `GSSAPI` (Kerberos \u2014 SPN discoverable, potential AS-REP / delegation targets), `MONGODB-X509` (client cert \u2014 recce doesn't advertise this even though it enumerates the presence of X.509 users), and `MONGODB-AWS` (IAM). At minimum a PLAIN attempt against Enterprise servers dramatically simplifies credentialed enumeration when only LDAP creds are known.",
+      "value": "medium",
+      "protocol_reference": "MongoDB Manual: Authentication Mechanisms (PLAIN, GSSAPI, MONGODB-X509, MONGODB-AWS)",
+      "finding_kind": "mongo_plain_ldap_auth",
+      "cwe": [
+        "CWE-522"
+      ]
+    },
+    {
+      "name": "aggregation_function_and_where_rce_proof",
+      "kind": "exploit",
+      "description": "Module correctly flags scripting=true as an RCE primitive but never *proves* it. On unauth or credentialed access with scripting enabled, an aggregation pipeline stage `$function: {body: 'function(){return process.env}', args: [], lang: 'js'}` or a `$where: 'this.x || (function(){/*payload*/})()'` executes attacker JavaScript inside the server. On pre-4.2 servers `db.eval()` is directly callable. A safe read-only proof (return `process.env.MONGO_INITDB_ROOT_USERNAME` or a stat) upgrades the finding from high-inferential to confirmed-critical.",
+      "value": "high",
+      "protocol_reference": "MongoDB Manual: $function operator (4.4+), $where operator, db.eval() (removed 4.2)",
+      "finding_kind": "mongo_scripting_rce_confirmed",
+      "cwe": [
+        "CWE-94"
+      ]
+    },
+    {
+      "name": "http_status_interface_probe_28017",
+      "kind": "passive",
+      "description": "Legacy mongod (<3.6) ships an HTTP status interface on port+1000 (default 28017) when `--rest` / `net.http.enabled` is on. It serves an HTML dashboard revealing dbs, commandline options, and \u2014 with `--rest` \u2014 arbitrary db.serverStatus() etc. via /admin/commands. Recce has no probe for it despite already scanning 27017/27018/27019. Trivial passive check when an old buildInfo comes back.",
+      "value": "medium",
+      "protocol_reference": "MongoDB 2.x/3.x Manual: net.http (removed in 3.6)",
+      "finding_kind": "mongo_http_status_interface",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "currentOp_active_session_intel",
+      "kind": "passive",
+      "description": "`db.currentOp()` returns active operations with `client` (source IP:port), `appName`, `desc`, effective user, and the full query text of in-flight operations. Reveals which app servers connect to this Mongo (targets for onward lateral), and any admin console currently attached. Unauth-readable on exposed; needs `inprog` privilege otherwise. Not called.",
+      "value": "medium",
+      "protocol_reference": "MongoDB Manual: db.currentOp / $currentOp aggregation stage",
+      "finding_kind": "mongo_current_op_clients",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "connectionStatus_effective_privileges",
+      "kind": "passive",
+      "description": "After a successful cred, `connectionStatus:{showPrivileges:true}` returns the effective role list and every action:resource pair for the authenticated principal \u2014 tells you exactly what this credential can do (dropDatabase? shutdown? read on `local`?). Currently probe_creds records only cred_access boolean; no effective-privilege inventory. This is the difference between 'we got in' and 'we got in and can shut down the cluster'.",
+      "value": "medium",
+      "protocol_reference": "MongoDB Manual: db.runCommand({connectionStatus:1, showPrivileges:true})",
+      "finding_kind": "mongo_effective_privileges"
+    },
+    {
+      "name": "rolesInfo_custom_role_privesc_map",
+      "kind": "passive",
+      "description": "`rolesInfo:1, showBuiltinRoles:false, showPrivileges:true` dumps every custom role definition, including `inheritedPrivileges`. Custom roles are where operators typically over-grant (a 'reader' role that also has `dropDatabase` on admin) \u2014 mapping them at probe time gives concrete privilege-escalation chains per compromised account.",
+      "value": "medium",
+      "protocol_reference": "MongoDB Manual: rolesInfo command",
+      "finding_kind": "mongo_role_privesc"
+    },
+    {
+      "name": "serverStatus_storage_engine_encryption",
+      "kind": "passive",
+      "description": "`serverStatus` reveals storageEngine.name (mmapv1 is deprecated and cannot encrypt at rest), encryptionAtRest state, transportSecurity, license type, connections.current (blast radius for a killAllSessions DoS), and the security.SSLServerSubjectName. Currently only version + js_engine are captured from buildInfo.",
+      "value": "medium",
+      "protocol_reference": "MongoDB Manual: serverStatus command (storageEngine, security, transportSecurity)",
+      "finding_kind": "mongo_storage_engine_weak",
+      "cwe": [
+        "CWE-311"
+      ]
+    },
+    {
+      "name": "tls_probe_and_cert_extraction",
+      "kind": "passive",
+      "description": "MongoDB supports TLS natively (net.tls.mode) with client-cert auth (MONGODB-X509). Recce never attempts a TLS handshake \u2014 no cipher enumeration, no cert CN/SAN capture, no TLS 1.0/1.1 detection, no self-signed / CA-issued distinction. CN/SAN would seed known_hostnames; weak-cipher / expired-cert findings are standard hygiene wins on database ports.",
+      "value": "medium",
+      "protocol_reference": "MongoDB Manual: TLS/SSL Configuration; net.tls.mode requireTLS / preferTLS / allowTLS",
+      "finding_kind": "mongo_tls_weak",
+      "cwe": [
+        "CWE-326",
+        "CWE-295"
+      ]
+    },
+    {
+      "name": "ransomware_marker_collection_detection",
+      "kind": "passive",
+      "description": "MongoDB ransomware campaigns (2017 Mongo Apocalypse and follow-ons) drop a marker collection with names like `README`, `WARNING`, `README_MISSING_DATABASES`, `PLEASE_READ`, `HOW_TO_RESTORE`. The collection_inventory already lists collection names \u2014 pattern-matching on that set would flag prior compromise / dropped-and-ransomed instances the operator hasn't noticed. High-signal, zero-cost check.",
+      "value": "medium",
+      "protocol_reference": "MongoDB security advisories 2017 (Mongo Apocalypse); marker collection naming patterns",
+      "finding_kind": "mongo_ransomware_marker",
+      "cwe": [
+        "CWE-506"
+      ]
+    },
+    {
+      "name": "cve_2019_2386_user_rename_auth_bypass",
+      "kind": "passive",
+      "description": "CVE-2019-2386 (fixed 4.0.9/3.6.13/3.4.20): after user rename the old user's sessions retained authorization. Detect: buildInfo version < those fixed lines and auth configured. Passive version-based flag; recce already checks EOL but doesn't map specific CVEs.",
+      "value": "low",
+      "protocol_reference": "MongoDB Security Advisory CVE-2019-2386",
+      "finding_kind": "mongo_cve_2019_2386",
+      "cwe": [
+        "CWE-613"
+      ]
+    },
+    {
+      "name": "whatsmyuri_egress_and_natmap",
+      "kind": "passive",
+      "description": "`whatsmyuri` returns the client IP as the server sees it \u2014 invaluable for confirming egress path / NAT translation from the operator to the target (does the target see our scanner-node IP or the perimeter NAT?). Free datapoint, one BSON round-trip.",
+      "value": "low",
+      "protocol_reference": "MongoDB Manual: whatsmyuri command",
+      "finding_kind": "mongo_egress_ip"
+    },
+    {
+      "name": "listCommands_surface_map",
+      "kind": "passive",
+      "description": "`listCommands` enumerates every command the server exposes to the authenticated principal. Reveals whether legacy commands (`eval`, `copydb`, `authSchemaUpgrade`, `applyOps`) are still available on this build \u2014 some are attack primitives (applyOps ~= arbitrary oplog write when authorized).",
+      "value": "low",
+      "protocol_reference": "MongoDB Manual: listCommands",
+      "finding_kind": "mongo_legacy_commands_present"
+    },
+    {
+      "name": "known_users_wire_gap",
+      "kind": "passive",
+      "description": "Every user harvested via usersInfo (probe['users'][*]['user']) is a Credential(kind='hash') only when SCRAM material is present. Bare usernames (SCRAM-less accounts, X.509 users, LDAP-external users) never become Credential(kind='username') / known_user rows for the wider engagement \u2014 so SSH / SMB / RDP sprays don't reuse the mongo account list.",
+      "value": "high",
+      "protocol_reference": "recce cross-service known_users pool convention",
+      "finding_kind": "known_user"
+    },
+    {
+      "name": "known_hostnames_wire_gap",
+      "kind": "passive",
+      "description": "replset_members and shard_hosts are used only for internal mongo lateral (_probe_members). The `host:port` strings contain FQDNs that other services (SSH/SMB/HTTP) would consume as hostname candidates \u2014 mongo cluster hostnames often follow `db-primary.internal` / `mongo-shard-N.svc` patterns that seed directory/domain guessing. Same story for hostInfo.system.hostname (not currently pulled) and TLS cert CN/SAN (no TLS at all). Not fed into a known_hostnames pool.",
+      "value": "high",
+      "protocol_reference": "recce cross-service known_hostnames pool convention",
+      "finding_kind": "known_hostname"
+    },
+    {
+      "name": "keyfile_secret_as_relay_credential",
+      "kind": "passive",
+      "description": "If local.system.keys were harvested (see cluster_keyfile_secret_extraction), the key itself is the internal cluster credential \u2014 usable against every replica-set member and every mongos as the `__system` account. Should be published as a Credential(kind='keyfile', username='__system') with `relay_targets=<all replset_members + shard_hosts>` so cross-service pivot code knows exactly where to replay it.",
+      "value": "critical",
+      "protocol_reference": "MongoDB Manual: internal authentication with keyFile / __system role",
+      "finding_kind": "relay_target"
+    },
+    {
+      "name": "getCmdLineOpts_full_extraction",
+      "kind": "passive",
+      "description": "getCmdLineOpts.parsed is already parsed for security.authorization and net.bindIp only. It also carries security.keyFile path, security.clusterAuthMode (keyFile vs x509 vs sendKeyFile), auditLog config (destination, filter \u2014 audit disabled is a finding on production), net.tls.mode + certificate paths, storage.engine, replication.oplogSizeMB, systemLog.path (log location for follow-on log-mining). Currently these are parsed off the wire and dropped on the floor.",
+      "value": "medium",
+      "protocol_reference": "MongoDB Manual: getCmdLineOpts (parsed config tree)"
+    },
+    {
+      "name": "getFreeMonitoringStatus_and_cloudProvider_leak",
+      "kind": "passive",
+      "description": "`getFreeMonitoringStatus` returns the free-tier monitoring URL \u2014 includes a per-instance token that grants read access to the Atlas monitoring dashboard for that server if uploaded. On self-hosted, tells you if the server is beaconing metrics outbound (potential egress path finding for a segmented environment).",
+      "value": "low",
+      "protocol_reference": "MongoDB Manual: getFreeMonitoringStatus"
+    }
+  ],
+  "priority_gaps": [
+    "cluster_keyfile_secret_extraction + keyfile_secret_as_relay_credential (cluster-wide __system impersonation is the single biggest missed primitive; local.system.keys / admin.system.keys are read-only-fetchable on unauth exposures and any account with read on `local`)",
+    "local_oplog_rs_mining (datamine deliberately skips `local`, but oplog.rs is the entire recent write history \u2014 credentials, sessions, PII writes \u2014 dwarfs the current sampled-collection datamine)",
+    "hostInfo + known_hostnames_wire_gap + known_users_wire_gap (three one-line reads that would feed the project-wide hostname/user pools other services already consume; the biggest cross-service leverage per line of code)",
+    "getLog_startupWarnings (the server literally reports its own misconfigurations \u2014 auth-off, all-interfaces bind, weak TLS, mmapv1 \u2014 and recce never asks)"
+  ],
+  "cross_service_wire_gaps": [
+    "usernames from usersInfo -> known_users pool (currently only surfaced as Credential(kind='hash') when SCRAM material exists; bare users / X.509 users / LDAP-external users are dropped)",
+    "hostnames from replSetGetConfig.members, getShardMap, hostInfo.system.hostname, TLS cert CN/SAN -> known_hostnames / known_domains (used only for internal mongo lateral today)",
+    "cluster keyfile secret from local.system.keys -> Credential(kind='keyfile', user='__system') with relay_targets = every replset member + every mongos",
+    "harvested embedded connection strings already flow to Credential(source='mongodb-datamine'), but username portion is not split out into known_users and hostname portion is not split out into known_hostnames \u2014 they're stored as a single opaque URI",
+    "getCmdLineOpts.parsed.systemLog.path -> file-collection module (log path is an SSH/SMB post-ex loot target)",
+    "getCmdLineOpts.parsed.security.keyFile path -> file-collection module (same)",
+    "currentOp client IPs -> known_hosts / lateral scan queue (application servers connecting to Mongo are onward pivot targets)",
+    "hostInfo.system.hostname domain suffix -> known_domains pool (Active Directory / DNS enumeration follow-up)"
+  ],
+  "notes": "The auth story is unusually complete for this module (SCRAM-SHA-256 + SCRAM-SHA-1, mutual verification, hashcat 24100/24200 extraction, weak-default sweep, replica-set pivot with credential replay) \u2014 the surviving auth gaps are secondary mechs (PLAIN/GSSAPI/X509/MONGODB-AWS), the MONGODB-CR legacy hash, and per-user saslSupportedMechs downgrade preference. The dominant category of gap is info-disclosure commands the wire protocol supports but the module never issues: hostInfo, getLog(startupWarnings|global), currentOp, connectionStatus, rolesInfo, serverStatus, whatsmyuri, listCommands, getFreeMonitoringStatus \u2014 plus the deliberately-skipped `local` database (oplog.rs and system.keys are the two crown jewels there). No TLS handling at all is a notable structural gap given many production mongos run TLS-required. The bigger architectural issue is cross-service leakage: the module knows usernames, hostnames, keyfiles, and app-server client IPs but does not publish any of them to the project's known_users / known_hostnames / relay_targets pools that SSH/SMB/RDP sweeps consume \u2014 high-ROI wiring fix independent of new protocol coverage. `_deep_mongo` also skips checking whether the response ok field is 0.0 for non-privileged accounts (i.e. what info does an authenticated low-priv account still leak) \u2014 worth adding once connectionStatus effective privileges land."
+}

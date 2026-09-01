@@ -1,0 +1,228 @@
+{
+  "service": "Cloud metadata service (link-local IMDS)",
+  "default_ports": [
+    "169.254.169.254/tcp:80",
+    "100.100.100.200/tcp:80 (Alibaba)",
+    "metadata.google.internal/tcp:80 (GCP alias)"
+  ],
+  "summary": "The link-local metadata endpoint 169.254.169.254 (and provider variants) is not a scannable network service in the usual sense \u2014 you can't reach it across the wire from an attacker box, it only exists on the cloud instance itself. Recce currently touches it in exactly one place: the web crawler fires the classic IMDS URLs as SSRF payloads (recce/services/web/crawl.py::_SSRF_PAYLOADS + _ssrf_via) against fuzzable URL-ish parameters and rates a metadata echo as CRITICAL. Wordlists (paths-cloud.txt, web/wordlists.py) carry cloud paths for content-discovery, and proofs.py mentions IMDS as an SSRF/XXE finish. What is MISSING is any agent-side probe \u2014 when recce has a session on a host (see recce/sessions/, exploit-session-wiring), it never asks 'can this host reach 169.254.169.254, and if so what does it tell us?'. That is where the highest-value loot lives: IAM role STS creds (AWS), OAuth2 access tokens (GCP/Azure), user-data with bootstrap secrets, SSH public keys, cloud-account/subscription/project IDs, VPC neighbor hostnames. None of that currently flows into known_hostnames / known_domains / credentials / relay_targets. A new recce/services/cloud_metadata.py should (a) probe reachability from a session or from recce itself, (b) fingerprint cloud provider by which metadata dialect answers, (c) enumerate IMDSv1 vs v2 posture on AWS, (d) pull role creds / SA tokens / managed-identity tokens where reachable, (e) parse identity documents for account/region/subscription, (f) feed all of that into the cross-service stores so DB/SSH/web modules can reuse it. There should also be a proxy-fronted variant: if the session host has HTTP_PROXY or an app-level proxy pattern, retry IMDS through the proxy (Capital One 2019 pattern). Airgap-safe throughout \u2014 stdlib http.client only.",
+  "capabilities": [
+    {
+      "name": "imds-reachability-probe",
+      "kind": "passive",
+      "description": "From a recce session on a compromised host (recce/sessions/), TCP-connect 169.254.169.254:80 with a short timeout. Reachability alone is a strong signal the host is a cloud VM and that SSRF/RCE on this host puts IMDS in play. Also probe 100.100.100.200 (Alibaba) and metadata.google.internal resolution. Also try from the recce runner itself (in case the operator is scanning from inside the cloud VPC).",
+      "value": "high",
+      "notes": "Feeds cloud_provider hint back to session facts."
+    },
+    {
+      "name": "cloud-provider-fingerprint",
+      "kind": "active",
+      "description": "GET / against 169.254.169.254 with each provider's required header and compare responses: AWS answers /latest/ with plain text index, GCP requires 'Metadata-Flavor: Google' (returns 403 without it), Azure requires 'Metadata: true' AND api-version query, Alibaba answers on 100.100.100.200, DigitalOcean answers /metadata/v1/id. Which one responds tells you the cloud and unlocks the right dialect for follow-ups.",
+      "value": "high",
+      "notes": "Feeds cloud_provider into cross-service store."
+    },
+    {
+      "name": "imdsv1-open-detect",
+      "kind": "active",
+      "description": "GET http://169.254.169.254/latest/meta-data/ with NO X-aws-ec2-metadata-token header. A 200 means IMDSv1 is enabled \u2014 every SSRF on this host is a token-free credential leak. If it returns 401 the instance is IMDSv2-only.",
+      "value": "critical",
+      "notes": "AWS docs: instance-metadata-service configuration; the AWS-recommended posture is IMDSv2-only."
+    },
+    {
+      "name": "imdsv2-token-mint",
+      "kind": "active",
+      "description": "PUT http://169.254.169.254/latest/api/token with header X-aws-ec2-metadata-token-ttl-seconds: 21600. A 200 returning a base64 token proves IMDSv2 is up and that we can perform token-bound reads. Save the token for the follow-on capabilities.",
+      "value": "high",
+      "notes": "Token TTL max 21600s."
+    },
+    {
+      "name": "aws-iam-role-credentials-pull",
+      "kind": "exploit",
+      "description": "GET /latest/meta-data/iam/security-credentials/ to list attached role name(s), then GET /latest/meta-data/iam/security-credentials/<role> to receive short-lived AccessKeyId / SecretAccessKey / Token / Expiration JSON. Full role assumption from a link-local HTTP GET. This is the payoff \u2014 feed into credentials store as an sts_token record.",
+      "value": "critical",
+      "cwe": [
+        "CWE-522",
+        "CWE-732"
+      ],
+      "notes": "AWS: instancedata-data-retrieval.html iam/security-credentials/"
+    },
+    {
+      "name": "instance-identity-document",
+      "kind": "passive",
+      "description": "GET /latest/dynamic/instance-identity/document (JSON) \u2014 returns accountId, region, availabilityZone, instanceId, instanceType, imageId, privateIp, architecture. Every field is a cross-service fact worth keeping.",
+      "value": "high",
+      "notes": "Also /pkcs7 signed variant proves authenticity of the account/instance claim."
+    },
+    {
+      "name": "aws-user-data-fetch",
+      "kind": "exploit",
+      "description": "GET /latest/user-data \u2014 bootstrap cloud-init script, frequently contains long-term AWS keys, DB passwords, GitHub tokens, S3 URIs, license keys. High-signal secret sweep; parse for credential-shaped strings and route through creds/hashloot.",
+      "value": "critical",
+      "cwe": [
+        "CWE-798",
+        "CWE-538"
+      ]
+    },
+    {
+      "name": "aws-metadata-enumeration",
+      "kind": "passive",
+      "description": "Sweep the useful /latest/meta-data/ leaves: public-hostname, local-hostname, public-ipv4, local-ipv4, mac, network/interfaces/macs/<mac>/vpc-id, security-groups, hostname, ami-id, block-device-mapping/, tags/instance/. Each is a fact for the cross-service wire.",
+      "value": "high"
+    },
+    {
+      "name": "aws-ssh-public-keys-fetch",
+      "kind": "passive",
+      "description": "GET /latest/meta-data/public-keys/ then /<idx>/openssh-key \u2014 surfaces every SSH key baked into the instance. Route public keys into a known_ssh_keys store and correlate to authorized_keys sightings on other hosts we've touched.",
+      "value": "medium"
+    },
+    {
+      "name": "gcp-service-account-token",
+      "kind": "exploit",
+      "description": "GET http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token with header 'Metadata-Flavor: Google'. Returns an OAuth2 access_token for the default SA. Also pull /email and /scopes to know what the token can do. Also /instance/service-accounts/default/identity?audience=<x> mints an ID token \u2014 useful for confused-deputy against services that trust GCP OIDC.",
+      "value": "critical",
+      "cwe": [
+        "CWE-522"
+      ],
+      "notes": "GCP: cloud.google.com/compute/docs/metadata/overview"
+    },
+    {
+      "name": "gcp-project-and-instance-metadata",
+      "kind": "passive",
+      "description": "GET /computeMetadata/v1/project/project-id, /project/numeric-project-id, /project/attributes/, /instance/hostname, /instance/zone, /instance/attributes/ (frequently contains startup-script and ssh-keys \u2014 both loot). project-id is the single most useful cross-service identifier on GCP.",
+      "value": "high"
+    },
+    {
+      "name": "azure-managed-identity-token",
+      "kind": "exploit",
+      "description": "GET http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/ with header 'Metadata: true'. Returns an access_token as the VM's system-assigned or user-assigned managed identity. Enumerate resources parameter values (management, storage, keyvault, graph) to mint tokens for each. Also /metadata/identity/oauth2/token?client_id=<uami> for user-assigned identities.",
+      "value": "critical",
+      "cwe": [
+        "CWE-522"
+      ],
+      "notes": "Azure: learn.microsoft.com/azure/virtual-machines/instance-metadata-service"
+    },
+    {
+      "name": "azure-instance-metadata",
+      "kind": "passive",
+      "description": "GET /metadata/instance?api-version=2021-02-01 (Metadata: true). Returns subscriptionId, resourceGroupName, vmSize, location, tags, osProfile, network/interface[]/ipv4/subnet \u2014 subscription+RG are the pivot IDs for the whole Azure environment.",
+      "value": "high"
+    },
+    {
+      "name": "alibaba-ram-credentials",
+      "kind": "exploit",
+      "description": "GET http://100.100.100.200/latest/meta-data/ram/security-credentials/<role> \u2014 Alibaba's IMDS equivalent returns temporary RAM STS creds. Also /latest/user-data and /latest/meta-data/instance-id / owner-account-id. Same shape as AWS, different provider.",
+      "value": "critical"
+    },
+    {
+      "name": "digitalocean-droplet-metadata",
+      "kind": "passive",
+      "description": "GET http://169.254.169.254/metadata/v1.json \u2014 Droplet id, region, hostname, user-data (frequently contains bootstrap secrets), public_keys, interfaces. No auth model \u2014 anything on the droplet gets everything.",
+      "value": "high"
+    },
+    {
+      "name": "imdsv2-hop-limit-check",
+      "kind": "passive",
+      "description": "Inspect the response to the token PUT for X-Aws-Ec2-Metadata-Token-Ttl-Seconds echoing and check whether an HTTP GET of /latest/meta-data/ via a hop (proxy container, sidecar) still works \u2014 an IMDSv2 hop-limit of 1 blocks SSRF from a containerized workload; a hop-limit > 1 leaves the hardened-mode bypass open. Report the effective hop-count observed.",
+      "value": "medium",
+      "notes": "AWS PutMetadataDefaults / http-put-response-hop-limit."
+    },
+    {
+      "name": "proxy-fronted-imds-access",
+      "kind": "chain",
+      "description": "If the compromised host exposes an HTTP proxy (Squid, envoy, nginx forward-proxy, application proxy on 8080/3128), retry the IMDS URL through that proxy. The Capital One 2019 pattern: a WAF/proxy that gladly proxies to 169.254.169.254 turns any remote SSRF into IMDS access even when direct link-local is blocked. Also test HTTP CONNECT.",
+      "value": "critical",
+      "cwe": [
+        "CWE-918"
+      ]
+    },
+    {
+      "name": "imds-via-web-ssrf-chain",
+      "kind": "chain",
+      "description": "Wire the web crawler's existing _ssrf_via hit (crawl.py:459-511) to hand off the confirmed SSRF endpoint to the metadata module \u2014 then attempt full credential extraction and identity-document read through the SSRF, not just the marker echo the crawler proves today. Promotes crawl's 'metadata echoed' finding into an actual STS token in the creds store.",
+      "value": "critical",
+      "notes": "Existing coverage stops at echo; this closes the loop."
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "credentials (NEW sts_token kind): AWS AccessKeyId/SecretAccessKey/SessionToken tuples from iam/security-credentials/<role>; GCP OAuth2 access_tokens; Azure managed-identity bearer tokens; Alibaba STS AccessKeySecret/SecurityToken",
+    "credentials (long-term): AWS access keys, DB passwords, API keys extracted from user-data / startup-scripts / custom-data",
+    "known_hostnames: instance public-hostname, local-hostname, GCP instance/hostname, Azure computerName, DO droplet name \u2014 feeds SSH/SMB/HTTP host enrichment",
+    "known_domains: derived from public-hostname (e.g. ec2-...compute.amazonaws.com), GCP project-id, Azure tenant-id (via graph token claims)",
+    "NEW known_cloud_accounts: AWS accountId, GCP projectId/numericProjectId, Azure subscriptionId+tenantId, Alibaba owner-account-id \u2014 single most useful pivot ID per cloud",
+    "NEW known_ssh_pubkeys: /public-keys/ from AWS, GCP /instance/attributes/ssh-keys, DO metadata public_keys \u2014 correlate to authorized_keys sightings on any Linux host we've touched",
+    "relay_targets: local-ipv4, network interfaces, VPC id (implies neighbor range), security-groups (target set), subnet CIDR \u2014 feeds internal scan queue when we pivot to the VPC",
+    "NEW known_iam_roles / service_accounts: AWS role names attached to the instance, GCP SA email + scopes, Azure managed-identity clientId \u2014 usernames for the cloud plane, worth enumerating",
+    "NEW user_data_blobs: raw user-data / custom-data / startup-scripts as evidence artifacts \u2014 grep them across the run for secrets and configuration reuse",
+    "session facts: cloud_provider (aws|gcp|azure|alibaba|do), region/zone, instance-type \u2014 enrich the session card and drive provider-specific playbooks",
+    "known_hashes: any hash-shaped secrets parsed out of user-data / cloud-init logs \u2014 routed through hashloot",
+    "NEW ami_ids / image_ids: aws ami-id, gcp instance/image, azure imageReference \u2014 useful for identifying golden-image reuse across a fleet"
+  ],
+  "existing_coverage": {
+    "detected": true,
+    "files": [
+      "recce/services/web/crawl.py",
+      "recce/services/web/wordlists.py",
+      "recce/data/wordlists/paths-cloud.txt",
+      "recce/data/wordlists/paths-big.txt",
+      "recce/data/wordlists/paths-quickhits.txt",
+      "recce/vuln/proofs.py"
+    ],
+    "notes": "Coverage is one-sided: the web crawler tests SSRF-into-IMDS on remote target apps (_SSRF_PAYLOADS includes AWS/GCP/Azure/Alibaba metadata URLs, _ssrf_via rates a metadata marker echo as CRITICAL). Wordlists carry IMDS paths for content-discovery fuzzing. proofs.py narrates IMDS as an SSRF/XXE post-ex finish (proofs.py:803, 852, 1553). What is completely absent: (1) no cloud_metadata.py / imds.py service module, (2) no port/host recognition in svcdetect.py or serviceenum.py \u2014 169.254.169.254 is not a scan target, only a payload string, (3) session-side agent probe from a compromised host does not exist \u2014 recce never asks 'can this host reach IMDS and what does it say', (4) crawl's SSRF hit stops at marker echo and never pulls actual STS creds through the SSRF, (5) no IMDSv1 vs v2 posture finding, (6) no proxy-fronted IMDS check, (7) nothing IMDS-derived feeds known_hostnames / known_domains / credentials / relay_targets / a new known_cloud_accounts store."
+  },
+  "recommended_findings": [
+    {
+      "title": "imds_v1_enabled",
+      "severity": "critical"
+    },
+    {
+      "title": "imds_iam_credentials_exposed",
+      "severity": "critical"
+    },
+    {
+      "title": "imds_user_data_secrets",
+      "severity": "critical"
+    },
+    {
+      "title": "gcp_service_account_token_exposed",
+      "severity": "critical"
+    },
+    {
+      "title": "azure_managed_identity_token_exposed",
+      "severity": "critical"
+    },
+    {
+      "title": "alibaba_ram_credentials_exposed",
+      "severity": "critical"
+    },
+    {
+      "title": "imds_reachable_from_host",
+      "severity": "high"
+    },
+    {
+      "title": "imds_reachable_via_proxy",
+      "severity": "critical"
+    },
+    {
+      "title": "imdsv2_hop_limit_too_high",
+      "severity": "medium"
+    },
+    {
+      "title": "instance_identity_disclosed",
+      "severity": "medium"
+    },
+    {
+      "title": "imds_ssh_public_keys_disclosed",
+      "severity": "low"
+    },
+    {
+      "title": "cloud_provider_identified",
+      "severity": "low"
+    },
+    {
+      "title": "web_ssrf_reaches_imds_credentials",
+      "severity": "critical"
+    }
+  ],
+  "implementation_notes": "Create recce/services/cloud_metadata.py mirroring the consul.py exemplar (is_*/probe/findings/runbook/analyze). Detection is unusual for this 'service' \u2014 it is never on a scanned host; instead it is triggered (a) from a recce session/agent-side context on a compromised host (see recce/sessions/, exploit-session-wiring), (b) opportunistically by the runner itself in case recce is executed inside a cloud VPC, and (c) as a follow-on from crawl.py's _ssrf_via when an SSRF is confirmed against a remote webapp. Airgap-safe: stdlib http.client only, 3-second timeout, small bounded sweep (roughly 8-15 requests per provider). Provider-selection first (single header/URL probe to each of AWS/GCP/Azure/Alibaba/DO, stop at first non-empty). For AWS: mint IMDSv2 token first, retry with token on 401, fall back to v1. Parse JSON safely with json.loads. Route pulled credentials through recce.creds.credentials as a new sts_token kind (short-lived, carry expiration). Feed identity-document fields into a NEW recce/core/known_cloud_accounts.py store parallel to known_hostnames.py / known_domains.py / relay_targets.py. Update svcdetect.py PORT_NAMES only if we ever actually want to LABEL 169.254.169.254 (probably no \u2014 this stays a session/chain module, not a scan-target module). Update recce/services/serviceenum.py analyze() to add cloud_metadata into the analyze fan-out driven by session presence, not port-open. Wire crawl.py:511 to import and call cloud_metadata.exploit_via_ssrf(sender) when metadata is echoed, upgrading the current 'echoed' finding to real credential capture. New CLI verbs likely under recce/cli/_services.py: recce cloud imds probe / recce cloud imds loot. Report/markdown/excel/docx need a new 'Cloud metadata' section. Tests: recce/tests/ should get a fake IMDS HTTP server fixture per provider \u2014 mirror the shape used for consul tests.",
+  "recommended_hashcat_modes": []
+}

@@ -1,0 +1,198 @@
+{
+  "capabilities": [
+    {
+      "name": "lpd-port-recognition",
+      "kind": "passive",
+      "description": "Add 515/tcp to recce/services/svcdetect.py _PORT_MAP as ('lpd','Line Printer Daemon (RFC 1179)') plus a byte-signature entry for the ASCII responses LPD daemons emit (single-byte 0x00 ack, or a 'no queue' plaintext). Today nmap will call it 'printer' but recce does not route it to any analyzer, so the port is scanned and dropped.",
+      "value": "medium",
+      "finding_kind": "detection",
+      "protocol_reference": "RFC 1179 sec 3 (daemon commands are single-byte codes followed by ASCII args, LF-terminated)"
+    },
+    {
+      "name": "lpd-queue-list-short",
+      "kind": "active",
+      "description": "Send LPD op 0x03 (Send queue state / short) with queue names probed from a wordlist and 'lp'/'default'/'raw'/etc. Parse the ASCII response into (rank, owner, job#, files, size) tuples. This is unauthenticated on every stock BSD lpd / LPRng / CUPS-lpd shim and returns real user names, source hostnames, and job filenames. RFC 1179 sec 5.3.",
+      "value": "high",
+      "finding_kind": "info_disclosure",
+      "cwe": [
+        "CWE-200",
+        "CWE-306"
+      ],
+      "protocol_reference": "RFC 1179 sec 3 command 03, sec 5.3 short listing format"
+    },
+    {
+      "name": "lpd-queue-list-long",
+      "kind": "active",
+      "description": "LPD op 0x04 (long queue listing) \u2014 same wire, more fields per job: full pathname of the file spooled, print-job class, host of origin, TOD queued. This is the richer harvest that yields the cross-service facts below.",
+      "value": "high",
+      "finding_kind": "info_disclosure",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1179 sec 3 command 04, sec 5.4 long listing format"
+    },
+    {
+      "name": "lpd-daemon-fingerprint",
+      "kind": "passive",
+      "description": "Fingerprint LPRng vs BSD lpd vs Windows LPD Print Service vs HP JetDirect vs CUPS cups-lpd from the queue-listing text (LPRng emits 'Printer:' headers, HP prints 'ready and printing', BSD prints 'no entries', CUPS-lpd echoes CUPS-style URIs). Determines which of the LPD-family CVEs actually apply and which vendor's default creds to try elsewhere.",
+      "value": "medium",
+      "finding_kind": "fingerprint",
+      "protocol_reference": "vendor-observed strings; LPRng src daemon.c, CUPS cups-lpd(8)"
+    },
+    {
+      "name": "lpd-cve-cross-reference",
+      "kind": "chain",
+      "description": "When fingerprint identifies LPRng, flag CVE-2000-0917 (format string in syslog(3) call, unauth RCE as root) and CVE-2001-0670 (LPRng SITE EXEC family). For HP JetDirect firmware ranges, flag PJL/LPD command injection CVE-2010-4107. For Windows Print Service on 515, note it typically pairs with SMB spooler / PrintNightmare targets on the same host \u2014 a cross-link to smb.py's PrintNightmare finding.",
+      "value": "high",
+      "finding_kind": "cve_flag",
+      "cwe": [
+        "CWE-134",
+        "CWE-77"
+      ],
+      "protocol_reference": "CVE-2000-0917, CVE-2001-0670, CVE-2010-4107"
+    },
+    {
+      "name": "lpd-print-injection-safe-flag",
+      "kind": "exploit",
+      "description": "Detection-only flag for the classic LPD unauth 'send a job whose banner-page name is a shell metachar' family (BSD lpd control-file field weaponization). recce must NOT invoke op 0x02 (Receive job) \u2014 that would actually spool paper and could trip logging. Just document that the daemon accepts jobs from any peer (no /etc/hosts.lpd enforcement observed) as a finding.",
+      "value": "medium",
+      "finding_kind": "exploit_flag",
+      "cwe": [
+        "CWE-306",
+        "CWE-77"
+      ],
+      "protocol_reference": "RFC 1179 sec 3 command 02; historical BSD lpd control-file injection (multiple CVEs 1996-2003)"
+    },
+    {
+      "name": "ipp-get-jobs-harvest",
+      "kind": "active",
+      "description": "Extend recce/services/ipp.py with a Get-Jobs (op 0x000A) call per printer discovered by CUPS-Get-Printers. Parse job-name, job-originating-user-name, job-originating-host-name, document-name. These attributes are unauthenticated on stock CUPS and are the highest-signal identity leak the printer stack has. Currently ipp.py only walks printer attributes, not queued jobs.",
+      "value": "high",
+      "finding_kind": "info_disclosure",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 8011 sec 4.2.6 Get-Jobs; sec 5.3 requested-attributes"
+    },
+    {
+      "name": "ipp-cups-browsed-udp",
+      "kind": "active",
+      "description": "631/udp cups-browsed listener probe: one datagram in the CUPS browse protocol advertising a fake IPP URI, watch for the daemon to reach back to Get-Printer-Attributes on a listener we open. This is the exact ingress path of CVE-2024-47176 \u2014 if the box replies, it is exposed regardless of whether 631/tcp is filtered. Detection only \u2014 recce must not deliver the foomatic payload.",
+      "value": "critical",
+      "finding_kind": "cve_flag",
+      "cwe": [
+        "CWE-306",
+        "CWE-940"
+      ],
+      "protocol_reference": "CVE-2024-47176; cups-browsed(8); RFC 3986 URI shape"
+    },
+    {
+      "name": "ipp-cups-foomatic-version-gate",
+      "kind": "chain",
+      "description": "Tighten the existing ipp.py CVE-2024-47176 finding: compare the parsed cups_version against the fixed-version table (CUPS >=2.4.9, Ubuntu 24.04.1 cups 2.4.7-1.2ubuntu7.1, RHEL 9 cups 2.3.3op2-25, Debian bookworm-security). Downgrade to informational when patched, keep high/critical when vulnerable + reachable, escalate to critical when paired with the cups-browsed capability above.",
+      "value": "high",
+      "finding_kind": "cve_flag",
+      "cwe": [
+        "CWE-77",
+        "CWE-306"
+      ],
+      "protocol_reference": "Red Hat 2024-09 advisory chain; Ubuntu USN-7043-1"
+    },
+    {
+      "name": "ipp-admin-endpoint-auth-check",
+      "kind": "auth",
+      "description": "GET /admin, /admin/conf, /admin/log/error_log, /admin/log/access_log on both 631/tcp and 631/tcp-tls. On many stock CUPS installs the log endpoints are readable to localhost only but exposed via a misconfigured Listen line \u2014 a 200 here leaks every job, every user, every source IP. If 401, feed to shared credential quickconnect for a small default-cred spray (cups/cups, admin/admin).",
+      "value": "medium",
+      "finding_kind": "auth_exposure",
+      "cwe": [
+        "CWE-200",
+        "CWE-284"
+      ],
+      "protocol_reference": "CUPS cupsd.conf(5) Location /admin; RFC 7617 Basic auth"
+    },
+    {
+      "name": "jetdirect-printer-correlation",
+      "kind": "passive",
+      "description": "When 631/tcp OR 515/tcp is found on a host that also has 9100/tcp open (already detected as jetdirect), correlate them into a single 'printer stack' finding. Print appliances almost always run all three, and the pivot value (PJL, direct raw print, disk read on old HP LaserJets via PJL FSDIRLIST) belongs on 9100. Emit a single grouped finding rather than three siloed ones.",
+      "value": "low",
+      "finding_kind": "correlation",
+      "protocol_reference": "HP PJL Technical Reference Manual (FSDIRLIST / FSUPLOAD)"
+    },
+    {
+      "name": "ipp-uri-hostname-harvest",
+      "kind": "passive",
+      "description": "Walk printer-uri-supported / device-uri / notify-recipient-uri values already parsed by ipp.py's _walk_ipp_attributes and extract hostnames + IPs \u2014 printers routinely list ipp://internal-print-01.corp.local/printers/HR-Color which reveals internal DNS structure the scanner would otherwise never see. Feed these into known_hostnames + known_domains.",
+      "value": "medium",
+      "finding_kind": "info_disclosure",
+      "protocol_reference": "RFC 8011 sec 5.4.10 printer-uri-supported"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_users <- LPD queue owner field (RFC 1179 short/long listings) and IPP job-originating-user-name (RFC 8011). Both are unauth on stock configs and yield real local usernames \u2014 the highest-value password-spray input outside of SMB/LDAP enumeration.",
+    "known_hostnames <- LPD job 'H' (host of origin) field in the long listing, IPP job-originating-host-name, IPP printer-uri-supported / device-uri hostnames, and cups-browsed advertised BrowseAddress entries. These are internal short-name + FQDN pairs the DNS layer usually can't see.",
+    "known_domains <- FQDN suffixes stripped from the above IPP URIs and LPD 'H' fields; feed known_domains for later Kerberos/LDAP realm inference.",
+    "artifact_disclosures (NEW shared surface \u2014 proposed) <- document-name / job-name / LPD job filename ('N' control-file field). Filenames like Q3-forecast.xlsx, passwords.txt, engineering-roadmap.docx are recon-grade artifact leaks that today no shared surface captures. Would also be fed by SMB open-share listings and rsync module listings \u2014 worth defining now.",
+    "relay_targets <- negative signal only: a Windows Print Service on 515 confirms the host is a Windows print server and thus a candidate for PrinterBug (MS-RPRN) / PrintNightmare wiring on 445, so promote its relay_targets weight when SMB signing posture also permits.",
+    "vulnerable_versions (existing service_versions surface) <- cups_version parsed by ipp.py and LPRng/BSD lpd banner strings from lpd-daemon-fingerprint \u2014 same shape the CVE mapper already consumes for OpenSSH/Exim/vsFTPd."
+  ],
+  "default_ports": [
+    "631/tcp (IPP over HTTP \u2014 CUPS)",
+    "631/udp (cups-browsed browse protocol \u2014 CVE-2024-47176 ingress)",
+    "515/tcp (LPD \u2014 RFC 1179)",
+    "9100/tcp (HP JetDirect raw print \u2014 correlation only, already detected)"
+  ],
+  "existing_coverage": {
+    "detected": true,
+    "files": [
+      "/home/kali/Desktop/projects/recce/recce/services/ipp.py",
+      "/home/kali/Desktop/projects/recce/recce/services/svcdetect.py"
+    ],
+    "notes": "IPP/CUPS on 631/tcp: full analyzer exists \u2014 is_ipp(), CUPS-Get-Printers wire (op 0x4002), TLS fallback, best-effort attribute walker, CVE-2024-47176 chain flagged from Server header. Missing on the IPP side: Get-Jobs (op 0x000A) for job/user harvest, cups-browsed 631/udp probe, admin endpoint auth check, URI hostname harvesting into cross-service surfaces. LPD (515/tcp): NOT in svcdetect.py _PORT_MAP (only 631 IPP and 9100 jetdirect represent the printer family), NO module in recce/services/, NO byte-signature. Zero coverage today. HP JetDirect (9100) is only named in svcdetect.py \u2014 no analyzer either, which is a separate gap but out of scope for this audit."
+  },
+  "implementation_notes": "\"Two files to add/edit: (1) new recce/services/lpd.py modeled on tftp.py (small, stdlib socket, one-connection-per-probe, no external deps, RFC 1179 wire is trivial \u2014 one byte opcode + ASCII args + LF). (2) extend recce/services/ipp.py with _ipp_get_jobs() alongside _ipp_get_printers(), and add a cups-browsed UDP prober. (3) register 515 in svcdetect.py _PORT_MAP. (4) wire lpd analyzer into serviceenum.py alongside ipp. Airgap-safe: everything is local network I/O, no LLM, no online lookups. Do NOT invoke LPD op 0x02 (Receive job) or the foomatic-rip payload \u2014 the value gate is 'flag exposure' not 'prove exploit'. IPP job harvesting must cap Get-Jobs per printer (jobs = 10) to avoid spamming a real spooler.\"",
+  "recommended_findings": [
+    {
+      "title": "LPD queue listing readable unauthenticated (RFC 1179)",
+      "severity": "medium"
+    },
+    {
+      "title": "LPD queue leaks usernames, source hostnames and print job filenames",
+      "severity": "high"
+    },
+    {
+      "title": "LPRng detected \u2014 CVE-2000-0917 / CVE-2001-0670 unauth RCE class",
+      "severity": "critical"
+    },
+    {
+      "title": "HP JetDirect LPD/PJL command injection (CVE-2010-4107) \u2014 vendor firmware review",
+      "severity": "high"
+    },
+    {
+      "title": "cups-browsed (631/udp) accepts crafted printer URIs \u2014 CVE-2024-47176 ingress reachable",
+      "severity": "critical"
+    },
+    {
+      "title": "CUPS reachable at vulnerable version \u2014 CVE-2024-47076/-47175/-47176/-47177 foomatic-rip chain applies",
+      "severity": "critical"
+    },
+    {
+      "title": "IPP Get-Jobs leaks originating user/host and document names",
+      "severity": "high"
+    },
+    {
+      "title": "CUPS /admin log endpoints readable unauthenticated",
+      "severity": "high"
+    },
+    {
+      "title": "Printer stack exposed (515/tcp + 631/tcp + 9100/tcp) \u2014 treat as unmanaged appliance",
+      "severity": "low"
+    },
+    {
+      "title": "IPP printer-uri-supported discloses internal hostnames / DNS suffixes",
+      "severity": "low"
+    }
+  ],
+  "recommended_hashcat_modes": [],
+  "service": "CUPS / LPD (printer stack)",
+  "summary": "\"IPP/CUPS on 631/tcp already has a solid recce module (recce/services/ipp.py) that handles CUPS-Get-Printers + version fingerprint + CVE-2024-47176 flagging, but it stops at printer names \u2014 it does not call Get-Jobs (which leaks users/hosts/filenames), does not probe 631/udp cups-browsed (the actual CVE-2024-47176 ingress vector), and does not feed any of what it does parse into recce's cross-service surfaces (known_users, known_hostnames, known_domains). LPD on 515/tcp has zero coverage: not in svcdetect.py _PORT_MAP, no analyzer module, no byte signature. LPD is the higher-yield gap because its unauthenticated RFC 1179 short/long queue listings return owner + source-host + filename tuples that map straight onto known_users + known_hostnames + a proposed artifact_disclosures surface, and LPRng/BSD lpd/HP JetDirect variants carry their own historical unauth-RCE CVEs. Recommended: new recce/services/lpd.py modeled on the tftp.py shape (stdlib-only, one-packet-per-probe, detection-only \u2014 never invoke op 0x02 Receive-job or the foomatic-rip payload), plus three targeted extensions to ipp.py (Get-Jobs harvest, cups-browsed UDP prober, admin auth check), plus 515/tcp registration in svcdetect.py. Airgap-safe throughout; no external calls.\""
+}

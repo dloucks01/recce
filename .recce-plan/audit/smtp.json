@@ -1,0 +1,269 @@
+{
+  "service": "smtp",
+  "module_files": [
+    "recce/services/smtp.py",
+    "tests/test_smtp_module.py"
+  ],
+  "summary": "The SMTP module today does a shallow ESMTP probe \u2014 banner, EHLO features (STARTTLS flag + AUTH mech string), VRFY, a single-shape open-relay envelope, RCPT/VRFY/EXPN user enum against ~15 canonical names, plus a cleartext posture check on 25/587. It never actually completes a STARTTLS handshake, never attempts AUTH (the `creds` parameter is dead), never fingerprints server implementation/version, never tests SMTP smuggling (CVE-2023-51764/-51765/-51766) or bypass-style relay strings, never probes XCLIENT/XFORWARD/ETRN/BDAT/PROXY, and \u2014 critically \u2014 feeds NOTHING into the engagement-wide cross-service caches (known_users, known_hostnames, known_domains, relay_targets) despite being a first-class producer of all four (VRFY/EXPN/RCPT literally yield usernames; banner/EHLO/Received/cert CN yield hostnames and domains; every SMTP host is itself a relay pivot).",
+  "existing_capabilities": [
+    "Port-set: 25, 465 (implicit TLS), 587, 2525 with SMTP_SSL branch on 465",
+    "probe(): connect + EHLO, capture first banner line (200-char trunc)",
+    "Reads esmtp_features dict: exposes 'starttls' bool and raw 'auth' mech string",
+    "VRFY <root> \u2014 flags 250/252 as user-enum vector",
+    "Open-relay test: RSET/MAIL FROM/RCPT TO external recipient (envelope only, no DATA), 250/251 = relay",
+    "enum_users(): iterates ~15 canonical local names via VRFY / EXPN / RCPT TO <u@localhost> with per-attempt RSET",
+    "Optional user wordlist via --wordlist merged onto the bundled list",
+    "Findings: open_relay (high, CWE-269/16), vrfy (low, CWE-200), user_enum (medium, CWE-200/203), cleartext-no-STARTTLS on 25/587 (low, CWE-319)",
+    "Runbook stubs for swaks + smtp-user-enum",
+    "findings_to_vulns via svccommon; analyze() honors active/budget/progress; is_smtp gate on port+service"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "SMTP smuggling detection (CVE-2023-51764/-51765/-51766)",
+      "kind": "exploit",
+      "description": "Never sends the LF-only or bare-CR DATA payload sequences that revealed differential end-of-DATA parsing across Postfix / Sendmail / Exim / Cisco Ironport. Sending a benign-looking test message with `<LF>.<LF>` vs `<CR><LF>.<CR><LF>` and observing whether the second envelope is accepted would flag SPF/DKIM-bypassing smuggling. This is the highest-value modern SMTP primitive and the module is silent on it.",
+      "value": "critical",
+      "cwe": [
+        "CWE-436",
+        "CWE-444"
+      ],
+      "protocol_reference": "RFC 5321 \u00a74.1.1.4 (end of DATA), CVE-2023-51764/51765/51766"
+    },
+    {
+      "name": "Implementation + version fingerprint \u2192 CVE mapping",
+      "kind": "passive",
+      "description": "Banner line is captured but never parsed for Postfix/Exim/Sendmail/Exchange/Microsoft ESMTP/qmail/Zimbra/Postfix-XCLIENT/Ironport. No version regex. Missing CVE hooks: Exim <4.92 CVE-2019-10149 (`${run{}}` RCE), Exim <4.94.2 21Nails CVE-2020-28017..-28026, Exim <4.97.1 CVE-2024-39929 (MIME filter), Exchange CVE-2020-0688 / CVE-2021-26855 ProxyLogon / CVE-2021-34473 ProxyShell, Zimbra CVE-2022-27924, Sendmail wiz/debug, qmail-1.03 assorted.",
+      "value": "critical",
+      "cwe": [
+        "CWE-1035",
+        "CWE-77",
+        "CWE-1287"
+      ],
+      "protocol_reference": "RFC 5321 \u00a74.2 reply codes; per-CVE advisories"
+    },
+    {
+      "name": "AUTH mechanism deep-probe (RFC 4954)",
+      "kind": "active",
+      "description": "Only reads the advertised `AUTH` line; never issues AUTH. Missing: (a) enumerate every advertised mech (PLAIN, LOGIN, CRAM-MD5, DIGEST-MD5, GSSAPI, NTLM, XOAUTH2, EXTERNAL, SCRAM-SHA-*); (b) flag AUTH offered BEFORE STARTTLS (RFC 4954 \u00a74 violation, credential-in-cleartext); (c) flag deprecated CRAM-MD5/DIGEST-MD5 as offline-crackable; (d) attempt NTLM Type-1 \u2192 server returns Type-2 that leaks NetBIOS domain, hostname, DNS domain, OS build \u2014 free info-disclosure primitive.",
+      "value": "critical",
+      "cwe": [
+        "CWE-522",
+        "CWE-319",
+        "CWE-200",
+        "CWE-327"
+      ],
+      "protocol_reference": "RFC 4954 \u00a74 (TLS-before-AUTH), RFC 2222 SASL, MS-NLMP \u00a72.2.1.2"
+    },
+    {
+      "name": "AUTH LOGIN username-oracle enum",
+      "kind": "exploit",
+      "description": "Many MTAs (Exchange notoriously) return distinguishable error codes/text for valid vs invalid usernames during AUTH LOGIN before password. This survives even when VRFY/EXPN/RCPT are all locked down. Not attempted.",
+      "value": "high",
+      "cwe": [
+        "CWE-204",
+        "CWE-203"
+      ],
+      "protocol_reference": "RFC 4954 \u00a76 (error handling)"
+    },
+    {
+      "name": "STARTTLS handshake + cert introspection",
+      "kind": "passive",
+      "description": "Module reports 'starttls advertised' but never issues STARTTLS or completes the TLS handshake. Missing: TLS version/cipher, self-signed / expired / weak-CA, cert CN + SAN list (feeds known_hostnames and known_domains), SNI virtual-hosting behavior, and STARTTLS-response-injection plaintext-command-injection class bug (CVE-2011-0411 Postfix, similar smtpd bugs).",
+      "value": "high",
+      "cwe": [
+        "CWE-295",
+        "CWE-311",
+        "CWE-326",
+        "CWE-74"
+      ],
+      "protocol_reference": "RFC 3207 \u00a74/\u00a75, CVE-2011-0411"
+    },
+    {
+      "name": "Full EHLO extension inventory",
+      "kind": "passive",
+      "description": "Only 'starttls' and 'auth' surface. RFC-registered extensions not enumerated: SIZE, PIPELINING, 8BITMIME, DSN, ENHANCEDSTATUSCODES, CHUNKING (BDAT), SMTPUTF8, ETRN, TURN, ATRN, XCLIENT, XFORWARD, PROXY, PRDR, BURL, VERP, EXPN. Each is a fingerprint and several are direct attack primitives (below).",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 5321 \u00a72.2.2; IANA Mail Parameters"
+    },
+    {
+      "name": "XCLIENT source-address spoofing (Postfix)",
+      "kind": "exploit",
+      "description": "If server advertises XCLIENT and accepts it from the scanner IP (i.e. scanner is in mynetworks), an unauthenticated attacker can overwrite client IP/hostname/HELO/SASL \u2014 trivially bypasses IP-based relay controls and forges Received headers. Never probed.",
+      "value": "critical",
+      "cwe": [
+        "CWE-290",
+        "CWE-350"
+      ],
+      "protocol_reference": "Postfix XCLIENT spec (postfix.org/XCLIENT_README)"
+    },
+    {
+      "name": "XFORWARD header spoofing",
+      "kind": "exploit",
+      "description": "Sibling of XCLIENT for downstream Received/Received-SPF forgery through a relay. Not tested.",
+      "value": "high",
+      "cwe": [
+        "CWE-290"
+      ],
+      "protocol_reference": "Postfix XFORWARD spec"
+    },
+    {
+      "name": "ETRN / TURN / ATRN queue-release + hosted-domain leak",
+      "kind": "active",
+      "description": "ETRN <domain> replies distinguish `250 queuing started` (this MTA IS a secondary for domain) vs `458/459 not allowed`. Free enumeration of every domain this MTA is a backup MX for \u2192 seeds known_domains cross-service. TURN/ATRN if enabled = relay pivot.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 1985 (ETRN), RFC 2645 (ATRN), RFC 821 \u00a74.1.1 (TURN)"
+    },
+    {
+      "name": "Open-relay bypass matrix",
+      "kind": "exploit",
+      "description": "Only one relay shape tested (`MAIL FROM:<external> RCPT TO:<external>`). Missing the classic bypass syntaxes that catch MTAs that block naive relay but still forward: percent-hack `user%victim.com@relay`, bang-path `victim.com!user@relay`, quoted `\"user@victim.com\"@relay`, source-route `<@relay:user@victim.com>`, IP-literal `user@[a.b.c.d]`, localpart-only + HELO spoof, MAIL FROM:<postmaster@self> RCPT TO:<external>, and null-sender relay `MAIL FROM:<>`. Each is a distinct finding.",
+      "value": "critical",
+      "cwe": [
+        "CWE-269",
+        "CWE-441"
+      ],
+      "protocol_reference": "RFC 5321 \u00a73.6.1 (source routes, deprecated but still accepted)"
+    },
+    {
+      "name": "BDAT / CHUNKING differential parsing",
+      "kind": "exploit",
+      "description": "CHUNKING (RFC 3030) BDAT chunk-size vs DATA framing is a known SMTP-smuggling vector distinct from DATA-terminator smuggling. Not probed.",
+      "value": "high",
+      "cwe": [
+        "CWE-444"
+      ],
+      "protocol_reference": "RFC 3030 \u00a72"
+    },
+    {
+      "name": "PROXY protocol acceptance",
+      "kind": "exploit",
+      "description": "Postfix/Exim optionally speak HAProxy PROXY v1/v2 on 25/587. If open to the internet, attacker sends `PROXY TCP4 <spoofed> \u2026` prefix and every downstream ACL / logging sees the spoofed source. Not detected.",
+      "value": "high",
+      "cwe": [
+        "CWE-290",
+        "CWE-345"
+      ],
+      "protocol_reference": "HAProxy PROXY v1/v2 spec; Postfix smtpd_upstream_proxy_protocol"
+    },
+    {
+      "name": "EXPN list expansion of well-known aliases",
+      "kind": "passive",
+      "description": "enum_users runs EXPN per-user but does not target the high-yield aliases `all`, `everyone`, `staff`, `users`, `postmaster`, `abuse`, `mailer-daemon`, `root`, `wheel`, which historically expand to full user rosters in one shot. RFC 5321 \u00a73.5.2 allows list expansion.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 5321 \u00a73.5.2"
+    },
+    {
+      "name": "Callback / bounce-address verification abuse",
+      "kind": "active",
+      "description": "Send `MAIL FROM:<victim@internal-domain>` `RCPT TO:<test@remote>` \u2014 many MTAs perform a callback to victim domain to verify sender exists, disclosing which internal addresses are considered legitimate senders and generating a scan-attributable NDR at the target. Not probed.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200",
+        "CWE-441"
+      ],
+      "protocol_reference": "RFC 5321 \u00a77.9 (sender verification callouts)"
+    },
+    {
+      "name": "SPF / DKIM / DMARC posture for served domains",
+      "kind": "passive",
+      "description": "For every domain the MTA accepts inbound mail for (learned from RCPT TO on known_domains + ETRN + cert SANs), DNS-resolve SPF `v=spf1`, DMARC `_dmarc`, DKIM selectors. Absent/weak (`~all`, `p=none`) plus accepting MTA = spoofable-inbound finding. Purely passive DNS, high signal.",
+      "value": "high",
+      "cwe": [
+        "CWE-345",
+        "CWE-290"
+      ],
+      "protocol_reference": "RFC 7208 SPF, RFC 6376 DKIM, RFC 7489 DMARC"
+    },
+    {
+      "name": "LMTP awareness",
+      "kind": "passive",
+      "description": "is_smtp() does not include 24 (LMTP), 2003, 2004. LMTP (RFC 2033) uses LHLO and often runs unauthenticated on internal nets \u2014 trivial local-delivery abuse and mailbox enumeration.",
+      "value": "medium",
+      "cwe": [
+        "CWE-306"
+      ],
+      "protocol_reference": "RFC 2033"
+    },
+    {
+      "name": "Submission (587) TLS-required enforcement",
+      "kind": "passive",
+      "description": "RFC 6409 \u00a74.3 requires submission to demand TLS before AUTH. Module reports 'no starttls' but doesn't specifically flag AUTH-offered-on-587-without-TLS-required, which is the RFC violation.",
+      "value": "medium",
+      "cwe": [
+        "CWE-319",
+        "CWE-522"
+      ],
+      "protocol_reference": "RFC 6409 \u00a74.3, RFC 8314"
+    },
+    {
+      "name": "Legacy Sendmail debug / wiz backdoor probe",
+      "kind": "exploit",
+      "description": "`DEBUG` and `WIZ` (Sendmail <5.59) still occasionally appear on embedded gear. One-line docmd probe, high signal when it lands.",
+      "value": "medium",
+      "cwe": [
+        "CWE-489"
+      ],
+      "protocol_reference": "Sendmail historical; CA-1988-01"
+    },
+    {
+      "name": "AUTH credential-spray with engagement creds",
+      "kind": "auth",
+      "description": "analyze() accepts `creds` but never uses it. When a spray-safe cred bundle exists and known_users has hits, attempt AUTH PLAIN/LOGIN over TLS with (user,pass) tuples for postmaster / admin / found-users. This is the credentialed pivot the module implies but never performs.",
+      "value": "high",
+      "cwe": [
+        "CWE-521",
+        "CWE-1391"
+      ],
+      "protocol_reference": "RFC 4954 \u00a74"
+    },
+    {
+      "name": "NTLM Type-2 domain/hostname leak via AUTH NTLM",
+      "kind": "passive",
+      "description": "When AUTH advertises NTLM (Exchange, IIS SMTP), sending a Type-1 message returns a Type-2 that leaks NetBIOS computer name, NetBIOS domain, DNS computer name, DNS domain, forest name, and OS version. Feeds known_hostnames + known_domains + AD recon. Free info-disclosure, no auth needed.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "MS-NLMP \u00a72.2.1.2 CHALLENGE_MESSAGE"
+    },
+    {
+      "name": "PIPELINING abuse fingerprint",
+      "kind": "active",
+      "description": "Send multiple envelope commands in one flush; a server advertising PIPELINING but not enforcing per-command order boundaries is a smuggling precursor (Cisco Ironport CVE-2023-20075 family).",
+      "value": "medium",
+      "cwe": [
+        "CWE-444"
+      ],
+      "protocol_reference": "RFC 2920"
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "known_users: VRFY/EXPN/RCPT hits + any AUTH LOGIN oracle hits are literal engagement usernames but are never appended to the shared known_users cache (only surfaced inside this module's findings). Downstream sprayers (SSH, SMB, LDAP, HTTP-basic, RDP) do not see them.",
+    "known_hostnames: banner FQDN (line after `220 `), EHLO response server name, STARTTLS cert CN + SANs, Received: header hops (relay/enum test bounces), NTLM Type-2 DNS/NetBIOS names \u2014 none extracted, none fed to known_hostnames.",
+    "known_domains: every RCPT domain the server accepts (probeable), ETRN queue-release domain list, cert SAN domain suffixes, MAIL FROM callback verified sender domains, NTLM DNS/forest domain \u2014 none fed to known_domains.",
+    "relay_targets: an MTA is itself a relay/pivot node; open_relay=true or XCLIENT/PROXY/XFORWARD acceptance should register the host in relay_targets so ad/impacket modules can chain (e.g. SMTP \u2192 mail-based phishing pivot; XCLIENT \u2192 source-IP-laundering to internal services). Not wired.",
+    "known_hashes: AUTH CRAM-MD5 challenge captured from server, plus responses solicited during a credentialed test, are offline-crackable material \u2014 never captured or fed to known_hashes."
+  ],
+  "priority_gaps": [
+    "P0 SMTP smuggling probe (CVE-2023-51764/-51765/-51766) \u2014 critical, current gap, no scanner in market catches it cleanly and it directly enables SPF/DKIM bypass.",
+    "P0 Wire VRFY/EXPN/RCPT + AUTH-LOGIN oracle hits into known_users, and banner/EHLO/cert/Received/NTLM leaks into known_hostnames + known_domains \u2014 the single highest-leverage change; every other service module benefits.",
+    "P0 Implementation/version fingerprint \u2192 CVE mapping for Exim (10149, 21Nails, 39929), Exchange (0688, ProxyLogon, ProxyShell), Zimbra (27924); banner is already captured, just needs parsing.",
+    "P1 XCLIENT / XFORWARD / PROXY-protocol acceptance probes \u2014 each is an unauth source-spoof primitive.",
+    "P1 STARTTLS handshake + cert introspection (feeds hostnames/domains, catches STARTTLS-injection class bugs, TLS-required-on-submission violation).",
+    "P1 AUTH mechanism deep-probe: AUTH-before-STARTTLS violation, NTLM Type-2 info-disclosure, CRAM-MD5/DIGEST-MD5 deprecation, plus wiring the currently-dead `creds` parameter into a spray step.",
+    "P1 Open-relay bypass matrix (percent-hack, bang-path, source-route, quoted, null-sender, IP-literal) \u2014 current single-shape test misses configured MTAs that still relay via legacy syntax.",
+    "P2 ETRN / EXPN-alias sweep \u2014 cheap, feeds known_domains + full user rosters in one shot.",
+    "P2 SPF/DMARC/DKIM check for every domain the MTA accepts inbound for \u2014 spoofable-inbound is a distinct finding class.",
+    "P2 LMTP port coverage (24, 2003, 2004) and BDAT/CHUNKING differential."
+  ],
+  "notes": "Confirmed via `grep` that recce/core/known_users.py, known_hostnames.py, and known_domains.py contain zero references to `smtp`, banners, STARTTLS, or SMTP-derived tokens \u2014 the module truly produces nothing for the shared caches today, unlike pop3.py which explicitly documents seeding all three. The `creds` parameter in analyze() is accepted but never referenced in the module body \u2014 dead. `active` gates the probe loop but not any auth attempts (there are none). Tests only cover open_relay / vrfy / cleartext against a hand-rolled fake \u2014 no coverage for AUTH, STARTTLS negotiation, XCLIENT, ETRN, smuggling, fingerprint, or cross-service wiring."
+}

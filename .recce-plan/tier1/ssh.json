@@ -1,0 +1,266 @@
+{
+  "capabilities": [
+    {
+      "name": "banner_and_softversion_parse",
+      "kind": "passive",
+      "description": "Parse the SSH identification string (SSH-<protoversion>-<softwareversion> <comments>) for softwareversion/product+version and the trailing comment tag (Ubuntu/Debian/FreeBSD build suffix) that CPE-maps to distro + patch level.",
+      "value": "high",
+      "notes": "svcdetect.py already regex-matches SSH-2.0-OpenSSH_/dropbear/libssh/ROSSSH; a dedicated module should also capture the free-form comment (e.g. 'Ubuntu-3ubuntu0.10') for CVE/patch-level pinning and feed the distro back to Host.os.",
+      "protocol_reference": "RFC 4253 \u00a74.2 (Protocol Version Exchange)",
+      "finding_kind": "ssh_banner"
+    },
+    {
+      "name": "legacy_protocol_version",
+      "kind": "passive",
+      "description": "Flag servers advertising SSH-1.99 (dual-stack) or SSH-1.x, which allow the trivially broken SSH-1 transport (CRC-32 compensation attack, no MAC).",
+      "value": "high",
+      "cwe": [
+        "CWE-327"
+      ],
+      "protocol_reference": "RFC 4253 \u00a75.1 (Old Client, New Server) / CVE-2001-0144",
+      "finding_kind": "ssh_legacy_proto"
+    },
+    {
+      "name": "algorithm_kexinit_enum",
+      "kind": "active",
+      "description": "Send our own SSH_MSG_KEXINIT and read the server's KEXINIT to enumerate all offered kex_algorithms, server_host_key_algorithms, encryption/mac/compression algorithms (client_to_server and server_to_server) and the languages/first_kex_packet_follows flags.",
+      "value": "critical",
+      "protocol_reference": "RFC 4253 \u00a77.1 (Algorithm Negotiation)",
+      "finding_kind": "ssh_algo_inventory",
+      "notes": "This is the foundation probe \u2014 every posture finding below reads from the KEXINIT lists it captures."
+    },
+    {
+      "name": "weak_kex_algorithms",
+      "kind": "passive",
+      "description": "Flag offered kex methods that are cryptographically deprecated: diffie-hellman-group1-sha1 (1024-bit MODP), diffie-hellman-group14-sha1, diffie-hellman-group-exchange-sha1, and any rsa1024-*.",
+      "value": "high",
+      "cwe": [
+        "CWE-326",
+        "CWE-327"
+      ],
+      "protocol_reference": "RFC 4253 \u00a78 / RFC 8270 (min 2048-bit MODP) / RFC 9142",
+      "finding_kind": "ssh_weak_kex"
+    },
+    {
+      "name": "weak_cipher_mac_suites",
+      "kind": "passive",
+      "description": "Flag offered ciphers/MACs that are broken or discouraged: arcfour/arcfour128/arcfour256, 3des-cbc, blowfish-cbc, cast128-cbc, any *-cbc (plaintext-recovery), hmac-md5*, hmac-sha1-96, umac-64, or the null cipher/'none' MAC.",
+      "value": "high",
+      "cwe": [
+        "CWE-327"
+      ],
+      "protocol_reference": "RFC 4253 \u00a76.3 / \u00a76.4 / RFC 8758 (arcfour deprecation)",
+      "finding_kind": "ssh_weak_cipher"
+    },
+    {
+      "name": "hostkey_algorithm_posture",
+      "kind": "passive",
+      "description": "Grade the offered server_host_key_algorithms list \u2014 ssh-rsa (SHA-1 signature) deprecated (OpenSSH 8.7+ disables by default), ssh-dss/1024-bit DSA broken, prefer rsa-sha2-256/512 and ssh-ed25519.",
+      "value": "medium",
+      "cwe": [
+        "CWE-327"
+      ],
+      "protocol_reference": "RFC 8332 (rsa-sha2-*) / RFC 8709 (ed25519) / OpenSSH release notes 8.7",
+      "finding_kind": "ssh_hostkey_posture"
+    },
+    {
+      "name": "hostkey_fingerprint_capture",
+      "kind": "active",
+      "description": "Complete the DH/ECDH key exchange to the point of reading SSH_MSG_KEX_ECDH_REPLY (or SSH_MSG_KEXDH_REPLY / GEX_REPLY) and extract the K_S host key blob; compute MD5-colon-hex and SHA256-base64 fingerprints matching ssh-keygen -l output.",
+      "value": "critical",
+      "protocol_reference": "RFC 4253 \u00a78 (Diffie-Hellman) / \u00a76.6 (SSH_MSG_KEXDH_REPLY) / RFC 5656 (ECDH)",
+      "finding_kind": "ssh_hostkey_fingerprint",
+      "notes": "Fingerprints are the primary correlator for host-cloning and cross-network SSH-pivot detection \u2014 justifies a NEW known_hostkeys shared surface."
+    },
+    {
+      "name": "auth_methods_enum",
+      "kind": "auth",
+      "description": "Send SSH_MSG_USERAUTH_REQUEST with method 'none' for a benign username after SSH_MSG_SERVICE_ACCEPT of ssh-userauth; the server replies SSH_MSG_USERAUTH_FAILURE carrying the comma-list of methods that can continue (password, publickey, keyboard-interactive, gssapi-with-mic, hostbased).",
+      "value": "high",
+      "protocol_reference": "RFC 4252 \u00a75.2 (The \"none\" Authentication Request)",
+      "finding_kind": "ssh_auth_methods"
+    },
+    {
+      "name": "password_auth_permitted",
+      "kind": "passive",
+      "description": "If auth_methods_enum returns 'password' or 'keyboard-interactive', flag interactive password auth exposed to the network \u2014 spraying and brute-force become viable and the server cannot enforce MFA at the transport layer.",
+      "value": "medium",
+      "cwe": [
+        "CWE-521",
+        "CWE-307"
+      ],
+      "protocol_reference": "RFC 4252 \u00a78 (Password Authentication) / RFC 4256 (Generic Message Exchange Auth)",
+      "finding_kind": "ssh_password_auth"
+    },
+    {
+      "name": "root_login_probe",
+      "kind": "auth",
+      "description": "Send a userauth 'none' for user 'root'; if the failure list is empty or the server responds SSH_MSG_USERAUTH_SUCCESS to a subsequent publickey-hasSig=false probe, PermitRootLogin is enabled \u2014 target for spray + key-in-loot re-use.",
+      "value": "high",
+      "cwe": [
+        "CWE-250"
+      ],
+      "protocol_reference": "RFC 4252 \u00a75.2 / OpenSSH sshd_config(5) PermitRootLogin",
+      "finding_kind": "ssh_root_login"
+    },
+    {
+      "name": "username_enum_cve_2016_6210",
+      "kind": "auth",
+      "description": "Timing-differential on SHA-512 crypt() when a long invalid password is sent for a valid vs invalid user \u2014 valid users take measurably longer on OpenSSH < 7.3; probe with a bounded set of names and record latency.",
+      "value": "medium",
+      "cwe": [
+        "CWE-203"
+      ],
+      "protocol_reference": "CVE-2016-6210 / OpenSSH-portable openssh-7.3",
+      "finding_kind": "ssh_userenum_timing"
+    },
+    {
+      "name": "username_enum_pkt_size_cve_2018_15473",
+      "kind": "auth",
+      "description": "Send a malformed SSH_MSG_USERAUTH_REQUEST publickey packet; OpenSSH < 7.7 responds differently (immediate failure vs disconnect) for valid vs invalid usernames \u2014 enumerates users pre-auth.",
+      "value": "medium",
+      "cwe": [
+        "CWE-203"
+      ],
+      "protocol_reference": "CVE-2018-15473",
+      "finding_kind": "ssh_userenum_oracle"
+    },
+    {
+      "name": "pubkey_hassig_false_probe",
+      "kind": "exploit",
+      "description": "For each collected private/public key in loot and each known_user, send SSH_MSG_USERAUTH_REQUEST publickey with has_signature=FALSE; a PK_OK reply proves the key is authorized (no crypto op, no logged login) \u2014 turns a stolen public key into a confirmed access finding.",
+      "value": "critical",
+      "cwe": [
+        "CWE-798"
+      ],
+      "protocol_reference": "RFC 4252 \u00a77 (Public Key Authentication)",
+      "finding_kind": "ssh_pubkey_accepted"
+    },
+    {
+      "name": "terrapin_cve_2023_48795",
+      "kind": "passive",
+      "description": "Flag KEXINIT that offers ChaCha20-Poly1305@openssh.com or any CBC cipher with *-etm@openssh.com MAC AND does NOT advertise kex-strict-s-v00@openssh.com / kex-strict-c-v00@openssh.com in kex_algorithms \u2014 the Terrapin prefix-truncation attack is applicable.",
+      "value": "high",
+      "cwe": [
+        "CWE-354"
+      ],
+      "protocol_reference": "CVE-2023-48795 (Terrapin) / OpenSSH 9.6 release",
+      "finding_kind": "ssh_terrapin"
+    },
+    {
+      "name": "known_backdoored_builds",
+      "kind": "passive",
+      "description": "Match softwareversion against a small curated map of trojaned/backdoored SSH distributions (Dropbear 2016.72 supply-chain, xz-utils sshd backdoor CVE-2024-3094 via liblzma link, OpenSSH regreSSHion CVE-2024-6387 for 8.5p1\u20139.7p1 on glibc).",
+      "value": "critical",
+      "cwe": [
+        "CWE-506",
+        "CWE-362"
+      ],
+      "protocol_reference": "CVE-2024-3094 / CVE-2024-6387",
+      "finding_kind": "ssh_known_bad_build"
+    },
+    {
+      "name": "hostkey_reuse_correlation",
+      "kind": "chain",
+      "description": "Group all discovered SSH hosts by SHA256 host-key fingerprint; identical keys across distinct IPs prove a golden-image / NAT / same-appliance relationship (or a stolen host-key) worth pivoting on.",
+      "value": "medium",
+      "protocol_reference": "RFC 4253 \u00a74.1 (Host Keys)",
+      "finding_kind": "ssh_hostkey_reuse",
+      "notes": "Consumes the proposed known_hostkeys surface \u2014 also feeds the attack-path graph as an implicit trust edge."
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames: the SSH banner comment often carries distro build tags ('Ubuntu-3ubuntu0.10', 'FreeBSD-20240101') and, on some appliances, the hostname \u2014 feed distro into Host.os and any hostname tokens into known_hostnames",
+    "known_users: valid usernames confirmed by CVE-2016-6210 timing or CVE-2018-15473 packet-size oracle become high-confidence entries in known_users (Linux realm, source='ssh_userenum')",
+    "known_users: usernames the auth 'none' probe implicitly validates when root_login_probe or a specific user gets a distinct methods-continue list",
+    "known_hashes: a captured hostkey (K_S blob) is not a crackable hash, but a SHA256:base64 fingerprint is the right key for a NEW shared surface 'known_hostkeys' \u2014 lets ssh, rdp (NLA/ECDSA), sftp and jump-host detection share one identity per box",
+    "relay_targets: an SSH endpoint where publickey with a loot-key returned PK_OK is a confirmed pivot target \u2014 emit relay_targets with method='ssh-pubkey' and the accepted key id so the pivot planner can use it directly",
+    "relay_targets: any host advertising password auth for a known_users entry is a spray-relay candidate",
+    "NEW surface 'known_hostkeys' proposed: {fingerprint_sha256, key_type, seen_on:[ip:port], first_source} \u2014 correlates SSH across the estate, detects golden-image clones, and is a natural place to record ssh-keyscan output from credentialed sessions"
+  ],
+  "default_ports": [
+    "22/tcp",
+    "2222/tcp (common alt)",
+    "830/tcp (netconf-ssh)"
+  ],
+  "existing_coverage": {
+    "detected": true,
+    "files": [
+      "recce/services/svcdetect.py (SSH-\\d signature at line 89; OpenSSH/dropbear/libssh/ROSSSH product-version regex at line 122)",
+      "recce/services/serviceenum.py (name 'ssh' -> script 'ssh' at line 12; port 22 -> 'ssh' at line 38)",
+      "recce/core/scanner.py (line 234-235 runs nmap NSE ssh2-enum-algos, ssh-auth-methods, ssh-hostkey)",
+      "recce/creds/deploy.py (uses ssh/sshpass as an exec transport for credentialed enum \u2014 does NOT probe the protocol)",
+      "recce/services/wordlists.py:92 ships a 'creds-ssh' wordlist"
+    ],
+    "notes": "Detection + a version-parse + nmap NSE run is all recce currently has for SSH. There is NO dedicated recce/services/ssh.py, no in-process KEXINIT parser, no hostkey capture into models, no auth-methods enum in Python (only whatever the nmap NSE returned), and no findings module wiring SSH posture into the vuln totals the way ftp/smtp/vnc do."
+  },
+  "implementation_notes": "Build recce/services/ssh.py modelled on services/ftp.py (banner+probe+findings shape) but with a small binary framer since SSH is packetised, not line-based. Read the identification string until CRLF (RFC 4253 \u00a74.2 \u2014 up to 255 bytes, may be preceded by other lines), then send our own identification string 'SSH-2.0-recce_<ver>\\\\r\\\\n', then send SSH_MSG_KEXINIT and read the server's KEXINIT \u2014 that alone unlocks the algo-inventory + weak-kex/cipher/mac + hostkey-posture + Terrapin findings without doing DH. Hostkey fingerprint requires one more round (SSH_MSG_KEXDH_INIT / KEX_ECDH_INIT with e = g^x mod p or curve25519-donna) \u2014 the stdlib doesn't ship curve25519, so either use cryptography (already a recce dependency?) or implement a Curve25519 X25519 in pure Python (~40 lines) to stay airgap-clean. Auth-methods enum is one more round after NEWKEYS/service-request but requires the derived keys \u2014 easiest path is to shell out to `ssh -o PreferredAuthentications=none -o BatchMode=yes` and parse stderr (matches recce's shell-out-to-Kali-tooling pattern in deploy.py), OR use paramiko if allowed. Recommend the pure-socket path for KEXINIT/hostkey (deterministic + airgap-safe) and shell-out to `ssh` for the userauth probes (matches existing style). Reuse svccommon.finding_builder and svcprobe.iter_probe like ftp.py does. Reuse svcdetect._PRODUCT_RE for banner parsing \u2014 don't duplicate. Emit a new known_hostkeys shared surface under recce/core/ mirroring known_hostnames.py shape.",
+  "recommended_findings": [
+    {
+      "title": "SSH-1 or SSH-1.99 legacy protocol enabled",
+      "severity": "high"
+    },
+    {
+      "title": "SSH host key algorithm ssh-rsa (SHA-1) offered",
+      "severity": "medium"
+    },
+    {
+      "title": "SSH host key algorithm ssh-dss (1024-bit DSA) offered",
+      "severity": "high"
+    },
+    {
+      "title": "SSH weak key exchange offered (dh-group1-sha1 / gex-sha1)",
+      "severity": "high"
+    },
+    {
+      "title": "SSH weak cipher offered (arcfour / 3des-cbc / *-cbc)",
+      "severity": "high"
+    },
+    {
+      "title": "SSH weak MAC offered (hmac-md5 / hmac-sha1-96)",
+      "severity": "medium"
+    },
+    {
+      "title": "SSH vulnerable to Terrapin prefix truncation (CVE-2023-48795)",
+      "severity": "high"
+    },
+    {
+      "title": "SSH password authentication permitted (network-exposed)",
+      "severity": "medium"
+    },
+    {
+      "title": "SSH root login permitted (auth methods reachable for root)",
+      "severity": "high"
+    },
+    {
+      "title": "SSH username enumeration via timing (CVE-2016-6210)",
+      "severity": "medium"
+    },
+    {
+      "title": "SSH username enumeration via packet-size oracle (CVE-2018-15473)",
+      "severity": "medium"
+    },
+    {
+      "title": "SSH publickey from loot accepted (PK_OK to hasSig=false) \u2014 confirmed access",
+      "severity": "critical"
+    },
+    {
+      "title": "SSH regreSSHion pre-auth RCE (CVE-2024-6387)",
+      "severity": "critical"
+    },
+    {
+      "title": "SSH xz-utils supply-chain backdoor (CVE-2024-3094)",
+      "severity": "critical"
+    },
+    {
+      "title": "SSH host key reused across multiple hosts (golden image / clone)",
+      "severity": "medium"
+    },
+    {
+      "title": "SSH banner leaks OS distribution + patch tag",
+      "severity": "low"
+    }
+  ],
+  "service": "SSH",
+  "summary": "SSH (RFC 4253 transport, RFC 4252 authentication) is a packetised binary protocol whose opening moves \u2014 the CRLF identification string and the SSH_MSG_KEXINIT exchange \u2014 leak everything an attacker needs to grade the server's cryptographic posture before any credential is spent: the full server-offered kex/hostkey/cipher/MAC/compression lists, the softwareversion (OpenSSH/dropbear/libssh/ROSSSH plus a distro comment tag), and after one more round the host key itself. What an attacker actually wants from SSH is (a) fingerprints of the host key for cross-network correlation and MITM baselines, (b) a graded posture (ssh-rsa deprecated, ssh-dss broken, *-cbc & hmac-md5 weak, Terrapin exposure via ChaCha20/EtM-CBC without kex-strict), (c) the concrete authentication methods the server will accept for a given username (via the RFC 4252 \u00a75.2 'none' request) and whether root is reachable, and (d) a low-cost way to turn any collected private key into a confirmed foothold using SSH_MSG_USERAUTH_REQUEST publickey with hasSig=false (a PK_OK reply proves acceptance without a login event). Recce today detects the port and mines the banner, but has no dedicated ssh module \u2014 the whole KEXINIT/hostkey/auth-methods loop is delegated to nmap NSE and never lands in models. A recce/services/ssh.py modelled on services/ftp.py would ship this, feed the OS field, and emit a new known_hostkeys shared surface so SSH identity is correlatable across the estate."
+}

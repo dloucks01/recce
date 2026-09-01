@@ -1,0 +1,208 @@
+{
+  "service": "bgp",
+  "summary": "BGP (Border Gateway Protocol) TCP/179 \u2014 RFC 4271. Not currently recognised anywhere in recce: port 179 is absent from services/svcdetect.py PORT_NAMES, absent from services/serviceenum.py (_NAME and _PORT), and no services/bgp.py exists. No signature in _SIGNATURES for the BGP marker (16 bytes 0xFF). BGP is rare in pure enterprise but appears frequently at colo/edge/DC-fabric boundaries (iBGP fabric on tenant segments, MikroTik/OpenBSD/FRR test rigs, mis-segmented ToR peering). An OPEN message is a rich passive disclosure (peer AS, BGP version, hold-time, Router-ID / BGP-Identifier, capabilities: 4-byte-AS RFC 6793, MP-BGP AFI/SAFI RFC 4760, Route Refresh RFC 2918, Graceful Restart RFC 4724). A NOTIFICATION reply to a spoofed OPEN itself leaks configuration \u2014 'Bad Peer AS' (code 2 subcode 2) often carries the *expected* local AS, 'Bad BGP Identifier' hints at strict-neighbor config, 'Unsupported Version' returns the peer's version ceiling. TCP-MD5 auth (RFC 2385, TCP option kind 19) can only be crudely inferred without raw sockets. Shape should mirror recce/services/modbus.py: binary struct.pack framing, single-shot connect, no writes to the wire beyond one OPEN, one 'reachable' finding + one 'peer identification' finding + capability-specific findings. Airgap-safe: stdlib socket + struct.",
+  "capabilities": [
+    {
+      "name": "detect_port_179_bgp",
+      "kind": "passive",
+      "description": "Recognise TCP/179 as BGP in svcdetect PORT_NAMES ({179: ('bgp', 'Border Gateway Protocol (RFC 4271)')}) and route to the bgp script in serviceenum._PORT and _NAME. Nothing today maps 179 anywhere.",
+      "value": "medium",
+      "cwe": [],
+      "protocol_reference": "RFC 4271 sec. 4",
+      "finding_kind": ""
+    },
+    {
+      "name": "bgp_marker_signature",
+      "kind": "passive",
+      "description": "Add a _SIGNATURES entry for the BGP header marker \u2014 16 bytes of 0xFF \u2014 so any residual banner or servicefp containing 16 * '\\xff' followed by a 2-byte length and type 1..5 is fingerprinted as BGP without a live probe.",
+      "value": "low",
+      "cwe": [],
+      "protocol_reference": "RFC 4271 sec. 4.1 (Marker)",
+      "finding_kind": ""
+    },
+    {
+      "name": "bgp_open_probe",
+      "kind": "active",
+      "description": "Send a well-formed BGP OPEN with version=4, a private-use My-AS (e.g., 65001 or 64512 from RFC 6996), hold-time=180, and a synthetic BGP Identifier (Router-ID); read up to 4096 bytes. A valid marker+OPEN or NOTIFICATION reply confirms BGP beyond a bare TCP connect (analogous to modbus.probe distinguishing a real device from an arbitrary listener on 502).",
+      "value": "high",
+      "cwe": [],
+      "protocol_reference": "RFC 4271 sec. 4.2 (OPEN Message Format), sec. 6.2 (OPEN Error Handling)",
+      "finding_kind": "bgp_reachable"
+    },
+    {
+      "name": "parse_peer_open_disclosure",
+      "kind": "passive",
+      "description": "When the peer sends its own OPEN in response, parse and record: peer AS (2-byte field, or 4-byte via capability 65), BGP version, negotiated hold-time, and the peer's BGP Identifier (Router-ID) \u2014 a 4-octet value that is almost always a real routable IPv4 address on the peer (loopback or interface).",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 4271 sec. 4.2; RFC 6793 (4-byte AS in capability 65)",
+      "finding_kind": "bgp_peer_id"
+    },
+    {
+      "name": "parse_capabilities_advertised",
+      "kind": "passive",
+      "description": "Parse Optional Parameters in the peer OPEN (parameter type 2, RFC 5492): enumerate Capability Codes \u2014 1 Multiprotocol AFI/SAFI (RFC 4760), 2 Route Refresh (RFC 2918), 64 Graceful Restart (RFC 4724), 65 4-octet AS (RFC 6793), 70 Enhanced Route Refresh, 71 LLGR, 5 Extended Next Hop, 45 BGPsec. Each is a fingerprint of the peer's role (edge vs iBGP vs route-reflector) and stack.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 5492 sec. 4; RFC 4760; RFC 2918; RFC 4724; RFC 6793",
+      "finding_kind": "bgp_capabilities"
+    },
+    {
+      "name": "parse_notification_disclosure",
+      "kind": "passive",
+      "description": "A NOTIFICATION (Type=3) reply to a spoofed OPEN itself leaks configuration. Decode error code/subcode per RFC 4271 sec. 4.5 and sec. 6: OPEN error code 2 subcode 2 ('Bad Peer AS') often includes the expected AS in the data field. Subcode 3 ('Bad BGP Identifier') hints at strict-neighbor config. Subcode 1 ('Unsupported Version Number') carries the peer's max supported version. Subcode 4 ('Unsupported Optional Parameter') and subcode 7 ('Unsupported Capability') enumerate what the peer forbids.",
+      "value": "high",
+      "cwe": [
+        "CWE-209",
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 4271 sec. 4.5, sec. 6.2; RFC 4486 (Cease subcodes); RFC 6608",
+      "finding_kind": "bgp_notification_leak"
+    },
+    {
+      "name": "peer_as_enumeration",
+      "kind": "active",
+      "description": "Iterate a small set of candidate My-AS values (starting bogus, then commonly-configured private-range AS: 65001, 64512, 65534, plus documentation AS 64496 from RFC 5398). If one specific value produces a NOTIFICATION 'Bad Peer AS' with an expected AS in the data field, we have extracted the peer's configured neighbor-AS. Bounded (<=6 tries), read-only.",
+      "value": "high",
+      "cwe": [
+        "CWE-200",
+        "CWE-307"
+      ],
+      "protocol_reference": "RFC 4271 sec. 6.2; RFC 6996 (private AS ranges)",
+      "finding_kind": "bgp_expected_as_disclosed"
+    },
+    {
+      "name": "unauthenticated_open_accepted",
+      "kind": "auth",
+      "description": "If the peer responds with its own OPEN (rather than a TCP RST/silent drop or a NOTIFICATION cease-connection-rejected), then BGP session establishment did NOT require TCP-MD5 (RFC 2385) or TCP-AO (RFC 5925) at the TCP layer, nor GTSM TTL-check (RFC 5082) rejection at the IP layer. Stance finding: an internet-facing BGP speaker that will proceed with an unauthenticated peer is a session-hijack risk.",
+      "value": "high",
+      "cwe": [
+        "CWE-306",
+        "CWE-923"
+      ],
+      "protocol_reference": "RFC 2385 (TCP-MD5), RFC 5925 (TCP-AO), RFC 5082 (GTSM)",
+      "finding_kind": "bgp_no_neighbor_auth"
+    },
+    {
+      "name": "tcp_md5_requirement_hint",
+      "kind": "passive",
+      "description": "Best-effort inference of TCP-MD5 requirement without raw sockets: an ordinary connect() to 179 that (a) TCP-handshakes successfully AND (b) BGP OPEN is answered => MD5 not required. A connect() that TCP-handshakes but the peer immediately RSTs after our OPEN with no data, or silently times out at the BGP layer only, is a weak signal for either MD5 required or ACL mismatch. Record as a probe hint, not a hard claim.",
+      "value": "medium",
+      "cwe": [
+        "CWE-306"
+      ],
+      "protocol_reference": "RFC 2385",
+      "finding_kind": "bgp_md5_hint"
+    },
+    {
+      "name": "bgp_version_downgrade_leak",
+      "kind": "passive",
+      "description": "If we advertise Version=5 (invalid) and the peer replies NOTIFICATION 'Unsupported Version Number' (code 2 subcode 1) with a 2-byte data field containing its maximum supported version, we have extracted the peer's version ceiling (essentially always 4, but the field's presence tells us the peer follows RFC 4271 sec. 6.2 verbatim \u2014 useful stack fingerprint).",
+      "value": "low",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 4271 sec. 6.2",
+      "finding_kind": "bgp_version_probe"
+    },
+    {
+      "name": "mp_bgp_afi_safi_disclosure",
+      "kind": "passive",
+      "description": "From the Multiprotocol Extensions capability (code 1), enumerate AFI/SAFI tuples the peer will negotiate: 1/1 IPv4 unicast, 2/1 IPv6 unicast, 1/2 IPv4 multicast, 1/128 VPN-IPv4 (L3VPN), 25/70 EVPN, 1/4 MPLS labels, etc. AFI/SAFI reveals topology role \u2014 an EVPN or L3VPN AFI on a discovered host says 'this is a PE / DC fabric leaf', not an edge router.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 4760 sec. 8; IANA AFI/SAFI registry",
+      "finding_kind": "bgp_afi_safi"
+    },
+    {
+      "name": "graceful_restart_flags",
+      "kind": "passive",
+      "description": "Parse the Graceful Restart capability (code 64) payload: Restart Flags (bit R = Restart State), Restart Time (12 bits), and per-AFI/SAFI Forwarding State bit. Presence of GR with a nonzero Restart Time is a strong hint the peer is production infrastructure (not a lab); the AFI list here corroborates the MP-BGP list above.",
+      "value": "low",
+      "cwe": [],
+      "protocol_reference": "RFC 4724 sec. 3",
+      "finding_kind": "bgp_graceful_restart"
+    },
+    {
+      "name": "route_refresh_supported",
+      "kind": "passive",
+      "description": "Presence of Route Refresh capability (code 2) or Enhanced Route Refresh (code 70) \u2014 informational fingerprint that the peer supports on-demand re-advertisement (used post-policy-change without dropping the session). Common on all modern implementations; absence is itself a fingerprint (very old code).",
+      "value": "low",
+      "cwe": [],
+      "protocol_reference": "RFC 2918; RFC 7313",
+      "finding_kind": "bgp_route_refresh"
+    },
+    {
+      "name": "router_id_wire_pivot",
+      "kind": "chain",
+      "description": "The BGP Identifier field in the peer's OPEN is a 4-octet IPv4 address chosen by the peer, almost always a real routable IP on that device (typically a loopback). Emit it as a new-host discovery for other scanners to pick up: it is frequently NOT the interface IP we connected to, and reveals the router's canonical management address.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 4271 sec. 4.2 (BGP Identifier); RFC 6286 (4-octet BGP Identifier)",
+      "finding_kind": "bgp_router_id_pivot"
+    },
+    {
+      "name": "as_number_correlation",
+      "kind": "chain",
+      "description": "The peer's AS number (or the peer's expected AS extracted via peer_as_enumeration) is a stable identifier that another recce module (whois/passive DNS/routing view) can key on to correlate this host with an organisation, ASN, or upstream provider \u2014 the AS is often the strongest single fingerprint of ownership.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 4271; RFC 6793",
+      "finding_kind": ""
+    }
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [],
+    "notes": "No BGP coverage anywhere in recce. Confirmed by (a) svcdetect.py PORT_NAMES has no 179 entry and no BGP marker in _SIGNATURES; (b) serviceenum.py _NAME and _PORT have no 'bgp' key and no 179 key; (c) no services/bgp.py file exists; (d) grep for '179', 'bgp', 'BGP' across recce/ returned only the unrelated port 2179 vmrdp entry in svcdetect.py."
+  },
+  "recommended_findings": [
+    {
+      "severity": "high",
+      "title": "BGP speaker reachable on TCP/179"
+    },
+    {
+      "severity": "high",
+      "title": "BGP peer accepts unauthenticated OPEN (no TCP-MD5 / TCP-AO / GTSM enforcement)"
+    },
+    {
+      "severity": "high",
+      "title": "BGP peer discloses expected local AS via NOTIFICATION 'Bad Peer AS'"
+    },
+    {
+      "severity": "medium",
+      "title": "BGP peer identification extracted (AS, version, hold-time, Router-ID, capabilities)"
+    },
+    {
+      "severity": "medium",
+      "title": "BGP Router-ID reveals additional host address (management/loopback IP)"
+    },
+    {
+      "severity": "low",
+      "title": "BGP capabilities enumerated (MP-BGP AFI/SAFI, Graceful Restart, Route Refresh, 4-byte AS)"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "Router-ID (BGP Identifier) \u2014 new IPv4 host to enqueue for scanning, distinct from the connect-target IP",
+    "Peer AS number \u2014 feed to whois/routing correlation for ownership attribution",
+    "MP-BGP AFI/SAFI list \u2014 role tag (edge / PE / RR / EVPN leaf) usable by attack-path graphing",
+    "Expected local AS (from 'Bad Peer AS' NOTIFICATION) \u2014 organisational identifier for the near side of the peering",
+    "Graceful Restart Restart-Time \u2014 production-vs-lab classifier",
+    "TCP-MD5 requirement hint \u2014 feed to auth-coverage scoring alongside SSH / SNMPv3 / etc.",
+    "Vendor fingerprint (capability code set and ordering \u2014 Cisco vs FRR vs BIRD vs JunOS advertise distinctly) \u2014 feed to product/version guessing for CVE mapping"
+  ],
+  "default_ports": [
+    "179/tcp"
+  ],
+  "implementation_notes": "Create recce/services/bgp.py mirroring modbus.py's shape: is_bgp(port), _build_open(my_as, hold_time, router_id, capabilities=None), _parse_header (marker+len+type), _parse_open, _parse_notification, probe(ip, port), bgp_targets(hosts), findings(hosts, probes), runbook(ip, port), findings_to_vulns, analyze(hosts, ...). Add 179: ('bgp', 'Border Gateway Protocol (RFC 4271)') to svcdetect.PORT_NAMES; add {179: 'bgp'} to serviceenum._PORT and {'bgp': 'bgp'} to _NAME; add a marker signature (16*0xFF prefix) to svcdetect._SIGNATURES. Use struct: '>16sHB' for header, then '>BHHIB' for OPEN body (version, my_as, hold_time, router_id, opt_parm_len). Wrap capabilities as Optional Parameter type 2 with (code, len, value) triples inside. Runbook cmds: 'nmap --script bgp-info -p179', 'bgpq4', 'exabgp' as reference tools (airgap-safe as suggestions)."
+}

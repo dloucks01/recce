@@ -1,0 +1,209 @@
+{
+  "service": "vnc",
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/vnc.py",
+    "/home/kali/Desktop/projects/recce/tests/test_rdp_vnc.py"
+  ],
+  "summary": "recce/services/vnc.py speaks the RFB handshake up to enumeration of the server security-type list and flags two conditions (type 1 = None, and type 2 only = DES). It stops immediately after receiving the security-type list. Everything the protocol offers past that byte \u2014 SecurityResult, ServerInit (desktop name / geometry / pixel format), VeNCrypt subtypes, Tight tunnel/auth capabilities, actual DES challenge bytes, TLS certs, vendor identification from the RFB minor, and any credentialed try \u2014 is left on the table. There is no cross-service wiring back into known_users / hostnames / hashes / relay_targets even though several of these are trivially reachable from the handshake.",
+  "existing_capabilities": [
+    "RFB banner probe on 5900-5906 with regex-parsed version (RFC 6143 \u00a77.1.1)",
+    "Handshake up to server security-type list, both RFB 3.7+ (byte-count + list) and legacy RFB 3.3 (4-byte single type) formats (RFC 6143 \u00a77.1.2)",
+    "Maps ~13 known security-type numbers to names (type 1 None, 2 VNC-DES, 5/6 RA2/RA2ne, 16 Tight, 17 Ultra, 18 TLS, 19 VeNCrypt, 20 SASL, 30 Apple ARD, etc.)",
+    "Flags security type 1 (no auth) as CRITICAL finding vnc_no_auth (CWE-306/287)",
+    "Flags security type 2 as only offered method as MEDIUM finding vnc_des_only (CWE-326/916)",
+    "Emits info finding vnc_fingerprint with version and security-type names",
+    "Yields targets to svcprobe and produces cred-free runbook (nmap vnc-info + vncviewer)"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "no_auth_desktop_name_leak",
+      "kind": "passive",
+      "value": "high",
+      "description": "When security type 1 is offered, module never actually selects it, sends SecurityResult ack, and reads ServerInit (RFC 6143 \u00a77.3.2). ServerInit is 24 bytes + 4-byte length + name-string. Desktop name almost always leaks hostname/username (e.g., 'root@dc01.corp:0', 'kiosk-lobby'), plus framebuffer geometry (kiosk vs full desktop) and pixel format. Should stream the ServerInit and feed the desktop-name string into known_users / hostnames / domains without any credential.",
+      "protocol_reference": "RFC 6143 \u00a77.3.2 ServerInit + \u00a77.2.1 SecurityResult",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "des_challenge_capture",
+      "kind": "exploit",
+      "value": "high",
+      "description": "When type 2 is offered, module identifies it but never issues the challenge exchange to grab the 16-byte server challenge. Selecting type 2 makes the server transmit a 16-byte random challenge (RFC 6143 \u00a77.2.2) that can be captured and posted with any known-plaintext response format \u2014 but even the bare challenge combined with a captured client response from PCAP/relay is hashcat -m 11600 fodder. Emit the captured challenge into hashes/relay_targets so cred_lab has an offline crack primitive rather than only a severity label.",
+      "protocol_reference": "RFC 6143 \u00a77.2.2 VNC Authentication",
+      "cwe": [
+        "CWE-916",
+        "CWE-326"
+      ]
+    },
+    {
+      "name": "vencrypt_subtype_enum",
+      "kind": "active",
+      "value": "high",
+      "description": "When type 19 VeNCrypt is offered, module never negotiates the sub-handshake: send 0.2, receive server version, then receive u8 nsub + array of u32 subtype ids. Subtypes 256 Plain, 259 TLSPlain, 262 X509Plain send username/password in cleartext inside their tunnels; 261 X509Vnc still uses DES under TLS. Should enumerate and flag any 'Plain' subtype as HIGH (cleartext-cred over TLS/x509) and any Vnc-under-tunnel as still-DES.",
+      "protocol_reference": "VeNCrypt draft (Constantin Kaplinsky / TigerVNC docs) \u2014 subtypes 256..264",
+      "cwe": [
+        "CWE-319",
+        "CWE-326"
+      ]
+    },
+    {
+      "name": "tls_cert_extraction",
+      "kind": "passive",
+      "value": "high",
+      "description": "For security types 18 (TLS) and 19 (VeNCrypt tls/x509 subtypes), no TLS handshake is performed, so no certificate is pulled. VNC boxes almost always present a self-signed cert whose CN / SAN leaks hostname, domain, and often the internal name of the console. Should perform an ssl.wrap_socket after selecting the type and feed CN/SAN into hostnames + domains, and flag self-signed / expired / weak-cipher.",
+      "protocol_reference": "RFC 6143 \u00a77.2 + VeNCrypt TLS/X509 subtypes",
+      "cwe": [
+        "CWE-295",
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "tight_capability_enum",
+      "kind": "active",
+      "value": "medium",
+      "description": "When type 16 Tight is offered, the sub-handshake carries a Tunnel capability list and an Auth capability list of 16-byte codes (e.g., 'STDVNOAUTH__', 'STDVVNCAUTH_', 'TGHTULGNAUTH', 'VENCVENCRYPT', 'SASLAUTHSASL'). Module never reads them, so it can't tell whether Tight is wrapping None, DES, ULGN (UNIX-login), etc. ULGN in particular hands over the local Unix login prompt over the wire.",
+      "protocol_reference": "TightVNC protocol extensions \u2014 Tight tunneling + auth capabilities",
+      "cwe": [
+        "CWE-287",
+        "CWE-319"
+      ]
+    },
+    {
+      "name": "apple_ard_type30",
+      "kind": "auth",
+      "value": "medium",
+      "description": "Security type 30 = Apple ARD (Diffie-Hellman with a fixed 512-bit generator historically; broken key exchange). Module maps the name but does not flag it. ARD servers on macOS are commonly on 5900 and pair with the ARD 'root shell over VNC' CVE-2017-13872 window. Type-30 presence should be a HIGH finding on its own and enable a screening probe for the vulnerable macOS build.",
+      "protocol_reference": "Apple Remote Desktop authentication (type 30)",
+      "cwe": [
+        "CWE-327",
+        "CWE-326"
+      ]
+    },
+    {
+      "name": "ultravnc_mslogon_dh",
+      "kind": "auth",
+      "value": "medium",
+      "description": "UltraVNC security types (roughly 0x71..0x73 / 113..115 and 0xFB/0xFC in some builds) implement MS-Logon and MS-LogonII. MS-Logon uses a hard-coded 64-bit DH group whose private key is trivially recovered (public research \u2014 Chris Gates, ~2012 and later NVISO writeups). Module does not recognise these type numbers at all; they show up as unknown(N). Should map and flag as HIGH.",
+      "protocol_reference": "UltraVNC protocol extensions \u2014 MS-Logon / MS-LogonII",
+      "cwe": [
+        "CWE-327"
+      ]
+    },
+    {
+      "name": "vendor_from_rfb_minor",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Module parses major.minor but never fingerprints the vendor. Distinctive minors: 003.006 UltraVNC, 003.007 TigerVNC (some), 003.008 stock/libvncserver, 003.889 Apple ARD, 004.000/004.001 RealVNC, 005.000 RealVNC E4. Vendor tag drives CVE correlation (LibVNCServer CVE-2019-15681/CVE-2018-7225/CVE-2020-14397..14405, TightVNC CVE-2022-26260 heap OF, UltraVNC CVE-2023-27830 series, RealVNC CVE-2024-32001).",
+      "protocol_reference": "RFB \u00a77.1.1 ProtocolVersion (non-standard minors used as vendor tags)",
+      "cwe": [
+        "CWE-1104"
+      ]
+    },
+    {
+      "name": "credentialed_common_password_probe",
+      "kind": "auth",
+      "value": "medium",
+      "description": "No credentialed check even when creds dict is supplied. VNC passwords are truncated to 8 chars; common defaults (empty, 'password', 'vnc', vendor defaults for ARD/RealVNC) are worth one attempt when active mode is on. Would produce an outright vnc_weak_password (CRITICAL) finding rather than a maybe-cracked hash.",
+      "protocol_reference": "RFC 6143 \u00a77.2.2 (8-char DES truncation)",
+      "cwe": [
+        "CWE-521",
+        "CWE-798"
+      ]
+    },
+    {
+      "name": "novnc_websockify_probe",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Module is bound to 5900-5906 raw RFB. noVNC/websockify commonly exposes the same RFB stream over WebSockets on 6080, 6081, 8080/vnc, /websockify with Sec-WebSocket-Protocol: binary. is_vnc() will never match those; nothing probes them. Should add a websocket-upgrade probe path for known noVNC endpoints and re-use the same RFB handshake once framed.",
+      "protocol_reference": "noVNC/websockify \u2014 RFB over WebSocket, subprotocol 'binary'",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "rfb_3_3_single_type_downgrade",
+      "kind": "active",
+      "value": "medium",
+      "description": "For RFB 3.3 servers, the module accepts whatever the 4-byte type field says. It never tries downgrading a 3.7+ server to 3.3 by replying with 'RFB 003.003\\n' \u2014 some old servers then respond with the RFB 3.3 single-type field forced to type 2 or type 1, exposing a weaker path even when the modern handshake advertised VeNCrypt. Should attempt the downgrade probe and flag 'downgrade-acceptable'.",
+      "protocol_reference": "RFC 6143 \u00a77.1.1/\u00a77.1.2 (version-dependent security negotiation)",
+      "cwe": [
+        "CWE-757"
+      ]
+    },
+    {
+      "name": "security_result_reason_leak",
+      "kind": "passive",
+      "value": "low",
+      "description": "On auth failure with RFB 3.8 the server sends SecurityResult status=1 followed by u32 reason-length + reason-string (RFC 6143 \u00a77.2.1). The reason string often leaks 'too many authentication failures', 'password required', or product identity. Never captured \u2014 could feed vendor fingerprint and lockout-policy detection.",
+      "protocol_reference": "RFC 6143 \u00a77.2.1 SecurityResult failure reason",
+      "cwe": [
+        "CWE-209"
+      ]
+    },
+    {
+      "name": "cve_correlation_libvncserver",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Once vendor tagging exists (see vendor_from_rfb_minor), the module should emit CVE-anchored findings for known-vulnerable versions: LibVNCServer CVE-2019-15681 (info-leak, uninit memory), CVE-2018-7225 (RCE), CVE-2020-14397..14405; TightVNC 1.3.10 CVE-2022-26260 (heap OF pre-auth); UltraVNC CVE-2023-27830 series; RealVNC CVE-2024-32001 range. Zero of these are surfaced today.",
+      "protocol_reference": "Vendor advisories; NVD entries",
+      "cwe": [
+        "CWE-125",
+        "CWE-787",
+        "CWE-908"
+      ]
+    },
+    {
+      "name": "cross_wire_hostnames_users_hashes_relay",
+      "kind": "chain",
+      "value": "high",
+      "description": "Module returns findings only. It does not feed the shared cross-service maps that other services (smb.py, http.py, ipmi.py, guacamole.py, iscsi.py, vault.py) do: (a) desktop-name string -> hostnames + known_users; (b) TLS cert CN/SAN -> hostnames + domains; (c) DES challenge/response -> hashes (hashcat -m 11600 record); (d) no-auth or DES-only endpoint -> relay_targets/pivot list (guacamole/screenshot/console-relay chain). All are reachable from data already partially handled here.",
+      "protocol_reference": "internal cross-service wiring convention",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "framebuffer_screenshot_no_auth",
+      "kind": "exploit",
+      "value": "high",
+      "description": "For no-auth endpoints, after ServerInit the module could send SetPixelFormat + FramebufferUpdateRequest (RFC 6143 \u00a77.5.3) and decode a raw-encoded first update into a PNG proof. A single-frame screenshot of the exposed desktop is the strongest possible proof-of-impact and can pull OCR'able window titles / lock-screen usernames / SCADA HMIs. Currently nothing beyond banner is captured.",
+      "protocol_reference": "RFC 6143 \u00a77.5 client-to-server + \u00a77.6 framebuffer updates (Raw encoding = 0)",
+      "cwe": [
+        "CWE-306",
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "rfb_version_5_realvnc",
+      "kind": "passive",
+      "value": "low",
+      "description": "RealVNC Enterprise 5+ uses RFB 005.000 with proprietary AES-EAX (types 129..131 range). Module's regex still matches but the type IDs come back as unknown(N), and the RA2/RA2ne downgrade history (CVE-2006-2369 lineage \u2014 accept type 2 announced but skip challenge) is unsurfaced. Should identify RealVNC 5+ and probe for the legacy RA2 authentication-bypass style.",
+      "protocol_reference": "RealVNC 5.x proprietary security types; historical CVE-2006-2369",
+      "cwe": [
+        "CWE-287"
+      ]
+    }
+  ],
+  "priority_gaps": [
+    "Read ServerInit after any type-1/no-auth (or after any successful auth) to extract desktop-name string \u2014 feeds hostnames/known_users and gives a concrete proof-of-impact string (RFC 6143 \u00a77.3.2)",
+    "Grab a single framebuffer update on no-auth endpoints and emit a PNG proof; nothing beats a screenshot of the exposed console for severity communication",
+    "Actually enter the type-2 challenge/response \u2014 capture the 16-byte challenge and post it as a hashcat -m 11600 record into the shared hashes map instead of only labelling the endpoint",
+    "Enumerate VeNCrypt subtypes (256/259/262 Plain family = cleartext creds; 261 = DES-under-TLS) and Tight tunnel/auth capabilities (STDVVNCAUTH, TGHTULGNAUTH) \u2014 the module currently stops one byte too early to see either",
+    "Perform TLS handshake for types 18/19 and extract cert CN/SAN \u2192 hostnames + domains; flag self-signed / expired",
+    "Vendor-fingerprint from RFB minor (003.006 UltraVNC, 003.889 Apple ARD, 004.x/005.x RealVNC) and correlate CVEs (LibVNCServer CVE-2019-15681 / CVE-2018-7225 / CVE-2020-14397..14405; TightVNC CVE-2022-26260; UltraVNC CVE-2023-27830; RealVNC CVE-2024-32001)",
+    "Recognise UltraVNC MS-Logon / MS-LogonII security-type ids and Apple ARD type 30 as HIGH on their own (broken DH / weak KEX)",
+    "Wire cross-service maps: desktop-name \u2192 hostnames+known_users, TLS SAN \u2192 domains, DES challenge \u2192 hashes, no-auth/DES-only endpoint \u2192 relay_targets/pivot list",
+    "Add credentialed common-password attempt (empty, 'password', 'vnc', vendor defaults) when active + creds available \u2014 produces a vnc_weak_password CRITICAL instead of just vnc_des_only MEDIUM",
+    "Probe noVNC/websockify (6080/6081/8080 /websockify with subprotocol 'binary') \u2014 the module is currently blind to WebSocket-framed RFB"
+  ],
+  "cross_service_wire_gaps": [
+    "hostnames: ServerInit desktop-name string (often 'user@host:display' or plain hostname) is not extracted or fed anywhere",
+    "domains + hostnames: TLS cert CN/SAN for security types 18/19 never pulled (no ssl.wrap_socket after type select)",
+    "known_users: username half of a 'user@host' desktop-name \u2014 plus any Tight/VeNCrypt SASL/ULGN username prompts \u2014 not harvested",
+    "hashes: DES type-2 challenge/response never captured as hashcat -m 11600 record for the cred-crack queue",
+    "relay_targets: no-auth VNC and DES-crackable VNC are prime pivot/relay targets (guacamole console chain, screenshot relay) but never enter the shared relay list",
+    "cve_hits: vendor fingerprint (RFB minor) never derived, so LibVNCServer/TightVNC/UltraVNC/RealVNC CVE feed cannot fire off this service"
+  ],
+  "notes": "Module is a clean but conservative banner-and-list probe: one round-trip, exits the moment the security-type list is read. Every remaining RFB message defined in RFC 6143 (SecurityResult, ClientInit, ServerInit, FramebufferUpdateRequest, FramebufferUpdate) is unimplemented, and every vendor-extension subtype (VeNCrypt subhandshake, Tight capability lists, UltraVNC MS-Logon, Apple ARD, RealVNC AES-EAX) is unrecognised past its name. Highest ROI additions are (1) actually finishing the no-auth handshake to pull desktop-name + a first-frame screenshot as proof, (2) VeNCrypt subhandshake to distinguish TLS from cleartext-over-TLS, and (3) wiring the DES challenge into the shared hashes map \u2014 none require third-party libs beyond stdlib ssl."
+}

@@ -1,0 +1,257 @@
+{
+  "service": "ipmi",
+  "module_files": [
+    "recce/services/ipmi.py",
+    "tests/test_ipmi.py",
+    "tests/test_ipmi_rakp.py"
+  ],
+  "summary": "The module ships a solid RAKP2-hash grabber (SHA1/SHA256) plus a Get Channel Auth Capabilities decoder, but stops short of the definitive cipher-0 proof, never issues Get Channel Cipher Suites (0x54) or Get Device ID (0x01), ignores three auth-status bits it already parses (per-message auth off, user-level auth off, KG set), never attempts HMAC-MD5 RAKP, and never publishes the enumerated existing_users / vendor / GUID back to the shared cred+asset pipeline that other modules would consume.",
+  "existing_capabilities": [
+    "Get Channel Auth Capabilities (App/0x38) UDP probe on channel 0x0E, admin priv",
+    "Auth-type bitmap decode (none/MD2/MD5/password/OEM) \u2014 IPMI 2.0 \u00a722.13",
+    "Anonymous logon + null-user bit decode (auth_status bits 0,1)",
+    "IPMI 2.0 support flag decode (ext_caps bit 0)",
+    "Cipher-0 heuristic: 'none' auth + IPMI 2.0 (CVE-2013-4786) \u2014 reported with caveat",
+    "MD2/MD5 weak-alg finding (CWE-327)",
+    "RMCP+ Open Session Request (payload 0x10) with configurable auth alg",
+    "RAKP Message 1/2 exchange, HMAC extraction to hashcat -m 7300 / -m 7302 lines",
+    "Multi-user + multi-alg RAKP sweep with short-circuit on alg refusal",
+    "Username enumeration via RAKP status asymmetry (medium-sev finding)",
+    "Cross-service consume: unions BMC-defaults with creds.known_users (AD/BloodHound/SNMP/SMB SAMR)",
+    "Per-scan RAKP user cap (25) to bound UDP round-trips",
+    "hashloot dispatch \u2192 loot/ipmi.hash + loot/ipmi-sha256.hash"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "Get Channel Cipher Suites (App/0x54) \u2014 direct cipher-0 enumeration",
+      "kind": "active",
+      "description": "Module explicitly punts on this (comment at line 400: 'that's a separate command'). Instead of the current 'none + IPMI 2.0' heuristic, send NetFn App / Cmd 0x54 to channel 0x0E with list-index 0..3 and parse the returned cipher_suite_records. Any record with auth_alg=0x00 is a hard confirm of CVE-2013-4786 (removes 'if cipher suite 0 is actually enabled' hedge from current finding). Also yields the full negotiable list (cipher 1..17), so weak-cipher findings can be precise rather than heuristic.",
+      "protocol_reference": "IPMI 2.0 spec \u00a722.15 (Table 22-19 cipher-suite records)",
+      "cwe": [
+        "CWE-327",
+        "CWE-757"
+      ],
+      "value": "critical"
+    },
+    {
+      "name": "Cipher-0 active exploit: complete RMCP+ session with auth_alg=0x00 and issue Chassis Power Status",
+      "kind": "exploit",
+      "description": "Currently only advertises cipher-0. The definitive test is Open Session Request with auth_alg=0 + integrity=0 + confidentiality=0, then RAKP1/RAKP3 with zero-length HMAC, then Set Session Privilege (App/0x3B) admin, then Chassis Status (Chassis/0x01) with the picked username 'admin' and empty password. A successful response is proof-of-exploit \u2014 critical finding with kind=ipmi_cipher_zero_proven and payload=power_state. This is the primitive metasploit/ipmitool -C 0 uses and is the single highest-impact IPMI attack.",
+      "protocol_reference": "IPMI 2.0 spec \u00a713.28 (RMCP+ Open Session), \u00a713.20 (RAKP), \u00a722.18 (Set Session Priv), \u00a728.2 (Chassis Status); Dan Farmer 2013 advisory",
+      "cwe": [
+        "CWE-287",
+        "CWE-306"
+      ],
+      "finding_kind": "ipmi_cipher_zero_proven",
+      "value": "critical"
+    },
+    {
+      "name": "Get Device ID (App/0x01) \u2014 vendor/firmware fingerprint pre-session",
+      "kind": "passive",
+      "description": "Pre-session zero-auth command that returns manufacturer_id (IANA), product_id, device_id, firmware major/minor + aux firmware revision. Enables direct CVE-match: Dell iDRAC 7 <2.30.30.30 (CVE-2018-1000116), HP iLO 4 <2.53 (CVE-2017-12542), Supermicro BMC <3.x (CVE-2013-3623 UPnP+cred), ASPEED AST2400/2500 firmware. Currently the module has ZERO vendor detection \u2014 cipher_zero and rakp findings can't be steered per-vendor and CVE mapping is manual.",
+      "protocol_reference": "IPMI 2.0 spec \u00a720.1 (Table 20-2 Get Device ID response)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "ipmi_device_id",
+      "value": "high"
+    },
+    {
+      "name": "Per-message auth disabled bit surfaced (auth_status bit 4)",
+      "kind": "passive",
+      "description": "probe() already reads auth_status but only exposes bits 0/1. Bit 4 = 'Per-message Auth Disabled' means once a session opens, individual IPMI messages inside it need no MAC \u2014 an on-path attacker can inject arbitrary commands into a legitimate session. Zero-cost to expose; missing today.",
+      "protocol_reference": "IPMI 1.5/2.0 \u00a722.13 Table 22-15 (Auth Status byte, bit 4)",
+      "cwe": [
+        "CWE-306",
+        "CWE-345"
+      ],
+      "finding_kind": "ipmi_per_msg_auth_disabled",
+      "value": "high"
+    },
+    {
+      "name": "User-level auth disabled bit surfaced (auth_status bit 3)",
+      "kind": "passive",
+      "description": "Also already-parsed-but-never-emitted. Bit 3 = 'User-level authentication disabled' means IPMI commands at USER privilege can be issued with auth type NONE \u2014 sensor reads, event log dump, some vendor extensions with no cred. Info-disclosure at zero cost.",
+      "protocol_reference": "IPMI 1.5/2.0 \u00a722.13 Table 22-15 (Auth Status byte, bit 3)",
+      "cwe": [
+        "CWE-306"
+      ],
+      "finding_kind": "ipmi_userlevel_auth_disabled",
+      "value": "high"
+    },
+    {
+      "name": "KG-set bit surfaced (auth_status bit 5)",
+      "kind": "passive",
+      "description": "auth_status bit 5 indicates the BMC has a non-null KG (BMC key). When KG is NOT set (the default on most rack BMCs), K_uid derivation collapses to HMAC(password) \u2014 combined with cipher-0 or captured RAKP2, exploitation is straightforward. Currently ignored.",
+      "protocol_reference": "IPMI 2.0 \u00a713.31 (K_uid derivation), \u00a722.13 (auth_status bit 5)",
+      "cwe": [
+        "CWE-1391"
+      ],
+      "finding_kind": "ipmi_kg_key_status",
+      "value": "medium"
+    },
+    {
+      "name": "HMAC-MD5 (auth_alg=0x02) added to RAKP sweep",
+      "kind": "active",
+      "description": "rakp_sweep only iterates SHA1 (0x01) and SHA256 (0x03). Auth alg 0x02 = RAKP-HMAC-MD5 is a valid negotiable algorithm on legacy BMCs (some older Supermicro/Fujitsu). BMCs that offer only MD5 today return zero hashes from recce even though hashcat has mode 7301 (RAKP HMAC-MD5). Missing coverage = missing loot on legacy hardware.",
+      "protocol_reference": "IPMI 2.0 \u00a713.28 Table 13-17 (auth alg IDs), hashcat -m 7301",
+      "cwe": [
+        "CWE-327"
+      ],
+      "finding_kind": "ipmi_rakp_hash",
+      "value": "high"
+    },
+    {
+      "name": "Default-credential attempt on captured usernames",
+      "kind": "auth",
+      "description": "Once a user is confirmed by RAKP2 (or username enum), recce should immediately try one round with the vendor's factory default password for THAT username (root:calvin for iDRAC, ADMIN:ADMIN for Supermicro, USERID:PASSW0RD for IBM/Lenovo, admin:admin/Administrator:Administrator generic). Currently the runbook just tells the operator to do it manually. A single successful Set Session Priv + Chassis Status confirms full BMC pwn without waiting for offline crack. Bounded round-trip cost (\u22648 users \u00d7 1 password = 8 RAKP3 completions).",
+      "protocol_reference": "Vendor default-cred inventories: Dell iDRAC 6/7/8, HPE iLO 3/4/5, Supermicro X-series, IBM/Lenovo IMM/IMM2",
+      "cwe": [
+        "CWE-798",
+        "CWE-1392"
+      ],
+      "finding_kind": "ipmi_default_creds",
+      "value": "critical"
+    },
+    {
+      "name": "Get System GUID (App/0x37) \u2014 BMC identity",
+      "kind": "passive",
+      "description": "Pre-session zero-auth command returning the 16-byte BMC GUID. Useful for cross-scan asset dedup (same BMC on multiple management VLANs), and for correlating IPMI with SMBIOS System UUID pulled from Windows via WMI / SMB / SNMP \u2014 enabling 'this BMC belongs to that hostname' pivots. Currently the RAKP1 exchange reveals the GUID (server_guid) but recce never surfaces or reports it.",
+      "protocol_reference": "IPMI 2.0 spec \u00a722.14 (Get System GUID)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "ipmi_system_guid",
+      "value": "medium"
+    },
+    {
+      "name": "Get Channel Info (App/0x42) + Get LAN Config Parameters (Transport/0x02)",
+      "kind": "passive",
+      "description": "Transport/0x02 returns IP source, community string (for PET SNMP traps \u2014 often 'public'), destination MAC, VLAN ID, and gratuitous ARP interval. Zero-auth pre-session (session-less request permitted for select parameters). Reveals management VLAN tag \u2192 attacker knows which VLAN to hop to for further BMC access; reveals PET SNMP community for cross-service SNMP write.",
+      "protocol_reference": "IPMI 2.0 spec \u00a723.2 (Get LAN Config Parameters, Table 23-4)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "ipmi_lan_config",
+      "value": "medium"
+    },
+    {
+      "name": "Get Channel Auth Capabilities on channel 0x01 (LAN #1) not just 0x0E",
+      "kind": "passive",
+      "description": "Probe uses channel 0x0E (current). Some BMCs expose multiple LAN channels (0x01 primary, 0x02 shared LAN, 0x06 dedicated OOB) with DIFFERENT auth policies \u2014 a hardened 'current' channel can hide a lax secondary channel. ipmitool -H \u2026 channel authcap 1 4 vs authcap 2 4 vs authcap 6 4 finds these. Currently one-shot on 0x0E only.",
+      "protocol_reference": "IPMI 2.0 spec \u00a76.3 (channel numbering), \u00a722.13 authcap per-channel",
+      "cwe": [
+        "CWE-693"
+      ],
+      "finding_kind": "ipmi_channel_delta",
+      "value": "medium"
+    },
+    {
+      "name": "SOL (Serial-Over-LAN) enabled check via Get SOL Config (Transport/0x21)",
+      "kind": "passive",
+      "description": "If SOL is enabled AND cipher-0/default-creds work \u2192 attacker gets a real serial console (BIOS boot, kernel messages, single-user password reset via bootloader). Detecting the SOL-enabled bit lets the finding escalate cipher-0 to include 'and you get console'.",
+      "protocol_reference": "IPMI 2.0 spec \u00a726.13 (Get SOL Config Parameters, param 1 = SOL Enable)",
+      "cwe": [
+        "CWE-306"
+      ],
+      "finding_kind": "ipmi_sol_enabled",
+      "value": "high"
+    },
+    {
+      "name": "Post-auth user-slot enumeration via Get User Access + Get User Name (App/0x44, App/0x46)",
+      "kind": "active",
+      "description": "Once cipher-0 or default creds land a session, iterate user IDs 1..15 and dump usernames + privilege levels + enabled bits. Yields ground-truth account inventory (feeds known_users), passwords set/not-set, and reveals hidden admin backdoors (a BMC with root as user 1 + hidden 'service' account at user 15). Currently RAKP status asymmetry gives a best-effort guess.",
+      "protocol_reference": "IPMI 2.0 spec \u00a722.28 (Get User Access), \u00a722.29 (Get User Name)",
+      "cwe": [
+        "CWE-200",
+        "CWE-284"
+      ],
+      "finding_kind": "ipmi_user_inventory",
+      "value": "high"
+    },
+    {
+      "name": "Publish confirmed users back to creds.known_users",
+      "kind": "chain",
+      "description": "analyze() CONSUMES known_users but never publishes back. rakp_sweep's existing_users (and any user list dumped via App/0x44 post-auth) should be pushed into the shared known-users pipe so downstream modules (SSH, WinRM, LDAP simple bind, HTTP basic on 443, redfish/iLO web) can spray those exact usernames. Today the BMC user 'USERID' or a discovered custom operator account never reaches SSH/WinRM sweeps on the same host.",
+      "protocol_reference": "recce/creds/known_users.py (currently one-way consumer)",
+      "cwe": [
+        "CWE-285"
+      ],
+      "finding_kind": "cross_service_user_leak",
+      "value": "high"
+    },
+    {
+      "name": "Publish vendor tag / firmware version to shared asset pipe \u2192 correlate with iDRAC/iLO web ports",
+      "kind": "chain",
+      "description": "Once Get Device ID identifies iDRAC/iLO/Supermicro, emit a vendor fact for host.ip so http/tls scanners on 443/5900/17988/2381 (iLO web, iLO XML config, iLO chat, iLO Health) know they're facing that same BMC's web UI \u2014 and can trigger HP iLO CVE-2017-12542 (auth-bypass via 29 'A's in Connection header) or iDRAC XML config file grab. Currently the vendor tag is nowhere.",
+      "protocol_reference": "HP SBD SA-2017-004 (iLO 4 CVE-2017-12542); Dell iDRAC XML config export",
+      "cwe": [
+        "CWE-287"
+      ],
+      "finding_kind": "cross_service_bmc_vendor",
+      "value": "high"
+    },
+    {
+      "name": "Supermicro NVRAM plaintext-password leak on TCP/49152",
+      "kind": "active",
+      "description": "Same physical BMC exposes /PSBlock or /IPMIdevicedesc.xml on 49152/tcp returning plaintext admin password. Not on 623/udp but ships-with-the-BMC; when Get Device ID says 'Supermicro' the ipmi module should emit a hint / cross-service fact triggering an http probe on 49152. Widely exploited pre-2014 and still present on unpatched hardware.",
+      "protocol_reference": "CVE-2013-3623 / CARIsecurity SA 2014; hashcat -m 7300 shortcut",
+      "cwe": [
+        "CWE-522",
+        "CWE-798"
+      ],
+      "finding_kind": "ipmi_supermicro_nvram_hint",
+      "value": "high"
+    },
+    {
+      "name": "ASF/RMCP Presence Ping fallback discovery (RFC 3621)",
+      "kind": "passive",
+      "description": "Some BMCs firewall Get Channel Auth Capabilities (dropping RMCP class 7) but still answer ASF class 6 ping (06 00 ff 06 00 00 11 be 80 00 00 00). A ping fallback would flag 'BMC present but auth-cap request dropped' \u2014 currently the module returns unreachable and the host is not flagged. Presence-ping response also encodes supported entity type (BMC vs OEM) + IANA enterprise number.",
+      "protocol_reference": "RFC 3621 \u00a73.2 (Presence Ping), IPMI 2.0 \u00a713.2.4",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "ipmi_rmcp_ping_only",
+      "value": "medium"
+    },
+    {
+      "name": "Wildcard-username BMC detection (username='' returns hash on some Dell iDRAC)",
+      "kind": "active",
+      "description": "Certain iDRAC/Sun ILOM firmwares return an HMAC for the empty username '' \u2014 the hash is keyed with the anonymous slot's password (often '' or 'anonymous'). rakp_sweep never includes '' as a username, so this class of BMC is missed. One extra request per alg.",
+      "protocol_reference": "IPMI 2.0 \u00a713.20 (RAKP1 name-lookup with 0-length username)",
+      "cwe": [
+        "CWE-287"
+      ],
+      "finding_kind": "ipmi_anonymous_rakp",
+      "value": "medium"
+    },
+    {
+      "name": "OEM auth type advertisement flagged separately",
+      "kind": "passive",
+      "description": "'OEM' auth type in the bitmap (bit 5) usually means an insecure vendor scheme (early HP iLO used a static XOR). Currently lumped into auth_types list with no severity; deserves its own info/medium finding with vendor-specific hint once Device ID is captured.",
+      "protocol_reference": "IPMI 1.5 \u00a713.6.1 (auth type 5 OEM)",
+      "cwe": [
+        "CWE-327"
+      ],
+      "finding_kind": "ipmi_oem_auth",
+      "value": "low"
+    }
+  ],
+  "priority_gaps": [
+    "Active cipher-0 session completion (Open Session + RAKP1/3 with auth_alg=0, Set Session Priv, Chassis Status) \u2014 turn heuristic finding into proof-of-exploit; single most-impactful IPMI attack",
+    "Get Channel Cipher Suites (App/0x54) \u2014 direct enumeration replaces the 'if cipher-0 is actually enabled' hedge in the current CVE-2013-4786 finding",
+    "Get Device ID (App/0x01) pre-session \u2014 vendor+firmware fingerprint enables per-BMC CVE match (iDRAC/iLO/Supermicro/ASPEED) and steers cross-service pivots",
+    "Surface the three already-parsed but unused auth_status bits: per-message auth disabled (bit 4), user-level auth disabled (bit 3), KG set (bit 5)",
+    "Default-credential completion after RAKP2 (root:calvin, ADMIN:ADMIN, USERID:PASSW0RD, admin:admin) \u2014 bounded 8 RAKP3 completions confirms pwn without offline crack",
+    "HMAC-MD5 (auth_alg=0x02, hashcat -m 7301) added to rakp_sweep \u2014 legacy BMCs are currently invisible to hash capture"
+  ],
+  "cross_service_wire_gaps": [
+    "known_users is CONSUMED but never PUBLISHED: RAKP-confirmed usernames (existing_users) and post-auth user-slot dumps never reach SSH/WinRM/LDAP/HTTP-basic sprayers on the same host",
+    "Vendor tag from Get Device ID is not emitted to the shared asset/service pipe \u2014 http/tls scanners on 443/17988/2381 (iLO web/chat/XML) never learn they're facing an iLO and don't trigger HP iLO CVE-2017-12542",
+    "System GUID (16 bytes) from RAKP1 response is decoded but discarded \u2014 cannot dedup a BMC seen on two management VLANs or correlate to SMBIOS System UUID from WMI/SMB",
+    "PET SNMP community + management VLAN ID from Get LAN Config are never emitted \u2014 SNMP module can't try that community; VLAN-hopping tools can't target the mgmt tag",
+    "Supermicro vendor detection would trigger a 49152/tcp NVRAM plaintext-password check (CVE-2013-3623) that today no module attempts",
+    "Confirmed BMC IP + MAC would feed the switch-CAM / DHCP correlation pipe so a discovered BMC on 10.x pairs with a hostname in AD"
+  ],
+  "notes": "Auth-status bits 3/4/5 are the cheapest win \u2014 they are already read into `auth_status` in probe() at line 378, three extra `bool(auth_status & mask)` lines plus three finding blocks and no new network I/O. The Get Channel Cipher Suites (0x54) and Get Device ID (0x01) additions each cost one extra pre-session UDP round-trip and remove the largest hedges from the current findings."
+}

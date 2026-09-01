@@ -1,0 +1,242 @@
+{
+  "service": "consul",
+  "module_files": [
+    "recce/services/consul.py",
+    "tests/test_consul.py"
+  ],
+  "summary": "The module fingerprints /v1/agent/self, falls back to /v1/status/leader for ACL-strict hosts, and touches /v1/catalog/services, /v1/catalog/nodes, /v1/kv/?recurse \u2014 but only counts nodes/keys and never extracts the actual data or attempts any active escalation. It ignores the biggest single-request win (POST /v1/acl/bootstrap), never tests KV writability, discards node/service addresses that other recce modules would consume, and although `analyze(creds=...)` accepts credentials, no code path ever sends X-Consul-Token. It also does not touch the Consul RPC/DNS/Serf side-ports (8300/8301/8302/8600).",
+  "existing_capabilities": [
+    "Port/service fingerprint (8500/8501, service=consul)",
+    "HTTP with transparent HTTPS/TLS retry (unverified ctx)",
+    "/v1/agent/self -> Version + ACL.DefaultPolicy detection (deny vs allow/absent)",
+    "/v1/status/leader fallback when /agent/self is 403",
+    "/v1/catalog/services -> first 50 service names",
+    "/v1/catalog/nodes -> node COUNT only",
+    "/v1/kv/?recurse -> key COUNT only",
+    "Emits consul_unauth_read (critical) and consul_authed (info)",
+    "Runbook: agent/self, catalog/services, kv recurse",
+    "svcprobe integration with budget/progress"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "ACL bootstrap escalation (PUT /v1/acl/bootstrap)",
+      "kind": "exploit",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-1188"
+      ],
+      "protocol_reference": "Consul ACL HTTP API \u2014 Bootstrap ACLs (developer.hashicorp.com/consul/api-docs/acl#bootstrap-acls). Endpoint returns 200 with a full-privilege management SecretID if the cluster has never been bootstrapped; 403 with 'ACL bootstrap no longer allowed' otherwise.",
+      "description": "Single PUT to /v1/acl/bootstrap on any ACL-not-yet-bootstrapped cluster returns a permanent management token = cluster-admin. Module never attempts it. Only safe active probe of comparable value in the entire module surface."
+    },
+    {
+      "name": "KV value extraction (not just key count)",
+      "kind": "passive",
+      "value": "critical",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ],
+      "protocol_reference": "Consul KV HTTP API (/v1/kv/<key>?recurse) \u2014 response contains base64-encoded Value field. developer.hashicorp.com/consul/api-docs/kv",
+      "description": "Docstring promises 'credentials, feature flags, service configs' but code only counts entries. Need to (a) base64-decode Value, (b) flag keys matching password|token|secret|api_key|aws|gcp|vault|jwt|priv, (c) surface top-N as evidence in the finding. This is the money endpoint and its actual money is thrown away."
+    },
+    {
+      "name": "KV write-access test (PUT /v1/kv/<probe>)",
+      "kind": "active",
+      "value": "critical",
+      "cwe": [
+        "CWE-284",
+        "CWE-732"
+      ],
+      "protocol_reference": "Consul KV HTTP API \u2014 Create/Update Key. Write access under default-allow ACL enables RCE against any host running consul-template, envconsul, nomad, or vault-agent that renders KV values into config/scripts.",
+      "description": "Write into KV is a documented RCE primitive on any subscriber using consul-template/envconsul. Module never probes writability. Even a HEAD/OPTIONS + a scoped PUT+DELETE of /v1/kv/recce-probe/<rand> would confirm."
+    },
+    {
+      "name": "Snapshot endpoint (GET /v1/snapshot)",
+      "kind": "passive",
+      "value": "critical",
+      "cwe": [
+        "CWE-200",
+        "CWE-538"
+      ],
+      "protocol_reference": "Consul Snapshot HTTP API \u2014 developer.hashicorp.com/consul/api-docs/snapshot. Returns a gzipped tarball of the entire cluster state (KV, ACL tokens, sessions, catalog, intentions, prepared queries).",
+      "description": "One request pulls the complete Raft state including token SecretIDs. Requires management-level access normally but often exposed on default-allow deployments. Not probed."
+    },
+    {
+      "name": "Credentialed path \u2014 accepts creds but never sends X-Consul-Token",
+      "kind": "auth",
+      "value": "high",
+      "cwe": [
+        "CWE-287"
+      ],
+      "protocol_reference": "Consul HTTP API auth \u2014 X-Consul-Token header (developer.hashicorp.com/consul/api-docs/api-structure). Also Authorization: Bearer <token> since 1.11.",
+      "description": "analyze(creds=...) signature accepts credentials, drops them on the floor. _http() has no token param. Any Consul token looted from KV of another host, git, Vault, or env leaks cannot be replayed. Blocks the entire credentialed runbook that neighbouring modules populate."
+    },
+    {
+      "name": "Per-service address enumeration (/v1/catalog/service/<name>)",
+      "kind": "passive",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Consul Catalog HTTP API \u2014 List Nodes for Service. Response items contain ServiceAddress, ServicePort, Address (node IP), TaggedAddresses (lan/wan), NodeMeta.",
+      "description": "Module returns only the service NAME map. The per-service call yields Address:Port of every instance = complete internal service graph (postgres backends, redis, vault, nomad, mesh sidecars). This is the primary lateral-movement payoff of an unauth Consul."
+    },
+    {
+      "name": "Full node inventory (/v1/agent/members and /v1/catalog/nodes payload)",
+      "kind": "passive",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Consul Agent HTTP API \u2014 List Members (Serf gossip view: Name, Addr, Port, Tags, Status, ProtocolCur, dc, role). /v1/catalog/nodes returns Address + TaggedAddresses per node.",
+      "description": "Currently only len(nodes) is retained. Names, IPv4/IPv6 tagged addresses, dc/role tags, and Serf gossip status are all discarded \u2014 losing every pivot target and every WAN federation link."
+    },
+    {
+      "name": "Cross-service wire \u2014 publish discovered services/hosts to the pipeline",
+      "kind": "chain",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Internal recce discovery pipeline; Consul catalog surfaces vault/nomad/postgres/mysql/redis/rabbitmq/kafka as named services with addresses.",
+      "description": "Findings/analyze return services + kv info but do not feed them back as Host/Port additions or as hints to service-specific modules (vault, redis, postgres, nomad). Consul is the single richest cross-service oracle in the environment and its output currently dead-ends in a text finding."
+    },
+    {
+      "name": "Agent/self extraction loss (datacenter, encryption, TLS floor, role, telemetry, Raft protocol)",
+      "kind": "passive",
+      "value": "high",
+      "cwe": [
+        "CWE-200",
+        "CWE-16"
+      ],
+      "protocol_reference": "Consul Agent HTTP API \u2014 Read Configuration (/v1/agent/self). Fields include Config.Datacenter, Config.NodeID, Config.Server, DebugConfig.EncryptKey (redacted flag), DebugConfig.TLSMinVersion, DebugConfig.RaftProtocol, DebugConfig.Ports, Telemetry.*, Meta.",
+      "description": "The response is parsed once for Version+ACL only. Missing: datacenter federation name (cross-DC pivot), Server bool (targeting servers vs agents), gossip encryption presence (unencrypted gossip = MitM), TLSMinVersion (TLS1.0/1.1 findings), Ports map (Serf/RPC/DNS overrides), Telemetry endpoints (Prometheus/StatsD leakage), NodeID (cluster-unique pivot key)."
+    },
+    {
+      "name": "Raft cluster topology (/v1/operator/raft/configuration)",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Consul Operator HTTP API \u2014 Read Raft Configuration. Returns Servers[] with ID, Node, Address, Leader, Voter.",
+      "description": "Reveals every Consul server IP and voter status = direct list of highest-value targets (compromising any voter = quorum influence). Not touched."
+    },
+    {
+      "name": "Service-mesh intentions and Connect CA (/v1/connect/intentions, /v1/connect/ca/roots)",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Consul Connect HTTP API \u2014 Intentions list (SourceName -> DestinationName Action=allow|deny) and CA Roots (PEM cert bundle for mTLS).",
+      "description": "Intentions = the machine-readable trust map of the mesh; picks lateral targets for you. CA roots expose the mTLS PKI (issuer, expiry, key algorithm) and confirm whether Connect is in use."
+    },
+    {
+      "name": "Consul DNS side-port (53-compatible on 8600/udp+tcp)",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Consul DNS Interface \u2014 <service>.service.<dc>.consul, <node>.node.consul, SRV records with instance ports (developer.hashicorp.com/consul/docs/services/discovery/dns-overview).",
+      "description": "is_consul() only recognises 8500/8501. 8600 is a separate always-anonymous service-enumeration channel \u2014 DNS SRV over UDP works even when the HTTP API is ACL-locked. No probe, no fingerprint."
+    },
+    {
+      "name": "Serf gossip encryption detection (8301/8302)",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-319"
+      ],
+      "protocol_reference": "Serf LAN (8301) and WAN (8302); Consul gossip encryption governed by encrypt config (16/24/32-byte base64 key). Absence of EncryptKey in agent/self = cleartext gossip on the wire.",
+      "description": "No detection of Serf ports or unencrypted-gossip condition, which enables cluster join spoofing and passive membership sniff."
+    },
+    {
+      "name": "Anonymous token privilege enumeration (/v1/acl/token/self, /v1/acl/policies)",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-284"
+      ],
+      "protocol_reference": "Consul ACL HTTP API \u2014 Read Self Token, List Policies. Anonymous token shows Rules/Policies attached to the empty SecretID.",
+      "description": "Confirms *exactly* what the anon token is allowed to do (e.g., 'operator = write' on a mis-scoped policy would upgrade the finding). Also lists all policy names = leaks role model."
+    },
+    {
+      "name": "Version -> CVE mapping",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-1035"
+      ],
+      "protocol_reference": "Consul security advisories: CVE-2020-7955 (RPC), CVE-2020-13250, CVE-2021-32574 (script injection via consul-template rendering), CVE-2022-24687 (SAML DoS), CVE-2022-40716 (SAML auth bypass, Enterprise), CVE-2020-28053 (HTTP request smuggling for ACL bypass <1.9.5).",
+      "description": "Version is captured but never scored against known Consul CVEs \u2014 most notably CVE-2020-28053 (ACL bypass on <1.9.5 flips the whole ACL-enforcing branch into unauth)."
+    },
+    {
+      "name": "Session and prepared-query enumeration (/v1/session/list, /v1/query)",
+      "kind": "passive",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Consul Session and Prepared Query HTTP APIs. Sessions bind KV locks; prepared queries embed service templates and often DC failover chains.",
+      "description": "Session hijack + KV lock steal is a documented Consul primitive; prepared queries reveal cross-DC service failover targets. Neither surface probed."
+    },
+    {
+      "name": "Catalog registration abuse (PUT /v1/catalog/register, PUT /v1/agent/service/register)",
+      "kind": "active",
+      "value": "medium",
+      "cwe": [
+        "CWE-284",
+        "CWE-345"
+      ],
+      "protocol_reference": "Consul Catalog / Agent HTTP APIs \u2014 Register Entity / Register Service. Under default-allow, arbitrary services can be inserted into DNS + catalog, redirecting mesh consumers.",
+      "description": "Not tested. Complements the KV-write test: catalog write = service impersonation / DNS poisoning within the mesh."
+    },
+    {
+      "name": "Legacy ACL surface (Consul <1.4 endpoints /v1/acl/list, /v1/acl/info)",
+      "kind": "passive",
+      "value": "low",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Consul legacy ACL system pre-1.4 (developer.hashicorp.com/consul/docs/security/acl/acl-legacy). Different endpoint set; still deployed on long-lived clusters.",
+      "description": "Version-gated fallback to legacy /v1/acl/list is not present. On <1.4 clusters current probe misses the ACL model entirely."
+    },
+    {
+      "name": "Consul RPC side-port 8300",
+      "kind": "passive",
+      "value": "low",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Consul server RPC on 8300/tcp (MessagePack over TLS or plaintext). Peer/join port for federation.",
+      "description": "8300 is not fingerprinted; identifying servers vs agents on the wire has value for target selection even without an RPC-client implementation."
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "Discovered services in /v1/catalog/services (e.g. 'vault','nomad','postgres','redis','mysql','rabbitmq','kafka','elasticsearch') are never re-emitted as hints/targets to their respective recce service modules.",
+    "Per-service Address:Port from /v1/catalog/service/<name> is never emitted as newly-discovered Host/Port entries into the pipeline (would materially expand the scan surface with zero extra network reach).",
+    "Node IPs and TaggedAddresses from /v1/catalog/nodes + /v1/agent/members are collapsed to a count; they should feed Host discovery.",
+    "KV values (once decoded) matching Vault paths (secret/, kv/), DB URIs (postgres://, mysql://, redis://), cloud creds (AKIA, GOOGLE_APPLICATION_CREDENTIALS, SAS tokens), and SSH keys are never surfaced as credentials into the shared creds bag other modules consume.",
+    "Connect CA root PEM is never surfaced to the TLS/PKI finding stream (issuer, expiry, weak-key checks).",
+    "Consul-issued tokens (from bootstrap or KV leakage) are never registered as replayable creds for the credentialed runbook, nor pushed into other services that trust Consul-derived auth (Vault Consul auth backend, Nomad).",
+    "Datacenter/federation name from agent/self is not published as a scope tag, so cross-DC catalog queries (?dc=<other>) that would reveal WAN peers are never issued."
+  ],
+  "priority_gaps": [
+    "1. POST /v1/acl/bootstrap \u2014 one-request cluster admin escalation on un-bootstrapped clusters (critical)",
+    "2. Extract & classify KV VALUES (base64-decode, secret-key regex), not just count keys \u2014 the docstring's promise is currently a lie (critical)",
+    "3. KV write-access test \u2014 direct RCE primitive against consul-template/envconsul/nomad consumers (critical)",
+    "4. GET /v1/snapshot \u2014 full cluster state dump including token SecretIDs (critical)",
+    "5. Send X-Consul-Token \u2014 plumb the analyze(creds=) argument that is currently ignored (high)",
+    "6. /v1/catalog/service/<name> per-service Address:Port enumeration (high)",
+    "7. Feed discovered services + node addresses back into recce discovery/creds pipelines (high, cross-service wire)",
+    "8. Rich /v1/agent/self extraction: datacenter, Server bool, EncryptKey presence, TLSMinVersion, RaftProtocol, Ports, Telemetry (high)",
+    "9. /v1/operator/raft/configuration \u2014 server voter list (medium)",
+    "10. /v1/connect/intentions + /v1/connect/ca/roots \u2014 mesh trust map + mTLS PKI (medium)",
+    "11. Consul DNS port 8600 recognition + SRV service enumeration (medium)",
+    "12. Version->CVE mapping (esp. CVE-2020-28053 pre-1.9.5 ACL bypass) (medium)"
+  ],
+  "notes": "Airgap constraint respected in recommendations \u2014 all listed probes are pure stdlib http.client/socket work. The module already has svcprobe/budget/progress plumbing to add these cheaply. No implementation performed. Also note that _http()'s TLS retry re-issues the same request on every SSLError \u2014 worth flagging separately, but per instructions cosmetic tweaks are excluded."
+}

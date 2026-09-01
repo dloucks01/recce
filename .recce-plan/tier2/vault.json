@@ -1,0 +1,221 @@
+{
+  "service": "HashiCorp Vault",
+  "summary": "HashiCorp Vault has partial coverage in recce today: a passive fingerprint in the web module (Server/x-vault-version headers \u2192 \"HashiCorp Vault\") and a single low-sev web check that hits /v1/sys/seal-status. There is NO dedicated services/vault.py probe, 8200/8201 is not in svcdetect.PORT_NAMES, and vault is not mapped in serviceenum. Vault deserves its own module modeled after services/consul.py and services/nomad.py (the other HashiCorp REST APIs), because a dedicated probe unlocks: (a) the highest-value criticals in this class \u2014 dev-mode, unsealed-plaintext, uninitialized-race, root-token secret dump, raft snapshot dump; (b) rich cross-service pivot data \u2014 cluster_name/hostname, cluster peers via x-vault-replication, enabled auth backends (LDAP/OIDC/K8s/AppRole \u2192 known_users/known_domains/relay_targets), and KV secret material that spills into known_users, known_hashes, known_domains for the rest of the scan. The web check alone under-reports Vault findings (only \"low\"), doesn't attempt cluster discovery, and never bridges to the shared cred surfaces the rest of recce feeds on.",
+  "default_ports": [
+    "8200/tcp",
+    "8201/tcp"
+  ],
+  "existing_coverage": {
+    "detected": true,
+    "notes": "Passive-only: (1) web/http.py has a signature 'Vault v[0-9]|x-vault-|api_addr' \u2192 'HashiCorp Vault' and an x-vault-version header extractor. (2) web/checks.py has one path check 'v1/sys/seal-status' at severity 'low' (kind web-vault-status). No dedicated services/vault.py. Not in svcdetect.PORT_NAMES (misses 8200 when nmap returns unknown/tcpwrapped). Not in serviceenum._NAME or _PORT (no per-service script routing). No cross-service wiring (nothing feeds known_users / known_hostnames / known_domains / known_hashes / relay_targets from Vault data).",
+    "files": [
+      "recce/services/web/http.py:187",
+      "recce/services/web/http.py:238",
+      "recce/services/web/checks.py:203",
+      "recce/services/svcdetect.py",
+      "recce/services/serviceenum.py"
+    ]
+  },
+  "capabilities": [
+    {
+      "name": "port-and-name-detection",
+      "kind": "passive",
+      "description": "Register 8200/tcp (vault, 'HashiCorp Vault API') and 8201/tcp (vault-cluster, 'Vault cluster/replication') in svcdetect.PORT_NAMES so nmap 'unknown'/'tcpwrapped' still labels Vault. Wire 'vault' \u2192 'vault' in serviceenum._NAME and 8200/8201 in _PORT so `recce services` emits the right script. Extend the http.py header extractor for x-vault-cluster, x-vault-replication-mode.",
+      "value": "medium",
+      "protocol_reference": "https://developer.hashicorp.com/vault/docs/configuration/listener/tcp (default listen 0.0.0.0:8200; cluster on 8201)"
+    },
+    {
+      "name": "seal-status-fingerprint",
+      "kind": "passive",
+      "description": "GET /v1/sys/seal-status (fully unauth). Extracts type, initialized, sealed, t/n (Shamir threshold), version, build_date, cluster_name, cluster_id, nonce, migration, storage_type. Establishes reachable=true and feeds the info-severity 'vault reachable' finding plus version \u2192 CVE mapper.",
+      "value": "high",
+      "protocol_reference": "https://developer.hashicorp.com/vault/api-docs/system/seal-status"
+    },
+    {
+      "name": "health-endpoint-probe",
+      "kind": "passive",
+      "description": "GET /v1/sys/health (unauth; the status CODE encodes state: 200 initialized+unsealed+active, 429 standby, 472 DR-mode, 473 perf-standby, 501 uninitialized, 503 sealed). Yields version, cluster_name, cluster_id, server_time_utc, replication_performance_mode, replication_dr_mode, echo_duration_ms, ha_enabled. Cluster topology without a token.",
+      "value": "high",
+      "protocol_reference": "https://developer.hashicorp.com/vault/api-docs/system/health"
+    },
+    {
+      "name": "leader-endpoint-probe",
+      "kind": "passive",
+      "description": "GET /v1/sys/leader (unauth). Returns ha_enabled, is_self, leader_address, leader_cluster_address, active_time, raft_committed_index, raft_applied_index. leader_address is a URL/hostname \u2192 new host to enumerate.",
+      "value": "high",
+      "protocol_reference": "https://developer.hashicorp.com/vault/api-docs/system/leader"
+    },
+    {
+      "name": "init-status-and-uninitialized-race",
+      "kind": "active",
+      "finding_kind": "vault_uninitialized",
+      "description": "GET /v1/sys/init to check initialized=false. An uninitialized Vault reachable on the network can be POSTed to by ANY attacker to initialize it \u2014 the response returns the root_token and unseal_keys. Emit CRITICAL when initialized=false is observed, with a runbook note NOT to actually POST (destructive), just flag it.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-284",
+        "CWE-665"
+      ],
+      "protocol_reference": "https://developer.hashicorp.com/vault/api-docs/system/init"
+    },
+    {
+      "name": "dev-mode-detection",
+      "kind": "active",
+      "finding_kind": "vault_dev_mode",
+      "description": "Detect `vault server -dev` deployments: always-unsealed, in-memory storage, well-known root token ('root' or a printed dev token), listener on 127.0.0.1:8200 exposed. Signals: sealed=false + initialized=true + storage_type='inmem' (from sys/health) + version banner in Server header + often no-TLS. Optionally attempt X-Vault-Token: root against /v1/sys/mounts \u2014 a 200 confirms dev mode. Full compromise on hit.",
+      "value": "critical",
+      "cwe": [
+        "CWE-798",
+        "CWE-1188",
+        "CWE-306"
+      ],
+      "protocol_reference": "https://developer.hashicorp.com/vault/docs/concepts/dev-server"
+    },
+    {
+      "name": "unsealed-cleartext-detection",
+      "kind": "active",
+      "finding_kind": "vault_unsealed_no_tls",
+      "description": "Detect the double-fail: sealed=false AND listener is plaintext HTTP (probe HTTP first; if it responds instead of returning 400 'Client sent an HTTP request to an HTTPS server', tls_disable is on). Every token, unseal share, and secret transits in the clear. Emit HIGH.",
+      "value": "high",
+      "cwe": [
+        "CWE-319",
+        "CWE-311"
+      ],
+      "protocol_reference": "https://developer.hashicorp.com/vault/docs/configuration/listener/tcp#tls_disable"
+    },
+    {
+      "name": "debug-and-metrics-endpoint-probe",
+      "kind": "active",
+      "finding_kind": "vault_debug_disclosure",
+      "description": "Check /v1/sys/pprof/goroutine, /v1/sys/pprof/heap, /v1/sys/metrics?format=prometheus. With unauthenticated_metrics_access=true or a wide-open listener these leak in-memory secrets in goroutine dumps and cluster-internal counters. Medium.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200",
+        "CWE-497"
+      ],
+      "protocol_reference": "https://developer.hashicorp.com/vault/api-docs/system/pprof and .../system/metrics"
+    },
+    {
+      "name": "wrapping-lookup-probe",
+      "kind": "active",
+      "description": "GET /v1/sys/wrapping/lookup with any token guessed from env/history feeds; if the operator leaked a wrap token via CI logs / commit, one-time unwrap yields the underlying secret. Passive part: scan already-collected loot (env dumps, docker inspect output) for X-Vault-Token / VAULT_TOKEN / hvs.* / s.* / b.* prefixes and register them for this probe.",
+      "value": "medium",
+      "protocol_reference": "https://developer.hashicorp.com/vault/api-docs/system/wrapping-lookup"
+    },
+    {
+      "name": "authed-mount-and-auth-enumeration",
+      "kind": "auth",
+      "description": "With a supplied VAULT_TOKEN (from creds store), GET /v1/sys/mounts (secret engines: kv, database, pki, transit, aws, gcp, azure, ssh) and /v1/sys/auth (auth backends: token, userpass, ldap, okta, jwt/oidc, approle, kubernetes, cert, azure, aws, github, radius). Emit medium if reachable; the enumerated auth methods + mount paths become the exploit surface for the next capability.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "https://developer.hashicorp.com/vault/api-docs/system/mounts and .../system/auth"
+    },
+    {
+      "name": "authed-secret-dump",
+      "kind": "exploit",
+      "finding_kind": "vault_authed_secret_read",
+      "description": "For each discovered KV mount (v1: LIST /v1/<mount>?list=true; v2: LIST /v1/<mount>/metadata?list=true then GET /v1/<mount>/data/<key>) plus database/creds/<role> for dynamic DB creds and pki/cert/ca for TLS material \u2014 read what the supplied token can. CRITICAL: every secret retrieved feeds known_users / known_hashes / known_domains. Rate-limit to avoid triggering audit alarms.",
+      "value": "critical",
+      "cwe": [
+        "CWE-522",
+        "CWE-200"
+      ],
+      "protocol_reference": "https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2"
+    },
+    {
+      "name": "raft-snapshot-exfil",
+      "kind": "exploit",
+      "finding_kind": "vault_raft_snapshot_dump",
+      "description": "With a root/sudo-capable token, GET /v1/sys/storage/raft/snapshot streams a gzip'd BoltDB of the ENTIRE Vault storage \u2014 every secret, policy, and auth backend config, offline-decryptable if the master key is recovered. CRITICAL. Also probe /v1/sys/storage/raft/configuration to enumerate peer nodes (feeds relay_targets/host discovery).",
+      "value": "critical",
+      "cwe": [
+        "CWE-200",
+        "CWE-284"
+      ],
+      "protocol_reference": "https://developer.hashicorp.com/vault/api-docs/system/storage/raft"
+    },
+    {
+      "name": "auth-method-bruteforce",
+      "kind": "auth",
+      "description": "For discovered userpass/ldap/radius auth backends: POST /v1/auth/userpass/login/<user> {password} and POST /v1/auth/ldap/login/<user> {password}. Feed usernames from known_users (BloodHound/SMB/SNMP-collected) and short curated password list. Any success returns a client_token which the exploit-chain capability uses. For approle: attempt POST /v1/auth/approle/login with any discovered role_id/secret_id from KV dumps or config files. Emit CRITICAL on success (vault_login_success).",
+      "value": "high",
+      "cwe": [
+        "CWE-521",
+        "CWE-307"
+      ],
+      "protocol_reference": "https://developer.hashicorp.com/vault/api-docs/auth/userpass, .../auth/ldap, .../auth/approle"
+    },
+    {
+      "name": "cross-service-fact-emission",
+      "kind": "chain",
+      "description": "Emit facts to shared surfaces: (1) cluster_name + Host header + TLS cert CN/SAN \u2192 known_hostnames/known_domains; (2) leader_address + raft peer addresses \u2192 new relay_targets + host inventory; (3) enumerated userpass/ldap logins + oidc issuer emails \u2192 known_users; (4) KV-dumped API keys, service-account tokens, DB passwords \u2192 known_hashes (if hashed) or known_creds (plaintext); (5) TLS certs from pki/cert/ca \u2192 known_hostnames via SAN mining; (6) Kubernetes auth backend config exposes kubernetes_host URL \u2192 new target; (7) AWS/Azure/GCP auth backend bound_service_account_names \u2192 known_users. This is what makes Vault a first-class citizen in the graph.",
+      "value": "critical",
+      "protocol_reference": "recce/core/known_users.py, known_hostnames.py, known_domains.py, relay_targets.py"
+    },
+    {
+      "name": "cve-version-mapping",
+      "kind": "passive",
+      "description": "Version string from seal-status/health is highly specific (e.g. 'Vault v1.13.2+ent'). Wire it into recce's CVE mapper \u2014 notable Vault CVEs: CVE-2020-16250/16251 (AWS/GCP/Alibaba auth bypass), CVE-2021-3024 (audit-log secret disclosure), CVE-2023-25000 (HTTP header manipulation), CVE-2024-2660 (deny-listed params bypass), plus Vault Enterprise-only CVEs. Emit low/medium per severity.",
+      "value": "medium",
+      "cwe": [
+        "CWE-1395"
+      ],
+      "protocol_reference": "https://discuss.hashicorp.com/c/security/54"
+    }
+  ],
+  "cross_service_wire_candidates": [
+    "known_hostnames \u2014 cluster_name from /v1/sys/seal-status (often maps to a real hostname), leader_address FQDNs from /v1/sys/leader, raft peer node_id/address from /v1/sys/storage/raft/configuration, TLS cert CN/SANs from pki/cert/ca mounts",
+    "known_domains \u2014 OIDC/JWT issuer URLs from auth/oidc/config, LDAP/AD url from auth/ldap/config, email suffixes from userpass user lists, cert SAN domains",
+    "known_users \u2014 userpass user list (LIST /v1/auth/userpass/users), LDAP bind DNs and user_filter fields, approle role names, kubernetes bound_service_account_names, AWS auth bound_iam_principal_arn",
+    "known_hashes / known_creds \u2014 every plaintext secret pulled from KV, database/config/<name> connection_url (contains DB users/passwords), aws/config/root or gcp/config credentials, ssh/roles OTP or CA private keys, transit-wrapped ciphertexts",
+    "relay_targets \u2014 Vault peer nodes discovered via raft configuration, leader_cluster_address (port 8201), any 'client' machine that must reach Vault (audit device sockets: file/syslog/socket paths point at internal SIEMs)",
+    "host inventory \u2014 leader_address, raft peer addresses, kubernetes_host in auth/kubernetes/config, aws sts_endpoint, azure resource URLs \u2014 each becomes a new host/URL to scan",
+    "dependency graph \u2014 a Vault \u2192 Consul storage backend (storage 'consul' shown in health) or Vault \u2192 Nomad service-registration link ties findings across the three HashiCorp services (cluster-wide compromise chain)"
+  ],
+  "recommended_findings": [
+    {
+      "title": "Vault reachable (seal status + version disclosed)",
+      "severity": "info"
+    },
+    {
+      "title": "Vault uninitialized \u2014 attacker-controlled initialization race",
+      "severity": "critical"
+    },
+    {
+      "title": "Vault running in dev mode (root token 'root', in-memory storage)",
+      "severity": "critical"
+    },
+    {
+      "title": "Vault unsealed over plaintext HTTP (tls_disable=true)",
+      "severity": "high"
+    },
+    {
+      "title": "Vault debug/pprof/metrics endpoints reachable unauthenticated",
+      "severity": "medium"
+    },
+    {
+      "title": "Vault authenticated (with supplied token) \u2014 mounts/auth backends enumerated",
+      "severity": "medium"
+    },
+    {
+      "title": "Vault KV secret dump succeeded \u2014 plaintext secrets returned",
+      "severity": "critical"
+    },
+    {
+      "title": "Vault raft snapshot exfiltrated (full storage dump)",
+      "severity": "critical"
+    },
+    {
+      "title": "Vault auth backend brute force succeeded (userpass/ldap/approle login)",
+      "severity": "critical"
+    },
+    {
+      "title": "Vault version has known CVEs",
+      "severity": "high"
+    }
+  ],
+  "recommended_hashcat_modes": [],
+  "implementation_notes": "Create recce/services/vault.py modeled 1:1 on recce/services/consul.py and recce/services/nomad.py (same file layout: is_vault(), _http() with HTTP\u2192HTTPS fallback, probe(), vault_targets(), _finding()/findings(), runbook(), findings_to_vulns(), analyze() using svcprobe.iter_probe). Vault is HTTPS-by-default (unlike Consul HTTP-first) \u2014 flip the _http() fallback order to (True, False). Register (a) 8200 in svcdetect.PORT_NAMES as ('vault','HashiCorp Vault API'), 8201 as ('vault-cluster','Vault cluster/replication'); (b) 'vault' in serviceenum._NAME \u2192 'vault' and 8200/8201 in _PORT \u2192 'vault'; (c) create scripts/recce-service-vault or extend recce-service.sh vault handler; (d) delete the low-sev web-vault-status check in web/checks.py in favor of the dedicated probe's info finding (or keep it as a fallback when the module isn't run). Wire cross_service outputs through the existing patterns: import from creds/known_users.py, core/known_hostnames.py, core/known_domains.py, core/relay_targets.py and emit into those pipelines exactly as services/ipmi.py (RAKP hashes \u2192 known_hashes) and services/db/mssql.py (relay_targets) already do. Airgap: stdlib only (http.client + ssl + json), no requests dep. Bound each probe to ~3s and cap total endpoints per target to keep the module ~10s worst-case, matching consul.py/nomad.py budgets."
+}

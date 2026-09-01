@@ -1,0 +1,206 @@
+{
+  "service": "sip",
+  "existing_capabilities": [
+    "OPTIONS probe over UDP with TCP fallback (RFC 3261 \u00a711)",
+    "Parses Server / User-Agent header for PBX fingerprint",
+    "Extracts realm= from WWW-Authenticate",
+    "Parses Allow header (advertised methods)",
+    "REGISTER-based extension enumeration (svwar-style) \u2014 20-ext range 100..119, UDP only (RFC 3261 \u00a710 + Sipvicious asymmetry)",
+    "Detects Asterisk `alwaysauthreject` (401/407 for both existing + missing) and 403 variant",
+    "Detects unauthenticated REGISTER acceptance (200 OK) as toll-fraud primitive",
+    "Findings: sip_fingerprint (low), sip_ext_enum (medium/high on unauth-OK)",
+    "Runbook entries for svmap, svwar, svcrack"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "No TLS wrap for 5061/SIPS",
+      "kind": "passive",
+      "value": "high",
+      "description": "is_sip() accepts 5061 but _probe_udp/_probe_tcp send cleartext \u2014 SIPS endpoints (RFC 3261 \u00a726.2, RFC 5630) require TLS ClientHello, so 5061 is silently reported unreachable. Missing: TLS handshake, cert CN/SAN/issuer/expiry disclosure, cipher/TLS-version fingerprint. Common on carrier trunks and CUCM secure profiles.",
+      "protocol_reference": "RFC 3261 \u00a726.2, RFC 5630",
+      "cwe": [
+        "CWE-295",
+        "CWE-311"
+      ]
+    },
+    {
+      "name": "No SIP-over-WebSocket (WSS) probe",
+      "kind": "passive",
+      "value": "high",
+      "description": "WebRTC PBXes (Asterisk chan_pjsip, FreeSWITCH mod_sofia/verto, Kamailio) speak SIP over WS/WSS on 8088/8089/7443 with Sec-WebSocket-Protocol: sip. Currently invisible to recce even when the HTTP scanner sees the ports. Provides a second auth surface with different rate-limiting.",
+      "protocol_reference": "RFC 7118",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "No anonymous INVITE / open-relay toll-fraud test",
+      "kind": "active",
+      "value": "critical",
+      "description": "Classic PSTN toll-fraud primitive: send INVITE sip:9<PSTN>@target with no auth; if the server returns 100/180/200 (or 407 with a challenge that a spoofed From bypasses), it will route calls out its trunk. Higher-impact than the REGISTER-200 check that fires today. Bounded, one probe to a benign echo/reject R-URI would suffice.",
+      "protocol_reference": "RFC 3261 \u00a726.4, \u00a716",
+      "cwe": [
+        "CWE-306",
+        "CWE-863"
+      ]
+    },
+    {
+      "name": "No full Digest challenge capture (nonce/qop/algorithm/opaque)",
+      "kind": "auth",
+      "value": "high",
+      "description": "Only `realm=` is captured. The WWW-Authenticate line also carries algorithm= (MD5 vs SHA-256/SHA-512-256), qop=, nonce=, opaque=. Needed to (a) flag MD5-only servers as weak-crypto, (b) detect static-nonce reuse (Kamailio misconfig \u2192 precomputed rainbow), (c) feed sipcrack/hashcat mode 11400 with a real challenge for offline attack, (d) detect algorithm-downgrade if server advertises MD5 only when RFC 8760 SHA options are available.",
+      "protocol_reference": "RFC 3261 \u00a722.4, RFC 8760",
+      "cwe": [
+        "CWE-327",
+        "CWE-916"
+      ]
+    },
+    {
+      "name": "No Via received= / rport= / Contact internal-IP extraction",
+      "kind": "passive",
+      "value": "high",
+      "description": "RFC 3581 rport response and RFC 3261 \u00a718.2.1 stipulate the server rewrites the top Via with received=<observed-src-IP> and adds rport=. Contact in response often carries the internal RFC1918 IP of the PBX. Neither is parsed. That is a topology-leak primitive on par with the SMTP internal-IP disclosure and would let downstream modules pivot into the private subnet.",
+      "protocol_reference": "RFC 3261 \u00a718.2.1, RFC 3581, RFC 4475",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "No SUBSCRIBE / NOTIFY presence + dialog-info leak probe",
+      "kind": "active",
+      "value": "high",
+      "description": "Unauthenticated SUBSCRIBE to Event: dialog / presence / message-summary on many Asterisk & Kamailio installs returns live BLF (busy-lamp-field) state \u2014 who is on a call right now, target URIs of transferred calls, voicemail counts. High recon value; module never sends SUBSCRIBE.",
+      "protocol_reference": "RFC 6665, RFC 4235 (dialog), RFC 3856 (presence), RFC 3842 (mwi)",
+      "cwe": [
+        "CWE-200",
+        "CWE-306"
+      ]
+    },
+    {
+      "name": "No MESSAGE / REFER method probing",
+      "kind": "active",
+      "value": "medium",
+      "description": "MESSAGE (RFC 3428) accepted unauth = spam/vishing lure delivery. REFER (RFC 3515) accepted unauth = call-injection / third-party transfer. Neither is exercised; Allow header is only displayed, never verified.",
+      "protocol_reference": "RFC 3428, RFC 3515",
+      "cwe": [
+        "CWE-306"
+      ]
+    },
+    {
+      "name": "Extension range too narrow + REGISTER-only enum",
+      "kind": "active",
+      "value": "medium",
+      "description": "Hard-coded 100..119 misses the ubiquitous 1000-1099, 2000-2099, 4-digit CUCM plans, and 8xx voicemail. INVITE and OPTIONS enum asymmetries exist on CUCM/FreeSWITCH where REGISTER is `alwaysauthreject` but INVITE isn't \u2014 currently uncovered. Also skips TCP (svwar has TCP mode).",
+      "protocol_reference": "RFC 3261 \u00a710, Sipvicious svwar -m INVITE",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "No SDP inspection from OPTIONS/INVITE 200-OK body",
+      "kind": "passive",
+      "value": "medium",
+      "description": "SIP responses commonly carry an SDP body (Content-Type: application/sdp) with c=IN IP4 <internal>, RTP port range, codec list, a=crypto (SRTP key material if not encrypted transport), a=fingerprint (DTLS-SRTP). Zero SDP parsing today \u2014 misses internal media IP disclosure, SRTP-off (RTP in cleartext), and codec-set fingerprinting for eavesdrop viability.",
+      "protocol_reference": "RFC 4566, RFC 4568 (a=crypto), RFC 5763 (DTLS-SRTP)",
+      "cwe": [
+        "CWE-200",
+        "CWE-319"
+      ]
+    },
+    {
+      "name": "No SIP UDP amplification / reflection assessment",
+      "kind": "active",
+      "value": "medium",
+      "description": "OPTIONS w/ spoofable src is a known DDoS reflector with BAF ~3-4x on verbose PBXes. Module doesn't measure response/request size ratio for `sip_amplifier` finding parallel to the DNS/NTP/memcached amp findings other services emit.",
+      "protocol_reference": "US-CERT TA14-017A (UDP reflection), RFC 3261",
+      "cwe": [
+        "CWE-406"
+      ]
+    },
+    {
+      "name": "No vendor-header / product-version normalisation into CVE-searchable form",
+      "kind": "passive",
+      "value": "high",
+      "description": "Server: `Asterisk PBX 13.7.2` / `FPBX-15.0.16` / `Kamailio (5.4.4 (x86_64/linux))` / `Cisco-CUCM11.5` are captured as a free-form string but never split into vendor+version tokens for the CVE cross-service consumer. Asterisk <=13.38, Kamailio <5.4.5, FreeSWITCH <1.10.7, CUCM <14 all have public unauth SIP RCE/DoS CVEs (CVE-2019-19151, CVE-2021-32276, CVE-2022-31780, CVE-2020-3161). No structured emission means the CPE/CVE module can't correlate.",
+      "protocol_reference": "RFC 3261 \u00a720.35 (Server header), NVD Asterisk/Kamailio/FreeSWITCH/CUCM records",
+      "cwe": [
+        "CWE-1395"
+      ]
+    },
+    {
+      "name": "No Warning / P-Asserted-Identity / Diversion / History-Info header capture",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Warning (\u00a720.43) often reveals internal reason text (\"Interworking Reject: from carrier XYZ\"). P-Asserted-Identity, Diversion, History-Info leak the calling identity chain and previous call legs. Vendor P-headers (P-hint, X-Cisco-*, P-Kamailio-*) are fingerprint-grade.",
+      "protocol_reference": "RFC 3261 \u00a720.43, RFC 3325, RFC 5806, RFC 7044",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "No malformed / oversize SIP fuzz probe for known parser CVEs",
+      "kind": "exploit",
+      "value": "medium",
+      "description": "A single malformed To-URI or oversize Via chain distinguishes vulnerable Asterisk chan_sip pre-CVE-2017-9358, CUCM SIP normalisation CVE-2018-15439, Kamailio CVE-2020-27507. Not a full fuzz \u2014 one crafted packet to check response class.",
+      "protocol_reference": "RFC 3261 \u00a77.5",
+      "cwe": [
+        "CWE-20",
+        "CWE-787"
+      ]
+    },
+    {
+      "name": "No SIP-T / SIP-I ISUP body / trunking gateway probe",
+      "kind": "passive",
+      "value": "low",
+      "description": "PSTN gateways (Sansay, AudioCodes, Ribbon) return Content-Type: application/ISUP or multipart/mixed with encapsulated ISUP \u2014 instantly identifies a carrier trunk edge, higher-value target than a soft-PBX.",
+      "protocol_reference": "RFC 3372, ITU-T Q.1912.5",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "No TCP-transport extension enumeration or 5061-TLS enum",
+      "kind": "active",
+      "value": "low",
+      "description": "enumerate_extensions() is UDP-only by design (per docstring). Real PBXes reachable only over TCP/TLS (carrier-side, corporate NAT) go un-enumerated even when OPTIONS succeeded over TCP.",
+      "protocol_reference": "RFC 3261 \u00a718",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "No SCTP transport (RFC 4168)",
+      "kind": "passive",
+      "value": "low",
+      "description": "Telecom carrier / IMS Cx interfaces run SIP-over-SCTP on 5060/sctp. Rare but blind spot.",
+      "protocol_reference": "RFC 4168",
+      "cwe": [
+        "CWE-200"
+      ]
+    }
+  ],
+  "priority_gaps": [
+    "Anonymous INVITE toll-fraud test \u2014 the actual PBX-money-loss primitive; currently only unauth REGISTER (200) triggers, which is far rarer than open-relay INVITE dialing (RFC 3261 \u00a726.4, \u00a716).",
+    "Vendor+version normalisation from Server header \u2192 CVE cross-service wiring \u2014 Asterisk/Kamailio/FreeSWITCH/CUCM have unauth-RCE CVEs but recce emits the string only, so CPE/CVE consumer can't match.",
+    "TLS wrap for 5061/SIPS \u2014 5061 is silently dark today; misses cert + cipher disclosure and the entire carrier-secure-trunk attack surface (RFC 3261 \u00a726.2, RFC 5630).",
+    "SIP-over-WebSocket (WSS 8088/8089) \u2014 mandatory for any WebRTC-era PBX; recce is blind to a whole second auth surface (RFC 7118).",
+    "Full Digest challenge capture (nonce/qop/algorithm/opaque) \u2014 enables offline sipcrack/hashcat feed, MD5-only weak-crypto finding, and algorithm-downgrade detection (RFC 3261 \u00a722.4, RFC 8760).",
+    "Via received= / rport= / Contact internal-IP extraction \u2014 cheap topology-leak on par with the SMTP internal-IP finding (RFC 3581, RFC 3261 \u00a718.2.1).",
+    "SUBSCRIBE for Event: dialog / presence / message-summary \u2014 live BLF and voicemail-count leak on many unauth-SUBSCRIBE-permissive installs (RFC 6665, RFC 4235)."
+  ],
+  "cross_service_wire_gaps": [
+    "Server header vendor+version is a free-form string, not (product, version) tuple \u2192 CVE/CPE consumer cannot correlate Asterisk 13.x, Kamailio 5.4.x, FreeSWITCH 1.10.x, CUCM 11.5 CVE lists.",
+    "Realm string is captured but never emitted as a cred-quickconnect / hydra target \u2014 the runbook mentions svcrack but no structured `auth_target` handoff.",
+    "Enumerated extension list is only rendered into finding text \u2014 not fed to a downstream password-spray / cred-spray module the way SMB/LDAP user lists are.",
+    "Contact / Via internal-IP disclosure is not parsed at all \u2192 topology graph / internal-subnet pivot facts other services emit have no SIP contribution.",
+    "SDP c=/m=/a=crypto lines are never parsed \u2192 RTP internal-IP and SRTP-off facts unavailable to any media/eavesdrop path.",
+    "Kamailio/OpenSIPS fingerprint doesn't hint at their likely Redis/MySQL/PostgreSQL backends on the same host, which the DB modules could confirm."
+  ],
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/sip.py",
+    "/home/kali/Desktop/projects/recce/tests/test_new_services.py",
+    "/home/kali/Desktop/projects/recce/tests/test_legacy_extras.py"
+  ],
+  "summary": "SIP module implements OPTIONS fingerprint + svwar-style REGISTER enum on UDP with sane always-auth-reject handling. Blind spots cluster in four buckets: (1) transport coverage \u2014 no TLS on 5061, no SIP-over-WSS, no TCP/TLS enum, no SCTP; (2) high-value active primitives never sent \u2014 anonymous INVITE toll-fraud test, SUBSCRIBE presence/dialog/MWI leak, MESSAGE/REFER acceptance; (3) response-parsing gaps \u2014 full Digest challenge (nonce/qop/algorithm), Via received=/rport=, Contact internal IP, SDP c=/m=/a=crypto, Warning/PAI/Diversion/vendor P-headers; (4) cross-service handoffs \u2014 Server string never normalised into product+version tuple for CVE correlation, enumerated extensions never fed to a spray consumer, realm never emitted as a structured auth target, no internal-IP/SDP topology facts. Highest-impact adds: anonymous INVITE test, vendor+version emission, TLS/SIPS on 5061, WSS transport, full Digest challenge capture.",
+  "notes": "Tests present: tests/test_new_services.py (OPTIONS parse) and tests/test_legacy_extras.py (ext enum + always_reject + unauth-REGISTER-OK severity bump). No test dir file named *sip*.py exists \u2014 coverage is inside multi-service test files. Auto-mode acknowledged; no destructive git actions taken."
+}

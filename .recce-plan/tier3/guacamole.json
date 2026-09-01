@@ -1,0 +1,175 @@
+{
+  "service": "Apache Guacamole (guacd)",
+  "default_ports": [
+    "4822/tcp"
+  ],
+  "summary": "guacd is the Apache Guacamole proxy daemon: a text-framed opcode protocol (`LENGTH.VALUE,...;`) that a Guacamole web tier calls into on 4822/tcp to open RDP/VNC/SSH/Telnet/K8s sessions on behalf of a browser client. It is **completely absent** from recce today - not in svcdetect.PORT_NAMES, not in serviceenum._PORT/_NAME, no probe module, no CVE hooks. Because guacd assumes it lives on loopback and trusts its caller, ANY reachable 4822 is a critical exposure: an attacker can send `6.select,3.rdp;` and use guacd as an RDP/VNC/SSH pivot to arbitrary hosts (an outbound SSRF over binary protocols), and the pre-1.2.0 codebase carries CVE-2020-9497/9498 (info disclosure + heap UAF -> RCE as guacd) reachable pre-auth over exactly this port. The service also self-identifies its version in the `args` reply (VERSION_1_5_0 etc.) so version-keyed CVE mapping is cheap. Proposed module recce/services/guacamole.py mirrors the vnc.py shape: one TCP roundtrip per opcode, stdlib-only, 4s timeout, air-gap safe.",
+  "existing_coverage": {
+    "detected": false,
+    "notes": "grep for 'guac' or '4822' across recce/ returns zero hits (excluding vendored node_modules). Not in svcdetect.py PORT_NAMES (line 34-77), not in serviceenum.py _NAME or _PORT (line 11-49), no signature in _SIGNATURES (line 88-105), no product regex in _PRODUCT_RE (line 121-141), no per-service script under recce/scripts/, no runbook, no CVE hook.",
+    "files": []
+  },
+  "cross_service_wire_candidates": [
+    "guacd version token (VERSION_1_x_y from `args` reply) -> feeds CVE mapper for CVE-2020-9497/9498 keyed on Apache Guacamole <1.2.0 (chain into recce/services/probes.py CVE emit path used by http/rdp/etc.)",
+    "Enumerated backend protocols (rdp/vnc/ssh/telnet/kubernetes/mysql/postgresql/sftp reported as supported by the guacd binary via `select` accept/reject) -> hints to rdp.py / vnc.py / ssh.py that the *target* environment expects those services somewhere; more importantly signals that guacd itself can be weaponised as an outbound SSRF proxy for those protocols",
+    "Presence of guacd on a host -> strong sibling-port hint for http/web enum: the Guacamole web tier almost always co-locates on 8080/tcp or 8443/tcp at path /guacamole/ (Tomcat). Wire a hint to recce/services/web/ to probe /guacamole/#/ and the /guacamole/api/tokens login endpoint with default creds guacadmin:guacadmin (a known default-cred hit).",
+    "Non-loopback bind on 4822 -> feeds attack-path graph: guacd is an unauthenticated pivot into the internal network for RDP/VNC/SSH targets - the cred-quickconnect / exploit-session-wiring path can use it to reach hosts otherwise unreachable from the tester's segment.",
+    "Server framing (opcode `args`) captured as banner -> feeds svcdetect._SIGNATURES so any *other* port a defender re-homed guacd onto still classifies correctly.",
+    "Absent-args or 'error,' opcode reply distinguishing hardened builds -> feeds fingerprint confidence tier for the Findings sheet."
+  ],
+  "capabilities": [
+    {
+      "name": "Register 4822/tcp in svcdetect PORT_NAMES",
+      "kind": "passive",
+      "value": "high",
+      "description": "Add `4822: ('guacd', 'Apache Guacamole proxy daemon')` to recce/services/svcdetect.py PORT_NAMES so a bare/unknown 4822 gets an inferred label with detect_source='inferred'. Zero traffic.",
+      "notes": "Also add to serviceenum.py _PORT (4822: 'guacamole') and _NAME ('guacd': 'guacamole', 'guacamole': 'guacamole') so `recce services` prints a next-command."
+    },
+    {
+      "name": "guacd instruction-framing signature in _SIGNATURES",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Add a regex like `^\\d+\\.args,\\d+\\.VERSION_\\d+_\\d+_\\d+,` (matches the guacd `args` frame with an embedded VERSION_x_y_z token) to svcdetect._SIGNATURES so any banner we grab - on 4822 or anywhere else guacd got re-homed - classifies as guacamole with detect_source='banner'.",
+      "notes": "Must be latin-1 safe; guacd frames are 7-bit ASCII so the regex is trivial."
+    },
+    {
+      "name": "Product/version extraction for CVE keying",
+      "kind": "passive",
+      "value": "high",
+      "description": "Add a _PRODUCT_RE entry that captures prod='Apache Guacamole' and ver from the VERSION_1_5_0 -> '1.5.0' token in an `args` reply, so port.product/port.version populate for the existing CVE mapper without a bespoke code path.",
+      "notes": "Regex: r'VERSION_(?P<ver_raw>\\d+_\\d+_\\d+)' with a post-process s/_/./g and prod='Apache Guacamole' assigned literally."
+    },
+    {
+      "name": "Active guacd protocol probe (select handshake)",
+      "kind": "active",
+      "value": "high",
+      "description": "New recce/services/guacamole.py::probe(ip, port=4822, timeout=4). Connect, send `6.select,3.vnc;` (12 bytes on the wire), read the `args` frame, parse the LENGTH.VALUE,... instruction, extract version + argument names. Returns {reachable, version, backends_ok:[], backends_err:[], args_seen:[]}. Mirrors vnc.py::probe shape and uses svcprobe.iter_probe for budget/progress/state.",
+      "protocol_reference": "https://guacamole.apache.org/doc/gug/guacamole-protocol.html section 'The Guacamole protocol - Instructions'",
+      "notes": "Framing helper: encode = lambda *els: ','.join(f'{len(e)}.{e}' for e in els) + ';'. Decode a single instruction with a small state machine reading LENGTH then '.' then VALUE-of-that-many-chars then ',' or ';'."
+    },
+    {
+      "name": "Backend-protocol enumeration",
+      "kind": "active",
+      "value": "high",
+      "description": "For each candidate `select,<proto>` in {rdp, vnc, ssh, telnet, kubernetes, sftp, mysql, postgresql}, open a fresh TCP connection, issue the select, and record whether guacd replies with `args` (backend built in) or an `error` frame / immediate close (backend disabled or protocol plugin missing). Populates probe['backends_ok'] and drives the exposure finding's blast radius.",
+      "protocol_reference": "Guacamole protocol reference - the initial `select` opcode; supported protocols listed in Guacamole User Guide chapter 'Connecting to your server'.",
+      "notes": "Rate-limit: 1 opcode per second baseline; 8 opcodes total for the full sweep. Reuse svcprobe.iter_probe for budget control."
+    },
+    {
+      "name": "Finding: guacd_exposed (CRITICAL, no-auth pivot)",
+      "finding_kind": "guacd_exposed",
+      "kind": "auth",
+      "value": "critical",
+      "description": "Emit CRITICAL when probe.reachable is true from a non-loopback source: guacd has no authentication - the web tier is expected to authenticate the user and then proxy to guacd on 127.0.0.1. A reachable 4822 lets an attacker issue arbitrary `select,rdp` with any hostname argument and use guacd as an outbound RDP/VNC/SSH proxy into anywhere guacd can route.",
+      "cwe": [
+        "CWE-306",
+        "CWE-918"
+      ],
+      "notes": "Detail should quote the offered backends so the tester sees the pivot surface (rdp+ssh = full lateral)."
+    },
+    {
+      "name": "Finding: guacd_cve_2020_9498 (RCE, HIGH)",
+      "finding_kind": "guacd_cve_2020_9498",
+      "kind": "exploit",
+      "value": "high",
+      "description": "Emit HIGH when parsed version < 1.2.0. CVE-2020-9498 is a heap use-after-free in guacd's RDP client (guac_common_svc_process_receive) reachable pre-auth over 4822 that yields code execution as the guacd user.",
+      "cwe": [
+        "CWE-416"
+      ],
+      "protocol_reference": "https://nvd.nist.gov/vuln/detail/CVE-2020-9498",
+      "notes": "Chain with guacd_exposed: exposed + <1.2.0 = pre-auth RCE, upgrade severity note in detail."
+    },
+    {
+      "name": "Finding: guacd_cve_2020_9497 (info disclosure, MEDIUM)",
+      "finding_kind": "guacd_cve_2020_9497",
+      "kind": "exploit",
+      "value": "medium",
+      "description": "Emit MEDIUM when parsed version < 1.2.0. CVE-2020-9497 leaks uninitialised memory from the guacd process through a crafted static virtual channel packet - useful for extracting session tokens / adjacent connection material.",
+      "cwe": [
+        "CWE-908",
+        "CWE-200"
+      ],
+      "protocol_reference": "https://nvd.nist.gov/vuln/detail/CVE-2020-9497"
+    },
+    {
+      "name": "Finding: guacd_fingerprint (info)",
+      "finding_kind": "guacd_fingerprint",
+      "kind": "passive",
+      "value": "low",
+      "description": "Always emit an info finding on a reachable guacd carrying version + accepted-backends list, matching the vnc_fingerprint pattern. Gives the sheet a stable row per target even when no CVE fires.",
+      "cwe": []
+    },
+    {
+      "name": "Runbook: credentialed + cred-free next steps",
+      "kind": "passive",
+      "value": "medium",
+      "description": "runbook(ip, port) returns a two-lane list matching vnc.py::runbook: cred-free lane is `nc <ip> 4822` + a paste-able `printf '6.select,3.vnc;'`; escalated lane is a pointer to the co-located /guacamole/ web UI on 8080/8443 with default creds guacadmin:guacadmin.",
+      "notes": "No `guacenc` invocation - that's an offline recording tool, not a client."
+    },
+    {
+      "name": "recce-service.sh script + scripts/ dropper",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Add scripts/guacamole to run the probe + enum against a single target from the shell driver, and register 'guacamole' in scripts/recce-service.sh's name_to_svc / port_to_svc maps (kept in sync with serviceenum.py per the module docstring).",
+      "notes": "Follows the pattern the docstring at serviceenum.py:6 mandates."
+    },
+    {
+      "name": "findings_to_vulns integration",
+      "kind": "passive",
+      "value": "medium",
+      "description": "Add `findings_to_vulns(fs) -> dict` in guacamole.py that delegates to svccommon.findings_to_vulns(fs, 'guacamole', 4822), mirroring vnc.py:179-181, so guacd findings surface in the vulns aggregator + attack-path graph.",
+      "cwe": []
+    },
+    {
+      "name": "analyze() orchestrator (public entry)",
+      "kind": "active",
+      "value": "high",
+      "description": "Top-level `analyze(hosts, creds, active, budget, progress)` that lists guacd_targets, runs probe via svcprobe.iter_probe when active, calls findings(), returns {targets, findings, runbooks, probes, stats} - identical shape to vnc.py::analyze(184-205) so the existing services runner picks it up with no bespoke wiring.",
+      "notes": "Use svcprobe.iter_probe for cancellation + budget; hydrate targets with reachable/backends fields for the summary."
+    },
+    {
+      "name": "suggest_id_command hint for still-unknown 4822",
+      "kind": "passive",
+      "value": "low",
+      "description": "Extend svcdetect.suggest_id_command so an unknown 4822 emits `printf '6.select,3.vnc;' | nc <ip> 4822   # guacd - expect an args, frame` instead of the generic nmap suggestion. Turns 'unknown 4822' into a one-liner ID.",
+      "notes": "Small edit to svcdetect.py::suggest_id_command around line 392."
+    },
+    {
+      "name": "TLS variant handling (guacd-ssl / self-signed)",
+      "kind": "active",
+      "value": "low",
+      "description": "When plaintext probe reads 0 bytes on 4822 and TLS is offered (some hardened installs enable guacd-ssl.crt/guacd-ssl.key with `enable-ssl: true` in guacd.conf), fall through to a TLS handshake + `select` retry, matching the tls_http_probe pattern already in svcdetect.py:218-246.",
+      "protocol_reference": "https://guacamole.apache.org/doc/gug/proxying-guacamole.html - guacd SSL configuration."
+    },
+    {
+      "name": "Cross-wire: emit http-hint for /guacamole/ web tier",
+      "kind": "chain",
+      "value": "high",
+      "description": "When guacd is confirmed reachable, publish a hint into the shared host-facts channel (the same mechanism msrpc/kerberos use to seed downstream modules) that http/https on the same host should be probed with URL hint /guacamole/ and creds guacadmin:guacadmin. That is the productised entry point - the web tier is where credential attacks land, and guacd's presence is the strongest single signal that a /guacamole/ context exists.",
+      "notes": "Concretely: append {'ip': ip, 'path': '/guacamole/', 'creds': [('guacadmin','guacadmin')], 'kind': 'guacamole_web'} to host.hints for the web enum module to consume."
+    }
+  ],
+  "recommended_findings": [
+    {
+      "title": "guacd_exposed - Apache Guacamole proxy reachable off-loopback (no auth)",
+      "severity": "critical"
+    },
+    {
+      "title": "guacd_cve_2020_9498 - pre-auth heap UAF -> RCE as guacd (<1.2.0)",
+      "severity": "high"
+    },
+    {
+      "title": "guacd_cve_2020_9497 - pre-auth memory disclosure via crafted SVC frame (<1.2.0)",
+      "severity": "medium"
+    },
+    {
+      "title": "guacd_backend_ssh/rdp/vnc_available - outbound pivot surface via `select`",
+      "severity": "high"
+    },
+    {
+      "title": "guacd_fingerprint - version + accepted backends (info)",
+      "severity": "info"
+    }
+  ],
+  "implementation_notes": "FILES TO EDIT:\n- /home/kali/Desktop/projects/recce/recce/services/svcdetect.py: PORT_NAMES += {4822: ('guacd','Apache Guacamole proxy daemon')}; _SIGNATURES += guacd `args` regex; _PRODUCT_RE += VERSION_x_y_z capture; suggest_id_command 4822 hint.\n- /home/kali/Desktop/projects/recce/recce/services/serviceenum.py: _NAME += {'guacd':'guacamole','guacamole':'guacamole'}; _PORT += {4822:'guacamole'}.\n- /home/kali/Desktop/projects/recce/recce/scripts/recce-service.sh: mirror the map entries (docstring at serviceenum.py:6 requires this).\n\nFILES TO CREATE:\n- /home/kali/Desktop/projects/recce/recce/services/guacamole.py: modelled on vnc.py (205 lines). Sections: is_guacd(), probe(), guacd_targets(), _finding(), findings(), runbook(), findings_to_vulns(), analyze(). Stdlib only, one connect per opcode, 4s timeout scaled by proxy.scaled().\n- /home/kali/Desktop/projects/recce/recce/scripts/guacamole: shell driver body invoking the probe from the CLI.\n- /home/kali/Desktop/projects/recce/tests/services/test_guacamole.py: fake guacd server on ephemeral port speaking one `args` frame + `error` for unsupported backends. Cover CVE version-comparison edge cases (1.1.0 vulnerable, 1.2.0 not, malformed VERSION token safe).\n\nPROTOCOL FRAMING HELPER (reusable):\n```\ndef encode(*elements: str) -> bytes:\n    return (','.join(f'{len(e)}.{e}' for e in elements) + ';').encode('ascii')\n\ndef decode_one(buf: str) -> tuple[list[str], str]:\n    # returns (elements, remainder); raises ValueError on malformed frame\n```\n\nPROBE BYTES ON WIRE (documented in module docstring for reviewer sanity):\n- CLIENT: `6.select,3.vnc;` (16 bytes)\n- SERVER (typical 1.5.x): `4.args,13.VERSION_1_5_0,8.hostname,4.port,...;` (~150-400 bytes)\n\nPROTOCOL REFERENCES:\n- https://guacamole.apache.org/doc/gug/guacamole-protocol.html\n- https://guacamole.apache.org/doc/gug/proxying-guacamole.html (guacd.conf, TLS variant)\n- CVE-2020-9497: https://nvd.nist.gov/vuln/detail/CVE-2020-9497 (info disclosure via crafted SVC packet)\n- CVE-2020-9498: https://nvd.nist.gov/vuln/detail/CVE-2020-9498 (heap UAF -> RCE)\n- Fix version: Apache Guacamole 1.2.0 (Jun 2020) - both CVEs.\n- Default cred: guacadmin/guacadmin on the web tier (documented, first-boot only).\n\nDOCSTRING SYNC RISK: serviceenum.py:6 explicitly requires keeping in sync with recce/scripts/recce-service.sh. Do NOT ship the Python map edit without also touching the shell driver, or `recce services` and the shell driver will disagree on 4822 forever.\n\nTESTING SEAM: tests/services/test_vnc.py is the pattern - it starts a socket, sends canned bytes, asserts probe fields; copy that fixture rather than mocking sockets."
+}

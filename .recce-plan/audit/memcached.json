@@ -1,0 +1,192 @@
+{
+  "service": "memcached",
+  "module_files": [
+    "recce/services/db/memcached.py"
+  ],
+  "existing_capabilities": [
+    "TCP text-protocol probe on 11211/11210/11215",
+    "`version` command -> exact build fingerprint",
+    "`stats` -> curr_items, bytes, connections, uptime, arch (pointer_size)",
+    "`stats items` -> slab ids that hold data",
+    "`stats cachedump <slab> <n>` -> sample of live KEY NAMES (capped at 4 slabs x 20 keys)",
+    "Unauth-read finding + old-version finding (single CVE band: pre-1.4.32 int overflow)",
+    "Runbook mentions UDP amplification, but only mentions \u2014 never probes UDP",
+    "Never SETs/DELETEs/FLUSHes (self-imposed read-only)",
+    "Explicitly abandons on SASL-gated binary-protocol servers (records 'no VERSION reply')"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "Retrieve actual cached values via `get`/`gets`",
+      "kind": "active",
+      "description": "Module dumps only KEY NAMES via `stats cachedump` and explicitly refuses to call `get <key>`. The actual loot \u2014 session tokens, JWTs, API responses, DB query results, secrets the app caches \u2014 is one command away. `get` is a pure read (protocol.txt 'Retrieval commands'). Without values, the finding says 'data is exposed' but never proves what that data is, which downstream modules (session pivot, cred store, web scanner) cannot consume.",
+      "value": "critical",
+      "protocol_reference": "memcached protocol.txt \u2014 'Retrieval commands' (get, gets)",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "`lru_crawler metadump all` \u2014 full key enumeration",
+      "kind": "active",
+      "description": "Since 1.4.31 `lru_crawler metadump all` (or `metadump <classid>`) streams metadata for EVERY cached item \u2014 key name, exp time, la (last access), cas, fetch count, size, class. This is a full key enumeration; `stats cachedump` is a legacy sampler capped by design and often disabled for large slabs. Module doesn't call it, so on modern servers with >100 items per slab (cachedump gets truncated) recce sees nothing useful.",
+      "value": "critical",
+      "protocol_reference": "memcached protocol.txt \u2014 'lru_crawler' / doc/protocol.txt metadump command (added 1.4.31)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "`stats settings` \u2014 runtime config disclosure",
+      "kind": "active",
+      "description": "`stats settings` returns the full runtime config: `auth_enabled_sasl`, `udp_port`, `binding_protocol`, `maxconns`, `evictions`, `verbosity`, `growth_factor`, `oldest`, `maxbytes`, `tcp_backlog`, `inline_ascii_resp`, `tls_*`. This CONFIRMS whether SASL is off (currently inferred, not proven), whether UDP is on (currently guessed from port), and reveals hardening posture. Module never issues it.",
+      "value": "high",
+      "protocol_reference": "memcached protocol.txt \u2014 'General-purpose statistics' / `stats settings`",
+      "cwe": [
+        "CWE-200",
+        "CWE-16"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "Binary-protocol SASL enumeration (SASL_LIST_MECHS opcode 0x20)",
+      "kind": "auth",
+      "description": "When the text `version` errors on a SASL-gated server, module gives up. Binary protocol opcode 0x20 (SASL_LIST_MECHS) requires NO credentials and returns the mechanism list ('PLAIN CRAM-MD5' etc.). Confirms SASL is enforced and enumerates weakest available mechanism (PLAIN over plaintext is CWE-319). Prerequisite for any auth spraying.",
+      "value": "high",
+      "protocol_reference": "memcached binary_protocol.txt \u2014 SASL authentication, opcode 0x20 SASL_LIST_MECHS",
+      "cwe": [
+        "CWE-319",
+        "CWE-521"
+      ],
+      "finding_kind": "auth_enumeration"
+    },
+    {
+      "name": "Binary-protocol SASL AUTH default/blank credential spray (opcode 0x21)",
+      "kind": "auth",
+      "description": "SASL_AUTH (opcode 0x21) with PLAIN and blank/default (memcache:memcache, admin:admin, empty) is a common finding on hardened-in-name-only deployments. Currently no auth attempt at all \u2014 the module treats SASL-enforced as an opaque wall.",
+      "value": "high",
+      "protocol_reference": "memcached binary_protocol.txt \u2014 SASL_AUTH opcode 0x21",
+      "cwe": [
+        "CWE-521",
+        "CWE-798"
+      ],
+      "finding_kind": "weak_auth"
+    },
+    {
+      "name": "UDP protocol probe \u2014 confirm reflection/amplification exposure",
+      "kind": "active",
+      "description": "Narrative and runbook cite UDP 11211 as a DDoS reflection vector (~50,000x amp \u2014 memcrashed) but code NEVER touches UDP. A single UDP `stats` datagram (8-byte UDP frame header: request_id + seq_num + num_datagrams + reserved, then 'stats\\r\\n') CONFIRMS UDP is enabled and MEASURES the amplification ratio. Without this the finding is speculation on a TCP-only observation; on modern memcached (>=1.5.6) UDP defaults to off, so we're currently over-claiming.",
+      "value": "critical",
+      "protocol_reference": "memcached protocol.txt \u2014 'UDP protocol' frame header (RFC-style 8-byte header)",
+      "cwe": [
+        "CWE-406",
+        "CWE-405"
+      ],
+      "finding_kind": "amplification"
+    },
+    {
+      "name": "`watch` \u2014 live get/set log stream",
+      "kind": "active",
+      "description": "1.5.x introduced `watch fetchers mutations evictions` \u2014 a persistent stream of every get/set on the server including key names and (with `watch mutations`) SET payloads passing through. On an unauth instance this is a live keylogger for the cache: every session token issued while the connection stays open is captured. Module doesn't know about `watch`.",
+      "value": "high",
+      "protocol_reference": "memcached protocol.txt \u2014 'watch' command (1.5.0+)",
+      "cwe": [
+        "CWE-200",
+        "CWE-319"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "`stats conns` \u2014 connected-client IP enumeration",
+      "kind": "active",
+      "description": "`stats conns` lists every open connection with source addr, state, secs_since_last_cmd. Reveals which app servers are connected (lateral-movement targets, ops-network CIDRs) \u2014 a fact every other recce module would consume for pivoting. Not issued.",
+      "value": "medium",
+      "protocol_reference": "memcached protocol.txt \u2014 `stats conns` subcommand",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "`stats slabs` and `stats sizes` \u2014 data-shape fingerprinting",
+      "kind": "active",
+      "description": "Runbook shell mentions `stats slabs` but Python never sends it. `stats slabs` gives per-class chunk_size, used_chunks, total_chunks; `stats sizes` gives a full size histogram (must be enabled with `stats sizes enable` first). Together these fingerprint what KIND of data is cached (16-byte keys = session ids; 2-8KB items = rendered HTML/JSON responses) which drives value-fetch prioritisation.",
+      "value": "medium",
+      "protocol_reference": "memcached protocol.txt \u2014 `stats slabs`, `stats sizes`",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "CVE coverage limited to a single pre-1.4.32 band",
+      "kind": "passive",
+      "description": "`_old_version` only flags <1.4.32 (CVE-2016-8704/5/6). Missing bands: CVE-2018-1000127 (int overflow in binary proto, <1.5.6), CVE-2019-11596 (NULL deref, <1.5.14), CVE-2019-15026 (OOB read, <1.5.16), CVE-2020-10931 (heap overflow in cachedump, <1.5.22 \u2014 ironic given recce USES cachedump against the server), CVE-2022-48571 (proxy code). Should feed vulndb per-version rather than a single hardcoded cutoff.",
+      "value": "high",
+      "protocol_reference": "NVD CVE-2018-1000127, CVE-2019-15026, CVE-2020-10931",
+      "cwe": [
+        "CWE-1104",
+        "CWE-190",
+        "CWE-125",
+        "CWE-122"
+      ],
+      "finding_kind": "known_vulnerable"
+    },
+    {
+      "name": "TLS-wrapped memcached (extstore/TLS build) probe",
+      "kind": "passive",
+      "description": "1.5.13+ supports `--enable-ssl` and `stats settings` reports `ssl_enabled=yes`. Module makes plain TCP only; a TLS-enforced server just hangs and is recorded as 'no VERSION reply'. Should retry with TLS handshake and extract cert (CN, SAN, expiry) \u2014 cert is a cross-service fact that also feeds the TLS/CA inventory.",
+      "value": "medium",
+      "protocol_reference": "memcached wiki \u2014 TLS support (1.5.13+)",
+      "cwe": [
+        "CWE-319"
+      ],
+      "finding_kind": "tls_config"
+    },
+    {
+      "name": "Meta-protocol commands (`me`, `mg`, `ms`, `md`, `ma`)",
+      "kind": "active",
+      "description": "1.6.0 introduced the meta protocol. Some deployments disable legacy text `stats cachedump` while leaving `me` (meta debug) and `mg <key> v h` (meta-get, returns value + flags) open. Falling back to meta on servers that reject cachedump would recover key-enumeration and value-fetch on modern targets.",
+      "value": "medium",
+      "protocol_reference": "memcached doc/protocol.txt \u2014 'Meta Commands' (1.6+)",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "info_disclosure"
+    },
+    {
+      "name": "Key-content classification for cross-module hand-off",
+      "kind": "chain",
+      "description": "Sample keys extracted (`sample_keys`) are stored verbatim but never classified or forwarded. Key patterns like `sess:<id>`, `PHPSESSID_`, `django.contrib.sessions.`, `laravel_session`, JWT-shaped values, `csrf_`, `oauth_`, `api_key:` are direct pivots \u2014 should be tagged and pushed to the credential/session store so exploit-session-wiring can replay them against the web frontend. Currently the fact dies inside memcached probe result.",
+      "value": "critical",
+      "protocol_reference": "n/a \u2014 cross-module wiring",
+      "cwe": [
+        "CWE-384",
+        "CWE-522"
+      ],
+      "finding_kind": "chain"
+    }
+  ],
+  "priority_gaps": [
+    "1. `get`/`gets` on sampled keys \u2014 this is the actual loot; the module refuses to fetch values on principle but the finding narrative already claims 'sessions, tokens, secrets' are exposed",
+    "2. `lru_crawler metadump all` \u2014 full key enumeration on modern servers where `stats cachedump` is truncated or disabled",
+    "3. UDP probe on 11211 \u2014 the runbook and finding text claim UDP amplification but no UDP frame is ever sent; either confirm it or stop claiming it",
+    "4. Binary-protocol SASL LIST_MECHS + SASL AUTH default-credential spray \u2014 currently zero coverage past 'text version errored'",
+    "5. `stats settings` \u2014 proves `auth_enabled_sasl=no`, `udp_port` state, TLS state (turns inference into fact)",
+    "6. CVE bands beyond pre-1.4.32 \u2014 CVE-2018-1000127, CVE-2019-15026, CVE-2020-10931 (heap overflow in cachedump itself) are all unflagged",
+    "7. Session/JWT key-name classification piped to cred store for exploit-session-wiring to replay",
+    "8. `watch mutations` \u2014 live SET-payload capture stream, unique to memcached \u22651.5"
+  ],
+  "cross_service_wire_gaps": [
+    "sample_keys are never classified (session/JWT/csrf/oauth pattern match) and never pushed to a shared credential/session store \u2014 exploit-session-wiring cannot see them",
+    "`stats settings` `auth_enabled_sasl` value is not published as a hardening-posture fact for compliance/reporting modules",
+    "UDP-amplification exposure is never CONFIRMED so no DDoS-exposure fact is produced for a reflection-catalog consumer",
+    "TLS cert (when memcached is TLS-wrapped) would feed the TLS/CA inventory \u2014 currently not extracted because module doesn't attempt TLS",
+    "`stats conns` client IPs would feed lateral-movement pivots (identify app-tier CIDRs) \u2014 never gathered",
+    "Version -> vuln pipeline uses a hardcoded single cutoff instead of a per-version vulndb lookup; other DB modules feed vulndb with full version \u2014 memcached under-reports"
+  ],
+  "summary": "\nmemcached module is a competent unauth-read prover but is deliberately narrow: it stops at key names (never `get`s values), never touches the binary/SASL protocol, never sends a UDP packet despite claiming amplification in the narrative, uses the legacy `stats cachedump` sampler instead of the modern `lru_crawler metadump all`, and knows exactly one CVE band. Highest-value gaps are (1) value retrieval, (2) full-key metadump, (3) UDP-amp confirmation, (4) SASL enumeration + default-cred spray. Cross-service wiring is the biggest structural gap \u2014 sampled session-shaped keys never reach the credential/session store.\n",
+  "notes": "\nTests coverage is minimal \u2014 only test_db_engines.py::probe returns unauth + version findings and test_db_engine_contract.py lists memcached in the contract set. No test exercises SASL path, UDP, cachedump edge cases, or version-CVE mapping past the 1.4.15 fixture. Any added capabilities should ship with tests since current fixtures are stub-level.\n"
+}

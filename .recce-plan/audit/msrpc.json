@@ -1,0 +1,316 @@
+{
+  "service": "msrpc",
+  "existing_capabilities": [
+    "IOXIDResolver::ServerAlive2 (opnum 5) \u2014 multi-homed interface disclosure with in/out-of-scope classification",
+    "ept_lookup (EPM opnum 2) \u2014 enumerate RPC interfaces registered on 135/tcp",
+    "UUID recognition of ~17 well-known interfaces (spoolss, EFSR, DFSNM, drsuapi, samr, lsarpc, svcctl, atsvc, WMI, winreg, wkssvc, srvsvc, IOXID, PAR)",
+    "Coercion-interface flagging (MS-RPRN, MS-PAR, MS-EFSR \u00d72, MS-DFSNM) with high-severity finding pointing at Coercer/ntlmrelayx",
+    "Hand-built DCE/RPC 1.1 CO PDU stack \u2014 bind, request, bind_ack parsing with fragment length validation (C706 \u00a712)",
+    "TCP-open fallback so a firewalled-but-listening 135 is distinguishable from unreachable",
+    "Per-finding tool routing (rpcmap vs Coercer) and runbook covering rpcmap/rpcdump/nxc/Coercer"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "NTLMSSP auth3 negotiation over RPC bind \u2014 pull Type-2 TargetInfo (AV_PAIRs)",
+      "kind": "passive",
+      "description": "MS-RPCE \u00a72.2.1.1.7/\u00a72.2.2.11 sec_trailer with auth_type=NTLMSSP(10), auth_level=CONNECT(2). Send bind with NTLMSSP NEGOTIATE (Type 1); target replies with bind_ack carrying NTLMSSP CHALLENGE (Type 2). Parse AV_PAIRs (MS-NLMP \u00a72.2.2.1): MsvAvNbDomainName, MsvAvNbComputerName, MsvAvDnsDomainName, MsvAvDnsComputerName, MsvAvDnsTreeName (forest), plus 8-byte Version block (MS-NLMP \u00a72.2.2.10) = major.minor.build + NTLM revision. This is the same OS/domain/forest disclosure SMB2 gives on 445, available on 135 with zero auth. Currently unmapped \u2014 module never sets auth_length or emits a sec_trailer.",
+      "value": "high",
+      "protocol_reference": "MS-RPCE 2.2.1.1.7, MS-NLMP 2.2.2.1 / 2.2.2.10",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Bind-Time Feature Negotiation (BTFN) \u2014 OS/patch-level fingerprint",
+      "kind": "passive",
+      "description": "MS-RPCE \u00a73.3.1.5.3: bind ctx with abstract UUID 6cb71c2c-9812-4540-<featurebits>-000000000000 returns which BTFN bits the server acknowledges (SecurityContextMultiplexingSupported bit0, KeepConnectionOnOrphanSupported bit1). Presence of bit2/bit3 differentiates 2003\u21922008\u21922012\u21922019\u21922022 lineage. Not attempted anywhere in _bind.",
+      "value": "medium",
+      "protocol_reference": "MS-RPCE 3.3.1.5.3",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "NDR64 transfer syntax negotiation",
+      "kind": "passive",
+      "description": "Bind currently offers only NDR v2 (8a885d04-\u2026). Interfaces registered NDR64-only (some post-2012 additions) will refuse the bind and be missed. MS-RPCE \u00a73.3.1.5.6 mandates advertising both syntaxes (71710533-beba-4937-8319-b5dbef9ccc36 v1.0) to reliably enumerate every context.",
+      "value": "medium",
+      "protocol_reference": "MS-RPCE 3.3.1.5.6",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "MS-NRPC / Netlogon interface (ZeroLogon precursor) missing from _KNOWN",
+      "kind": "passive",
+      "description": "UUID 12345678-1234-abcd-ef00-01234567cffb (MS-NRPC v1.0) is not in the recognised set, so EPM dumps against DCs never flag Netlogon. Netlogon exposure is the ZeroLogon (CVE-2020-1472) and NetrServerPasswordSet2 attack surface; feeding this fact to a downstream check is the entire point.",
+      "value": "critical",
+      "protocol_reference": "MS-NRPC 1.0",
+      "cwe": [
+        "CWE-287",
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "MS-BKRP (BackupKey Remote) \u2014 DPAPI domain backup key vector",
+      "kind": "passive",
+      "description": "UUID 3dde7c30-165d-11d1-ab8f-00805f14db40 not recognised. On a DC this interface serves the domain DPAPI backup key; unrecognised means no cross-service hint for a credentialed follow-up.",
+      "value": "high",
+      "protocol_reference": "MS-BKRP 1.0",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "MS-EVEN6 / EVEN \u2014 remote event log read interface",
+      "kind": "passive",
+      "description": "UUIDs f6beaff7-1e19-4fbb-9f8f-b89e2018337c (EVEN6) and 82273fdc-e32a-18c3-3f78-827929dc23ea (EVEN) not recognised. Feeds credentialed event-scraping (LSASS clues, logon patterns).",
+      "value": "low",
+      "protocol_reference": "MS-EVEN6 1.0",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "MS-TSTS / MS-RSP (Remote Shutdown / Terminal Services) and MS-EERR/MS-RCMP not recognised",
+      "kind": "passive",
+      "description": "Several post-Vista interfaces (WMI IWbemLevel1Login 8bc3f05e-\u2026 is present but MS-TSTS 484809d6-\u2026, MS-RSP d95afe70-a6d5-4259-822e-2c84da1ddb0d for InitiateShutdown) missing. Reduces triage value.",
+      "value": "low",
+      "protocol_reference": "MS-RSP 1.0",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "ept_map (opnum 3) \u2014 resolve specific interface UUID to its dynamic ncacn_ip_tcp port",
+      "kind": "active",
+      "description": "MS-RPCE / C706 ept_map takes a partial tower and returns the concrete endpoint (dynamic port in 49152-65535). Without it recce knows drsuapi/samr/wmi are exposed but not on which port, so downstream services cannot follow up on the dynamic port without a second-stage tool. Cross-service wire gap.",
+      "value": "high",
+      "protocol_reference": "C706 Appendix O; MS-RPCE 2.2.1.2.5",
+      "finding_kind": "msrpc_dynport_map",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Full tower parse from ept_lookup \u2014 extract dynamic ports currently discarded",
+      "kind": "active",
+      "description": "_uuids_in scans only for 16-byte UUID runs and drops the rest of every twr_p_t. The tower carries floor 4 (uuid_t transport / ncacn_ip_tcp 0x07) with the 2-byte TCP port. Currently thrown away. Parsing floors 3+4 would yield {interface_uuid, dynamic_tcp_port} pairs for every entry, feeding portscan and per-service modules.",
+      "value": "high",
+      "protocol_reference": "C706 \u00a7L.1.2.5 (protocol tower)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "IOXIDResolver::ServerAlive (opnum 3) fallback",
+      "kind": "active",
+      "description": "ServerAlive2 (opnum 5) is Windows Vista/2003+ only. Older hosts and some hardened boxes only implement ServerAlive (opnum 3, DCOM /1.0). Currently a bind_ack + opnum5 failure yields nothing; opnum3 would at least confirm DCOM is up and give a v1 keepalive.",
+      "value": "low",
+      "protocol_reference": "MS-DCOM 3.1.2.5.1",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "IOXIDResolver::ResolveOxid2 (opnum 4) \u2014 OXID-scoped binding disclosure",
+      "kind": "active",
+      "description": "Given an OXID (obtained from a DCOM activation on 135 or from a captured binding) ResolveOxid2 returns the same DUALSTRINGARRAY plus the authn hints (COMVERSION, dwAuthnHint). The dwAuthnHint field advertises the server's preferred authentication level (RPC_C_AUTHN_LEVEL_*) \u2014 direct policy fingerprint.",
+      "value": "medium",
+      "protocol_reference": "MS-DCOM 3.1.2.5.1.4",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Auth-level probe per coercion interface \u2014 is the interface bind reachable unauthenticated?",
+      "kind": "active",
+      "description": "The finding says PetitPotam/PrinterBug/DFSCoerce interfaces are 'reachable' from EPM listing alone, but EPM only proves the endpoint is registered \u2014 not that an anonymous NCACN_NP or NCACN_IP_TCP bind will succeed. Actual bind against each coercion interface UUID (with per-interface version, e.g. MS-EFSR v1.0, MS-DFSNM v3.0, MS-RPRN v1.0) with auth_level=NONE tells you whether CVE-2022-26925/KB5005413 mitigations are in place. Currently we bind only to EPM v3.0 and IOXID v0.0.",
+      "value": "high",
+      "protocol_reference": "MS-EFSR 3.1.4; MS-RPRN 3.1.4; MS-DFSNM 3.1.4",
+      "cwe": [
+        "CWE-287"
+      ]
+    },
+    {
+      "name": "ncacn_np / SMB pipe binding not attempted",
+      "kind": "active",
+      "description": "Many high-value interfaces (drsuapi, netlogon, samr, lsarpc) are exposed only over \\PIPE\\lsass, \\PIPE\\netlogon, \\PIPE\\samr via SMB \u2014 not ncacn_ip_tcp. EPM's registered protseqs include ncacn_np entries; parsing them and cross-feeding to the SMB module (or opening the pipe directly) is the wire link that never happens.",
+      "value": "high",
+      "protocol_reference": "MS-RPCE 2.1.1.2 (ncacn_np)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "ncacn_http (RPC over HTTP) protseq detection",
+      "kind": "active",
+      "description": "MS-RPCH: RPC/HTTP endpoints (593/tcp, or 80/443 with RPC_IN_DATA/RPC_OUT_DATA verbs). Never enumerated. Exchange, ADCS Web Enrollment, and RD Gateway rely on this transport; missing means those services drop off the map.",
+      "value": "medium",
+      "protocol_reference": "MS-RPCH 3.2 / 2.1",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "alter_context (PDU type 14) \u2014 post-bind auth or NDR swap",
+      "kind": "active",
+      "description": "PDU type 14 lets you add a second presentation context or swap NDR syntaxes on an existing connection without a fresh TCP handshake. Needed for BTFN + NDR64 + auth negotiation on the same socket. Not implemented.",
+      "value": "low",
+      "protocol_reference": "C706 \u00a712.6.4.1",
+      "cwe": []
+    },
+    {
+      "name": "sec_trailer parse on bind_ack \u2014 enumerate accepted auth types",
+      "kind": "passive",
+      "description": "A bind with a bogus AUTH_TYPE gets bind_nak (13) with reject_reason=protocol_version_not_specified vs authentication_type_not_recognized (MS-RPCE 2.2.2.5). Iterating auth_type 9/10/16/68/70 (SPNEGO/NTLMSSP/Kerberos/Netlogon/Schannel) reveals accepted auth backends. Never attempted.",
+      "value": "medium",
+      "protocol_reference": "MS-RPCE 2.2.2.5 (bind_nak reject_reason)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Per-interface bind version negotiation",
+      "kind": "active",
+      "description": "_bind is called with default ver_major=3, ver_minor=0 (correct for EPM only). spoolss is v1.0, samr is v1.0, drsuapi is v4.0. Passing wrong version to a real coercion probe would produce bind_nak reason=abstract_syntax_not_supported. The current wrapper hard-codes 3,0 unless caller overrides \u2014 no interface-version table exists, so an active per-interface bind probe would silently fail.",
+      "value": "medium",
+      "protocol_reference": "C706 \u00a712.5.2.5 abstract_syntax version",
+      "cwe": []
+    },
+    {
+      "name": "reject_reason surfacing on bind_nak",
+      "kind": "passive",
+      "description": "_bind returns bool; a bind_nak (ptype 13) with reject_reason (u16) is discarded. Reason codes distinguish: abstract syntax not supported, protocol version not supported, authentication type not recognised, invalid checksum, local limit exceeded. This is negotiation intel that costs nothing to keep.",
+      "value": "low",
+      "protocol_reference": "MS-RPCE 2.2.2.5",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "PDU fault code parse on request (ptype 3)",
+      "kind": "passive",
+      "description": "_request treats anything not ptype=2 as failure. A fault PDU (ptype 3) carries status (nca_s_op_rng_error, nca_s_unk_if, nca_s_proto_error, nca_s_out_args_too_big, access_denied). Access-denied faults from an unauth request against a bound interface tell you the interface enforces auth \u2014 the exact fact 'msrpc_coercion' would want to qualify.",
+      "value": "medium",
+      "protocol_reference": "C706 \u00a712.6.4.7 (nca_status)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Multiple presentation contexts in one bind",
+      "kind": "active",
+      "description": "_bind_body fixes n_context_elem=1. C706 permits up to 255 contexts per bind \u2014 a single-round-trip probe could bind EPM + IOXID (or NDR + NDR64) at once. Reduces detection footprint and round-trips.",
+      "value": "low",
+      "protocol_reference": "C706 \u00a712.6.4.3",
+      "cwe": []
+    },
+    {
+      "name": "Fragmentation / large-response reassembly beyond one frag",
+      "kind": "active",
+      "description": "_recv_pdu reads one PDU. ept_lookup with max_ents=500 will often exceed max_xmit_frag=5840 and be split across multiple response PDUs (flags PFC_FIRST_FRAG/PFC_LAST_FRAG). Current code processes only the first fragment, so hosts with >~20 registered interfaces will have their tail silently dropped and unknown coercion interfaces missed.",
+      "value": "high",
+      "protocol_reference": "C706 \u00a712.6.4.9 (frag flags)",
+      "cwe": [
+        "CWE-noise"
+      ]
+    },
+    {
+      "name": "ept_lookup continuation via entry_handle",
+      "kind": "active",
+      "description": "The all-zero entry_handle passed marks 'start of enumeration'; the response returns an updated handle to fetch the next page when max_ents was exceeded. Not looped, so a host with >500 entries is truncated. Combined with the fragmentation gap this compounds the miss.",
+      "value": "medium",
+      "protocol_reference": "C706 Appendix O.1 (ept_lookup)",
+      "cwe": []
+    },
+    {
+      "name": "Cross-service wire gap: dynamic ports from EPM never merge into Host.open_ports",
+      "kind": "chain",
+      "description": "EPM reveals dynamic-range TCP ports (49152-65535) hosting drsuapi/samr/wmi. Those ports are almost never in the initial nmap scope. msrpc.analyze does not push the discovered {ip,port,interface} tuples back into the host model so downstream services (smb, ldap, ad) see them. Attack-path breaker.",
+      "value": "high",
+      "protocol_reference": "MS-RPCE 2.1.1.1",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Cross-service wire gap: IOXID out-of-scope addresses not registered as new host candidates",
+      "kind": "chain",
+      "description": "server_alive2 returns IPs on unseen networks. The finding prints them but nothing hands them to the scan queue as pivot targets. Same 'discovery, not disclosure' logic already argued in the finding text is not followed through in code.",
+      "value": "high",
+      "protocol_reference": "MS-DCOM 3.1.2.5.1.3",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Cross-service wire gap: coercion presence not tagged on the host fact set for ntlmrelay planning",
+      "kind": "chain",
+      "description": "The AD/LDAP/SMB modules choose relay targets. msrpc knows which hosts are coercion sources; there is no shared fact ('this host will coerce to any listener') for the relay module to pair with 'this host accepts NTLM without signing' from smb.py. Both facts exist independently but never join.",
+      "value": "high",
+      "protocol_reference": "MS-EFSR 3.1.4.1 EfsRpcOpenFileRaw",
+      "cwe": [
+        "CWE-287"
+      ]
+    },
+    {
+      "name": "Cross-service wire gap: Netlogon UUID \u2192 ZeroLogon check dispatch",
+      "kind": "chain",
+      "description": "Even after adding MS-NRPC to _KNOWN, there is no callback so a dedicated netlogon module (missing today) can run the NetrServerAuthenticate3 all-zero-challenge probe. This is the single highest-value msrpc-derived active check on a DC.",
+      "value": "critical",
+      "protocol_reference": "MS-NRPC 3.5.4.4.2 (NetrServerAuthenticate3), CVE-2020-1472",
+      "cwe": [
+        "CWE-287",
+        "CWE-330"
+      ]
+    },
+    {
+      "name": "Cross-service wire gap: OS/build number from NTLMSSP Type-2 \u2192 fingerprint aggregator",
+      "kind": "chain",
+      "description": "Once the NTLMSSP-over-RPC probe above is added, the Version block gives the same 6.1.7601 / 10.0.19041 fingerprint SMB2 negotiate gives. It should feed the same fingerprint sink so hosts with 135 open but 445 filtered still resolve to an OS build.",
+      "value": "medium",
+      "protocol_reference": "MS-NLMP 2.2.2.10 VERSION",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Unknown-UUID exposure count in EPM findings",
+      "kind": "passive",
+      "description": "_uuids_in filters to _KNOWN. Total-interface count and per-UUID first-seen sample would let an operator spot custom/third-party RPC servers (backup agents, EDR management, ADCS custom modules) that are not in Microsoft's catalog. Currently invisible.",
+      "value": "low",
+      "protocol_reference": "C706 Appendix O",
+      "cwe": [
+        "CWE-200"
+      ]
+    }
+  ],
+  "priority_gaps": [
+    "MS-NRPC (Netlogon) UUID not recognised \u2014 blocks ZeroLogon dispatch (critical)",
+    "NTLMSSP Type-2 over RPC bind \u2014 unauth domain/hostname/forest/OS-build disclosure (MS-NLMP 2.2.2.1) equivalent to SMB2 negotiate, works when 445 is filtered",
+    "ept_lookup fragmentation and entry_handle continuation not handled \u2014 silent truncation of interface list, coercion interfaces at the tail are missed",
+    "Full-tower parse of ept_lookup \u2014 dynamic ncacn_ip_tcp ports discarded, breaking downstream service reach on 49152-65535",
+    "Cross-service wire: EPM-discovered dynamic ports never merged into Host.open_ports; IOXID out-of-scope IPs never queued as pivot candidates; coercion facts never joined with SMB-signing facts for relay planning",
+    "Per-interface unauth bind probe (correct MS-EFSR/MS-RPRN/MS-DFSNM versions) to confirm CVE-2022-26925 / KB5005413 posture instead of inferring from EPM listing",
+    "ncacn_np protseq (SMB pipe) and ncacn_http (593 / RPC-over-HTTP) transports never enumerated",
+    "sec_trailer probes to enumerate accepted auth types (SPNEGO/NTLMSSP/Kerberos/Netlogon/Schannel) via bind_nak reject_reason",
+    "MS-BKRP UUID unrecognised \u2014 DPAPI domain backup key vector on DCs invisible",
+    "NDR64 transfer syntax + Bind-Time Feature Negotiation absent \u2014 post-2012 interfaces may be missed and free OS-lineage fingerprint left on the table"
+  ],
+  "cross_service_wire_gaps": [
+    "EPM-derived {interface,dynamic_port} tuples do not feed Host.open_ports, so smb/ldap/ad modules never see samr/drsuapi/wmi on their dynamic ports",
+    "IOXID ServerAlive2 out-of-scope addresses are surfaced in a finding but never enqueued as new scan targets \u2014 pivot path documented but not wired",
+    "Coercion-source flag from msrpc has no join with the SMB signing/EPA facts from smb.py; the two halves of the coercion\u2192relay chain live in separate silos",
+    "Netlogon interface exposure has no downstream ZeroLogon probe consumer (module absent)",
+    "NTLMSSP Type-2 disclosure (once implemented) has no route into the fingerprint aggregator that smb/ldap already feed",
+    "MS-BKRP presence on a DC is not routed to any credentialed-follow-up hint",
+    "EPM RPC-over-HTTP (ncacn_http) protseq disclosure would light up Exchange/ADCS-Web/RDG endpoints on 80/443/593 that the HTTP module today has no reason to check"
+  ],
+  "module_files": [
+    "/home/kali/Desktop/projects/recce/recce/services/msrpc.py",
+    "/home/kali/Desktop/projects/recce/tests/test_msrpc.py"
+  ],
+  "summary": "msrpc.py delivers two solid unauth reads (ServerAlive2 + ept_lookup) and a good curated UUID\u2192spec map with coercion flagging, but leaves substantial protocol surface unused. Biggest attack-value gaps: (1) no NTLMSSP-over-RPC bind to pull the Type-2 TargetInfo/Version block (SMB-negotiate-grade disclosure available when 445 is filtered), (2) MS-NRPC/Netlogon UUID not in _KNOWN so ZeroLogon dispatch is impossible, (3) ept_lookup responses are single-fragment / single-page \u2014 anything past the first frag or 500-entry window is dropped, so coercion interfaces at the tail vanish silently, (4) full tower parse is skipped so dynamic ncacn_ip_tcp ports are discarded, breaking the wire link between msrpc discovery and every downstream service module that would otherwise pivot into 49152-65535, (5) coercion-source facts never join SMB-signing facts for relay planning, and (6) IOXID out-of-scope IPs are printed in a finding but never queued as scan targets. Secondary: no NDR64/BTFN negotiation, no ncacn_np or ncacn_http protseq, no per-interface unauth bind to confirm CVE-2022-26925 posture, MS-BKRP/EVEN6 missing from the UUID catalog, and bind_nak reject_reason / fault status codes are collapsed to bool so auth-type and access-denied signals are lost.",
+  "notes": "Interface versions matter: _bind hard-codes (3,0) suitable for EPM only; any per-interface bind probe added will need a UUID\u2192version table (samr 1.0, drsuapi 4.0, spoolss 1.0, EFSR 1.0, DFSNM 3.0, NRPC 1.0, WMI 0.0). CVE references worth wiring: CVE-2020-1472 (Netlogon), CVE-2021-36942 (PetitPotam), CVE-2022-26925 (LSA over lsarpc without auth), CVE-2022-26809 (RPC runtime heap overflow \u2014 detectable by version, not exploitation). Date sync noted (2026-08-29, Auto Mode)."
+}

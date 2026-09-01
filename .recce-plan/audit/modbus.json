@@ -1,0 +1,216 @@
+{
+  "service": "modbus",
+  "summary": "The current recce/services/modbus.py implements a minimal reachability + banner probe (Functions 0x03 and 0x2B/0x0E Basic). It skips the majority of Modbus/TCP's attacker-relevant surface: unit-ID enumeration through TCP-to-RTU gateways, diagnostics subfunctions (including Force Listen-Only DoS), Read Exception Status, Report Slave ID, safer register/coil reads that fingerprint process state, vendor-specific function codes (Schneider UMAS 0x5A, Siemens, Codesys), the Modbus Security (TLS/802) side-channel, and any CVE-level firmware/product matching. It also does not feed vendor/model/serial data into cross-service pools (creds, asset inventory, downstream-device lists behind gateways).",
+  "module_files": [
+    "recce/services/modbus.py",
+    "tests/test_modbus.py"
+  ],
+  "existing_capabilities": [
+    "TCP connect to 502/8502 with is_modbus port/service/product match",
+    "Function 0x03 Read Holding Registers (addr=0, count=1) with unit-ID rotation across (1,0,255)",
+    "Function 0x2B/0x0E Read Device Identification, Basic conformity level 0x01, objects VendorName(0)/ProductCode(1)/MajorMinorRevision(2)",
+    "MBAP header parse (tid/proto/length/unit), exception-response detection (fn|0x80)",
+    "HIGH finding on reachable, INFO finding on device ID, static runbook (modpoll/mbtget)",
+    "Read-only design: never writes to the device"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "Unit-ID / slave-ID sweep across gateway",
+      "kind": "passive",
+      "description": "Modbus/TCP-to-RTU gateways are extremely common. Sweeping unit IDs 0-247 (MODBUS Application Protocol v1.1b3 \u00a74.1) discovers downstream serial PLCs hiding behind the TCP endpoint. Currently only 1/0/255 are tried and only to satisfy the first success \u2014 so the whole downstream fleet is invisible. Each responding unit is a distinct target and should feed the cross-service inventory.",
+      "value": "critical",
+      "protocol_reference": "MODBUS Application Protocol v1.1b3 \u00a74.1 (Unit Identifier) and MODBUS Messaging on TCP/IP v1.0b \u00a73.1.3",
+      "cwe": [
+        "CWE-668"
+      ]
+    },
+    {
+      "name": "Function 0x11 Report Server/Slave ID",
+      "kind": "passive",
+      "description": "Returns vendor-specific controller data + run-indicator byte. On Schneider/Modicon, AB, and older devices this yields firmware banner and running state that Function 0x2B does not. Not implemented.",
+      "value": "high",
+      "protocol_reference": "MODBUS App Protocol v1.1b3 \u00a76.14 (Function code 17 / 0x11)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Function 0x2B/0x0E Regular (0x02) and Extended (0x03) conformity reads",
+      "kind": "passive",
+      "description": "Only Basic (0x01, objects 0-2) is read. Regular pulls VendorUrl(3), ProductName(4), ModelName(5), UserApplicationName(6); Extended pulls vendor-defined objects 0x80+ (serials, MAC, project name, download timestamps). This is the main asset-fingerprint layer.",
+      "value": "high",
+      "protocol_reference": "MODBUS App Protocol v1.1b3 \u00a76.21 (MEI Type 0x0E, ReadDevID codes 0x01/0x02/0x03/0x04)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Function 0x07 Read Exception Status",
+      "kind": "passive",
+      "description": "Serial-legacy but supported by many bridged/embedded stacks. Returns 8 status bits \u2014 device-specific but often reveals alarm/run states. Zero cost, high signal for legacy device fingerprinting.",
+      "value": "medium",
+      "protocol_reference": "MODBUS App Protocol v1.1b3 \u00a76.7 (Function code 7)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Function 0x08 Diagnostics subfunctions (0x00, 0x0B-0x12)",
+      "kind": "passive",
+      "description": "Return Query Data (0x00) proves the endpoint is really a Modbus stack; Return Bus/Slave counters (0x0B-0x12) leak connection statistics, error counts and identify the device family. Currently unprobed.",
+      "value": "medium",
+      "protocol_reference": "MODBUS App Protocol v1.1b3 \u00a76.8 (Function 8, subfunctions 00-18)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Function 0x08 sub 0x04 Force Listen-Only Mode \u2014 DoS primitive",
+      "kind": "active",
+      "description": "One MBAP frame silences the target \u2014 device stops responding on Modbus until a Restart Comms (sub 0x01) or power cycle. Iconic OT DoS attack (used in CrashOverride/Industroyer). Should be an opt-in EXPLOIT capability so operators can prove segmentation risk; currently absent. Also implicitly: sub 0x01 (Restart Communications Option) \u2014 can clear counters or restart comms.",
+      "value": "critical",
+      "protocol_reference": "MODBUS App Protocol v1.1b3 \u00a76.8 subfunction 0x04 (Force Listen Only Mode); ICS-CERT ICSA-16-336-04",
+      "cwe": [
+        "CWE-400",
+        "CWE-1287"
+      ]
+    },
+    {
+      "name": "Function 0x01/0x02/0x04 (Coils, Discrete Inputs, Input Registers)",
+      "kind": "passive",
+      "description": "Only Holding Registers (0x03) is read. Coils and Discrete Inputs reveal process I/O state (valves open/closed, contactors); Input Registers reveal live sensor telemetry. Reading these is fingerprint-quality proof of a running process and lets us distinguish an idle test rig from a live PLC.",
+      "value": "high",
+      "protocol_reference": "MODBUS App Protocol v1.1b3 \u00a76.1-6.4 (Function codes 1, 2, 4)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Write-capability probe (0x05/0x06/0x0F/0x10) via safe echo-write",
+      "kind": "active",
+      "description": "A non-destructive write test \u2014 read a coil/register, write the SAME value back, observe ack vs exception 0x01/0x02/0x04 \u2014 proves whether the device accepts writes from this network position. That elevates modbus_reachable from HIGH to CRITICAL (attacker can move a valve, not just watch). Currently the finding assumes writability without evidence.",
+      "value": "critical",
+      "protocol_reference": "MODBUS App Protocol v1.1b3 \u00a76.5, 6.6, 6.11, 6.12 (Function codes 5, 6, 15, 16)",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ]
+    },
+    {
+      "name": "Schneider UMAS (Function 0x5A) probe \u2014 CVE-2018-7846, CVE-2020-7475, CVE-2021-22779",
+      "kind": "exploit",
+      "description": "Schneider M221/M340/M580 tunnel their programming protocol (UMAS) over Modbus function 0x5A. Multiple pre-auth abuses: session hijacking (CVE-2021-22779), project upload/download without auth (CVE-2020-7475), reserved-command RCE (CVE-2018-7846). A one-byte probe (function 0x5A, subfunction 0x02 Read ID) confirms UMAS is exposed. Nothing in the module knows about vendor function codes.",
+      "value": "critical",
+      "protocol_reference": "Schneider UMAS Reference (function code 90); NVD CVE-2018-7846, CVE-2020-7475, CVE-2021-22779, CVE-2022-45789",
+      "cwe": [
+        "CWE-306",
+        "CWE-798"
+      ]
+    },
+    {
+      "name": "Siemens SIMATIC / Codesys runtime on 502 detection",
+      "kind": "passive",
+      "description": "Codesys V2/V3 runtimes often expose Modbus/TCP alongside their own protocol on 1200/2455; a device answering Modbus with a Codesys product banner is affected by a large CVE cluster (CVE-2022-31806, CVE-2022-32136, CVE-2023-3663) \u2014 no fingerprint layer to catch this. Same for SIMATIC S7-1200 Modbus DoS CVE-2019-10920.",
+      "value": "high",
+      "protocol_reference": "NVD CVE-2022-31806 (Codesys); CVE-2019-10920 (Siemens Modbus DoS)",
+      "cwe": [
+        "CWE-1188",
+        "CWE-400"
+      ]
+    },
+    {
+      "name": "Modbus Security (TLS) probe on port 802",
+      "kind": "auth",
+      "description": "The 'Modbus Security' spec (Modbus.org, 2018) defines TLS-wrapped MBAP on TCP/802 with X.509 client auth carrying a role OID. Recce doesn't scan 802 or attempt a TLS ClientHello there. A device that supports 802 but ALSO leaves 502 open is a much sharper finding than 502-only, and a device only on 802 gets missed entirely.",
+      "value": "high",
+      "protocol_reference": "MODBUS/TCP Security v21 (2018) \u00a75 (TCP/802, TLS 1.2+ w/ role-based X.509 extension)",
+      "cwe": [
+        "CWE-319",
+        "CWE-306"
+      ]
+    },
+    {
+      "name": "Malformed-PDU / oversize-length fuzzing markers (Aegis-style)",
+      "kind": "exploit",
+      "description": "Well-known family of MBAP crashes: length field > 260 (spec max \u00a74.1), unit-ID 248-255 reserved usage (\u00a74.1), function 0x2B with invalid MEI 0x0D \u2014 many embedded stacks (Modicon <=v2.4, ProSoft, Wago, older Advantech) crash. Should be an opt-in ACTIVE check gated behind explicit exploit-mode, since it can actually hang the PLC.",
+      "value": "high",
+      "protocol_reference": "MBAP header \u00a73, \u00a74.1; ICS-CERT ICSA-17-234-01 (Wago), ICSA-19-134-08 (Advantech)",
+      "cwe": [
+        "CWE-20",
+        "CWE-125"
+      ]
+    },
+    {
+      "name": "Function code enumeration / exception-code mapping",
+      "kind": "passive",
+      "description": "Sending each standard fn 0x01-0x18 and 0x2B, and cataloguing which return normal / exception 0x01 (Illegal Function) / 0x04 (Slave Device Failure), fingerprints the stack (Modicon vs open-source libmodbus vs freemodbus vs Codesys) very precisely. Zero writes, one round-trip per function. Not implemented.",
+      "value": "medium",
+      "protocol_reference": "MODBUS App Protocol v1.1b3 \u00a77 Exception responses (codes 01-0B)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Cross-service wire: downstream unit list",
+      "kind": "chain",
+      "description": "When the endpoint is a gateway, each responding unit-ID represents a distinct downstream device that should appear as its own target row (with unit-ID) and be included in target inventory, downstream_devices pool, and vendor-specific finding routing. Right now those devices are invisible to the rest of recce.",
+      "value": "high",
+      "protocol_reference": "MODBUS Messaging on TCP/IP v1.0b \u00a73.1.3 (routing via Unit ID)",
+      "cwe": [
+        "CWE-778"
+      ]
+    },
+    {
+      "name": "Cross-service wire: vendor/model to CVE + default-cred pools",
+      "kind": "chain",
+      "description": "Device-ID vendor/product/revision is captured then only echoed in a finding string \u2014 never normalized (SchneiderElectric/M340/v3.10 -> canonical vendor+model+version tuple) and never fed to shared vendor_products / known_default_creds pools. That's how Schneider 'admin/blank', Siemens 'Administrator/(blank)', Allen-Bradley Micro8xx creds get missed by later HTTP/FTP/Telnet probes on the same host.",
+      "value": "high",
+      "protocol_reference": "MODBUS App Protocol v1.1b3 \u00a76.21 objects 0-2; ICS-CERT default-cred advisories per vendor",
+      "cwe": [
+        "CWE-1188",
+        "CWE-798"
+      ]
+    },
+    {
+      "name": "Cross-service wire: extended device-ID serial/MAC to hostnames/asset inventory",
+      "kind": "chain",
+      "description": "Extended objects (0x80+) commonly carry MAC, serial number, project name and station name \u2014 asset-identity data that should populate known_hostnames and asset inventory pools for reporting and cross-host correlation. Not read, not exported.",
+      "value": "medium",
+      "protocol_reference": "MODBUS App Protocol v1.1b3 \u00a76.21 (Extended objects 0x80-0xFF)",
+      "cwe": [
+        "CWE-200"
+      ]
+    },
+    {
+      "name": "Elevated severity path when write is proven",
+      "kind": "chain",
+      "description": "modbus_reachable is fixed at HIGH regardless of whether writes are accepted. If a safe echo-write probe succeeds (see above), the finding should re-emit at CRITICAL with a CWE-1287/CWE-284 tag and a distinct kind ('modbus_writable') so ranking, exploit-session generation, and dashboards route it correctly.",
+      "value": "high",
+      "protocol_reference": "Derived from \u00a76.5/6.6/6.11/6.12 write functions + \u00a77 exception responses",
+      "cwe": [
+        "CWE-284",
+        "CWE-1287"
+      ]
+    }
+  ],
+  "priority_gaps": [
+    "Function 0x08 sub 0x04 Force Listen-Only Mode DoS probe (opt-in exploit)",
+    "Unit-ID 0-247 sweep to discover downstream RTU slaves behind TCP-to-RTU gateways",
+    "Safe echo-write probe using 0x05/0x06 to prove writability and elevate finding to CRITICAL",
+    "Schneider UMAS function 0x5A detection for CVE-2018-7846 / CVE-2020-7475 / CVE-2021-22779",
+    "Function 0x2B/0x0E Regular + Extended conformity reads (ModelName, UserAppName, serial/MAC via 0x80+)",
+    "Modbus Security TLS probe on TCP/802",
+    "Function 0x11 Report Server ID + 0x07 Read Exception Status for legacy device fingerprint",
+    "Cross-service export: normalized vendor/product/revision + downstream unit-IDs into shared pools (asset inventory, default-cred routing, CVE match)",
+    "Function 0x01/0x02/0x04 reads to prove live process state (elevates from 'device on network' to 'live process on network')",
+    "Function-code enumeration + exception-code fingerprint for stack identification (Codesys, libmodbus, Modicon)"
+  ],
+  "cross_service_wire_gaps": [
+    "Downstream unit-IDs discovered behind a gateway are not emitted as separate targets or into a shared downstream_devices pool",
+    "Vendor/product/revision from 0x2B is only inlined into the finding text \u2014 never normalized nor pushed to a vendor_products/known_default_creds pool for other services on the same host",
+    "Extended device-ID objects (serial, MAC, project name, station name) are not fetched and therefore never fed to known_hostnames / asset-inventory pools",
+    "No feedback to a relay_targets or cred pool from vendor-string ('Schneider' -> admin/blank on HTTP, 'Siemens' -> Administrator/blank, 'Rockwell' -> guest, etc.)",
+    "modbus_reachable finding severity does not chain to a modbus_writable exploit primitive when writes succeed \u2014 no exploit-session artefact emitted for the exploit-session-wiring pipeline"
+  ],
+  "notes": "Scope reminder: recce is airgap-constrained, so all recommended probes must remain stdlib socket+struct with no external CVE lookup at runtime \u2014 CVE matching should be a shipped local vendor/version table keyed by the normalized fingerprint. All ACTIVE items (Force Listen-Only, write echo, malformed-PDU fuzz, UMAS reserved commands) must sit behind explicit exploit-mode gates because they can genuinely disrupt a physical process; the punch list flags them but they should not run in the default passive scan path."
+}

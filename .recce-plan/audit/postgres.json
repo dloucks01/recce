@@ -1,0 +1,259 @@
+{
+  "service": "postgres",
+  "module_files": [
+    "recce/services/db/postgres.py"
+  ],
+  "summary": "Deep, high-quality Postgres module: trust-auth detection, cleartext/md5/SCRAM-SHA-256 auth with weak-default sweep, loot (databases/roles/pg_shadow hashes/extensions/replication roles/foreign servers/security-definer/public schema), COPY-FROM-PROGRAM RCE (capability + opt-in benign prove), lo_import legacy file read, dblink/postgres_fdw pivot with foreign-server user-mapping cred extraction, sensitive-column datamine with connection-string harvest, and a small CVE map. Gaps cluster around the wire-encryption layer (SSLRequest/GSSENCRequest never sent), the replication startup pseudo-DB, live topology intel (pg_stat_activity / pg_stat_replication / pg_hba.conf), several classes of hash and DB fingerprinting a superuser can trivially read, missing modern CVEs (2024 batch, CREATEROLE self-grant CVE-2023-5869 in wrong bucket), and cross-service wire gaps for hostnames/hashes/known_users derived from what the loot already sees.",
+  "existing_capabilities": [
+    "v3-startup-trust-detect",
+    "auth-cleartext-md5-scram256",
+    "weak-default-cred-sweep",
+    "loot-databases-roles-shadow-hashes",
+    "extension-enumeration",
+    "replication-role-enum",
+    "foreign-server-cred-extract",
+    "dblink-fdw-pivot-finding",
+    "public-schema-create-audit",
+    "security-definer-public-audit",
+    "lo-import-legacy-file-read-detect",
+    "copy-from-program-rce-with-optin-prove",
+    "datamine-secret-columns-with-connstr-harvest",
+    "cve-map-2019-2022-2023",
+    "server-version-parse",
+    "pg-error-parse",
+    "credential-emission-postgres-loot-fdw-datamine"
+  ],
+  "missing_capabilities": [
+    {
+      "name": "SSLRequest / TLS-mode enumeration",
+      "kind": "passive",
+      "description": "The module never sends SSLRequest (0x04D2162F preamble) before the v3 StartupMessage. That single-byte 'S'/'N' response reveals whether TLS is offered, and follow-up handshake reveals cert (issuer, CN, SAN, expiry, self-signed), negotiated TLS version and cipher \u2014 and whether the server permits an UNENCRYPTED startup after refusing SSL (ssl=off, hostssl absent) or accepts weak TLS1.0/1.1. Same for GSSENCRequest (0x04D21630) in \u00a755.2.11. Without it the module can't flag 'Postgres reachable in cleartext' \u2014 the single most common wire finding on internal networks and the precondition for MITM/downgrade of the SCRAM handshake.",
+      "value": "high",
+      "protocol_reference": "PostgreSQL docs \u00a755.2.10 SSL Session Encryption; \u00a755.2.11 GSSAPI Session Encryption",
+      "cwe": [
+        "CWE-319",
+        "CWE-326",
+        "CWE-757"
+      ],
+      "finding_kind": "pg_no_tls / pg_weak_tls / pg_tls_downgrade"
+    },
+    {
+      "name": "pg_hba.conf / postgresql.conf sniff via pg_read_file()",
+      "kind": "active",
+      "description": "A superuser (or member of pg_read_server_files) can `SELECT pg_read_file('pg_hba.conf')` and `SELECT pg_read_file(setting) FROM pg_settings WHERE name='hba_file'`. That yields the entire trust table \u2014 every CIDR/host+auth-method+db combo, including `trust` entries that only apply to specific dbs (which the current trust-probe would miss because it only tries dbname=postgres) and replication trust that permits pg_basebackup. Also `SHOW archive_command / restore_command / ssl_key_file / log_directory` leaks filesystem layout used for lo_export writes.",
+      "value": "high",
+      "protocol_reference": "postgresql.org/docs/current/functions-admin.html \u00a7pg_read_file; postgresql.org/docs/current/auth-pg-hba-conf.html",
+      "cwe": [
+        "CWE-200",
+        "CWE-538"
+      ],
+      "finding_kind": "pg_hba_disclosure"
+    },
+    {
+      "name": "Replication startup (replication=true / pseudo-db) probe",
+      "kind": "active",
+      "description": "Send startup with the parameter `replication=true` (or `replication=database`) \u2014 the server enters the replication sub-protocol. If auth passes, the connecting role can pg_basebackup the ENTIRE cluster (physical dump: every DB, every hash, every extension, WALs) without ever executing SQL. pg_hba typically has a SEPARATE `host replication all \u2026` line that admins forget to lock down (default 'trust' from Debian packages). Module currently only tests SQL access, misses this whole trust surface.",
+      "value": "critical",
+      "protocol_reference": "PostgreSQL docs \u00a755.4 Streaming Replication Protocol; \u00a722.2.5.7 replication startup parameter",
+      "cwe": [
+        "CWE-306",
+        "CWE-284"
+      ],
+      "finding_kind": "pg_replication_trust / pg_replication_reachable"
+    },
+    {
+      "name": "pg_stat_activity / pg_stat_replication topology intel",
+      "kind": "active",
+      "description": "`SELECT usename, client_addr, client_hostname, application_name, backend_type FROM pg_stat_activity` reveals every currently-connected user AND the internal IPs/hostnames that connect (app tier, ETL, ops workstations). `SELECT usename, client_addr, application_name FROM pg_stat_replication` reveals every WAL receiver \u2014 standby DB IPs to pivot to. These feed hostnames/known_users/relay_targets directly. Module never queries either.",
+      "value": "high",
+      "protocol_reference": "postgresql.org/docs/current/monitoring-stats.html \u00a727.2.4 pg_stat_activity; \u00a727.2.5 pg_stat_replication",
+      "cwe": [
+        "CWE-200"
+      ],
+      "finding_kind": "pg_topology_disclosure"
+    },
+    {
+      "name": "Hash-format classification for pg_shadow output",
+      "kind": "passive",
+      "description": "`passwd` from pg_shadow comes in three formats: `md5<32hex>` (hashcat -m 11100 with salt=username), `SCRAM-SHA-256$<iter>:<salt>$<StoredKey>:<ServerKey>` (hashcat -m 28600), or literal cleartext on very old / custom setups. Current code emits every hash as `kind=hash` with no format tag or hashcat-mode hint, forcing downstream tools/testers to guess. Also: distinguishing SCRAM from md5 tells you whether a downgrade attack against pg_authentication_timeout is even possible.",
+      "value": "medium",
+      "protocol_reference": "PostgreSQL docs \u00a755.3.11 AuthenticationSASL / \u00a721.5 Password Authentication",
+      "cwe": [
+        "CWE-916",
+        "CWE-200"
+      ],
+      "finding_kind": "pg_hash_format"
+    },
+    {
+      "name": "SCRAM-SHA-256-PLUS channel-binding negotiation",
+      "kind": "passive",
+      "description": "Server advertises both `SCRAM-SHA-256` and `SCRAM-SHA-256-PLUS` in the mech list. If a client with a TLS session selects the non-PLUS mech, the SCRAM auth is not bound to the channel and a MITM at the TLS layer can steal creds. Module blindly picks SCRAM-SHA-256 and never records that PLUS was offered but downgraded \u2014 miss both a hardening finding and a MITM opportunity for testers who own the network path.",
+      "value": "medium",
+      "protocol_reference": "RFC 5802 \u00a76; RFC 7677; PostgreSQL docs \u00a721.5 (SCRAM channel binding)",
+      "cwe": [
+        "CWE-757",
+        "CWE-287"
+      ],
+      "finding_kind": "pg_scram_no_channel_binding"
+    },
+    {
+      "name": "GSSAPI / Kerberos & SSPI auth detection (codes 7,8,9)",
+      "kind": "passive",
+      "description": "_do_auth returns False on AuthenticationGSS(7)/GSSContinue(8)/SSPI(9). It should at least emit a fingerprint finding: 'server requires GSSAPI/Kerberos' + include the SPN (postgres/hostname) as a Kerberoasting/AS-REP-roasting seed for the AD module. Also GSSENCRequest support probe (see TLS gap).",
+      "value": "medium",
+      "protocol_reference": "PostgreSQL docs \u00a755.2.2 Authentication (AuthenticationGSS/GSSContinue/SSPI); \u00a721.6 GSSAPI",
+      "cwe": [
+        "CWE-287"
+      ],
+      "finding_kind": "pg_gss_required"
+    },
+    {
+      "name": "CancelRequest fingerprinting",
+      "kind": "passive",
+      "description": "The Postgres v3 protocol defines CancelRequest (message code 80877102) that requires the 32-bit backend PID + 32-bit secret key from a captured BackendKeyData. Not exploited today. Also serves as a stealthy 'is this really Postgres' fingerprint (server closes silently rather than replying) to distinguish real Postgres from pgbouncer/pgpool/honeypots.",
+      "value": "low",
+      "protocol_reference": "PostgreSQL docs \u00a755.2.9 Canceling Requests in Progress",
+      "cwe": [
+        "CWE-732"
+      ],
+      "finding_kind": "pg_cancel_abuse"
+    },
+    {
+      "name": "pgbouncer / pgpool / pgcat admin console detection",
+      "kind": "active",
+      "description": "pgbouncer answers a Postgres-like handshake but on `dbname=pgbouncer` accepts SHOW STATS / SHOW POOLS / SHOW USERS from `stats_users`/`admin_users` \u2014 often left as `postgres` with an auth_file that leaks EVERY pool password in cleartext or md5. Common on 6432. Not detected. Same shape for pgpool (9999) and pgcat.",
+      "value": "high",
+      "protocol_reference": "pgbouncer docs \u00a7Admin console; auth_query & auth_file",
+      "cwe": [
+        "CWE-284",
+        "CWE-522"
+      ],
+      "finding_kind": "pgbouncer_admin_reachable"
+    },
+    {
+      "name": "Broader trust-DB probe (template1 / replication / common app DBs)",
+      "kind": "active",
+      "description": "probe() only tries `dbname=postgres`. pg_hba entries commonly key on database name (`local all all trust`, `host template1 postgres 10.0.0.0/8 trust`). A trust rule limited to template1/replication/an app db is missed. Should iterate a small list: postgres, template1, template0 (rejected), replication (see separate gap), and the harvested `databases` list from any accessible connection.",
+      "value": "medium",
+      "protocol_reference": "PostgreSQL docs \u00a721.1 The pg_hba.conf File \u2014 record types keyed on database",
+      "cwe": [
+        "CWE-306"
+      ],
+      "finding_kind": "pg_trust_db_specific"
+    },
+    {
+      "name": "CREATEROLE self-elevation (CVE-2023-5869 / 2024 CREATEROLE hardening)",
+      "kind": "passive",
+      "description": "Pre-16.1 a role with CREATEROLE could grant itself membership in any role \u2014 including superuser-adjacent roles \u2014 by creating a role, granting itself membership, then WITH ADMIN OPTION. Module already reads pg_roles; add a check for `rolcreaterole=true AND NOT rolsuper` and flag as potential self-elevation. Current CVE map has `CVE-2023-5869` bucketed as an integer-overflow (wrong CVE mapping \u2014 the string is right but the description is CVE-2023-5868/5870 style \u2014 worth verifying).",
+      "value": "high",
+      "protocol_reference": "postgresql.org release notes 16.1; CVE-2023-5869 mapping vs CVE-2024-10978 / CVE-2024-10979",
+      "cwe": [
+        "CWE-269",
+        "CWE-266"
+      ],
+      "finding_kind": "pg_createrole_privesc"
+    },
+    {
+      "name": "Modern CVE additions (2024 batch)",
+      "kind": "passive",
+      "description": "CVE map is missing: CVE-2024-10979 (PL/Perl env var manipulation \u2192 RCE), CVE-2024-4317 (pg_stats_ext / pg_stats_ext_exprs exposed sample data to unauthorised users), CVE-2024-7348 (TOCTOU race in pg_dump \u2192 superuser RCE), CVE-2024-10976 (row security policy applied inconsistently across queries), CVE-2024-10977 (client cert error \u2192 MITM injection). Also missing older-but-common: CVE-2018-1058 (search_path trojan-object \u2014 module tangentially covers via public_can_create but doesn't tie to the CVE), CVE-2021-32027 (array subscript arbitrary R/W), CVE-2021-3393 (partitioned-table constraint bypass row leak).",
+      "value": "high",
+      "protocol_reference": "postgresql.org/support/security/",
+      "cwe": [
+        "CWE-1035",
+        "CWE-269"
+      ],
+      "finding_kind": "pg_cve_2024_batch"
+    },
+    {
+      "name": "pg_event_trigger / ON LOGIN backdoor enumeration",
+      "kind": "passive",
+      "description": "PG 17 added `ON LOGIN` event triggers. Prior versions have `ddl_command_start / sql_drop` event triggers. A malicious event trigger owned by a low-priv role but firing under the connecting user's context is a classic persistence primitive. `SELECT evtname, evtowner::regrole, evtevent, evtfoid::regproc FROM pg_event_trigger` is one query.",
+      "value": "medium",
+      "protocol_reference": "postgresql.org/docs/current/catalog-pg-event-trigger.html; PG17 ON LOGIN event triggers",
+      "cwe": [
+        "CWE-506",
+        "CWE-269"
+      ],
+      "finding_kind": "pg_event_trigger_backdoor"
+    },
+    {
+      "name": "Role-grant map / writable-table enumeration for low-priv accounts",
+      "kind": "passive",
+      "description": "For a NON-superuser credentialed hit the module dumps pg_shadow-visible bits but never asks `SELECT grantee, table_schema, table_name, privilege_type FROM information_schema.role_table_grants WHERE grantee IN (current_user, 'PUBLIC') AND privilege_type IN ('INSERT','UPDATE','DELETE')` \u2014 which tables the compromised low-priv user can WRITE (data-integrity/staging-of-payload angle) or `SELECT` across other schemas. This is the primary pivot from a scoped app account.",
+      "value": "medium",
+      "protocol_reference": "SQL/Schemata \u2014 information_schema.role_table_grants; PG docs \u00a737.53",
+      "cwe": [
+        "CWE-284",
+        "CWE-732"
+      ],
+      "finding_kind": "pg_lowpriv_writable_tables"
+    },
+    {
+      "name": "COPY TO PROGRAM / lo_export write primitives (distinct from read)",
+      "kind": "passive",
+      "description": "`can_write_files` is captured but not exploited; there's no finding calling out that write allows dropping an authorized_keys into the postgres OS home, planting a udev/pgpass file, or overwriting archive_command scripts. `COPY (SELECT \u2026) TO PROGRAM 'cmd'` is a separate RCE vector from FROM PROGRAM (asymmetric grants exist in the wild).",
+      "value": "medium",
+      "protocol_reference": "postgresql.org/docs/current/sql-copy.html \u2014 TO PROGRAM",
+      "cwe": [
+        "CWE-78",
+        "CWE-732"
+      ],
+      "finding_kind": "pg_copy_to_program"
+    },
+    {
+      "name": "Row-Level Security policy enumeration (pg_policies)",
+      "kind": "passive",
+      "description": "`SELECT schemaname, tablename, policyname, roles, qual, with_check FROM pg_policies` reveals RLS policies, and combined with `SELECT relname FROM pg_class WHERE relrowsecurity AND NOT relforcerowsecurity` finds tables where the OWNER bypasses RLS \u2014 classic privesc/leak surface, and the target of CVE-2023-2454/2455.",
+      "value": "medium",
+      "protocol_reference": "postgresql.org/docs/current/catalog-pg-policy.html; \u00a75.9 RLS",
+      "cwe": [
+        "CWE-284",
+        "CWE-863"
+      ],
+      "finding_kind": "pg_rls_bypass"
+    },
+    {
+      "name": "Untrusted-language ownership + PL/Python/Perl body dump for backdoors",
+      "kind": "passive",
+      "description": "Extension list already flags plpythonu/plperlu presence, but never enumerates the ACTUAL functions written in those languages (`SELECT proname, pg_get_functiondef(oid) FROM pg_proc WHERE prolang IN (SELECT oid FROM pg_language WHERE lanname IN ('plpythonu','plperlu'))`). Function bodies commonly contain hardcoded creds, S3 keys, LDAP binds, or explicit shell-outs.",
+      "value": "medium",
+      "protocol_reference": "postgresql.org/docs/current/catalog-pg-proc.html; \u00a741 PL/*",
+      "cwe": [
+        "CWE-200",
+        "CWE-798"
+      ],
+      "finding_kind": "pg_untrusted_pl_body"
+    },
+    {
+      "name": "libpq startup-parameter injection / options=-c abuse",
+      "kind": "active",
+      "description": "Startup message accepts `options=-c<setting>=<value>` for any GUC. That is the vector abused by CVE-2020-25694/25695 and by more recent (CVE-2024-4317-ish) info-leak vectors \u2014 options=`-c search_path=` or `-c work_mem=` on servers that log them exposes information. Also useful defensively: probing `options=-c log_statement=none` acceptance tells you the server allows client-side log-suppression (post-auth stealth).",
+      "value": "low",
+      "protocol_reference": "PostgreSQL docs \u00a755.2.1 Start-up (`options` parameter) + \u00a7GUC parameters",
+      "cwe": [
+        "CWE-20"
+      ],
+      "finding_kind": "pg_options_injection"
+    }
+  ],
+  "cross_service_wire_gaps": [
+    "pg_stat_activity.client_addr / client_hostname \u2014 internal IPs and hostnames of every current DB client \u2014 never emitted into hostnames or relay_targets",
+    "pg_stat_replication remote_addr \u2014 WAL-receiver IPs (standby DB peers) \u2014 never emitted anywhere; ideal pivot targets",
+    "foreign_servers[].host is captured for pivot findings but not registered as a hostname/relay_target for the next scan pass; only propagated as origin_ip on Credential when a user mapping happens to have creds",
+    "pg_shadow role names (out['roles']) are captured but NOT pushed into known_users \u2014 the spray set never learns every DB role name",
+    "pg_shadow hashes emit with kind='hash' but no hash_type ('md5' vs 'scram-sha-256') \u2014 downstream hashcat has to guess the -m mode",
+    "datamine 'harvested' connection strings are added as Credential but the parsed HOST portion is never emitted to hostnames/relay_targets (mongodb:// or postgres:// URIs contain fresh internal endpoints)",
+    "email-shaped values in datamine samples never contribute to domains",
+    "TLS certificate CN/SAN (once SSLRequest is implemented) would emit hostnames and \u2014 for wildcard/internal SANs \u2014 subdomain hints for the DNS/AD module",
+    "pg_hba.conf CIDR ranges (when pg_read_file works) reveal INTERNAL SUBNETS trusted to talk to Postgres \u2014 a first-class relay_targets seed and never harvested",
+    "GSSAPI/Kerberos SPN (postgres/host@REALM) from the mech list would feed AD kerberoasting queue"
+  ],
+  "priority_gaps": [
+    "SSLRequest / TLS-mode probe \u2014 cleartext-Postgres finding + prereq for SCRAM channel-binding downgrade detection; single biggest wire gap and 3-line addition to the startup handshake",
+    "Replication startup (`replication=true`) probe \u2014 completely separate pg_hba surface with pg_basebackup \u2192 whole-cluster dump; commonly left `trust` on Debian defaults and invisible to the current SQL-only probe",
+    "pg_stat_activity + pg_stat_replication topology extract + pg_hba.conf sniff (post-super) \u2014 feeds hostnames/known_users/relay_targets that no other module can produce, closes the cross-service wire gap the audit called out",
+    "Hash-type tagging for pg_shadow output + CREATEROLE self-elevation flag + 2024 CVE batch (10979 PL/Perl RCE, 7348 pg_dump race, 4317 pg_stats leak) \u2014 small changes, high downstream ROI for cracking + version-based findings"
+  ],
+  "notes": "Module quality is high \u2014 the trust/loot/pivot/datamine chain is thorough and the finding text is actionable. Priority-1 (TLS) is a one-preamble add before the current v3 startup. Priority-2 (replication startup) is a second `_startup()` variant taking a parameter dict. Priority-3 (topology + pg_hba) is three additional _simple_query calls inside loot() plus emitting Host/Credential-style records upstream. The current CVE map's `CVE-2023-5869` blurb ('integer overflow in array modification') matches CVE-2023-5869 but the CREATEROLE-self-elevation angle (CVE-2023-5869/5870 in the November 2023 batch) is separately worth its own detection path against pg_roles.rolcreaterole. Not implementing anything per instructions."
+}

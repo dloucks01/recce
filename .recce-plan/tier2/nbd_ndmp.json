@@ -1,0 +1,245 @@
+{
+  "service": "NBD + NDMP",
+  "summary": "Neither Network Block Device (10809/tcp) nor NDMP (10000/tcp) is recognised anywhere in recce today. svcdetect.py's PORT_NAMES, serviceenum.py's _PORT/_NAME maps, and _SIGNATURES have zero entries for either protocol; grep for 'nbd', 'NBDMAGIC', 'ndmp', or port 10809 across recce/ returns nothing. No recce/services/*.py module implements either. Both protocols are high-value backup/storage attack surfaces: NBD advertises block-device exports (raw disk images, VM volumes) with fixed-newstyle handshake and unauth NBD_OPT_LIST; NDMP is the SNIA-standard backup control channel for NetApp/EMC/Isilon/Veritas filers, and returns rich host/vendor/filesystem/tape topology from CONFIG_GET_* messages before authentication, plus offers an MD5-challenge auth surface that is crackable and replayable. The exemplar shape is rsync.py: raw-socket protocol handshake, unauth inventory pull (module list / export list / CONFIG_GET_*), per-item verdict probe, finding_builder-based findings, analyze() orchestration with svcprobe.iter_probe.",
+  "default_ports": [
+    "10809/tcp",
+    "10000/tcp"
+  ],
+  "existing_coverage": {
+    "detected": false,
+    "files": [],
+    "notes": "No hits for nbd/NBDMAGIC/ndmp/10809 anywhere in recce/. Port 10000/tcp is also unmapped in svcdetect.py PORT_NAMES and serviceenum._PORT \u2014 a live NDMP on 10000 currently shows up as 'unknown'/'tcpwrapped' with no follow-on, and NBD on 10809 gets no label and no probe. No proof helper, no runbook, no findings, no cross-service wire integration."
+  },
+  "cross_service_wire_candidates": [
+    "known_hostnames: NDMP CONFIG_GET_HOST_INFO returns the filer's own hostname (often FQDN) and NDMP FS listings enumerate mounted filesystems whose paths and share names carry hostnames \u2014 feed both into core.known_hostnames so DNS/HTTP/SMB/LDAP scoring picks them up",
+    "known_domains: NDMP host_info hostnames are frequently FQDNs (netapp01.corp.example) \u2014 feed the domain suffix into core.known_domains for kerberos/LDAP/AD scoring",
+    "known_hashes: NDMP AUTH_MD5 challenge/response is essentially HMAC-MD5(password, challenge) \u2014 when we solicit a challenge with a bogus user, capture challenge+response pairs and register them as crackable material in creds.known_hashes (hashcat -m 50)",
+    "known_users: NDMP CONFIG_GET_AUTH_ATTR error text and vendor implementations often leak the configured backup-admin username (root/ndmp/backup/dump) \u2014 feed into creds.known_users for cross-service password spray",
+    "relay_targets: NDMP MD5 challenge-response is replayable across sibling NDMP endpoints that share the backup credential (very common on filer clusters) \u2014 a new degenerate relay surface, mirroring core.relay_targets",
+    "NEW known_volumes / known_exports: NBD export names + NDMP FS listings + NDMP tape/SCSI inventory are storage targets that inform post-exploitation prioritisation (which SMB shares matter, which iSCSI LUNs to grep, which VMDK to pull) \u2014 this is a NEW shared surface worth adding as core.known_volumes so nfs/smb/iscsi/vmware modules can cross-reference",
+    "NEW known_backup_topology: NDMP reveals which tape libraries, robots, and DP servers pair with which filer \u2014 a NEW shared surface that helps other modules (SMB, NFS, iSCSI) rank hosts by 'is this the crown-jewel backup target'",
+    "known_products / cve pipeline: NDMP CONFIG_GET_SERVER_INFO returns vendor + revision (NetApp OnTap, EMC Celerra, Veritas NetBackup, Bacula) \u2014 feed product/version into Port.product/version so the existing CVE mapper picks it up (mirrors what svcdetect._fill_product does for banner grabs)"
+  ],
+  "capabilities": [
+    {
+      "name": "detect-nbd-port-10809",
+      "kind": "passive",
+      "description": "Add 10809 -> ('nbd', 'Network Block Device') to svcdetect.PORT_NAMES and 10809 -> 'nbd' to serviceenum._PORT so an nmap 'unknown' on 10809 gets an inferred label and shows up in commands_for_host. Zero traffic.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "NBD protocol doc, https://github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md"
+    },
+    {
+      "name": "detect-ndmp-port-10000",
+      "kind": "passive",
+      "description": "Add 10000 -> ('ndmp', 'Network Data Management Protocol (backup)') to svcdetect.PORT_NAMES and 10000 -> 'ndmp' to serviceenum._PORT. Port 10000 is also Webmin's default, so keep the label as an *inference* (not authoritative) and let the active probe upgrade or downgrade it \u2014 grab_banner returns HTML/HTTP for Webmin, XDR framing for NDMP.",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "SNIA NDMP v4 spec, https://www.snia.org/tech_activities/standards/curr_standards/ndmp"
+    },
+    {
+      "name": "nbd-magic-signature",
+      "kind": "passive",
+      "description": "Add signatures to svcdetect._SIGNATURES that catch NBD's fixed-newstyle greeting bytes: 'NBDMAGIC' + IHAVEOPT (0x49 0x48 0x41 0x56 0x45 0x4f 0x50 0x54) and the oldstyle NBDMAGIC + 0x00 0x00 0x42 0x02 0x81 0x86 0x12 0x53. Any port that emits those bytes on connect is NBD regardless of port number (NBD is often re-hosted on non-default ports for VM export).",
+      "value": "medium",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "NBD proto.md, 'Handshake' section"
+    },
+    {
+      "name": "nbd-export-list-unauth",
+      "kind": "active",
+      "description": "Complete the fixed-newstyle NBD handshake and send NBD_OPT_LIST (option 3) \u2014 the server returns NBD_REP_SERVER for each export with the export name and description. Unauthenticated by default on stock nbd-server, qemu-nbd -e, and most VM-image share setups. Records every export name \u2014 the storage-layout equivalent of rsync's #list. Analogous to rsync.list_modules.",
+      "value": "high",
+      "cwe": [
+        "CWE-306",
+        "CWE-200"
+      ],
+      "protocol_reference": "NBD proto.md, NBD_OPT_LIST (option 3), NBD_REP_SERVER (reply type 2)",
+      "finding_kind": "nbd_export_list"
+    },
+    {
+      "name": "nbd-export-info-probe",
+      "kind": "active",
+      "description": "For each export discovered, send NBD_OPT_INFO (option 6) to learn the export size, minimum/preferred/maximum block sizes, and transmission flags (NBD_FLAG_READ_ONLY, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_TRIM, etc.). Read-only: stop after NBD_REP_INFO, never NBD_OPT_GO into the transmission phase. Flags reveal whether the export is writable (data-destruction / ransomware risk) or read-only.",
+      "value": "high",
+      "cwe": [
+        "CWE-306",
+        "CWE-732"
+      ],
+      "protocol_reference": "NBD proto.md, NBD_OPT_INFO / NBD_INFO_EXPORT / NBD_INFO_BLOCK_SIZE",
+      "finding_kind": "nbd_export_writable"
+    },
+    {
+      "name": "nbd-tls-posture",
+      "kind": "active",
+      "description": "Send NBD_OPT_STARTTLS (option 5); the server replies NBD_REP_ACK (TLS supported), NBD_REP_ERR_POLICY (TLS forbidden \u2014 export is cleartext-only), or NBD_REP_ERR_UNSUP (server too old for TLS). Also check whether the server forces TLS before allowing NBD_OPT_LIST \u2014 if it doesn't, the export list itself leaks over cleartext. Classic 'block device transport is cleartext' finding.",
+      "value": "medium",
+      "cwe": [
+        "CWE-319"
+      ],
+      "protocol_reference": "NBD proto.md, NBD_OPT_STARTTLS (option 5)",
+      "finding_kind": "nbd_cleartext"
+    },
+    {
+      "name": "nbd-block0-fingerprint",
+      "kind": "active",
+      "description": "Optional and gated behind --active-deep: after NBD_OPT_GO on a writable-or-readable export, issue a single 512-byte NBD_CMD_READ at offset 0 and match the leading bytes against a small filesystem-signature table (EFI PART / MBR 55AA / LUKS / ext4 magic 0xEF53 at offset 0x438 / NTFS 'NTFS    ' at 0x03 / VMDK 'KDMV' / QCOW 'QFI\\xfb'). Turns 'export foo, 500 GB' into 'export foo = LUKS-encrypted disk' or 'export vm01 = VMDK'. One block only, then NBD_CMD_DISC.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "NBD proto.md NBD_CMD_READ; on-disk magic per Wikipedia 'List of file signatures'",
+      "finding_kind": "nbd_export_fingerprint"
+    },
+    {
+      "name": "ndmp-server-info-unauth",
+      "kind": "active",
+      "description": "Speak NDMP v3/v4 XDR over TCP and send NDMP_CONNECT_OPEN then NDMP_CONFIG_GET_SERVER_INFO \u2014 many implementations (NetApp OnTap, EMC Celerra/Isilon, Veritas NetBackup Media Server, Bacula bacula-sd) return vendor_name / product_name / revision_number and the supported auth types (NDMP_AUTH_NONE / NDMP_AUTH_TEXT / NDMP_AUTH_MD5) BEFORE any credential is required. Feed product/version into Port.product/version for the CVE mapper.",
+      "value": "high",
+      "cwe": [
+        "CWE-200",
+        "CWE-306"
+      ],
+      "protocol_reference": "SNIA NDMP v4 \u00a73.6.2 NDMP_CONFIG_GET_SERVER_INFO; historical draft-skardal-ndmp-04",
+      "finding_kind": "ndmp_info_unauth"
+    },
+    {
+      "name": "ndmp-host-info-unauth",
+      "kind": "active",
+      "description": "Send NDMP_CONFIG_GET_HOST_INFO \u2014 returns hostname, os_type, os_vers, hostid. This is the crown-jewel cross-service pivot: feed hostname/FQDN into known_hostnames + known_domains so DNS/LDAP/SMB scoring picks it up, and feed os_type into the host OS-guessing pool. Unauth on stock configs.",
+      "value": "high",
+      "cwe": [
+        "CWE-200"
+      ],
+      "protocol_reference": "SNIA NDMP v4 \u00a73.6.1 NDMP_CONFIG_GET_HOST_INFO",
+      "finding_kind": "ndmp_host_info"
+    },
+    {
+      "name": "ndmp-fs-tape-scsi-inventory",
+      "kind": "active",
+      "description": "Send NDMP_CONFIG_GET_FS_INFO, NDMP_CONFIG_GET_TAPE_INFO, and NDMP_CONFIG_GET_SCSI_INFO \u2014 returns every mounted filesystem (path, type, size, used), every tape drive, and every SCSI backend. Complete backup-topology inventory. Feed filesystem paths into the NEW known_volumes surface so nfs/smb/iscsi modules can rank targets by 'this is what the filer backs up'.",
+      "value": "high",
+      "cwe": [
+        "CWE-200",
+        "CWE-306"
+      ],
+      "protocol_reference": "SNIA NDMP v4 \u00a73.6.4/3.6.5/3.6.6",
+      "finding_kind": "ndmp_inventory_leak"
+    },
+    {
+      "name": "ndmp-auth-md5-challenge-capture",
+      "kind": "auth",
+      "description": "Send NDMP_CONFIG_GET_AUTH_ATTR with auth_type=NDMP_AUTH_MD5 to solicit a fresh 64-byte challenge, then attempt NDMP_CONNECT_CLIENT_AUTH with a throwaway username and dummy response to identify configured admin usernames and confirm the challenge/response format. Store (username, challenge, response) triples in creds.known_hashes as crackable material \u2014 the construction is HMAC-MD5(password, challenge), so hashcat -m 50 (HMAC-MD5, key=$pass) cracks them. Do NOT bruteforce online; capture only.",
+      "value": "high",
+      "cwe": [
+        "CWE-326",
+        "CWE-916"
+      ],
+      "protocol_reference": "SNIA NDMP v4 \u00a73.6.10 NDMP_CONFIG_GET_AUTH_ATTR; RFC 2104 HMAC",
+      "finding_kind": "ndmp_md5_challenge_capture"
+    },
+    {
+      "name": "ndmp-auth-text-cleartext-check",
+      "kind": "auth",
+      "description": "If the server's supported auth_types (from CONFIG_GET_SERVER_INFO) advertises NDMP_AUTH_TEXT, that means the server accepts plaintext passwords over the NDMP control channel \u2014 anyone MITM-positioned reads the backup admin password in the clear. Report as a distinct finding. Also flag NDMP_AUTH_NONE if advertised (unauthenticated backup control \u2014 critical).",
+      "value": "high",
+      "cwe": [
+        "CWE-319",
+        "CWE-522"
+      ],
+      "protocol_reference": "SNIA NDMP v4 \u00a73.6.10 auth_types enum",
+      "finding_kind": "ndmp_cleartext_auth"
+    },
+    {
+      "name": "ndmp-version-downgrade-probe",
+      "kind": "active",
+      "description": "NDMP_CONNECT_OPEN advertises a protocol version. Try v4 first, then downgrade to v3 and v2 on failure \u2014 pre-v3 servers (Bacula-sd < 5.x, older Veritas) never gate CONFIG_GET_* on auth at all. Also report the highest supported version as a soft finding (v2/v3 on modern infrastructure = end-of-life posture).",
+      "value": "medium",
+      "cwe": [
+        "CWE-1104",
+        "CWE-1188"
+      ],
+      "protocol_reference": "SNIA NDMP v4 \u00a73.4; NDMP v3 draft-skardal-ndmp-04",
+      "finding_kind": "ndmp_legacy_version"
+    },
+    {
+      "name": "ndmp-session-hijack-surface",
+      "kind": "exploit",
+      "description": "NDMP DATA/MOVER connections between the tape server and data server are typically unauthenticated TCP sessions negotiated via NDMP_MOVER_LISTEN / NDMP_DATA_LISTEN \u2014 an attacker on the same network segment can hijack the data channel and inject or exfiltrate backup streams. recce cannot exploit this passively but should REPORT the attack surface when the mover/data services are reachable, cite CWE-306+CWE-300, and stage runbook commands (nmap on the mover port, wireshark filter). Non-destructive \u2014 no active hijack.",
+      "value": "critical",
+      "cwe": [
+        "CWE-306",
+        "CWE-300"
+      ],
+      "protocol_reference": "SNIA NDMP v4 \u00a75 (DATA/MOVER interfaces)",
+      "finding_kind": "ndmp_session_hijack_surface"
+    },
+    {
+      "name": "cross-service-wire-nbd-ndmp",
+      "kind": "chain",
+      "description": "Wire NBD/NDMP findings into recce's shared surfaces: (1) NDMP host_info hostname -> core.known_hostnames + core.known_domains; (2) NDMP MD5 challenge/response triples -> creds.known_hashes with hashcat mode 50; (3) NDMP auth error-leaked usernames -> creds.known_users; (4) NDMP filesystem paths + NBD export names -> NEW core.known_volumes surface so nfs/smb/iscsi rank targets; (5) NDMP MD5 challenge replay across sibling filers -> core.relay_targets extension. This is the punch-list item that makes the module 'smart' rather than a siloed reporter.",
+      "value": "high",
+      "cwe": [],
+      "protocol_reference": "recce/core/known_hostnames.py, recce/core/known_domains.py, recce/creds/known_users.py, recce/creds/known_hashes.py, recce/core/relay_targets.py"
+    }
+  ],
+  "recommended_hashcat_modes": [
+    {
+      "mode": 50,
+      "description": "HMAC-MD5 (key = $pass): the correct mode for NDMP AUTH_MD5, which is HMAC-MD5(password, challenge). challenge is the 64-byte value from CONFIG_GET_AUTH_ATTR."
+    },
+    {
+      "mode": 10,
+      "description": "md5($pass.$salt): fallback for older Bacula/NDMP implementations that use plain MD5(password || challenge) rather than proper HMAC \u2014 a couple of vendors got this wrong."
+    }
+  ],
+  "recommended_findings": [
+    {
+      "severity": "critical",
+      "title": "NDMP server accepts unauthenticated backup control (NDMP_AUTH_NONE advertised)"
+    },
+    {
+      "severity": "critical",
+      "title": "NDMP DATA/MOVER session hijack surface exposed on the network"
+    },
+    {
+      "severity": "high",
+      "title": "NBD export writable without authentication (block-level ransomware / data-destruction risk)"
+    },
+    {
+      "severity": "high",
+      "title": "NBD exports enumerable without authentication (storage layout + export names leak via NBD_OPT_LIST)"
+    },
+    {
+      "severity": "high",
+      "title": "NDMP host/server/filesystem inventory leaked pre-auth (CONFIG_GET_HOST_INFO / SERVER_INFO / FS_INFO)"
+    },
+    {
+      "severity": "high",
+      "title": "NDMP AUTH_TEXT enabled \u2014 backup admin password sent in cleartext"
+    },
+    {
+      "severity": "high",
+      "title": "NDMP AUTH_MD5 challenge captured \u2014 HMAC-MD5 crackable offline (hashcat -m 50)"
+    },
+    {
+      "severity": "medium",
+      "title": "NBD export served over cleartext \u2014 NBD_OPT_STARTTLS not required"
+    },
+    {
+      "severity": "medium",
+      "title": "NDMP v2/v3 in use \u2014 end-of-life protocol version on production filer"
+    },
+    {
+      "severity": "medium",
+      "title": "NBD block-0 fingerprint reveals sensitive volume type (LUKS / VMDK / QCOW / raw filesystem)"
+    }
+  ],
+  "implementation_notes": "Create recce/services/backup_storage.py (or two files: nbd.py and ndmp.py) modeled directly on rsync.py: raw-socket protocol implementation, _LineReader analog for XDR frames on NDMP, is_nbd()/is_ndmp() port+banner predicates, list_exports() / config_get_all() unauth inventory, per-item probe helpers, finding_builder-based findings(), TESTING_NARRATIVE, runbook(), proof_html() reusing db.mssql.proof_html, findings_to_vulns via svccommon._f2v, and analyze() using svcprobe.iter_probe. Add 10809/10000 to svcdetect.PORT_NAMES and serviceenum._PORT/_NAME. Add NBDMAGIC signature to svcdetect._SIGNATURES. Register the new module in recce/services/__init__.py and hook analyze() into whatever driver enumerates services (scan pipeline). For cross-service wiring, extend creds.known_users to accept NDMP-discovered usernames, creds.known_hashes to accept NDMP MD5 tuples, core.known_hostnames.hostnames_for() consumer to also read NDMP host_info, and design a NEW core/known_volumes.py that follows the same shape as core/relay_targets.py so nfs.py/smb.py/rsync.py/(future iscsi.py) can rank targets by whether NDMP or NBD confirmed the filer treats them as backup-critical. Airgap constraint: stdlib socket only \u2014 no pyndmp/pynbd dependency; hand-roll the XDR encoding (uint32 message type, sequence, timestamp, reply_sequence, error, message body) per SNIA NDMP v4 \u00a73.3."
+}
