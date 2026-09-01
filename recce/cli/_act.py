@@ -345,6 +345,7 @@ def cmd_prove(args: argparse.Namespace) -> int:
     by_key: dict = {}
     for r in results:
         by_key[(r['ip'], r['port'], r['finding'])] = r
+    tier_upgrades = 0
     for host in hosts:
         for v in host.vulns:
             r = by_key.get((v.ip, v.port, v.title))
@@ -353,6 +354,20 @@ def cmd_prove(args: argparse.Namespace) -> int:
             v.verdict = r['verdict']
             v.verdict_evidence = list(r.get('evidence') or [])
             v.verdict_finish = r.get('finish', '')
+            # P2-5: a CONFIRMED verdict IS server-side evidence — promote
+            # depth_tier to "t2" (proof of exploit) when the finding was
+            # at "t0"/"t1" or unstamped. The prove result's evidence lines
+            # ARE the T2 output; drop them into `output` so the ExploitSurface
+            # tab shows the proof without needing to open verdict_evidence.
+            # Never DEMOTES (a finding already at t2/t3/t4 stays put).
+            if r['verdict'] == proofs.CONFIRMED:
+                cur = (getattr(v, "depth_tier", "") or "").lower()
+                if cur in ("", "t0", "t1"):
+                    v.depth_tier = "t2"
+                    tier_upgrades += 1
+                    if not v.output and v.verdict_evidence:
+                        v.output = "proof-verdict:\n  " + "\n  ".join(
+                            v.verdict_evidence[:6])
             touched.add(host.ip)
     for host in hosts:
         if host.ip in touched:
@@ -374,6 +389,9 @@ def cmd_prove(args: argparse.Namespace) -> int:
     c = proofs.summary(results)
     print(f"\n[+] {c[proofs.CONFIRMED]} confirmed · {c[proofs.LIKELY]} likely · "
           f"{c[proofs.INCONCLUSIVE]} inconclusive · {c[proofs.FALSE_POSITIVE]} false positive.")
+    if tier_upgrades:
+        print(f"    Promoted {tier_upgrades} finding(s) to depth_tier='t2' "
+              f"(proof of exploit) — visible on the WebUI Exploit tab.")
     _final_report(store, paths, store.get_meta("engagement") or args.title)
     store.close()
     print(f"    Full detail on the Verification tab in {paths['xlsx']}.")
