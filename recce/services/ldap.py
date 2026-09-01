@@ -800,6 +800,42 @@ def _laps_readable(computers: list) -> list[tuple[str, str, str]]:
     return out
 
 
+def _redact_pw_desc(desc: str, max_len: int = 90) -> str:
+    """Sanitize one description string for T2 evidence display: keep the leading
+    credential-hint keyword (so a reader sees WHY it matched) but mask the trailing
+    secret. Never echoes the whole plaintext.
+
+    Example: 'temp password: Sup3rP@ss!' -> 'temp password: Su***'.
+    A description with no visible hint (regex matched a subtle spelling) is
+    reduced to a short, hard-truncated stub of 6 chars + '***'."""
+    if not desc:
+        return ""
+    m = _PW_DESC_RE.search(desc)
+    if m is None:
+        return (desc[:6] + "***") if len(desc) > 8 else "***"
+    # Preserve everything up to and INCLUDING a couple of chars after the hint
+    # keyword, then mask. Cap the total length so a long description can't blow
+    # up the finding output.
+    end = min(m.end() + 2, len(desc))
+    prefix = desc[:end]
+    if len(prefix) > max_len - 3:
+        prefix = prefix[:max_len - 3]
+    return prefix + "***"
+
+
+def _pw_desc_evidence(accts: list, cap: int = 12) -> str:
+    """T2 captured-evidence block for the pw-in-description finding: one redacted
+    line per real account returned by the paged authenticated search.
+    Bounded (default 12 rows) so a large environment doesn't produce a wall of text."""
+    lines: list[str] = []
+    for a in accts[:cap]:
+        desc = a.attrs.get("description", "") if getattr(a, "attrs", None) else ""
+        lines.append(f"sAMAccountName={a.name}\tdescription={_redact_pw_desc(desc)!r}")
+    if len(accts) > cap:
+        lines.append(f"... and {len(accts) - cap} more")
+    return "\n".join(lines)
+
+
 def _rbcd_targets(computers: list) -> list[str]:
     """Computer names carrying a non-empty msDS-AllowedToActOnBehalfOfOtherIdentity
     (RBCD SD set) - each is one Rubeus s4u away from SYSTEM for whoever is in the SD."""
@@ -868,7 +904,7 @@ def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict
             ["CWE-307"], kind="ldap_lockout"))
     if pw_desc:
         names = ", ".join(a.name for a in pw_desc[:12])
-        fs.append(_finding(
+        pw_desc_f = _finding(
             "high", "Passwords in LDAP description/comment fields", tgt,
             f"{len(pw_desc)} account description(s) look like they contain a credential "
             f"(e.g. {names}). Descriptions are world-readable to any authenticated user - "
@@ -884,7 +920,14 @@ def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict
                 "'(description=*)' sAMAccountName description; parse; then nxc smb "
                 "<ip> -u <sam> -p '<extracted-pass>' to validate; if valid: "
                 "--local-auth escalation checks."),
-            depth_tier="t2"))
+            depth_tier="t2")
+        # T2 SAFE PROOF: captured server-side evidence from the paged read that
+        # already ran (single controlled search, no extra request). One redacted
+        # line per hit ("sAMAccountName=X description='...pass:***...'") - proves
+        # the description text really came back, without echoing the plaintext
+        # secret into the report. Bounded to 12 rows to keep the finding compact.
+        pw_desc_f["output"] = _pw_desc_evidence(pw_desc)
+        fs.append(pw_desc_f)
 
     laps = _laps_readable(computers)
     if laps:

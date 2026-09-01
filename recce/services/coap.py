@@ -712,6 +712,53 @@ def proxy_relay_test(ip: str, port: int, proxy_uri: str,
     return out
 
 
+# --- Capability: Proxy-Uri T2 SAFE-read proof (RFC 7252 §5.7) -------------
+# Once the T1 fingerprint has flagged the endpoint as a proxy, this single
+# controlled read proves the relay ACTUALLY reaches a target and returns the
+# fetched content. We point Proxy-Uri at the target's OWN external
+# coap://<ip>:<port>/.well-known/core — a resource the target already serves
+# anonymously, so the loopback fetch has no state impact and no exfil beyond
+# echoing what the target already publishes. A 2.05 with a link-format body
+# (or any non-empty payload) = the proxy DID perform the outbound fetch —
+# deterministic SSRF-class evidence.
+
+def proxy_relay_read(ip: str, port: int, target_uri: str,
+                     timeout: float = _TIMEOUT) -> dict:
+    """Send ONE Proxy-Uri GET pointing at `target_uri` (typically the target's
+    own /.well-known/core) and capture the response body verbatim. Returns
+    {attempted, echoed, code, size, snippet, target_uri, error}."""
+    out = {"attempted": False, "echoed": False, "code": "",
+           "size": 0, "snippet": b"", "target_uri": target_uri, "error": ""}
+    mid = _rand_mid()
+    token = _rand_token()
+    opts = [(_OPT_PROXY_URI, target_uri.encode("utf-8"))]
+    pkt = _encode_message(_T_CON, _M_GET, mid, token, opts)
+    sock = _open_udp(timeout)
+    try:
+        out["attempted"] = True
+        data, _ = _txn(sock, ip, port, pkt, timeout, expect_mid=mid)
+        if not data:
+            out["error"] = "no reply"
+            return out
+        try:
+            msg = _decode_message(data)
+        except ValueError:
+            out["error"] = "malformed reply"
+            return out
+        out["code"] = _code_str(msg["code"])
+        out["size"] = len(msg["payload"])
+        out["snippet"] = msg["payload"][:128]
+        # T2 threshold: a 2.xx response WITH a non-empty body means the proxy
+        # actually fetched and returned bytes. Empty body 2.xx alone is not
+        # enough — an endpoint could echo an empty 2.05 without fetching.
+        cls = (msg["code"] >> 5) & 0x07
+        if cls == 2 and out["size"] > 0:
+            out["echoed"] = True
+    finally:
+        sock.close()
+    return out
+
+
 # --- Capability: DTLS ClientHello fingerprint (5684/udp) ------------------
 # Minimal DTLS 1.2 ClientHello with PSK ciphers offered. We only parse the
 # server response looking for HelloVerifyRequest, ServerHello, and PSK
@@ -887,6 +934,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         "observe": [],
         "dtls": {},
         "proxy": {},
+        "proxy_read": {},
         "amp_ratio": 0.0,
         "oscore": False,
         "product": "",
@@ -1000,6 +1048,17 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
                                             timeout=timeout)
         except OSError:
             out["proxy"] = {}
+        # T2 SAFE-read: only when the T1 fingerprint above already flagged the
+        # endpoint as a proxy. Loop the target back to its OWN /.well-known/core
+        # so no third party is contacted and no state changes.
+        if (out["proxy"].get("proxied")
+                and out.get("wellknown_code", "").startswith("2.")):
+            loopback = f"coap://{ip}:{port}/.well-known/core"
+            try:
+                out["proxy_read"] = proxy_relay_read(
+                    ip, port, loopback, timeout=timeout)
+            except OSError:
+                out["proxy_read"] = {}
 
     return out
 
@@ -1214,13 +1273,31 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             # Proxy relay abuse.
             pxy = pr.get("proxy") or {}
             if pxy.get("proxied"):
+                # T2 promotion: one loopback Proxy-Uri read that echoed a
+                # non-empty body proves the relay actually performed the
+                # outbound fetch — deterministic SSRF-class evidence.
+                pxy_read = pr.get("proxy_read") or {}
+                echoed = bool(pxy_read.get("echoed"))
+                depth_tier = "t2" if echoed else "t1"
+                t2_bit = ""
+                if echoed:
+                    snippet_txt = (pxy_read.get("snippet") or b"").decode(
+                        "utf-8", "replace")[:120]
+                    t2_bit = (
+                        f" T2 proof: recce sent a follow-up Proxy-Uri GET aimed at "
+                        f"the target's own loopback resource "
+                        f"({pxy_read.get('target_uri')}) — the endpoint returned "
+                        f"{pxy_read.get('code')} with {pxy_read.get('size')}B of "
+                        f"echoed content ({snippet_txt!r}), proving the proxy "
+                        f"actually performed the outbound fetch.")
                 out.append(_finding(
                     "high",
                     "CoAP endpoint acts as an open proxy (Proxy-Uri accepted)",
                     tgt,
                     f"GET with Proxy-Uri returned {pxy.get('code')} — the endpoint "
                     "attempted to forward the request. An attacker can pivot to "
-                    "internal HTTP / CoAP services otherwise unreachable (SSRF-class).",
+                    "internal HTTP / CoAP services otherwise unreachable "
+                    "(SSRF-class)." + t2_bit,
                     f"coap-client -m get -P coap://{h.ip}:{p.portid} "
                     "coap://internal.target/path",
                     "Disable proxy forwarding on the CoAP stack, or restrict the "
@@ -1231,7 +1308,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "coap://127.0.0.1/.well-known/core; then "
                         f"coap-client -m get -P coap://{h.ip}:{p.portid} "
                         "http://<internal-ip>/ to test HTTP SSRF pivot."),
-                    depth_tier="t1"))
+                    depth_tier=depth_tier))
 
             # UDP amplifier.
             ratio = pr.get("amp_ratio") or 0.0

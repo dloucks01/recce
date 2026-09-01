@@ -501,5 +501,208 @@ class DrdaMagicTest(unittest.TestCase):
         self.assertLessEqual(length, 65535)
 
 
+# --- T2 unauth-evidence probe (/whoAmI/api/json on the twin) ---------------
+
+# Wire-derived: Jenkins WhoAmI descriptor as a real anonymous caller sees it
+# on an ACL-permissive controller (name='anonymous', authenticated=false).
+_WHOAMI_ANON_JSON = (
+    b'{"_class":"hudson.security.WhoAmI",'
+    b'"anonymous":true,"authenticated":false,'
+    b'"authorities":["anonymous"],'
+    b'"details":"RemoteIpAddress: 10.0.0.5; SessionId: null",'
+    b'"name":"anonymous",'
+    b'"toString":"..."}'
+)
+
+
+class UnauthEvidenceProbeTest(unittest.TestCase):
+    def test_anonymous_whoami_200_captures_identity(self):
+        def fake_http_get(ip, port, path, tls, timeout):
+            self.assertEqual(path, "/whoAmI/api/json")
+            self.assertFalse(tls)
+            return 200, {"content-type": "application/json"}, _WHOAMI_ANON_JSON
+        original = jj._http_get
+        jj._http_get = fake_http_get
+        try:
+            ev = jj._probe_unauth_evidence("10.0.0.7", 8080, False, timeout=1)
+        finally:
+            jj._http_get = original
+        self.assertIsNotNone(ev)
+        self.assertTrue(ev["probed"])
+        self.assertEqual(ev["status"], 200)
+        self.assertEqual(ev["endpoint"], "/whoAmI/api/json")
+        self.assertEqual(ev["name"], "anonymous")
+        self.assertIs(ev["authenticated"], False)
+        self.assertIs(ev["anonymous"], True)
+        self.assertIn("anonymous", ev["authorities"])
+
+    def test_patched_returns_403_no_identity_capture(self):
+        def fake_http_get(ip, port, path, tls, timeout):
+            return 403, {}, b"Forbidden"
+        original = jj._http_get
+        jj._http_get = fake_http_get
+        try:
+            ev = jj._probe_unauth_evidence("10.0.0.7", 8080, False, timeout=1)
+        finally:
+            jj._http_get = original
+        # Probed but 403 — name field empty, so caller does NOT upgrade.
+        self.assertIsNotNone(ev)
+        self.assertTrue(ev["probed"])
+        self.assertEqual(ev["status"], 403)
+        self.assertEqual(ev["name"], "")
+        self.assertIsNone(ev["authenticated"])
+
+    def test_timeout_returns_none_no_upgrade(self):
+        def fake_http_get(ip, port, path, tls, timeout):
+            return None  # simulate timeout / connection error
+        original = jj._http_get
+        jj._http_get = fake_http_get
+        try:
+            ev = jj._probe_unauth_evidence("10.0.0.7", 8080, False, timeout=1)
+        finally:
+            jj._http_get = original
+        # None result signals "no evidence — caller keeps T1".
+        self.assertIsNone(ev)
+
+    def test_malformed_json_body_leaves_fields_empty(self):
+        def fake_http_get(ip, port, path, tls, timeout):
+            return 200, {}, b"<html>not-json</html>"
+        original = jj._http_get
+        jj._http_get = fake_http_get
+        try:
+            ev = jj._probe_unauth_evidence("10.0.0.7", 8080, False, timeout=1)
+        finally:
+            jj._http_get = original
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["status"], 200)
+        self.assertEqual(ev["name"], "")
+
+    def test_authorities_capped_to_six(self):
+        big = ('{"name":"anonymous","authenticated":false,"anonymous":true,'
+               '"authorities":["a","b","c","d","e","f","g","h","i","j"]}')
+        def fake_http_get(ip, port, path, tls, timeout):
+            return 200, {}, big.encode("utf-8")
+        original = jj._http_get
+        jj._http_get = fake_http_get
+        try:
+            ev = jj._probe_unauth_evidence("10.0.0.7", 8080, False, timeout=1)
+        finally:
+            jj._http_get = original
+        self.assertEqual(len(ev["authorities"]), 6)
+
+
+class T2PromotionFindingsTest(unittest.TestCase):
+    """The jenkins_agent_listener_discovered finding should carry depth_tier=
+    't2' with captured evidence when _probe_unauth_evidence produced a real
+    identity readback, and stay at 't1' otherwise."""
+
+    def _base_probe(self, http_evidence: dict):
+        idt = _FakeIdentity()
+        return {("10.0.0.1", 50000): {
+            "reachable": True, "is_jnlp": True,
+            "protocols": ["JNLP4-connect", "Ping"],
+            "legacy_jnlp": [], "plaintext_jnlp": [], "cli_legacy": [],
+            "http_sibling": {"found": True, "http_port": 8080, "tls": False,
+                             "jenkins_version": "2.319.1",
+                             "agent_port": 50000,
+                             "protocols": ["JNLP4-connect"],
+                             "instance_identity_b64": idt.b64,
+                             "instance_identity_fp": idt.fp,
+                             "url": "http://10.0.0.1:8080/tcpSlaveAgentListener/"},
+            "version": "2.319.1", "instance_identity_fp": idt.fp, "error": "",
+            "banner": "",
+            "unauth_evidence": http_evidence,
+        }}
+
+    def _host(self):
+        return Host(ip="10.0.0.1", ports=[
+            Port(portid=50000, service="jnlp-agent",
+                 extrainfo="Jenkins JNLP agent listener"),
+        ])
+
+    def test_upgrade_to_t2_when_whoami_identity_captured(self):
+        ev = {"probed": True, "status": 200, "endpoint": "/whoAmI/api/json",
+              "name": "anonymous", "authenticated": False, "anonymous": True,
+              "authorities": ["anonymous"]}
+        probes = self._base_probe(ev)
+        fs = jj.findings([self._host()], probes)
+        listener = next(f for f in fs
+                        if f["kind"] == "jenkins_agent_listener_discovered")
+        self.assertEqual(listener["depth_tier"], "t2")
+        self.assertIn("evidence", listener)
+        self.assertEqual(listener["evidence"]["name"], "anonymous")
+        self.assertEqual(listener["evidence"]["http_status"], 200)
+        self.assertIs(listener["evidence"]["authenticated"], False)
+        # Detail line reflects the captured proof.
+        self.assertIn("T2 proof", listener["detail"])
+        self.assertIn("/whoAmI/api/json", listener["detail"])
+        self.assertIn("anonymous", listener["detail"])
+
+    def test_stays_t1_when_whoami_returns_403(self):
+        ev = {"probed": True, "status": 403, "endpoint": "/whoAmI/api/json",
+              "name": "", "authenticated": None, "anonymous": None,
+              "authorities": []}
+        probes = self._base_probe(ev)
+        fs = jj.findings([self._host()], probes)
+        listener = next(f for f in fs
+                        if f["kind"] == "jenkins_agent_listener_discovered")
+        self.assertEqual(listener["depth_tier"], "t1")
+        self.assertNotIn("evidence", listener)
+        self.assertNotIn("T2 proof", listener["detail"])
+
+    def test_stays_t1_when_probe_absent(self):
+        # Simulates a timeout / no-response path — probe() left unauth_evidence
+        # as the default empty dict.
+        probes = self._base_probe({})
+        fs = jj.findings([self._host()], probes)
+        listener = next(f for f in fs
+                        if f["kind"] == "jenkins_agent_listener_discovered")
+        self.assertEqual(listener["depth_tier"], "t1")
+        self.assertNotIn("evidence", listener)
+
+
+class ProbeInvokesUnauthEvidenceTest(unittest.TestCase):
+    """When probe() fetches the HTTP sibling successfully, it should also invoke
+    the T2 evidence probe on the twin — a single extra GET, no more."""
+
+    def test_probe_calls_whoami_after_sibling_hit(self):
+        idt = _FakeIdentity()
+        headers = {
+            "x-jenkins": "2.319.1",
+            "x-jenkins-agent-protocols": "JNLP4-connect, Ping",
+            "x-instance-identity": idt.b64,
+        }
+        seen: list[str] = []
+
+        def fake_http_get(ip, port, path, tls, timeout):
+            seen.append(path)
+            if path == "/tcpSlaveAgentListener/":
+                return 200, headers, b""
+            if path == "/whoAmI/api/json":
+                return 200, {}, _WHOAMI_ANON_JSON
+            return None
+
+        srv = _CannedTCPServer(_JNLP_ERROR_HARDENED)
+        try:
+            h = Host(ip="127.0.0.1", ports=[
+                Port(portid=srv.port, service="jnlp-agent"),
+                Port(portid=8080, service="http"),
+            ])
+            original = jj._http_get
+            jj._http_get = fake_http_get
+            try:
+                pr = jj.probe("127.0.0.1", srv.port, timeout=2, host=h)
+            finally:
+                jj._http_get = original
+        finally:
+            srv.close()
+        self.assertTrue(pr["reachable"])
+        self.assertEqual(pr["unauth_evidence"].get("name"), "anonymous")
+        # Exactly the two twin paths were fetched (single extra read for T2).
+        self.assertIn("/tcpSlaveAgentListener/", seen)
+        self.assertIn("/whoAmI/api/json", seen)
+        self.assertEqual(seen.count("/whoAmI/api/json"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

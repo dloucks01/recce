@@ -590,3 +590,204 @@ def test_http_tunnel_probe_detects_tunnel_content_type():
         srv.close()
     assert out["tunnel"] is True
     assert "DSS" in out["server"]
+
+
+# --- T2 SAFE PROOF: unauth_setup_probe -------------------------------------
+#
+# RTSP SETUP (RFC 2326 §11) is how a client asks the server to allocate a
+# media transport for one track. A 200 OK with a Session header proves the
+# server accepted an anonymous media-session allocation — deterministic T2
+# evidence that unauthenticated PLAY would immediately stream RTP. recce
+# never issues PLAY; a TEARDOWN with the returned Session id releases the
+# allocation, so nothing is recorded off the sensor.
+
+_SETUP_200 = (
+    b"RTSP/1.0 200 OK\r\n"
+    b"CSeq: 20\r\n"
+    b"Session: 47112815;timeout=60\r\n"
+    b"Transport: RTP/AVP/TCP;unicast;interleaved=0-1;ssrc=1a2b3c4d\r\n"
+    b"\r\n"
+)
+
+_SETUP_401 = (
+    b"RTSP/1.0 401 Unauthorized\r\n"
+    b"CSeq: 20\r\n"
+    b'WWW-Authenticate: Digest realm="HikvisionDS", nonce="deadbeef",'
+    b" algorithm=MD5\r\n"
+    b"\r\n"
+)
+
+_SETUP_TEARDOWN_200 = (
+    b"RTSP/1.0 200 OK\r\n"
+    b"CSeq: 21\r\n"
+    b"\r\n"
+)
+
+
+def _parse_sdp_fixture():
+    return rtsp.parse_sdp(_SDP_BODY)
+
+
+def test_unauth_setup_probe_ok_when_setup_returns_200_with_session():
+    # Server accepts SETUP + then acknowledges TEARDOWN. The client should
+    # only report ok=True when Session is populated, and evidence should
+    # carry the reply headers verbatim.
+    srv = _RTSPServer([_SETUP_200, _SETUP_TEARDOWN_200])
+    try:
+        sdp = _parse_sdp_fixture()
+        base = f"rtsp://{srv.host}:{srv.port}/"
+        out = rtsp.unauth_setup_probe(srv.host, srv.port, timeout=2.0,
+                                      tls=False, sdp=sdp, base_uri=base)
+    finally:
+        srv.close()
+    assert out["ok"] is True
+    assert out["status"] == 200
+    assert out["session"].startswith("47112815")
+    assert "interleaved=0-1" in out["transport"]
+    # The first non-aggregate control ('*') is 'track1' from the SDP fixture;
+    # relative controls resolve against the DESCRIBE base URI.
+    assert out["control_uri"].endswith("/track1")
+    assert "Session: 47112815" in out["evidence"]
+
+
+def test_unauth_setup_probe_reports_not_ok_on_401():
+    srv = _RTSPServer([_SETUP_401])
+    try:
+        sdp = _parse_sdp_fixture()
+        base = f"rtsp://{srv.host}:{srv.port}/"
+        out = rtsp.unauth_setup_probe(srv.host, srv.port, timeout=2.0,
+                                      tls=False, sdp=sdp, base_uri=base)
+    finally:
+        srv.close()
+    assert out["ok"] is False
+    assert out["status"] == 401
+    assert out["session"] == ""
+
+
+def test_unauth_setup_probe_returns_not_ok_when_port_closed():
+    # Bind then immediately close — nothing accepts. Probe must return
+    # cleanly (ok=False) rather than raise; bounded timeout enforced.
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    sdp = _parse_sdp_fixture()
+    out = rtsp.unauth_setup_probe("127.0.0.1", port, timeout=0.5, tls=False,
+                                  sdp=sdp, base_uri=f"rtsp://127.0.0.1:{port}/")
+    assert out["ok"] is False
+    assert out["session"] == ""
+
+
+def test_unauth_setup_probe_skips_when_no_track_control():
+    # sdp with only aggregate '*' control should short-circuit — no network
+    # traffic at all.
+    sdp = {"session": "x", "tool": "", "media": [], "codecs": [],
+           "controls": ["*"], "fmtp": []}
+    out = rtsp.unauth_setup_probe("127.0.0.1", 1, timeout=0.1, tls=False,
+                                  sdp=sdp, base_uri="rtsp://127.0.0.1:1/")
+    assert out["ok"] is False
+    assert out["control_uri"] == ""
+
+
+def test_resolve_control_uri_absolute_and_relative():
+    # Absolute wins as-is.
+    absu = "rtsp://cam.example.local:554/streaming/track1"
+    assert rtsp._resolve_control_uri(absu, "rtsp://10.0.0.10:554/") == absu
+    # Relative appends to base, with a single '/' separator either way.
+    assert rtsp._resolve_control_uri(
+        "track1", "rtsp://10.0.0.10:554/Streaming/Channels/101") \
+        == "rtsp://10.0.0.10:554/Streaming/Channels/101/track1"
+    assert rtsp._resolve_control_uri(
+        "/track1", "rtsp://10.0.0.10:554/") == "rtsp://10.0.0.10:554/track1"
+
+
+def test_findings_emit_rtsp_setup_unauth_t2_when_setup_ok():
+    h = _host_with_rtsp()
+    pr = {("10.0.0.10", 554): {
+        "reachable": True, "server": "Hipcam", "public": ["OPTIONS"],
+        "auth": {}, "unauth_stream": True,
+        "sdp": {"session": "cam", "tool": "LIVE555",
+                "media": [{"kind": "video", "transport": "RTP/AVP", "payload": 96}],
+                "codecs": [{"codec": "H264", "clock": 90000}],
+                "controls": ["*", "track1"], "fmtp": []},
+        "paths": [], "liveness": False, "cve_hits": [], "digest_capture": "",
+        "cert_cn": "", "tls": False,
+        "sdp_base_uri": "rtsp://10.0.0.10:554/",
+        "setup_probe": {
+            "ok": True, "status": 200,
+            "session": "47112815;timeout=60",
+            "transport": "RTP/AVP/TCP;unicast;interleaved=0-1",
+            "control_uri": "rtsp://10.0.0.10:554/track1",
+            "evidence": ("RTSP/1.0 200 OK\r\nCSeq: 20\r\n"
+                         "Session: 47112815;timeout=60\r\n"
+                         "Transport: RTP/AVP/TCP;unicast;interleaved=0-1"),
+        }}}
+    fs = rtsp.findings([h], pr)
+    kinds = [f["kind"] for f in fs]
+    assert "rtsp_setup_unauth" in kinds
+    setup = next(f for f in fs if f["kind"] == "rtsp_setup_unauth")
+    assert setup["severity"] == "critical"
+    assert setup["depth_tier"] == "t2"
+    # Real server-side evidence carried through into the finding detail.
+    assert "Session=47112815" in setup["detail"]
+    assert "interleaved=0-1" in setup["detail"]
+    assert "track1" in setup["detail"]
+    # T1 rtsp_unauth_stream (already t2) still emitted alongside — additions
+    # only; no existing finding suppressed.
+    assert "rtsp_unauth_stream" in kinds
+
+
+def test_findings_skip_rtsp_setup_unauth_when_probe_not_ok():
+    # setup_probe reported not-ok (server refused or timed out) → no T2
+    # setup-unauth finding, but the existing t2 unauth_stream still fires.
+    h = _host_with_rtsp()
+    pr = {("10.0.0.10", 554): {
+        "reachable": True, "server": "Hipcam", "public": ["OPTIONS"],
+        "auth": {}, "unauth_stream": True,
+        "sdp": {"session": "cam", "tool": "LIVE555",
+                "media": [{"kind": "video", "transport": "RTP/AVP", "payload": 96}],
+                "codecs": [], "controls": ["*", "track1"], "fmtp": []},
+        "paths": [], "liveness": False, "cve_hits": [], "digest_capture": "",
+        "cert_cn": "", "tls": False,
+        "sdp_base_uri": "rtsp://10.0.0.10:554/",
+        "setup_probe": {"ok": False, "status": 401, "session": "",
+                         "transport": "", "control_uri": "",
+                         "evidence": ""}}}
+    fs = rtsp.findings([h], pr)
+    kinds = [f["kind"] for f in fs]
+    assert "rtsp_setup_unauth" not in kinds
+    assert "rtsp_unauth_stream" in kinds
+
+
+def test_probe_end_to_end_populates_setup_probe_evidence():
+    # Full probe(): OPTIONS -> DESCRIBE 200+SDP -> per-path DESCRIBE 404 x N
+    # -> SETUP 200 (control from SDP) -> TEARDOWN 200. Verifies the T2
+    # promotion field is wired end-to-end from probe() through to findings().
+    replies: list[bytes] = [_OPTIONS_200_NO_GETPARAM, _DESCRIBE_200]
+    replies += [_DESCRIBE_404] * len(rtsp._WELL_KNOWN_PATHS)
+    replies += [_SETUP_200, _SETUP_TEARDOWN_200]
+    srv = _RTSPServer(replies)
+    try:
+        pr = rtsp.probe(srv.host, srv.port, timeout=2.0)
+    finally:
+        srv.close()
+    assert pr["unauth_stream"] is True
+    sp = pr["setup_probe"]
+    assert sp["ok"] is True
+    assert sp["session"].startswith("47112815")
+    assert sp["control_uri"].endswith("/track1")
+
+
+def test_probe_setup_proof_disabled_by_flag():
+    # do_setup_proof=False keeps the T1 path unchanged (no SETUP traffic).
+    # A single-reply queue is enough — if SETUP fired, the recv would hit
+    # a closed connection but the point is: setup_probe stays empty.
+    replies: list[bytes] = [_OPTIONS_200_NO_GETPARAM, _DESCRIBE_200]
+    replies += [_DESCRIBE_404] * len(rtsp._WELL_KNOWN_PATHS)
+    srv = _RTSPServer(replies)
+    try:
+        pr = rtsp.probe(srv.host, srv.port, timeout=2.0, do_setup_proof=False)
+    finally:
+        srv.close()
+    assert pr["unauth_stream"] is True
+    assert pr["setup_probe"] == {}

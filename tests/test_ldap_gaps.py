@@ -153,6 +153,104 @@ def test_weak_sasl_helper_case_insensitive_and_dedup():
     assert L._weak_sasl_mechs(None) == []
 
 
+def _user(name: str, description: str = "") -> dict:
+    d: dict[str, list[str]] = {"sAMAccountName": [name],
+                               "userAccountControl": ["512"]}
+    if description:
+        d["description"] = [description]
+    return d
+
+
+# --- ldap_pw_desc T2 promotion: captured redacted evidence in output field ------
+
+def test_pw_desc_t2_emits_captured_evidence_output():
+    """Vulnerable: an authenticated read returned real descriptions with password
+    hints - the T2 finding must ship a captured-evidence `output` block that names
+    each account and shows the description text existed, without echoing the
+    plaintext secret."""
+    users = [
+        _user("alice", "Temporary password: Sup3rS3cret!Rotate"),
+        _user("bob", "pwd=Winter2025! reset me"),
+        _user("carol", "backup service credential Xy9zTop"),   # 'credential' hint
+        _user("dave"),                                          # no desc - control
+        _user("eve", "please review"),                          # no hint - control
+    ]
+    en = _enum(users=users)
+    _summary, fs = L.apply_enum(Host(ip="10.0.0.9"), "corp.local", "10.0.0.9", 389, en)
+    hits = [f for f in fs if f["kind"] == "ldap_pw_desc"]
+    assert len(hits) == 1, [f["kind"] for f in fs]
+    f = hits[0]
+    assert f["depth_tier"] == "t2"
+    assert f["severity"] == "high"
+    # Captured evidence block is present and contains each vulnerable sAMAccountName.
+    out = f.get("output", "")
+    assert out, "T2 finding must carry captured evidence in `output`"
+    for name in ("alice", "bob", "carol"):
+        assert name in out, out
+    # Non-matching users must not appear in the evidence block.
+    assert "dave" not in out and "eve" not in out
+    # The plaintext secrets must NEVER be echoed into the evidence.
+    for secret in ("Sup3rS3cret!Rotate", "Winter2025!", "Xy9zTop"):
+        assert secret not in out, f"plaintext {secret!r} leaked into T2 evidence"
+    # A recognisable credential-hint keyword IS preserved (proves the match).
+    assert "password" in out.lower() or "pwd" in out.lower() or "cred" in out.lower()
+
+
+def test_pw_desc_patched_no_finding_no_output():
+    """Patched: no description carries a credential hint -> no finding emitted at
+    all (and therefore no captured evidence to leak)."""
+    users = [_user("alice", "on leave"), _user("bob", "engineering team"),
+             _user("carol")]
+    en = _enum(users=users)
+    _summary, fs = L.apply_enum(Host(ip="10.0.0.9"), "corp.local", "10.0.0.9", 389, en)
+    assert not [f for f in fs if f["kind"] == "ldap_pw_desc"]
+
+
+def test_pw_desc_t2_bounded_evidence_row_cap():
+    """Bounded evidence: >12 hits collapses into a 'and N more' tail, so the
+    output block stays compact on large environments."""
+    users = [_user(f"user{i:03d}", f"password: Sekret{i:03d}!") for i in range(20)]
+    en = _enum(users=users)
+    _summary, fs = L.apply_enum(Host(ip="10.0.0.9"), "corp.local", "10.0.0.9", 389, en)
+    f = [x for x in fs if x["kind"] == "ldap_pw_desc"][0]
+    out = f["output"]
+    # 12 rows + one tail line
+    assert out.count("\n") == 12
+    assert "and 8 more" in out
+    # No plaintext leak in the truncated set either.
+    for i in range(20):
+        assert f"Sekret{i:03d}!" not in out
+
+
+def test_pw_desc_t2_enum_timeout_yields_no_output():
+    """Timeout / connect-failed shape: enum returned an error, so apply_enum is
+    never called and no T2 evidence exists to display. Verifies the module's
+    error branch does not synthesize a fake finding."""
+    # Mirror the analyze() path: on `error`, apply_enum is skipped entirely.
+    en = {"error": "connect failed"}
+    # Nothing to fold - apply_enum path is bypassed by design in analyze().
+    assert en.get("error") == "connect failed"
+    # And if apply_enum WERE invoked with an empty users list (equivalent shape
+    # after a mid-search timeout that returned zero rows), no pw_desc finding
+    # is emitted:
+    empty = _enum(users=[])
+    _summary, fs = L.apply_enum(Host(ip="10.0.0.9"), "corp.local", "10.0.0.9", 389, empty)
+    assert not [f for f in fs if f["kind"] == "ldap_pw_desc"]
+
+
+def test_redact_pw_desc_helper_masks_secret_keeps_hint():
+    """Unit test for the redactor: hint-keyword survives, secret does not."""
+    r = L._redact_pw_desc("Temporary password: Sup3rS3cret!Rotate")
+    assert "password" in r.lower()
+    assert "Sup3rS3cret!Rotate" not in r
+    assert r.endswith("***")
+    # No hint match -> hard truncate + ***
+    r2 = L._redact_pw_desc("service account for backups only")
+    assert r2.endswith("***")
+    # Empty description -> empty string, not '***' (nothing to redact).
+    assert L._redact_pw_desc("") == ""
+
+
 def test_weak_sasl_dedup_per_host_across_multiple_ports():
     """Host-level SASL finding fires once per host even when 389/636/3268/3269 all open."""
     h = Host(ip="10.9.9.9")

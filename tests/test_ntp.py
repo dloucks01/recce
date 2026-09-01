@@ -337,6 +337,72 @@ def test_monlist_finding_names_disclosed_clients_when_parsed():
     assert "3" in f["detail"]         # count
 
 
+# --- T2 promotion: monlist evidence -------------------------------------------
+
+def test_monlist_finding_promotes_to_t2_when_client_ips_parsed():
+    """T2 proof: any IP decoded from a real info_monitor_1 record is server-side
+    evidence — a hardened ntpd cannot produce that payload. The finding must
+    upgrade depth_tier and carry the client list as feedable `output`."""
+    fs = _findings({"reachable": True, "monlist": True, "monlist_packets": 6,
+                    "monlist_bytes": 5400, "amplification": 112.5,
+                    "mon_clients": ["10.0.0.5", "10.0.0.6", "10.0.0.7"]})
+    f = next(f for f in fs if f["kind"] == "ntp_monlist")
+    assert f["depth_tier"] == "t2"
+    assert f.get("output"), "T2 must expose parsed clients as pivot output"
+    lines = f["output"].splitlines()
+    assert lines == ["10.0.0.5", "10.0.0.6", "10.0.0.7"]
+    assert "info_monitor_1" in f["detail"]         # names the wire evidence
+    assert "known_hosts" in f["detail"] or "pivot" in f["detail"].lower()
+
+
+def test_monlist_finding_stays_t1_when_no_client_ips_parsed():
+    """Payload came back but nothing decoded (v6-only mrulist / malformed
+    record) — the amplification finding stands, but without concrete pivot
+    evidence it must stay at t1 rather than falsely claiming T2 proof."""
+    fs = _findings({"reachable": True, "monlist": True, "monlist_packets": 4,
+                    "monlist_bytes": 2400, "amplification": 50.0})
+    f = next(f for f in fs if f["kind"] == "ntp_monlist")
+    assert f["depth_tier"] == "t1"
+    assert not f.get("output"), "no clients decoded => no pivot output"
+
+
+def test_monlist_t2_promotion_via_wire_probe_end_to_end():
+    """End-to-end: a fake vulnerable ntpd answers with a properly-shaped
+    info_monitor_1 payload; probe -> findings must land at t2 with the parsed
+    IPs on the finding's `output` field."""
+
+    class _Responder(_FakeNtpd):
+        def run(self):
+            end = time.time() + 5
+            while time.time() < end:
+                try:
+                    data, addr = self.sock.recvfrom(4096)
+                except (socket.timeout, OSError):
+                    return
+                if not data:
+                    return
+                mode = data[0] & 0x07
+                if mode == 3:
+                    self.sock.sendto(_time_reply(0.0, 3), addr)
+                elif mode == 7 and data[3] == 42:
+                    self.sock.sendto(_mode7_response(42, [
+                        _info_monitor_1(bytes([10, 9, 8, 7])),
+                        _info_monitor_1(bytes([10, 9, 8, 8])),
+                    ]), addr)
+
+    srv = _Responder(monlist=True, mode6=False)
+    srv.start()
+    time.sleep(0.15)
+    try:
+        pr = ntp.probe("127.0.0.1", srv.port, timeout=1.5)
+    finally:
+        srv.stop()
+    fs = _findings(pr)
+    f = next(x for x in fs if x["kind"] == "ntp_monlist")
+    assert f["depth_tier"] == "t2"
+    assert f["output"].splitlines() == ["10.9.8.7", "10.9.8.8"]
+
+
 def test_monlist_finding_truncates_very_long_client_lists():
     ips = [f"10.0.1.{i}" for i in range(1, 21)]
     fs = _findings({"reachable": True, "monlist": True, "monlist_packets": 6,

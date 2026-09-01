@@ -311,5 +311,123 @@ class RunbookTest(unittest.TestCase):
         self.assertTrue(any("6.select,3.vnc" in s["cmd"] for s in steps))
 
 
+class HandshakeLeakVerifyTest(unittest.TestCase):
+    """T2 promotion: single-shot `select,rdp` capture of the live args
+    frame guacd returns. Non-destructive, one connect, one opcode."""
+
+    # Wire-derived: an actual guacd 1.5.0 RDP args frame — VERSION token +
+    # the RDP plugin's live parameter template. Real server-side evidence.
+    # LENGTH is the CHARACTER count of each VALUE.
+    ARGS_RDP_1_5_0 = (
+        b"4.args,13.VERSION_1_5_0,8.hostname,4.port,6.domain,"
+        b"8.username,8.password,5.width,6.height,3.dpi;")
+
+    def test_verify_leak_captures_raw_wire_bytes(self):
+        srv = _GuacdServer({"rdp": self.ARGS_RDP_1_5_0})
+        try:
+            leak = guacamole.verify_handshake_leak(srv.host, srv.port,
+                                                   timeout=2)
+        finally:
+            srv.close()
+        # Real bytes from the server — includes the version token and the
+        # full parameter list guacd's RDP plugin advertised.
+        self.assertIn("VERSION_1_5_0", leak)
+        self.assertIn("hostname", leak)
+        self.assertIn("password", leak)
+        self.assertTrue(leak.endswith(";"))
+        # The `select,rdp` selector reached the server (single-shot).
+        self.assertEqual(srv.selected, ["rdp"])
+
+    def test_verify_leak_empty_on_error_opcode(self):
+        # A patched/hardened server whose RDP plugin refuses select yields
+        # an error frame — verify must return '' so t1 stays t1.
+        srv = _GuacdServer({"rdp": ERROR_FRAME_UNSUPPORTED})
+        try:
+            leak = guacamole.verify_handshake_leak(srv.host, srv.port,
+                                                   timeout=2)
+        finally:
+            srv.close()
+        self.assertEqual(leak, "")
+
+    def test_verify_leak_empty_on_timeout(self):
+        # Dead port → OSError inside create_connection → ''.
+        leak = guacamole.verify_handshake_leak("127.0.0.1", 1, timeout=1)
+        self.assertEqual(leak, "")
+
+    def test_verify_leak_truncates_pathological_reply(self):
+        # A pathologically large args frame must be capped by _MAX_LEAK_BYTES
+        # so a hostile server cannot bloat the finding.
+        padding = "X" * (guacamole._MAX_LEAK_BYTES * 2)
+        # Build a valid frame: `4.args,LEN.<padding>;`
+        big = (f"4.args,{len(padding)}.{padding};").encode("latin-1")
+        srv = _GuacdServer({"rdp": big})
+        try:
+            leak = guacamole.verify_handshake_leak(srv.host, srv.port,
+                                                   timeout=2)
+        finally:
+            srv.close()
+        self.assertLessEqual(len(leak), guacamole._MAX_LEAK_BYTES)
+        # Still starts with the real args opcode header from the server.
+        self.assertTrue(leak.startswith("4.args,"))
+
+
+class ExposedT2PromotionTest(unittest.TestCase):
+    """Findings-level: handshake_leak on the probe promotes guacd_exposed
+    from t1 to t2 and surfaces the raw wire text in `output`."""
+
+    def _host(self, ip="10.0.0.5", port=4822) -> Host:
+        return Host(ip=ip, ports=[Port(portid=port, service="guacd",
+                                       state="open")])
+
+    def test_exposed_stays_t1_without_leak(self):
+        h = self._host()
+        probes = {("10.0.0.5", 4822): {
+            "reachable": True, "opcode": "args", "version": "1.5.0",
+            "args_seen": ["VERSION_1_5_0"],
+            "backends_ok": ["vnc", "rdp"], "backends_err": []}}
+        fs = guacamole.findings([h], probes)
+        exposed = [f for f in fs if f["kind"] == "guacd_exposed"][0]
+        self.assertEqual(exposed["depth_tier"], "t1")
+        self.assertNotIn("output", exposed)
+
+    def test_exposed_promoted_to_t2_with_leak(self):
+        leak = ("4.args,13.VERSION_1_5_0,8.hostname,4.port,"
+                "6.domain,8.username,8.password;")
+        h = self._host()
+        probes = {("10.0.0.5", 4822): {
+            "reachable": True, "opcode": "args", "version": "1.5.0",
+            "args_seen": ["VERSION_1_5_0"],
+            "backends_ok": ["vnc", "rdp"], "backends_err": [],
+            "handshake_leak": leak}}
+        fs = guacamole.findings([h], probes)
+        exposed = [f for f in fs if f["kind"] == "guacd_exposed"][0]
+        self.assertEqual(exposed["depth_tier"], "t2")
+        # Raw server-side evidence surfaced in output.
+        self.assertEqual(exposed["output"], leak)
+        # T2 note appears in the detail so the operator sees WHY it upgraded.
+        self.assertIn("T2 verify", exposed["detail"])
+
+    def test_analyze_active_captures_leak_end_to_end(self):
+        # Wire the leak all the way through analyze(): probe -> verify ->
+        # findings emits guacd_exposed at t2 with the raw frame in output.
+        rdp_frame = (b"4.args,13.VERSION_1_5_0,8.hostname,4.port,"
+                     b"6.domain,8.username,8.password;")
+        replies = {b: ARGS_FRAME_1_5_0 for b in guacamole._BACKENDS}
+        replies["rdp"] = rdp_frame
+        srv = _GuacdServer(replies)
+        try:
+            h = Host(ip=srv.host,
+                     ports=[Port(portid=srv.port, service="guacd",
+                                 state="open")])
+            out = guacamole.analyze([h], active=True, budget=15.0)
+        finally:
+            srv.close()
+        exposed = [f for f in out["findings"]
+                   if f["kind"] == "guacd_exposed"][0]
+        self.assertEqual(exposed["depth_tier"], "t2")
+        self.assertIn("VERSION_1_5_0", exposed.get("output", ""))
+        self.assertIn("password", exposed.get("output", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

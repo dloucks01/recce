@@ -133,7 +133,15 @@ class _FakeCoAP:
         # Proxy-Uri path.
         if proxy_uri is not None:
             code = self.plan.get("proxy_code", 0x45)
-            reply = _build_reply(2, code, msg["mid"], msg["token"], [], b"")
+            # Optional per-target proxy bodies keyed by the Proxy-Uri (used to
+            # exercise the T2 loopback read that echoes upstream content).
+            body_map = self.plan.get("proxy_body_by_uri") or {}
+            body = body_map.get(proxy_uri, self.plan.get("proxy_body", b""))
+            ct = self.plan.get("proxy_ct")
+            opts = []
+            if ct is not None:
+                opts.append((coap._OPT_CONTENT_FORMAT, coap._uint_option(ct)))
+            reply = _build_reply(2, code, msg["mid"], msg["token"], opts, body)
             self._srv.sendto(reply, addr)
             return
 
@@ -567,6 +575,152 @@ class ProxyRelayTest(unittest.TestCase):
             srv.close()
         self.assertFalse(r["proxied"])
         self.assertEqual(r["code"], "5.05")
+
+
+class ProxyRelayReadT2Test(unittest.TestCase):
+    """T1->T2 promotion for coap_open_proxy: after the T1 fingerprint flags a
+    proxy, one loopback Proxy-Uri read that returns non-empty content proves
+    the relay actually performed the outbound fetch (SSRF-class evidence).
+    RFC 7252 §5.7.2: a proxy replies 5.05 when it will NOT forward — so any
+    2.xx with a body is a real proxied response."""
+
+    def test_echoed_body_flags_t2_proof(self):
+        # Vulnerable target: the fake proxy responds to a Proxy-Uri with a
+        # real /.well-known/core body (echoing what the upstream fetch
+        # returned). recce should mark echoed=True.
+        echoed_body = b'</sensors/temp>;rt="core.s";ct=0'
+        srv = _FakeCoAP({
+            "proxy_code": 0x45,
+            "proxy_ct": 40,
+            "proxy_body": echoed_body,
+        })
+        try:
+            r = coap.proxy_relay_read(
+                srv.host, srv.port,
+                f"coap://{srv.host}:{srv.port}/.well-known/core", timeout=1.0)
+        finally:
+            srv.close()
+        self.assertTrue(r["attempted"])
+        self.assertTrue(r["echoed"])
+        self.assertEqual(r["code"], "2.05")
+        self.assertEqual(r["size"], len(echoed_body))
+        self.assertIn(b"sensors/temp", r["snippet"])
+        self.assertEqual(r["target_uri"],
+                         f"coap://{srv.host}:{srv.port}/.well-known/core")
+
+    def test_patched_5_05_does_not_flag_echoed(self):
+        # Patched target: proxy replies 5.05 Proxying Not Supported with no
+        # body — no T2 promotion.
+        srv = _FakeCoAP({"proxy_code": 0xA5, "proxy_body": b""})
+        try:
+            r = coap.proxy_relay_read(
+                srv.host, srv.port,
+                f"coap://{srv.host}:{srv.port}/.well-known/core", timeout=1.0)
+        finally:
+            srv.close()
+        self.assertTrue(r["attempted"])
+        self.assertFalse(r["echoed"])
+        self.assertEqual(r["code"], "5.05")
+        self.assertEqual(r["size"], 0)
+
+    def test_empty_2xx_body_does_not_flag_echoed(self):
+        # 2.05 but empty body: an endpoint could reply 2.05 without actually
+        # fetching. T2 needs positive content evidence, not just a class-2 code.
+        srv = _FakeCoAP({"proxy_code": 0x45, "proxy_body": b""})
+        try:
+            r = coap.proxy_relay_read(
+                srv.host, srv.port,
+                f"coap://{srv.host}:{srv.port}/.well-known/core", timeout=1.0)
+        finally:
+            srv.close()
+        self.assertTrue(r["attempted"])
+        self.assertFalse(r["echoed"])
+        self.assertEqual(r["code"], "2.05")
+        self.assertEqual(r["size"], 0)
+
+    def test_timeout_returns_clean_no_reply(self):
+        # No server listening: bounded timeout, no exception, echoed=False.
+        r = coap.proxy_relay_read(
+            "127.0.0.1", 1, "coap://127.0.0.1/.well-known/core", timeout=0.3)
+        self.assertTrue(r["attempted"])
+        self.assertFalse(r["echoed"])
+        self.assertEqual(r["error"], "no reply")
+
+    def test_findings_upgrade_to_t2_when_echoed(self):
+        # Full findings-layer wiring: proxy T1 fingerprint flagged proxied,
+        # and proxy_read carries positive echoed evidence -> depth_tier=t2.
+        pr = {
+            "reachable": True,
+            "resources": [], "readable": [], "writable": [], "observe": [],
+            "wellknown_extras": {},
+            "proxy": {"attempted": True, "proxied": True, "code": "2.05"},
+            "proxy_read": {"attempted": True, "echoed": True, "code": "2.05",
+                           "size": 32, "snippet": b'</sensors/temp>;rt="core.s"',
+                           "target_uri": "coap://10.0.0.1:5683/.well-known/core"},
+            "amp_ratio": 0.0,
+            "authgated": False, "oscore": False,
+            "wellknown_code": "2.05", "empty_ping": {},
+            "dtls": {}, "product": "", "version_str": "",
+        }
+        fs = coap.findings(_hosts(), {("10.0.0.1", 5683): pr})
+        pxy = next(f for f in fs if f["kind"] == "coap_open_proxy")
+        self.assertEqual(pxy["depth_tier"], "t2")
+        self.assertIn("T2 proof", pxy["detail"])
+        self.assertIn("echoed", pxy["detail"])
+        self.assertIn("/.well-known/core", pxy["detail"])
+
+    def test_findings_stay_t1_without_echo(self):
+        # T1 fingerprint alone (proxied=True) but no proxy_read echoed body:
+        # depth_tier must stay t1.
+        pr = {
+            "reachable": True,
+            "resources": [], "readable": [], "writable": [], "observe": [],
+            "wellknown_extras": {},
+            "proxy": {"attempted": True, "proxied": True, "code": "2.05"},
+            "proxy_read": {"attempted": True, "echoed": False, "code": "2.05",
+                           "size": 0, "snippet": b"",
+                           "target_uri": "coap://10.0.0.1:5683/.well-known/core"},
+            "amp_ratio": 0.0,
+            "authgated": False, "oscore": False,
+            "wellknown_code": "2.05", "empty_ping": {},
+            "dtls": {}, "product": "", "version_str": "",
+        }
+        fs = coap.findings(_hosts(), {("10.0.0.1", 5683): pr})
+        pxy = next(f for f in fs if f["kind"] == "coap_open_proxy")
+        self.assertEqual(pxy["depth_tier"], "t1")
+        self.assertNotIn("T2 proof", pxy["detail"])
+
+    def test_probe_wires_proxy_read_on_vulnerable_target(self):
+        # End-to-end probe: /.well-known/core succeeds AND proxy fingerprint
+        # flags proxied — probe must issue the loopback proxy_read on its own.
+        wk = b'</sensors/temp>;rt="core.s";ct=0'
+        srv = _FakeCoAP({
+            "wellknown": wk,
+            "proxy_code": 0x45,
+            "proxy_body": wk,   # echoed content from a real proxy fetch
+            "proxy_ct": 40,
+        })
+        try:
+            pr = coap.probe(srv.host, srv.port, timeout=1.0, active=True,
+                            observe_window=0.1, test_write=False)
+        finally:
+            srv.close()
+        self.assertTrue(pr["proxy"].get("proxied"))
+        self.assertTrue(pr["proxy_read"].get("echoed"))
+        self.assertGreater(pr["proxy_read"].get("size", 0), 0)
+
+    def test_probe_skips_proxy_read_when_not_a_proxy(self):
+        # Patched target: proxy 5.05 -> probe must NOT issue proxy_read.
+        wk = b'</sensors/temp>;rt="core.s";ct=0'
+        srv = _FakeCoAP({"wellknown": wk, "proxy_code": 0xA5})
+        try:
+            pr = coap.probe(srv.host, srv.port, timeout=1.0, active=True,
+                            observe_window=0.1, test_write=False)
+        finally:
+            srv.close()
+        self.assertFalse(pr["proxy"].get("proxied"))
+        # proxy_read stays empty (never issued).
+        self.assertEqual(pr["proxy_read"], {})
 
 
 class FullProbeTest(unittest.TestCase):

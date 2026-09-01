@@ -554,6 +554,135 @@ class FindingsTest(unittest.TestCase):
             self.assertIn("10.0.0.5", step["cmd"])
 
 
+# --- T2 uplift: plaintext_traffic captures real server-side evidence -------
+
+class PlaintextT2EvidenceTest(unittest.TestCase):
+    """T2 promotion for nrpe_plaintext_traffic.
+
+    T1 was 'plaintext v2 handshake succeeded' — inference from a
+    round-trip. T2 = the same plaintext channel actually carried real
+    server-side host state (a check_ output line), captured as evidence.
+    A single controlled read reused from the enumeration reads already
+    performed by probe(); no MITM, no extra network round-trip.
+    """
+
+    def test_vulnerable_plaintext_probe_populates_evidence(self):
+        # Vulnerable = daemon answers check_load with real host state
+        # over cleartext; the enumeration captures it and probe() lifts
+        # the first non-error output into plaintext_evidence.
+        def responder(cmd):
+            if cmd == "_NRPE_CHECK":
+                return _make_v2_packet(2, 0, "NRPE v2.15")
+            if cmd == "check_load":
+                return _make_v2_packet(
+                    2, 0, "OK - load average: 0.42, 0.31, 0.19")
+            return _make_v2_packet(2, 3, "NRPE: Command not defined")
+
+        srv = _NrpeServer(responder)
+        try:
+            pr = nrpe.probe(srv.host, srv.port, timeout=2,
+                            commands=("check_load",))
+        finally:
+            srv.close()
+        self.assertTrue(pr["plaintext"])
+        self.assertIn("load average", pr["plaintext_evidence"])
+        self.assertEqual(pr["plaintext_evidence_command"], "check_load")
+
+    def test_patched_tls_probe_leaves_evidence_empty(self):
+        # Patched = TLS with a real cert; no plaintext path so no evidence.
+        fake_parsed = {"version": 4, "type": 2, "crc": 0, "crc_valid": True,
+                       "result_code": 0, "output": "NRPE v4.0.3"}
+        fake_info = {"handshake_ok": True, "anon_dh": False,
+                     "cipher": "ECDHE-RSA-AES256-GCM-SHA384",
+                     "cert_der": b"", "cert_cn": "nrpe.example",
+                     "cert_sans": [], "error": ""}
+        original_plain = nrpe._try_plain
+        original_tls = nrpe._try_tls
+        try:
+            nrpe._try_plain = lambda *a, **k: None
+            nrpe._try_tls = lambda *a, **k: (fake_parsed, fake_info)
+            pr = nrpe.probe("127.0.0.1", 5666, timeout=1, commands=())
+        finally:
+            nrpe._try_plain = original_plain
+            nrpe._try_tls = original_tls
+        self.assertFalse(pr["plaintext"])
+        self.assertEqual(pr["plaintext_evidence"], "")
+
+    def test_timeout_probe_leaves_evidence_empty(self):
+        # Timeout = dead port; probe returns unreachable, no evidence.
+        pr = nrpe.probe("127.0.0.1", 1, timeout=1, commands=())
+        self.assertFalse(pr["reachable"])
+        self.assertEqual(pr["plaintext_evidence"], "")
+
+    def test_findings_upgrade_plaintext_traffic_to_t2_with_output(self):
+        # With plaintext_evidence populated, the emitted finding carries
+        # depth_tier='t2' and an output field with the captured line.
+        h = _fake_host()
+        pr = {
+            "reachable": True, "plaintext": True, "tls": False,
+            "anon_dh_tls": False, "tls_cipher": "", "tls_cert_cn": "",
+            "tls_cert_sans": [],
+            "version": "2.15", "version_line": "NRPE v2.15",
+            "commands_present": ["check_load"], "commands_absent": [],
+            "command_outputs": {"check_load": "OK - load average: 0.42, 0.31, 0.19"},
+            "users": [], "hostname": "", "os_hint": "",
+            "arg_injection_rce": False, "arg_injection_evidence": "",
+            "metachar_bypass_rce": False, "metachar_bypass_evidence": "",
+            "cve_2020_6581_applies": False,
+            "crc32_only_integrity": True,
+            "plaintext_evidence": "OK - load average: 0.42, 0.31, 0.19",
+            "plaintext_evidence_command": "check_load",
+        }
+        fs = nrpe.findings([h], {(h.ip, 5666): pr})
+        pt = [f for f in fs if f["kind"] == "nrpe_plaintext_traffic"][0]
+        self.assertEqual(pt["depth_tier"], "t2")
+        self.assertIn("output", pt)
+        self.assertIn("load average", pt["output"])
+        self.assertIn("check_load", pt["detail"])
+        self.assertIn("T2 evidence", pt["detail"])
+
+    def test_findings_keep_plaintext_traffic_at_t1_without_evidence(self):
+        # T1 path unchanged: empty plaintext_evidence -> depth_tier stays t1
+        # and no output field is added.
+        h = _fake_host()
+        pr = {
+            "reachable": True, "plaintext": True, "tls": False,
+            "anon_dh_tls": False, "tls_cipher": "", "tls_cert_cn": "",
+            "tls_cert_sans": [],
+            "version": "2.15", "version_line": "NRPE v2.15",
+            "commands_present": [], "commands_absent": [],
+            "command_outputs": {}, "users": [], "hostname": "", "os_hint": "",
+            "arg_injection_rce": False, "arg_injection_evidence": "",
+            "metachar_bypass_rce": False, "metachar_bypass_evidence": "",
+            "cve_2020_6581_applies": False,
+            "crc32_only_integrity": True,
+            "plaintext_evidence": "",
+            "plaintext_evidence_command": "",
+        }
+        fs = nrpe.findings([h], {(h.ip, 5666): pr})
+        pt = [f for f in fs if f["kind"] == "nrpe_plaintext_traffic"][0]
+        self.assertEqual(pt["depth_tier"], "t1")
+        self.assertNotIn("output", pt)
+
+    def test_findings_skip_not_defined_error_as_evidence(self):
+        # A 'not defined' error line must not be lifted as T2 evidence —
+        # probe() skips it, so the finding stays at t1.
+        srv = _NrpeServer(lambda cmd:
+                          _make_v2_packet(2, 0, "NRPE v2.15")
+                          if cmd == "_NRPE_CHECK"
+                          else _make_v2_packet(
+                              2, 3,
+                              f"NRPE: Command '{cmd}' not defined"))
+        try:
+            pr = nrpe.probe(srv.host, srv.port, timeout=2,
+                            commands=("check_bogus", "check_alsobogus"))
+        finally:
+            srv.close()
+        self.assertTrue(pr["plaintext"])
+        self.assertEqual(pr["plaintext_evidence"], "")
+        self.assertEqual(pr["plaintext_evidence_command"], "")
+
+
 class AnalyzeTest(unittest.TestCase):
     def test_analyze_end_to_end_with_loopback_server(self):
         srv = _NrpeServer(_default_responder)

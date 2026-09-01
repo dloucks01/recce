@@ -267,6 +267,56 @@ def _spki_fingerprint(pem_b64: str) -> str:
     return hashlib.sha256(der).hexdigest()
 
 
+def _probe_unauth_evidence(ip: str, http_port: int, tls: bool,
+                           timeout: float = _TIMEOUT) -> dict | None:
+    """T2 SAFE proof-of-exploit: single controlled GET /whoAmI/api/json on the
+    Jenkins HTTP twin — real server-side evidence that the controller answers
+    an authenticated-looking API to an anonymous caller.
+
+    Jenkins' WhoAmI descriptor returns a small JSON payload with the caller's
+    principal name, authenticated flag, and authority list. Fetched without a
+    session cookie, a 200 with name='anonymous' / authenticated=false is proof
+    that the twin's user-identity surface is exposed unauth. Non-destructive:
+    one read of a diagnostic endpoint, no writes, no state change, bounded via
+    proxy.scaled(). Returns None on any failure so callers keep T1.
+    """
+    r = _http_get(ip, http_port, "/whoAmI/api/json", tls, timeout)
+    if r is None:
+        return None
+    status, _headers, body = r
+    ev: dict = {"probed": True, "status": int(status),
+                "endpoint": "/whoAmI/api/json",
+                "name": "", "authenticated": None, "anonymous": None,
+                "authorities": []}
+    if status != 200 or not body:
+        # Non-200 is not evidence — leave sample fields empty, caller drops it.
+        return ev
+    import json as _json
+    try:
+        data = _json.loads(body[:4096].decode("utf-8", "replace"))
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return ev
+    if not isinstance(data, dict):
+        return ev
+    name = data.get("name")
+    if isinstance(name, str):
+        ev["name"] = name[:64]
+    authed = data.get("authenticated")
+    if isinstance(authed, bool):
+        ev["authenticated"] = authed
+    anon = data.get("anonymous")
+    if isinstance(anon, bool):
+        ev["anonymous"] = anon
+    auths = data.get("authorities")
+    if isinstance(auths, list):
+        clean = []
+        for a in auths[:6]:
+            if isinstance(a, str):
+                clean.append(a[:40])
+        ev["authorities"] = clean
+    return ev
+
+
 def http_sibling(host: Host, timeout: float = _TIMEOUT) -> dict:
     """Fetch /tcpSlaveAgentListener/ on every likely HTTP port on the host.
     Returns the first hit's parsed metadata, or an empty result. Keys:
@@ -379,7 +429,8 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
     out: dict = {"reachable": False, "is_jnlp": False, "banner": "",
                  "protocols": [], "legacy_jnlp": [], "plaintext_jnlp": [],
                  "cli_legacy": [], "http_sibling": {}, "version": "",
-                 "instance_identity_fp": "", "error": ""}
+                 "instance_identity_fp": "", "unauth_evidence": {},
+                 "error": ""}
     dis = disambiguate(ip, port, timeout=timeout)
     out["reachable"] = dis["reachable"]
     out["banner"] = dis["banner"]
@@ -406,6 +457,12 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
             out["http_sibling"] = sib
             out["version"] = sib["jenkins_version"]
             out["instance_identity_fp"] = sib["instance_identity_fp"]
+            # T2 SAFE evidence probe on the twin — one extra GET, non-
+            # destructive. Only run when we already have a confirmed twin.
+            ev = _probe_unauth_evidence(host.ip, sib["http_port"],
+                                        sib["tls"], timeout=timeout)
+            if ev is not None:
+                out["unauth_evidence"] = ev
             # Fold the HTTP-advertised protocol set in when the raw TCP probe
             # got nothing (a controller behind a strict firewall on the agent
             # port may still expose the listener metadata over HTTP).
@@ -543,6 +600,37 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                           + " · ".join(bits) if bits else
                           f"GET {sib.get('url','')} responded with Jenkins "
                           f"agent-listener metadata headers.")
+                # T2 upgrade: /whoAmI/api/json returned parseable identity JSON
+                # to an anonymous caller — real captured server-side evidence.
+                ev = pr.get("unauth_evidence") or {}
+                tier = "t1"
+                base_url = sib.get('url','')
+                twin_base = base_url.split("/tcpSlaveAgentListener")[0]
+                who_url = twin_base + "/whoAmI/api/json"
+                if (ev.get("probed") and ev.get("status") == 200
+                        and ev.get("name")):
+                    tier = "t2"
+                    who_name = ev.get("name") or ""
+                    authed = ev.get("authenticated")
+                    anon = ev.get("anonymous")
+                    auth_bits = []
+                    if authed is not None:
+                        auth_bits.append(f"authenticated={str(authed).lower()}")
+                    if anon is not None:
+                        auth_bits.append(f"anonymous={str(anon).lower()}")
+                    auths = ev.get("authorities") or []
+                    if auths:
+                        auth_bits.append(
+                            "authorities=[" + ",".join(auths[:3])
+                            + ("…" if len(auths) > 3 else "") + "]")
+                    detail += (
+                        f" T2 proof — GET {who_url} returned HTTP 200 with "
+                        f"principal name='{who_name}'"
+                        + (" (" + ", ".join(auth_bits) + ")" if auth_bits
+                           else "")
+                        + ". The controller answers WhoAmI to an "
+                        "unauthenticated caller, confirming unauth surface "
+                        "beyond header disclosure.")
                 out.append(_finding(
                     "high",
                     "Jenkins /tcpSlaveAgentListener/ metadata disclosed", tgt,
@@ -557,7 +645,17 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "curl -sk http://<ip>:8080/tcpSlaveAgentListener/ -I; "
                         "then curl -sk http://<ip>:8080/asynchPeople/api/json "
                         "(unauth user list on many installs)."),
-                    depth_tier="t1"))
+                    depth_tier=tier))
+                if tier == "t2":
+                    out[-1]["evidence"] = {
+                        "endpoint": ev.get("endpoint", "/whoAmI/api/json"),
+                        "http_status": ev.get("status"),
+                        "name": ev.get("name"),
+                        "authenticated": ev.get("authenticated"),
+                        "anonymous": ev.get("anonymous"),
+                        "authorities": ev.get("authorities") or [],
+                        "url": who_url,
+                    }
 
             # X-Instance-Identity fingerprint.
             fp = pr.get("instance_identity_fp") or ""

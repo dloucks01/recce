@@ -380,11 +380,14 @@ def ntp_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
-             exploit_note="", depth_tier=""):
-    return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "ntpq", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind,
-            "exploit_note": exploit_note, "depth_tier": depth_tier}
+             exploit_note="", depth_tier="", output=""):
+    f = {"severity": sev, "title": title, "target": target, "detail": detail,
+         "tool": "ntpq", "command": cmd, "remediation": rem,
+         "cwes": cwes, "kind": kind,
+         "exploit_note": exploit_note, "depth_tier": depth_tier}
+    if output:
+        f["output"] = output
+    return f
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -411,6 +414,26 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     head = ", ".join(clients[:8])
                     extra = f" (+{len(clients) - 8} more)" if len(clients) > 8 else ""
                     sample = f" Distinct client IPs disclosed: {len(clients)} — {head}{extra}."
+                # T2 promotion: parsed client IPs from a mode-7
+                # REQ_MON_GETLIST_1 payload ARE the exploit primitive — a
+                # patched or restricted ntpd cannot answer with a populated
+                # info_monitor_1 record. Any decoded IPv4 addr proves the
+                # disclosure primitive on the wire, so upgrade to t2 and emit
+                # the deduped client list as feedable pivot output. When we
+                # got a payload back but couldn't decode a single v4 addr
+                # (v6-only mrulist, malformed record), stay at t1 — we saw
+                # the amplification but have no concrete pivot yet.
+                depth_tier = "t1"
+                pivot_output = ""
+                pivot_note = ""
+                if clients:
+                    depth_tier = "t2"
+                    pivot_output = "\n".join(clients)
+                    pivot_note = (
+                        " Wire-derived proof: these IPs were decoded from an "
+                        "info_monitor_1 record body — a hardened ntpd cannot "
+                        "produce that payload. Feed straight to downstream "
+                        "SMB/LDAP/HTTP scans as known_hosts pivots.")
                 out.append(_finding(
                     "high",
                     "NTP monlist enabled (CVE-2013-5211) — amplification + client disclosure",
@@ -422,7 +445,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"that contacted this server: on an internal that is a free list "
                     f"of hosts talking to it, including any recce has not discovered. "
                     f"Externally it is a reflective DDoS amplifier."
-                    f"{sample}",
+                    f"{sample}{pivot_note}",
                     "ntpdc -n -c monlist <ip>   # or: nmap -sU -p123 --script ntp-monlist <ip>",
                     "Upgrade to ntpd 4.2.7p26+, or set `disable monitor` in ntp.conf. "
                     "Restrict mode 6/7 with `restrict default noquery`.",
@@ -432,7 +455,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "nxc smb <clients> -u '' -p '' to catch null-session "
                         "hosts among them."
                     ),
-                    depth_tier="t1"))
+                    depth_tier=depth_tier, output=pivot_output))
 
             if pr.get("mode6"):
                 v = pr.get("ntpd_version") or "unknown"

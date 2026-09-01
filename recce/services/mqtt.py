@@ -22,6 +22,7 @@ timeout scaled through core.proxy.
 from __future__ import annotations
 
 import os
+import re
 import socket
 import struct
 
@@ -432,6 +433,87 @@ def _subscribe_and_drain(sock: socket.socket, topic_filter: str,
     return out
 
 
+# --- T2 promotion: retained-payload secret disclosure scan ----------------
+#
+# Non-destructive: works purely on the retained-payload snippets that the
+# SUBSCRIBE '#' window already captured (one controlled read). No extra
+# packets sent, no state changed. Concrete server-side evidence: the
+# matching payload bytes are pinned into the finding, proving retained
+# messages are not just voluminous but actually disclose secrets.
+#
+# Pattern rationale (each is a documented wire-visible form):
+#   - JWT (RFC 7519 §3): base64url header '.' payload '.' signature; header
+#     always starts with '{"alg' which base64url-encodes to 'eyJhbG'.
+#   - Bearer token (RFC 6750 §2.1): the literal 'Bearer <token>' form.
+#   - PEM private key (RFC 7468 §2): '-----BEGIN <label> PRIVATE KEY-----'.
+#   - Key=value fields (api_key / password / secret / token): the common
+#     JSON/env/mosquitto-conf shapes that carry the secret verbatim.
+#   - AWS access-key ID: AWS IAM Console format (AKIA + 16 base32).
+_SECRET_PATTERNS: tuple[tuple[str, "re.Pattern[bytes]"], ...] = (
+    ("jwt", re.compile(
+        rb"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
+    ("bearer_token", re.compile(
+        rb"(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}")),
+    ("private_key", re.compile(
+        rb"-----BEGIN [A-Z][A-Z ]*PRIVATE KEY-----")),
+    ("aws_akid", re.compile(
+        rb"AKIA[0-9A-Z]{16}")),
+    ("api_key_field", re.compile(
+        rb"(?i)(?:api[_-]?key|apikey)\s*[:=]\s*[\"']?([A-Za-z0-9._+/=-]{12,})")),
+    ("password_field", re.compile(
+        rb"(?i)(?:pass(?:word|wd)?|pwd)\s*[:=]\s*[\"']?([^\s\"',}]{6,})")),
+    ("secret_field", re.compile(
+        rb"(?i)(?:secret|token)\s*[:=]\s*[\"']?([A-Za-z0-9._+/=-]{12,})")),
+    ("mac_address", re.compile(
+        rb"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f])")),
+)
+
+
+def _redact(match: bytes, keep: int = 6) -> bytes:
+    """Show head+tail of a matched secret, mask the middle. Deterministic."""
+    if len(match) <= keep * 2:
+        return match
+    return match[:keep] + b"..." + match[-keep:]
+
+
+def _scan_retained_secrets(retained: list[dict], max_hits: int = 20,
+                           per_topic_cap: int = 3) -> list[dict]:
+    """Scan already-captured retained snippets for concrete secret-shaped
+    evidence. Returns [{topic, pattern, match, offset, size}]. Bounded on
+    both total hits and per-topic hits so a single garbage payload cannot
+    dominate the output."""
+    out: list[dict] = []
+    if not retained:
+        return out
+    for entry in retained:
+        if len(out) >= max_hits:
+            break
+        snippet = entry.get("snippet") or b""
+        if not snippet:
+            continue
+        topic = entry.get("topic") or ""
+        per_topic = 0
+        for pname, patt in _SECRET_PATTERNS:
+            if per_topic >= per_topic_cap or len(out) >= max_hits:
+                break
+            try:
+                m = patt.search(snippet)
+            except re.error:
+                continue
+            if not m:
+                continue
+            match_bytes = m.group(0)[:160]
+            out.append({
+                "topic": topic,
+                "pattern": pname,
+                "match": _redact(match_bytes),
+                "offset": m.start(),
+                "size": int(entry.get("size") or len(snippet)),
+            })
+            per_topic += 1
+    return out
+
+
 # --- High-level operations ------------------------------------------------
 
 def _anonymous_connect(ip: str, port: int, timeout: float,
@@ -537,6 +619,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         "publish_ok": False,
         "sys": {},                              # $SYS/# scrape
         "retained": [],
+        "retained_secrets": [],                 # T2: pattern-matched evidence
         "live": [],
         "reason": None,
         "v5_properties": {},
@@ -612,6 +695,14 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
                                         max_topics=200, packet_id=11)
             out["retained"] = wild["retained"]
             out["live"] = wild["live"]
+
+            # T2 promotion (additive): scan the just-captured retained
+            # snippets for concrete secret evidence. No new packets — same
+            # single SUBSCRIBE window feeds this.
+            try:
+                out["retained_secrets"] = _scan_retained_secrets(out["retained"])
+            except Exception:                             # pragma: no cover
+                out["retained_secrets"] = []
 
             # Anonymous PUBLISH permission test — only when SUBACK on '#'
             # wasn't a blanket reject (0x80). If subscription failed, write
@@ -796,6 +887,62 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "tee loot/mqtt_retained.txt; grep -iE "
                         "'token|pass|secret|api[_-]?key|jwt|bearer|BEGIN [A-Z]+ PRIVATE KEY' "
                         "loot/mqtt_retained.txt."),
+                    depth_tier="t2"))
+
+            # 3a. T2 promotion — retained payloads carry actual secret
+            # material. Same single SUBSCRIBE '#' window we already did;
+            # the scan is local, deterministic, and pins concrete matched
+            # bytes into the finding.
+            secrets = pr.get("retained_secrets") or []
+            if secrets:
+                # Rank distinct patterns by highest-signal first.
+                _rank = ("private_key", "jwt", "aws_akid", "bearer_token",
+                         "api_key_field", "secret_field", "password_field",
+                         "mac_address")
+                by_pat: dict[str, list[dict]] = {}
+                for s in secrets:
+                    by_pat.setdefault(s["pattern"], []).append(s)
+                pat_lines = []
+                for pname in _rank:
+                    if pname not in by_pat:
+                        continue
+                    hits = by_pat[pname]
+                    ex = hits[0]
+                    try:
+                        preview = ex["match"].decode("utf-8", "replace")
+                    except Exception:
+                        preview = ex["match"].hex()
+                    pat_lines.append(
+                        f"  - {pname} x{len(hits)} @ {ex['topic']}: {preview}")
+                pat_summary = "\n".join(pat_lines[:8])
+                topics_hit = sorted({s["topic"] for s in secrets})[:6]
+                sample_topics = ", ".join(topics_hit)
+                out.append(_finding(
+                    "critical",
+                    "MQTT retained messages disclose credential / key material",
+                    tgt,
+                    f"Scan of {len(pr.get('retained') or [])} retained "
+                    f"payload(s) matched {len(secrets)} secret-shaped "
+                    f"substring(s) on {len(topics_hit)} topic(s) "
+                    f"({sample_topics}). Concrete evidence (head/tail shown, "
+                    f"middle redacted):\n{pat_summary}\n"
+                    "This is captured server-side content — the retained "
+                    "flag is not just 'wide subscribe permitted' but an "
+                    "actual credential-disclosure primitive.",
+                    f"mosquitto_sub -h {h.ip} -p {p.portid} -t '#' -v -W 10 | "
+                    "grep -iE 'token|secret|api[_-]?key|jwt|bearer|"
+                    "BEGIN [A-Z]+ PRIVATE KEY|AKIA[0-9A-Z]{16}'",
+                    "Never publish secrets as retained messages; rotate any "
+                    "credential visible above; enforce per-topic ACLs so "
+                    "config/state topics reject anonymous subscribe; move "
+                    "secrets into a dedicated secret store.",
+                    ["CWE-200", "CWE-522", "CWE-798", "CWE-312"],
+                    kind="mqtt_retained_disclosed",
+                    exploit_note=(
+                        f"mosquitto_sub -h {h.ip} -p {p.portid} -t '#' -v -W 30 "
+                        "| tee loot/mqtt_retained.txt; then feed matches into "
+                        "known_credentials / known_tokens for cross-service "
+                        "reuse (HTTP admin UIs, other brokers, AMQP)."),
                     depth_tier="t2"))
 
             live = pr.get("live") or []

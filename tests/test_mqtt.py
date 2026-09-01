@@ -546,6 +546,172 @@ class FindingsTest(unittest.TestCase):
         self.assertIn("mqtt_will_message", kinds)
 
 
+class RetainedSecretScanTest(unittest.TestCase):
+    """T2 promotion: retained-payload secret disclosure. Non-destructive,
+    same single SUBSCRIBE '#' window feeds the scan."""
+
+    def test_scanner_finds_jwt_and_password_and_pem(self):
+        # RFC 7519 §3 header 'eyJhbG…', RFC 7468 PEM header, key=value
+        retained = [
+            {"topic": "app/cfg", "snippet":
+                b'{"jwt":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'
+                b'.eyJzdWIiOiIxMjM0NSJ9.abcdefghijklmnop"}',
+             "size": 200, "qos": 0},
+            {"topic": "svc/env", "snippet":
+                b"password=hunter22swordfish\nDEBUG=1", "size": 34, "qos": 0},
+            {"topic": "provisioning/keys",
+             "snippet": b"-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIB",
+             "size": 44, "qos": 0},
+        ]
+        hits = mqtt._scan_retained_secrets(retained)
+        pats = {h["pattern"] for h in hits}
+        self.assertIn("jwt", pats)
+        self.assertIn("password_field", pats)
+        self.assertIn("private_key", pats)
+        # topic anchoring survived
+        topics = {h["topic"] for h in hits}
+        self.assertEqual(topics,
+                         {"app/cfg", "svc/env", "provisioning/keys"})
+        # Match bytes returned are bounded (≤ 160 + redaction).
+        for h in hits:
+            self.assertLessEqual(len(h["match"]), 200)
+
+    def test_scanner_finds_bearer_and_aws_and_mac_and_apikey(self):
+        retained = [
+            {"topic": "auth/http", "snippet":
+                b'{"header":"Authorization: Bearer AbCdEf1234567890XYZ"}',
+             "size": 60, "qos": 0},
+            {"topic": "cloud/init", "snippet":
+                b"aws_access_key_id = AKIAABCDEFGHIJKLMNOP", "size": 40, "qos": 0},
+            {"topic": "device/1/net", "snippet":
+                b'{"mac":"aa:bb:cc:dd:ee:ff"}', "size": 26, "qos": 0},
+            {"topic": "cfg/api", "snippet":
+                b'api_key: "ABCDEF1234567890xyz"', "size": 30, "qos": 0},
+        ]
+        hits = mqtt._scan_retained_secrets(retained)
+        pats = {h["pattern"] for h in hits}
+        self.assertIn("bearer_token", pats)
+        self.assertIn("aws_akid", pats)
+        self.assertIn("mac_address", pats)
+        self.assertIn("api_key_field", pats)
+
+    def test_scanner_patched_no_secrets(self):
+        """Patched broker: retained payloads carry only innocent telemetry."""
+        retained = [
+            {"topic": "temp/room", "snippet": b"21.5C", "size": 5, "qos": 0},
+            {"topic": "presence/1", "snippet": b"true", "size": 4, "qos": 0},
+            # A word that mentions 'password' in a natural-language string
+            # but no key=value pair — must NOT match password_field (needs
+            # ':' or '=' separator).
+            {"topic": "docs/help",
+             "snippet": b"reset your password using the web UI",
+             "size": 40, "qos": 0},
+        ]
+        hits = mqtt._scan_retained_secrets(retained)
+        self.assertEqual(hits, [])
+
+    def test_scanner_empty_when_no_retained(self):
+        """Timeout / auth-gated: no retained collected → empty scan."""
+        self.assertEqual(mqtt._scan_retained_secrets([]), [])
+        # Also robust when snippet is missing/empty
+        self.assertEqual(
+            mqtt._scan_retained_secrets(
+                [{"topic": "x", "snippet": b"", "size": 0, "qos": 0}]),
+            [])
+
+    def test_scanner_bounded_output(self):
+        """Cap total hits and per-topic hits so one payload cannot flood."""
+        pathological = [{
+            "topic": "flood",
+            # A snippet that would trigger multiple patterns without a cap.
+            "snippet": (
+                b'password=hunter22swordfish '
+                b'api_key=ABCDEF1234567890xyz '
+                b'secret=deadbeefcafebabe1234 '
+                b'jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij'),
+            "size": 200, "qos": 0,
+        }]
+        hits = mqtt._scan_retained_secrets(pathological, per_topic_cap=2)
+        self.assertLessEqual(len(hits), 2)
+
+    def test_redact_middle_of_long_match(self):
+        long = b"A" * 20 + b"B" * 20
+        r = mqtt._redact(long)
+        self.assertIn(b"...", r)
+        self.assertTrue(r.startswith(b"AAAAAA"))
+        self.assertTrue(r.endswith(b"BBBBBB"))
+        # short match is passed through unchanged
+        self.assertEqual(mqtt._redact(b"short"), b"short")
+
+    def test_probe_populates_retained_secrets(self):
+        """Full probe round-trip: fake broker returns a retained payload
+        that contains a JWT; probe() must expose it as retained_secrets."""
+        subs = {
+            "$SYS/#": [_suback(0, b"\x00")],
+            "#": [
+                _suback(0, b"\x00"),
+                _publish("cfg/token",
+                         b'{"jwt":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'
+                         b'.eyJzdWIiOiIxIn0.abcdefghijkl"}',
+                         retain=True),
+            ],
+        }
+        srv = _FakeBroker({"subscribe_responses": subs, "publish_ack": True})
+        try:
+            pr = mqtt.probe(srv.host, srv.port, timeout=1,
+                            subscribe_window=0.3, test_write=False)
+        finally:
+            srv.close()
+        self.assertTrue(pr["reachable"])
+        self.assertTrue(pr["anon_ok"])
+        self.assertGreaterEqual(len(pr["retained_secrets"]), 1)
+        pats = {s["pattern"] for s in pr["retained_secrets"]}
+        self.assertIn("jwt", pats)
+
+    def test_finding_emits_t2_when_secrets_present(self):
+        from recce.core.models import Host, Port
+        hosts = [Host(ip="10.0.0.9",
+                      ports=[Port(portid=1883, service="mqtt")])]
+        probes = {("10.0.0.9", 1883): {
+            "reachable": True, "anon_ok": True, "empty_clientid_ok": False,
+            "protocol_level": 4, "publish_ok": False,
+            "sys": {}, "retained": [
+                {"topic": "cfg/x", "payload": b"", "snippet": b"apikey=SOMESECRETVALUE1234",
+                 "size": 28, "qos": 0}],
+            "retained_secrets": [
+                {"topic": "cfg/x", "pattern": "api_key_field",
+                 "match": b"apikey=SOMESECRETVALUE1234", "offset": 0, "size": 28}],
+            "live": [], "reason": 0x00, "version": "", "cred": None,
+            "v5_properties": {}}}
+        fs = mqtt.findings(hosts, probes)
+        disclosed = [f for f in fs if f["kind"] == "mqtt_retained_disclosed"]
+        self.assertEqual(len(disclosed), 1)
+        self.assertEqual(disclosed[0]["severity"], "critical")
+        self.assertEqual(disclosed[0]["depth_tier"], "t2")
+        # concrete evidence pinned into detail
+        self.assertIn("api_key_field", disclosed[0]["detail"])
+        self.assertIn("cfg/x", disclosed[0]["detail"])
+        # baseline mqtt_retained_messages still fires (T1 path unchanged)
+        base = [f for f in fs if f["kind"] == "mqtt_retained_messages"]
+        self.assertEqual(len(base), 1)
+
+    def test_finding_absent_when_no_secrets(self):
+        from recce.core.models import Host, Port
+        hosts = [Host(ip="10.0.0.9",
+                      ports=[Port(portid=1883, service="mqtt")])]
+        probes = {("10.0.0.9", 1883): {
+            "reachable": True, "anon_ok": True, "empty_clientid_ok": False,
+            "protocol_level": 4, "publish_ok": False,
+            "sys": {}, "retained": [
+                {"topic": "temp/room", "snippet": b"21.5C", "size": 5, "qos": 0}],
+            "retained_secrets": [],
+            "live": [], "reason": 0x00, "version": "", "cred": None,
+            "v5_properties": {}}}
+        fs = mqtt.findings(hosts, probes)
+        kinds = {f["kind"] for f in fs}
+        self.assertNotIn("mqtt_retained_disclosed", kinds)
+
+
 class TargetsTest(unittest.TestCase):
     def test_is_mqtt_by_port_and_service(self):
         from recce.core.models import Port

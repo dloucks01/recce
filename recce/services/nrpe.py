@@ -341,6 +341,12 @@ def probe(ip: str, port: int = _DEFAULT_PORT,
         "metachar_bypass_rce": False, "metachar_bypass_evidence": "",
         "cve_2020_6581_applies": False,
         "crc32_only_integrity": False,
+        # T2 uplift: a captured real check_ response that traversed the
+        # plaintext v2 channel — proof any passive on-path observer sees
+        # server-side host state, sourced from the enumeration reads
+        # already performed above (no extra network round-trip).
+        "plaintext_evidence": "",
+        "plaintext_evidence_command": "",
     }
 
     parsed = _try_plain(ip, port, _NRPE_CHECK_CMD, timeout)
@@ -408,6 +414,18 @@ def probe(ip: str, port: int = _DEFAULT_PORT,
                 out["hostname"] = h
         if not out["os_hint"]:
             out["os_hint"] = _classify_os(text)
+
+    # T2 evidence for nrpe_plaintext_traffic: pick the first captured
+    # command output that returned a real check result (not a not-defined
+    # error). This is a single controlled read reused from the enumeration
+    # above — the bytes flowed over the plaintext channel, so their
+    # presence in our capture proves any on-path observer sees them too.
+    if out["plaintext"] and not out["plaintext_evidence"]:
+        for _cmd, _text in out["command_outputs"].items():
+            if _text and not _command_not_defined(_text):
+                out["plaintext_evidence"] = _text[:256]
+                out["plaintext_evidence_command"] = _cmd
+                break
 
     if active_rce and out["commands_present"]:
         target = out["commands_present"][0]
@@ -505,13 +523,28 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     [], kind="nrpe_version_disclosed"))
 
             if pr.get("plaintext"):
-                out.append(_finding(
-                    "high", "NRPE traffic in the clear (no TLS)", tgt,
+                pt_evidence = pr.get("plaintext_evidence") or ""
+                pt_cmd = pr.get("plaintext_evidence_command") or ""
+                base_detail = (
                     "Daemon accepted an unencrypted NRPE v2 exchange. "
                     "Command output — logged-in users, hostnames, process "
                     "lists, mount points — traverses the network in the "
                     "clear, and anyone who can reach the socket can invoke "
-                    "any registered command (no auth in the base protocol).",
+                    "any registered command (no auth in the base protocol).")
+                if pt_evidence:
+                    # T2 uplift: a single controlled plaintext read against
+                    # a benign check_ command returned real server-side
+                    # host state on the cleartext channel — the confidentiality
+                    # gap is not inferred from a handshake, it is proven by
+                    # captured bytes.
+                    base_detail += (
+                        f" T2 evidence — a controlled plaintext read of "
+                        f"{pt_cmd!r} returned real server-side output over "
+                        f"the cleartext channel: {pt_evidence[:120]!r}. Any "
+                        f"passive on-path observer sees the same bytes.")
+                pt_finding = _finding(
+                    "high", "NRPE traffic in the clear (no TLS)", tgt,
+                    base_detail,
                     f"check_nrpe -H {h.ip} -p {p.portid} -c _NRPE_CHECK "
                     "-n   # -n forces no-SSL",
                     "Configure NRPE with use_ssl=1 (v3+) and set allowed_ciphers "
@@ -522,7 +555,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "tcpdump -i any -w nrpe.pcap 'tcp port 5666'; replay "
                         "captured queries to correlate with legitimate check "
                         "output."),
-                    depth_tier="t1"))
+                    depth_tier="t2" if pt_evidence else "t1")
+                if pt_evidence:
+                    pt_finding["output"] = pt_evidence[:200]
+                out.append(pt_finding)
                 out.append(_finding(
                     "low", "NRPE v2 packet integrity is CRC32 only", tgt,
                     "The v2 packet checksum is CRC32 — an integrity check, "
