@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -63,7 +64,39 @@ def create_app(eng_dir: str) -> FastAPI:
         loop = asyncio.get_running_loop()
         broker.bind(loop)
         session_manager.bind_loop(loop)
-        yield
+        # Auto-crack watcher (P1-8): while `recce serve` is up, periodically
+        # fold hashcat's OWN cracks (from its default potfile + any *.pot in
+        # the engagement out_dir) back into the credential store. Opt out
+        # with RECCE_DISABLE_CRACK_WATCHER=1 (matches RECCE_ACTIVE_ATTACKS
+        # gate convention). Watcher lives across the whole serve; store is a
+        # long-lived instance (Store uses check_same_thread=False).
+        _cw_disable = os.environ.get("RECCE_DISABLE_CRACK_WATCHER", "").lower()
+        _cw_store = None
+        if _cw_disable not in ("1", "true", "yes"):
+            try:
+                from ..core.store import Store
+                from ..creds.crack_watcher import start_watcher
+                _cw_store = Store(db_path)
+                start_watcher(_cw_store, eng_dir, interval_seconds=60.0)
+                logging.getLogger("recce.webui").info(
+                    "auto-crack watcher started (interval 60s)")
+            except Exception:
+                logging.getLogger("recce.webui").exception(
+                    "auto-crack watcher failed to start; continuing without it")
+        try:
+            yield
+        finally:
+            if _cw_store is not None:
+                try:
+                    from ..creds.crack_watcher import stop_watcher
+                    stop_watcher()
+                except Exception:
+                    logging.getLogger("recce.webui").debug(
+                        "crack-watcher stop failed", exc_info=True)
+                try:
+                    _cw_store.conn.close()
+                except Exception:
+                    pass
 
     app = FastAPI(title="recce workbench", version=__version__, lifespan=_lifespan)
     # No permissive CORS: the SPA is served same-origin (and `npm run dev` proxies /api),
