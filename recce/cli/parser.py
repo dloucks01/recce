@@ -327,6 +327,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     dp.set_defaults(func=_h("deploy"))
 
     # Reporting: per-finding Word write-ups from the template.
+    # `suggest` — read-only "what should I run next given what recce knows"
+    # digest. Pulls entirely from the store + shared surfaces; no probes.
+    sg = sub.add_parser("suggest",
+                        help="print the ranked next-moves digest (no scan) - "
+                             "cross-service intel + proven-exploitable findings")
+    _add_io(sg, title=False)
+    sg.add_argument("--top", type=int, default=10,
+                    help="cap each section at this many rows (default 10)")
+    sg.set_defaults(func=_h("suggest"))
+
     wu = sub.add_parser("writeups",
                         help="generate one Word (.docx) write-up per finding")
     wu.add_argument("targets", nargs="*",

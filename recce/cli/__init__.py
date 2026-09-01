@@ -45,6 +45,7 @@ from ._db import *  # noqa: F401,F403
 from ._ad import *  # noqa: F401,F403
 from ._external import *  # noqa: F401,F403
 from ._meta import *  # noqa: F401,F403
+from ._suggest import *  # noqa: F401,F403
 from ..core import tracking as tr
 from ..core.models import Host
 from ..report.excel import read_workbook_edits, update_workbook
