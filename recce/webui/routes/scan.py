@@ -256,6 +256,51 @@ def _rule_hostname_vhosts(hosts, creds, loot_dir):  # noqa: ARG001
              "source": "known_hostnames"}]
 
 
+def _rule_t3_capable_findings(hosts, creds, loot_dir):  # noqa: ARG001
+    """Vulns rated at (or one step below) the initial-access boundary →
+    external-tool handoff card carrying the finding's exploit_note as the
+    shell hint. Reads Vuln.depth_tier (T0-T4 rubric per core.depth):
+    every t3 finding qualifies (any severity — t3 already means initial-
+    access-capable), plus any t2 finding at critical/high severity."""
+    try:
+        from ...core.depth import rank as _tier_rank
+    except ImportError:
+        return []
+    _sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    picks: list = []
+    for h in hosts or []:
+        for v in (getattr(h, "vulns", None) or []):
+            tier = (getattr(v, "depth_tier", "") or "").lower()
+            sev = (getattr(v, "severity", "") or "").lower()
+            if tier == "t3" or (tier == "t2" and sev in ("critical", "high")):
+                picks.append(v)
+    if not picks:
+        return []
+    picks.sort(
+        key=lambda v: (
+            _tier_rank((getattr(v, "depth_tier", "") or "").lower()),
+            1 if getattr(v, "kev", False) else 0,
+            _sev_rank.get((getattr(v, "severity", "") or "").lower(), 0),
+            float(getattr(v, "epss", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    out: list[dict] = []
+    for v in picks[:10]:
+        tier = (getattr(v, "depth_tier", "") or "").lower()
+        conf = ("high" if getattr(v, "kev", False)
+                else ("medium" if tier == "t3" else "low"))
+        out.append({
+            "key": f"depth:{v.ip}:{v.port}:{v.script_id}",
+            "command": "", "field": "", "suggested_value": "",
+            "reason": (f"{v.title} on {v.ip}:{v.port} — "
+                       f"depth-tier {v.depth_tier}, {v.severity} severity"),
+            "confidence": conf, "source": "depth_tier_gate",
+            "external_cmd": getattr(v, "exploit_note", "") or "",
+        })
+    return out
+
+
 _SUGGESTION_RULES = (
     _rule_domain,
     _rule_admin_user,
@@ -266,6 +311,7 @@ _SUGGESTION_RULES = (
     _rule_mail_cross_transport,
     _rule_hostkey_reuse,
     _rule_hostname_vhosts,
+    _rule_t3_capable_findings,
 )
 
 

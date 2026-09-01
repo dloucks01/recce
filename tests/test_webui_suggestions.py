@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from recce.cli import _open_paths
-from recce.core.models import Account, Credential, Host, Port
+from recce.core.models import Account, Credential, Host, Port, Vuln
 from recce.core.store import Store
 from recce.webui.app import create_app
 
@@ -126,6 +126,41 @@ def test_relay_targets_surface_ntlmrelayx_suggestion(tmp_path):
     assert relays, "relay_targets rule did not fire"
     assert "ntlmrelayx" in relays[0]["external_cmd"]
     assert relays[0]["confidence"] == "high"
+
+
+# --- rule N: depth_tier-gated exploit_note handoff -----------------------
+
+def test_t3_capable_vulns_surface_depth_tier_gate_suggestions(tmp_path):
+    """Vulns hitting the initial-access boundary (t3, or t2 at critical/
+    high) become external-tool handoff cards keyed on the finding's
+    exploit_note. Sub-threshold findings (t1/medium) are filtered out."""
+    eng = _mkeng(tmp_path, "depth")
+    h = Host(ip="10.0.0.30", up_reason="syn-ack")
+    h.vulns = [
+        Vuln(ip="10.0.0.30", port=445, protocol="tcp",
+             script_id="smb-vuln-ms17-010", title="EternalBlue",
+             severity="critical", depth_tier="t3",
+             exploit_note="dump SAM via secretsdump"),
+        Vuln(ip="10.0.0.30", port=88, protocol="tcp",
+             script_id="ms14-068", title="Kerberos Checksum",
+             severity="critical", depth_tier="t2", kev=True),
+        Vuln(ip="10.0.0.30", port=80, protocol="tcp",
+             script_id="http-old-lighttpd", title="Old lighttpd banner",
+             severity="medium", depth_tier="t1"),
+    ]
+    with _open_store(eng) as st:
+        st.upsert_host(h)
+
+    sugs = _suggestions(eng)
+    depth = [s for s in sugs if s["source"] == "depth_tier_gate"]
+    # t1/medium is below the gate; only the t3 and the t2+critical+kev qualify.
+    assert len(depth) == 2, [s["reason"] for s in depth]
+
+    t3 = next(s for s in depth if "EternalBlue" in s["reason"])
+    assert t3["external_cmd"] == "dump SAM via secretsdump"
+
+    kev = next(s for s in depth if "Kerberos Checksum" in s["reason"])
+    assert kev["confidence"] == "high"
 
 
 # --- shape / dedup invariants --------------------------------------------
