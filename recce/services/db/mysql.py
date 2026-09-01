@@ -16,6 +16,7 @@ import socket
 import struct
 
 from ...core.models import Host, Port
+from ...core import proxy as _proxy
 from .base import recvn as _recvn, finding as _base_finding
 
 _PORTS = (3306, 3307, 33060)
@@ -941,3 +942,282 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
             "stats": {"targets": len(targets), "findings": len(fs),
                       "credentials": len(looted), "stopped": state.get("stopped")}}
+
+
+# ============================================================================
+# MySQL X Protocol (33060) — SAFE reachability probe.
+#
+# The X Plugin listens on 33060 by default and speaks a protobuf-framed
+# protocol distinct from the classic MySQL wire on 3306. It is client-first,
+# so a single CapabilitiesGet frame draws a Capabilities response advertising
+# the tls flag and the authentication mechanism list — enough evidence that
+# the plugin is exposed to whatever range 33060 is bound to. No auth is
+# attempted; no state is written; the probe closes on the first reply.
+# ============================================================================
+
+_MYSQLX_PORT = 33060
+_MYSQLX_TIMEOUT = 4.0
+_MYSQLX_MAX_FRAME = 64 * 1024
+
+# Message-type bytes on the wire, per the task's mysqlx.proto reference.
+_MYSQLX_MSG_CAPABILITIES_GET = 5     # client -> server
+_MYSQLX_MSG_CAPABILITIES = 3         # server -> client
+_MYSQLX_MSG_ERROR = 1                # server -> client (Mysqlx.Error)
+
+
+def _pb_varint(buf: bytes, off: int) -> tuple[int, int]:
+    """Read a protobuf varint. Returns (value, new_off); (0, off) on truncation."""
+    v = 0
+    shift = 0
+    start = off
+    while off < len(buf):
+        b = buf[off]
+        off += 1
+        v |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return v, off
+        shift += 7
+        if shift > 63:
+            return 0, start
+    return 0, start
+
+
+def _pb_iter(buf: bytes, off: int, end: int):
+    """Iterate (field_number, wire_type, raw_value) over a protobuf message
+    slice. Bytes for wire 2, int for wire 0/1/5. Silently ends on malformed
+    length prefixes rather than raising — an X-Plugin capability response is
+    never long enough to be worth crash-parsing."""
+    while off < end:
+        tag, new = _pb_varint(buf, off)
+        if new == off:
+            return
+        off = new
+        wt = tag & 0x7
+        fn = tag >> 3
+        if wt == 0:
+            v, new = _pb_varint(buf, off)
+            if new == off:
+                return
+            yield fn, wt, v
+            off = new
+        elif wt == 2:
+            n, new = _pb_varint(buf, off)
+            if new == off or new + n > end or n < 0:
+                return
+            off = new
+            yield fn, wt, buf[off:off + n]
+            off += n
+        elif wt == 1:
+            if off + 8 > end:
+                return
+            yield fn, wt, int.from_bytes(buf[off:off + 8], "little")
+            off += 8
+        elif wt == 5:
+            if off + 4 > end:
+                return
+            yield fn, wt, int.from_bytes(buf[off:off + 4], "little")
+            off += 4
+        else:
+            return
+
+
+def _pb_extract_any(buf: bytes):
+    """Best-effort extraction of a Mysqlx.Datatypes.Any body: returns a bool,
+    a string, or a list of strings, whichever is present. Nested Scalar /
+    Array / Object shapes are walked recursively; printable-ASCII bytes are
+    treated as strings and varints (0/1) as booleans."""
+    strings: list[str] = []
+    bools: list[int] = []
+    other_ints: list[int] = []
+
+    def walk(b: bytes) -> None:
+        for _fn, wt, v in _pb_iter(b, 0, len(b)):
+            if wt == 2:
+                if isinstance(v, bytes):
+                    walk(v)
+                    if v and all(32 <= c < 127 for c in v):
+                        try:
+                            strings.append(v.decode("ascii"))
+                        except UnicodeDecodeError:
+                            pass
+            elif wt == 0:
+                if v in (0, 1):
+                    bools.append(v)
+                else:
+                    other_ints.append(v)
+
+    walk(buf)
+    if strings:
+        return strings if len(strings) > 1 else strings[0]
+    if bools:
+        return bool(bools[-1])
+    if other_ints:
+        return other_ints[-1]
+    return None
+
+
+def _pb_parse_capabilities(payload: bytes) -> dict:
+    """Parse a Mysqlx.Connection.Capabilities message body into
+    {capability_name: value}. Unknown / unparseable capabilities become the
+    empty string so the caller still sees them listed."""
+    out: dict = {}
+    for fn, wt, v in _pb_iter(payload, 0, len(payload)):
+        if fn != 1 or wt != 2 or not isinstance(v, bytes):
+            continue
+        name = ""
+        value_bytes = b""
+        for cfn, cwt, cv in _pb_iter(v, 0, len(v)):
+            if cfn == 1 and cwt == 2 and isinstance(cv, bytes):
+                name = cv.decode("utf-8", "replace")
+            elif cfn == 2 and cwt == 2 and isinstance(cv, bytes):
+                value_bytes = cv
+        if name:
+            out[name] = _pb_extract_any(value_bytes)
+    return out
+
+
+def _mysqlx_capabilities_get(ip: str, port: int, timeout: float) -> dict:
+    """Send a single CapabilitiesGet frame and read the first server frame.
+    Returns {reachable, msg_type, capabilities, err}. Never authenticates
+    and never writes state — one TCP round-trip and out."""
+    res: dict = {"reachable": False, "msg_type": None,
+                 "capabilities": {}, "err": ""}
+    to = _proxy.scaled(min(max(timeout, 2.0), 6.0))
+    try:
+        sock = socket.create_connection((ip, port), timeout=to)
+        sock.settimeout(to)
+    except OSError as e:
+        res["err"] = str(e)
+        return res
+    try:
+        # CapabilitiesGet payload is empty. Frame = <len:le32><type:u8> where
+        # len covers the type byte (1) + payload (0).
+        frame = struct.pack("<I", 1) + bytes([_MYSQLX_MSG_CAPABILITIES_GET])
+        sock.sendall(frame)
+        hdr = _recvn(sock, 5)
+        if len(hdr) < 5:
+            res["err"] = "short header"
+            return res
+        length = int.from_bytes(hdr[0:4], "little")
+        msg_type = hdr[4]
+        res["reachable"] = True
+        res["msg_type"] = msg_type
+        # length includes the msg-type byte we already consumed.
+        remaining = max(0, min(length - 1, _MYSQLX_MAX_FRAME))
+        body = _recvn(sock, remaining) if remaining else b""
+        if msg_type == _MYSQLX_MSG_CAPABILITIES:
+            res["capabilities"] = _pb_parse_capabilities(body)
+        elif msg_type == _MYSQLX_MSG_ERROR:
+            res["err"] = "server error frame"
+        else:
+            res["err"] = f"unexpected msg type {msg_type}"
+    except OSError as e:
+        res["err"] = str(e)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    return res
+
+
+def _mysqlx_auth_mechs(caps: dict) -> list[str]:
+    """Pull the authentication.mechanisms capability out as a list of strings.
+    Accepts the value shape variations the X Plugin has shipped (list, single
+    string, or nested string in the Any). Returns [] if absent."""
+    v = caps.get("authentication.mechanisms")
+    if isinstance(v, list):
+        return [s for s in v if isinstance(s, str)]
+    if isinstance(v, str):
+        return [v]
+    return []
+
+
+def _mysqlx_tls_flag(caps: dict) -> bool | None:
+    """The 'tls' capability advertises whether the plugin will accept a
+    StartTLS negotiation on this connection. Missing capability -> None
+    (unknown), so the caller can distinguish "no TLS advertised" from
+    "server declined to answer"."""
+    if "tls" not in caps:
+        return None
+    v = caps["tls"]
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return bool(v)
+    return None
+
+
+def is_mysqlx(port: Port) -> bool:
+    """Match the X Plugin port. The service string is rarely populated for
+    33060 (nmap labels it 'mysqlx' only with a version probe), so port
+    number carries the check."""
+    if not port.is_open:
+        return False
+    svc = (port.service or "").lower()
+    return port.portid == _MYSQLX_PORT or "mysqlx" in svc
+
+
+def mysqlx_probe(ip: str, port: int = _MYSQLX_PORT,
+                 timeout: float = _MYSQLX_TIMEOUT) -> dict:
+    """Public entry: is the X Plugin answering CapabilitiesGet on this port?
+    Read-only, single-shot, no auth. Returns
+      {reachable, capabilities_open, tls, auth_mechanisms, capabilities, err}."""
+    r = _mysqlx_capabilities_get(ip, port, timeout)
+    caps = r.get("capabilities") or {}
+    return {
+        "reachable": r["reachable"],
+        "capabilities_open": r["msg_type"] == _MYSQLX_MSG_CAPABILITIES,
+        "tls": _mysqlx_tls_flag(caps),
+        "auth_mechanisms": _mysqlx_auth_mechs(caps),
+        "capabilities": caps,
+        "err": r["err"],
+    }
+
+
+def mysqlx_findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
+    """Emit the mysql_x_protocol_open finding for every host:port whose probe
+    landed a Capabilities frame. Keyed by (ip, port) so the caller can share
+    the same probe cache pattern as the classic mysql findings() flow."""
+    probes = probes or {}
+    out: list[dict] = []
+    for h in hosts:
+        for p in h.open_ports:
+            if not is_mysqlx(p):
+                continue
+            pr = probes.get((h.ip, p.portid))
+            if not pr or not pr.get("capabilities_open"):
+                continue
+            tgt = f"{h.ip}:{p.portid}"
+            tls = pr.get("tls")
+            mechs = pr.get("auth_mechanisms") or []
+            tls_txt = ("TLS available" if tls is True
+                       else "TLS NOT advertised" if tls is False
+                       else "TLS capability not reported")
+            mechs_txt = ", ".join(mechs) if mechs else "none advertised"
+            out.append(_finding(
+                "medium",
+                "MySQL X Protocol (mysqlx) exposed on 33060",
+                tgt,
+                "The X Plugin answered a Mysqlx.Connection.CapabilitiesGet "
+                f"with a Capabilities frame - the mysqlx endpoint is bound "
+                f"to whatever range reaches {tgt}. Advertised auth "
+                f"mechanisms: {mechs_txt}. {tls_txt}. The classic MySQL "
+                "protocol on 3306 is a separate binding and may be locked "
+                "down while 33060 is not - an attacker with a mysqlx client "
+                "(mysqlsh, MySQL Connector/X, mysql-connector-python x-proto) "
+                "targets this port directly for auth.",
+                f"mysqlsh --mysqlx -h {h.ip} -P {p.portid} -u <u>",
+                "Bind mysqlx_bind_address to a trusted interface (loopback or "
+                "the management VLAN); or set mysqlx=OFF in my.cnf if the X "
+                "Plugin is not in use; require TLS with "
+                "mysqlx_ssl_cert / mysqlx_ssl_key.",
+                ["CWE-1327"],
+                kind="mysql_x_protocol_open",
+                exploit_note=(
+                    "mysqlsh --mysqlx -h " + h.ip + " -P " + str(p.portid)
+                    + " -u root --password= ; then \\sql SELECT USER(); "
+                    "spray captured MySQL credentials through the x-protocol "
+                    "endpoint - it often survives an IP allowlist on 3306."),
+                depth_tier="t1"))
+    return out

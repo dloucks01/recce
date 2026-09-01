@@ -30,7 +30,7 @@ import socket
 import struct
 
 from ..core import proxy
-from ..core.known_hostkeys import record_hostkey
+from ..core.known_hostkeys import known_hostkeys, record_hostkey
 from ..core.models import Host, Port
 from .svccommon import finding_builder
 from .svcdetect import parse_product_version
@@ -731,6 +731,14 @@ _NARRATIVE = {
     "ssh_root_login": (
         "Root login is reachable over SSH - a spray or a key-in-loot "
         "reuse against 'root' can grant full host control directly."),
+    "ssh_hostkey_reused": (
+        "The same SSH host key fingerprint is presented by more than one "
+        "IP. That is the on-wire signature of a golden-image clone, a VM "
+        "template stamped without regenerating /etc/ssh/ssh_host_*_key, "
+        "or a single instance NAT-fronted behind multiple addresses. If "
+        "the hosts are supposed to be independent it is instead a MitM "
+        "baseline: whoever holds the private key can transparently "
+        "impersonate every host that shares it."),
 }
 
 
@@ -1042,6 +1050,58 @@ def findings(hosts: list[Host], probes: dict | None = None,
                             "/root/.ssh/known_hosts /etc/shadow, then loot "
                             "~/.aws ~/.docker/config.json /root/.gnupg."),
                         depth_tier="t1"))
+
+    # --- cross-host hostkey reuse correlator (T4) ---------------------------
+    # Read-only consumer of the engagement-wide fingerprint store
+    # (`known_hostkeys(hosts).reused`) populated by every SSH probe that
+    # captured a K_S. One finding per endpoint that shares its fingerprint
+    # with another IP - lets a golden-image clone / VM template stamp / MitM
+    # baseline surface next to each affected host in the report. No probes,
+    # no network, no state change - pure correlation over what earlier
+    # protocol reads already recorded.
+    reuse_entries = known_hostkeys(hosts).get("reused") or []
+    for entry in reuse_entries:
+        fp = entry.get("fingerprint") or ""
+        kt = entry.get("key_type") or ""
+        ips = entry.get("ips") or []
+        endpoints = entry.get("endpoints") or []
+        if not fp or len(ips) < 2:
+            continue
+        peer_summary = ", ".join(ips)
+        endpoint_summary = ", ".join(endpoints)
+        for ep in endpoints:
+            ep_ip, _, ep_port = ep.rpartition(":")
+            ep_ip = ep_ip or ep
+            ep_port = ep_port if ep_port.isdigit() else str(_DEFAULT_PORT)
+            out.append(_finding(
+                "info",
+                f"SSH host key reused across {len(ips)} IPs: {fp}", ep,
+                f"Fingerprint {fp} (key_type={kt or '?'}) is presented by "
+                f"more than one IP in this engagement.\n"
+                f"IPs sharing this key: {peer_summary}\n"
+                f"Endpoints observed: {endpoint_summary}\n\n"
+                "Two distinct machines returning the same K_S over "
+                "SSH_MSG_KEXDH_REPLY means they hold the same private "
+                "host key on disk - golden-image clone, VM template "
+                "stamped without regenerating /etc/ssh/ssh_host_*_key, "
+                "or the same instance NAT-fronted behind multiple "
+                "addresses. If the hosts are supposed to be independent, "
+                "the shared private key is a MitM key.",
+                "openssh",
+                f"ssh-keyscan -p {ep_port} {ep_ip} | ssh-keygen -lf -",
+                "Regenerate host keys per host (`rm /etc/ssh/ssh_host_*_key* "
+                "&& ssh-keygen -A && systemctl restart ssh`) so each host "
+                "presents a unique identity; re-pin known_hosts entries "
+                "and audit the image / template pipeline that produced "
+                "the shared key.",
+                ["CWE-262", "CWE-1394"], kind="ssh_hostkey_reused",
+                exploit_note=(
+                    "Compare fingerprints across the estate: "
+                    "`for ip in " + " ".join(ips) + "; do ssh-keyscan "
+                    "$ip 2>/dev/null | ssh-keygen -lf -; done | sort -u`. "
+                    "If any host is compromised, the shared private key "
+                    "lets you MitM every other IP on this list."),
+                depth_tier="t4"))
     return out
 
 

@@ -2696,3 +2696,464 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             "stats": {"targets": len(targets), "findings": len(fs),
                       "stopped": state.get("stopped")}}
 
+
+# --- sp_execute_external_script RCE (SAFE detection) ---------------------------
+# Machine Learning Services (In-Database) ships an `sp_execute_external_script`
+# that hands arbitrary Python/R to a Launchpad child process running as the SQL
+# service account. Any sysadmin can EXEC it when `external scripts enabled` is 1
+# — instant OS command execution without touching xp_cmdshell / OLE / CLR / Agent
+# and often without the extended-procedure telemetry those primitives trigger.
+# Detection only: read `IsPolyBaseInstalled` + `external scripts enabled` +
+# `IS_SRVROLEMEMBER('sysadmin')`. We never actually invoke the procedure.
+
+_NARRATIVE["mssql_external_script_rce"] = (
+    "SQL Server's Machine Learning Services expose `sp_execute_external_script`, "
+    "a system stored procedure that ships an arbitrary Python (or R) payload to "
+    "the Launchpad host process for execution. Any sysadmin can EXEC it when the "
+    "instance's `external scripts enabled` flag is 1, and the payload runs as the "
+    "SQL Server service account with full access to os.system / subprocess / open — "
+    "so it is OS command execution without ever touching xp_cmdshell, OLE "
+    "Automation, CLR, or a SQL Agent CmdExec job. Environments that watch those "
+    "traditional primitives frequently do not flag Launchpad output, making "
+    "sp_execute_external_script the quieter RCE path once sysadmin is held.")
+
+_EXT_SCRIPT_QUERY = (
+    "SELECT '@@B:extscript'\n"
+    "SELECT CAST(ISNULL(SERVERPROPERTY('IsPolyBaseInstalled'),0) AS varchar(4))"
+    "+'|'+ISNULL((SELECT CAST(value_in_use AS varchar(8)) FROM sys.configurations "
+    "WHERE name='external scripts enabled'),'0')"
+    "+'|'+CAST(IS_SRVROLEMEMBER('sysadmin') AS varchar(4))\n"
+    "SELECT '@@E:extscript'\n"
+    "exit\n"
+)
+
+
+def parse_external_scripts(output: str) -> dict:
+    """Extract the sentinel-wrapped row from the probe's mssqlclient output.
+    Returns {ok, polybase, external_scripts, is_sysadmin} or {ok:False}."""
+    import re
+    m = re.search(r"@@B:extscript\b(.*?)@@E:extscript\b", output, re.S)
+    if not m:
+        return {"ok": False}
+    for line in m.group(1).splitlines():
+        line = line.strip()
+        if "|" in line and "----" not in line and not line.startswith("@@"):
+            parts = [c.strip() for c in line.split("|")]
+            if len(parts) >= 3:
+                return {"ok": True,
+                        "polybase": parts[0] == "1",
+                        "external_scripts": parts[1] == "1",
+                        "is_sysadmin": parts[2] == "1"}
+    return {"ok": False}
+
+
+def probe_external_scripts(ip: str, creds: dict, port: int = _DEFAULT_PORT,
+                           windows_auth: bool = True) -> dict:
+    """SAFE detection for sp_execute_external_script RCE. Reads
+    `IsPolyBaseInstalled`, the `external scripts enabled` sp_configure value,
+    and `IS_SRVROLEMEMBER('sysadmin')` via impacket-mssqlclient. No write,
+    no auth-probe beyond the one connect the runner already makes, and no
+    call to sp_execute_external_script itself. Returns {ok, polybase,
+    external_scripts, is_sysadmin, error}."""
+    from ...core import proxy
+    cmd = _mssqlclient_cmd(ip, creds, port, windows_auth)
+    if cmd is None:
+        return {"ok": False, "error": "impacket-mssqlclient not installed"}
+    timeout = max(2, int(proxy.scaled(6)))
+    out, err = _run_stdin(cmd, _EXT_SCRIPT_QUERY, timeout=timeout,
+                          password=creds.get("secret", ""))
+    if err:
+        return {"ok": False, "error": err}
+    parsed = parse_external_scripts(out)
+    if not parsed.get("ok"):
+        return {"ok": False, "error": "no result / login failed"}
+    return parsed
+
+
+def external_script_rce_finding(target: dict, probe: dict,
+                                creds: dict | None) -> dict | None:
+    """Build the mssql_external_script_rce finding when the probe shows
+    `external scripts enabled` = 1 AND the current login is sysadmin (both
+    are required for the primitive to fire). Returns None otherwise so the
+    caller can skip appending it."""
+    if not (probe and probe.get("ok")
+            and probe.get("external_scripts") and probe.get("is_sysadmin")):
+        return None
+    tgt = f"{target['ip']}:{target.get('port', _DEFAULT_PORT)}"
+    ctx = _ctx(target, creds)
+    polybase_note = (" PolyBase is also installed."
+                     if probe.get("polybase") else "")
+    return _finding(
+        "critical",
+        "MSSQL sp_execute_external_script RCE (external scripts + sysadmin)",
+        tgt,
+        ("`external scripts enabled` = 1 and the current login is sysadmin. "
+         "EXEC sp_execute_external_script @language=N'Python',@script=... runs "
+         "arbitrary Python inside the Launchpad host process as the SQL service "
+         "account — OS command execution without touching xp_cmdshell, OLE, CLR "
+         "or SQL Agent." + polybase_note),
+        "impacket-mssqlclient",
+        _fill("impacket-mssqlclient <user>@<ip> -p <port>   # then EXEC "
+              "sp_execute_external_script @language=N'Python',"
+              "@script=N'import os; print(os.popen(\"whoami\").read())'",
+              ctx),
+        "Disable external scripts (sp_configure 'external scripts enabled',0; "
+        "RECONFIGURE WITH OVERRIDE) unless the workload requires them; keep "
+        "sysadmin membership to the minimum.",
+        ["CWE-77", "CWE-250"], kind="mssql_external_script_rce",
+        exploit_note=(
+            "impacket-mssqlclient <user>@<ip>; EXEC sp_execute_external_script "
+            "@language=N'Python',@script=N'import os;"
+            "print(os.popen(\"whoami\").read())' WITH RESULT SETS "
+            "((cmd nvarchar(max))). Runs as the SQL service account via the "
+            "Launchpad child process."),
+        depth_tier="t2")
+
+
+# --- contained database authentication (SAFE detection) ------------------------
+# A contained database (containment > 0) stores its own users with passwords in
+# sys.database_principals rather than mapping to server-level logins. Those
+# contained users authenticate directly against the database — the instance's
+# login policy, auditing and password checks do not apply, and they are
+# frequently overlooked when auditing sysadmin/login rosters. Detection reads
+# sys.databases for containment>0 and, for each hit, counts the
+# authentication_type=2 (DATABASE / contained) principals — no auth attempts,
+# no spraying, no state change.
+
+_NARRATIVE["mssql_contained_db_users"] = (
+    "One or more databases on this instance are marked as CONTAINED "
+    "(containment > 0), and hold users whose passwords live inside the "
+    "database (sys.database_principals.authentication_type = 2) rather than "
+    "mapping to server-level logins. Contained users bypass the instance's "
+    "login-policy and audit surface: their passwords are not subject to the "
+    "server's password checks, they do not appear in sys.server_principals "
+    "roster reviews, and a database that is later detached / restored on a "
+    "different instance keeps its full set of authenticatable users along "
+    "with it — a hand-off of credentials that is easy to miss. Any principal "
+    "with ALTER ANY USER inside a contained database can create additional "
+    "authentication paths without touching the instance's login store, and "
+    "the hashes are readable to db_owner (sysadmin equivalent inside the "
+    "container). Treat every contained-database user as a first-class login "
+    "for review, rotation and offboarding.")
+
+_CONTAINED_DBS_QUERY = (
+    "SELECT '@@B:contdbs'\n"
+    "SELECT name+'|'+containment_desc FROM sys.databases WHERE containment>0\n"
+    "SELECT '@@E:contdbs'\n"
+    "exit\n"
+)
+
+
+def _build_contained_users_script(dbs: list[str]) -> str:
+    """Per-db batch: switch context and count authentication_type=2 principals
+    (contained users with a password stored inside the database). Also carries
+    DB_NAME() through so a failed USE cannot be mistaken for a zero count."""
+    lines = []
+    for i, db in enumerate(dbs):
+        lines.append("USE [%s]" % db.replace("]", "]]"))
+        lines.append(f"SELECT '@@B:contusers:{i}'")
+        lines.append(
+            "SELECT DB_NAME()+'|'+CAST(COUNT(*) AS varchar(8)) "
+            "FROM sys.database_principals WHERE authentication_type=2 "
+            "AND type IN ('S','E','X')")
+        lines.append(f"SELECT '@@E:contusers:{i}'")
+    lines.append("exit")
+    return "\n".join(lines) + "\n"
+
+
+def parse_contained_dbs(output: str) -> list[dict]:
+    """Extract [{name, containment_desc}, ...] from the sentinel-wrapped
+    listing. Returns [] when the sentinel is missing (login failed / no
+    contained DBs)."""
+    import re
+    m = re.search(r"@@B:contdbs\b(.*?)@@E:contdbs\b", output, re.S)
+    if not m:
+        return []
+    rows: list[dict] = []
+    for line in m.group(1).splitlines():
+        line = line.strip()
+        if "|" not in line or "----" in line \
+                or line.startswith("@@") or line.startswith("SQL>"):
+            continue
+        parts = [c.strip() for c in line.split("|")]
+        if len(parts) >= 2 and parts[0]:
+            rows.append({"name": parts[0], "containment_desc": parts[1]})
+    return rows
+
+
+def parse_contained_users(output: str, dbs: list[str]) -> dict:
+    """{db: user_count} for each db whose per-batch section landed AND whose
+    DB_NAME() confirmed the USE succeeded. Missing / mismatched entries are
+    omitted rather than reported as zero, so an unverified DB isn't mistaken
+    for a clean one."""
+    import re
+    result: dict[str, int] = {}
+    for i, db in enumerate(dbs):
+        m = re.search(rf"@@B:contusers:{i}\b(.*?)@@E:contusers:{i}\b",
+                      output, re.S)
+        if not m:
+            continue
+        for line in m.group(1).splitlines():
+            line = line.strip()
+            if "|" not in line or "----" in line \
+                    or line.startswith("@@") or line.startswith("SQL>"):
+                continue
+            parts = [c.strip() for c in line.split("|")]
+            if len(parts) >= 2 and parts[0].lower() == db.lower() \
+                    and parts[1].isdigit():
+                result[db] = int(parts[1])
+                break
+    return result
+
+
+def probe_contained_db_auth(ip: str, creds: dict, port: int = _DEFAULT_PORT,
+                            windows_auth: bool = True) -> dict:
+    """SAFE detection of contained-database authentication. First reads
+    sys.databases for containment>0, then (only if any) counts contained
+    users (authentication_type=2) per DB. No auth attempts, no spraying,
+    no writes. Returns {ok, contained_dbs:[{name, containment_desc,
+    user_count}], error}."""
+    from ...core import proxy
+    cmd = _mssqlclient_cmd(ip, creds, port, windows_auth)
+    if cmd is None:
+        return {"ok": False, "error": "impacket-mssqlclient not installed"}
+    timeout = max(2, int(proxy.scaled(6)))
+    out, err = _run_stdin(cmd, _CONTAINED_DBS_QUERY, timeout=timeout,
+                          password=creds.get("secret", ""))
+    if err:
+        return {"ok": False, "error": err}
+    dbs = parse_contained_dbs(out)
+    if not dbs:
+        # Sentinel absent = login failed / wrong tool; sentinel present but
+        # empty = no contained DBs on this instance (ok, nothing to report).
+        if "@@B:contdbs" not in out:
+            return {"ok": False, "error": "no result / login failed"}
+        return {"ok": True, "contained_dbs": []}
+    names = [d["name"] for d in dbs]
+    out2, err2 = _run_stdin(cmd, _build_contained_users_script(names),
+                            timeout=timeout,
+                            password=creds.get("secret", ""))
+    counts = parse_contained_users(out2 or "", names) if not err2 else {}
+    for d in dbs:
+        d["user_count"] = counts.get(d["name"], 0)
+    return {"ok": True, "contained_dbs": dbs}
+
+
+def contained_db_users_finding(target: dict, probe: dict,
+                               creds: dict | None) -> dict | None:
+    """Emit the mssql_contained_db_users finding when at least one contained
+    DB carries one or more authentication_type=2 users. A contained DB with
+    zero contained users is enumerated (harmless on its own) but not
+    reported."""
+    if not (probe and probe.get("ok")):
+        return None
+    hits = [d for d in probe.get("contained_dbs") or []
+            if d.get("user_count", 0) > 0]
+    if not hits:
+        return None
+    tgt = f"{target['ip']}:{target.get('port', _DEFAULT_PORT)}"
+    ctx = _ctx(target, creds)
+    listing = ", ".join(
+        f"{d['name']} ({d['containment_desc'] or 'CONTAINED'}, "
+        f"{d['user_count']} user{'s' if d['user_count'] != 1 else ''})"
+        for d in hits)
+    total = sum(d["user_count"] for d in hits)
+    return _finding(
+        "medium",
+        "MSSQL contained-database users (authentication bypasses server logins)",
+        tgt,
+        (f"{len(hits)} contained database(s) hold {total} user(s) whose "
+         f"passwords are stored inside the DB (sys.database_principals."
+         f"authentication_type=2): {listing}. These users authenticate "
+         "directly against the database and are outside the instance's "
+         "login-policy / audit surface."),
+        "impacket-mssqlclient",
+        _fill("impacket-mssqlclient <user>@<ip> -p <port>   # then "
+              "SELECT name, containment_desc FROM sys.databases "
+              "WHERE containment>0;  USE [<db>]; SELECT name, type_desc, "
+              "authentication_type FROM sys.database_principals "
+              "WHERE authentication_type=2;", ctx),
+        "Review every contained-database user against the offboarding / "
+        "rotation policy that covers server logins; enforce password checks "
+        "(CHECK_POLICY = ON) on contained users; where the containment is "
+        "not a product requirement, set containment = NONE and migrate the "
+        "users back to server-level logins.",
+        ["CWE-522", "CWE-287"], kind="mssql_contained_db_users",
+        exploit_note=(
+            "impacket-mssqlclient <user>@<ip>; enumerate with "
+            "SELECT name, containment_desc FROM sys.databases WHERE "
+            "containment>0; for each hit USE [<db>]; SELECT name, "
+            "type_desc, authentication_type, "
+            "CONVERT(varchar(max),password_hash,1) FROM "
+            "sys.database_principals WHERE authentication_type=2 (hashes "
+            "readable to db_owner) — crack offline with hashcat mode 1731."),
+        depth_tier="t1")
+
+
+# --- DAC (Dedicated Admin Connection) network exposure --------------------------
+#
+# SQL Server ships a diagnostic listener called the Dedicated Admin Connection
+# reserved for the sysadmin role: it is intended for local emergency use only, and
+# the default posture is loopback-only. Turning on `remote admin connections`
+# (sp_configure) exposes the DAC on TCP so *authenticated sysadmin* traffic can
+# come from off-box. Two facts matter for a pre-auth safety scan:
+#
+#   * DAC is advertised. The SQL Browser (UDP 1434) answers the CLNT_UCAST_DAC
+#     message (MS-SQLR 2.2.1 / 2.2.5) with the DAC's dynamic TCP port. Any host
+#     that can reach UDP 1434 can learn the port with a single datagram.
+#   * DAC is reachable on the default instance. For the default instance the DAC
+#     listens on TCP 1434 (the same number as the browser, but TCP). If TCP 1434
+#     answers a TDS PRELOGIN, the DAC endpoint is reachable off-box.
+#
+# We NEVER authenticate to the DAC. Only sysadmin logins are accepted there and a
+# failed auth is a very high-signal event to a defender; this capability stops at
+# "reachable" and emits an evidence-only finding.
+
+_DAC_KIND = "mssql_dac_exposed"
+
+_NARRATIVE[_DAC_KIND] = (
+    "The Dedicated Admin Connection (DAC) is a diagnostic TDS endpoint reserved "
+    "for the sysadmin role; SQL Server ships it loopback-only and the "
+    "`remote admin connections` server option must be turned on to expose it "
+    "over the network. Two off-box signals show that has happened: the SQL "
+    "Browser (UDP 1434) answers CLNT_UCAST_DAC with a dynamic TCP port for the "
+    "instance (MS-SQLR 2.2.1 / 2.2.5), and/or TCP 1434 answers a TDS PRELOGIN "
+    "(the default instance's DAC always listens there). A reachable DAC is a "
+    "high-value target: it is a low-traffic sysadmin-only channel that survives "
+    "when the primary listener is saturated or locked out, it bypasses the "
+    "session/connection limits the DBA relies on for triage, and a stolen "
+    "sysadmin credential works there specifically for the kind of recovery / "
+    "config-change access DBAs use to break-glass. The DAC itself is not "
+    "authenticated by exposure — never spray it, never authenticate to it — "
+    "but it should not be network-reachable at all: set `sp_configure 'remote "
+    "admin connections', 0` and firewall the advertised DAC port along with "
+    "TCP 1434.")
+
+
+def _build_ucast_dac(instance: str = "") -> bytes:
+    """CLNT_UCAST_DAC per MS-SQLR 2.2.1: 0x0F, protocol version 0x01, then the
+    ASCII instance name null-terminated. Empty instance = default instance."""
+    name = (instance or "").encode("ascii", "ignore")
+    return b"\x0f\x01" + name + b"\x00"
+
+
+def _parse_ucast_dac(data: bytes) -> int:
+    """Parse SVR_RESP for a CLNT_UCAST_DAC. Header is 0x05 + LE payload length;
+    payload is protocol version (1 byte) + DAC TCP port (LE uint16). Returns 0
+    on any malformed / non-DAC / disabled-DAC response."""
+    if len(data) < 6 or data[0] != 0x05:
+        return 0
+    size = struct.unpack("<H", data[1:3])[0]
+    # A valid DAC payload is exactly 3 bytes (version + port). A larger size is
+    # the browser's SVR_RESP for CLNT_UCAST_EX (which we handle elsewhere) so
+    # refuse to interpret it as a DAC answer.
+    if size != 3:
+        return 0
+    if data[3] != 0x01:
+        return 0
+    port = struct.unpack("<H", data[4:6])[0]
+    return port if 1 <= port <= 65535 else 0
+
+
+def sql_browser_dac(ip: str, instance: str = "",
+                    timeout: float = 3.0) -> int:
+    """Ask SQL Browser (UDP 1434) for the DAC TCP port for `instance` via
+    CLNT_UCAST_DAC. Returns the port (>0) if the browser advertised one, or 0
+    if the instance is unknown / DAC is disabled / any wire failure.
+    Read-only: one datagram sent, one datagram read, no auth."""
+    from ...core import proxy
+    if proxy.is_active():
+        # UDP does not traverse the proxy; a datagram would leak from the real IP.
+        return 0
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(proxy.scaled(timeout))
+        try:
+            s.sendto(_build_ucast_dac(instance), (ip, SQLBROWSER_PORT))
+            data, _ = s.recvfrom(65535)
+        finally:
+            s.close()
+    except OSError:
+        return 0
+    return _parse_ucast_dac(data)
+
+
+def dac_tcp_answers_prelogin(ip: str, port: int = SQLBROWSER_PORT,
+                             timeout: float = 3.0) -> bool:
+    """True when TCP `port` (default 1434, the default-instance DAC) answers a
+    TDS PRELOGIN. Reuses the existing prelogin() probe — read-only, no auth,
+    bounded socket timeout."""
+    from ...core import proxy
+    info = prelogin(ip, port, timeout=proxy.scaled(timeout))
+    # prelogin returns {} on any wire / parse failure; a version string means
+    # the port spoke enough TDS to answer.
+    return bool(info)
+
+
+def probe_dac_exposure(ip: str, instances: list | None = None,
+                       timeout: float = 3.0) -> dict:
+    """Detect network exposure of the DAC endpoint. Two SAFE checks:
+      * Browser advertisement for each instance (CLNT_UCAST_DAC).
+      * TCP 1434 answers TDS PRELOGIN (default-instance DAC port).
+    Returns {advertised: [{instance, port}, ...], tcp_1434_tds: bool}.
+    Never authenticates to the DAC. instances may be pre-supplied to skip a
+    second SQL Browser round-trip."""
+    inst = sql_browser(ip, timeout=timeout) if instances is None else list(instances)
+    names = [(i.get("instance") or "") for i in inst] or [""]
+    advertised: list[dict] = []
+    for name in names:
+        p = sql_browser_dac(ip, name, timeout=timeout)
+        if p:
+            advertised.append({"instance": name, "port": p})
+    tcp_ok = dac_tcp_answers_prelogin(ip, SQLBROWSER_PORT, timeout=timeout)
+    return {"advertised": advertised, "tcp_1434_tds": tcp_ok}
+
+
+def dac_exposed_finding(target: dict, probe: dict) -> dict | None:
+    """Emit `mssql_dac_exposed` (medium, t1, CWE-306) when the DAC is
+    network-reachable. Returns None if neither signal fired."""
+    if not probe:
+        return None
+    adv = probe.get("advertised") or []
+    tcp_ok = bool(probe.get("tcp_1434_tds"))
+    if not adv and not tcp_ok:
+        return None
+    tgt = f"{target.get('ip', '<ip>')}:{target.get('port', _DEFAULT_PORT)}"
+    bits: list[str] = []
+    if adv:
+        pretty = ", ".join(
+            f"{a['instance'] or 'DEFAULT'}={a['port']}" for a in adv)
+        bits.append(f"SQL Browser advertised DAC port ({pretty})")
+    if tcp_ok:
+        bits.append(f"TCP {SQLBROWSER_PORT} answers TDS PRELOGIN "
+                    "(default-instance DAC endpoint)")
+    detail = ("Dedicated Admin Connection is network-reachable: "
+              + "; ".join(bits) + ". Only sysadmin logins are accepted on the "
+              "DAC; recce did NOT authenticate to it. Exposure alone is a "
+              "misconfiguration — DAC ships loopback-only and is intended for "
+              "local emergency use.")
+    # Choose the first advertised port for the "prove" hint, else TCP 1434.
+    show_port = adv[0]["port"] if adv else SQLBROWSER_PORT
+    return _finding(
+        "medium",
+        "MSSQL DAC (Dedicated Admin Connection) network-reachable",
+        tgt,
+        detail,
+        "recce (stdlib) / manual",
+        (f"# CLNT_UCAST_DAC — one UDP datagram, no auth\n"
+         f"printf '\\x0f\\x01\\x00' | nc -u -w2 {target.get('ip', '<ip>')} "
+         f"{SQLBROWSER_PORT}\n"
+         f"# TDS PRELOGIN on the advertised DAC port (no LOGIN7 follows)\n"
+         f"nmap -Pn -p {show_port} --script ms-sql-info "
+         f"{target.get('ip', '<ip>')}"),
+        "Set `sp_configure 'remote admin connections', 0; RECONFIGURE;` and "
+        "firewall UDP 1434 and every advertised DAC port off the network — "
+        "the DAC is a break-glass local channel, not a remote service.",
+        ["CWE-306"],
+        kind=_DAC_KIND,
+        exploit_note=(
+            "Do NOT authenticate to the DAC without written authorisation: it "
+            "is sysadmin-only and every failed auth is a very high-signal "
+            "event. Detection is: printf '\\x0f\\x01\\x00' | nc -u -w2 <ip> "
+            "1434 — response begins 0x05 03 00 01 <port_lo> <port_hi>."),
+        depth_tier="t1")
