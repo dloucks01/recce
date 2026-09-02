@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 
+from .depth import T0_ENUM, T1_VERIFY
 from .models import Account, Evidence, Host, Port, Script, Vuln
 
 _CVE_RE = re.compile(r"\b(CVE-\d{4}-\d{4,7})\b", re.IGNORECASE)
@@ -235,6 +236,32 @@ def _classify_vuln(host_ip: str, port: Port | None, script: Script) -> Vuln | No
     if not title:
         title = sid
 
+    # Depth stamping for the `vulners` NSE wrapper. vulners maps banner->CVE with
+    # NO live-vulnerable probe, so a bare vulners emission is a version-inference
+    # lead — T0_ENUM. If the same run also flagged a positive VULNERABLE state
+    # (a co-run detection script surfaced through the same output), upgrade to
+    # T1_VERIFY per recce.core.depth. Additions only; no existing logic touched.
+    _depth_tier = ""
+    _exploit_note = ""
+    if sid == "vulners":
+        _kev_flag = False
+        try:
+            from ..vuln.kev import any_kev as _any_kev
+            _kev_flag = _any_kev([i.upper() for i in ids])
+        except Exception:                     # noqa: BLE001 - never break the parser
+            _kev_flag = False
+        _depth_tier = T1_VERIFY if positive else T0_ENUM
+        _first_cve = (sorted([i.upper() for i in ids])[0] if ids else "")
+        _prefix = "KEV: " if _kev_flag else ""
+        _portid = port.portid if port else "PORT"
+        _cve_hint = f" (top: {_first_cve})" if _first_cve else ""
+        _exploit_note = (
+            f"{_prefix}vulners banner->CVE lead{_cve_hint} - verify with a live "
+            f"detector: `nmap -sV --script=vuln -p {_portid} {host_ip}` and "
+            f"`searchsploit {(port.product or port.service) if port else 'service'}"
+            f" {port.version if port else ''}`. Expect a State: VULNERABLE line "
+            f"or a working PoC before treating as exploitable."
+        )
     return Vuln(
         ip=host_ip,
         port=port.portid if port else None,
@@ -250,6 +277,8 @@ def _classify_vuln(host_ip: str, port: Port | None, script: Script) -> Vuln | No
         # only a lead. `positive` carries that distinction structurally.
         evidence=[Evidence(kind="nse", positive=bool(positive),
                            detail=(state or sid)[:120])],
+        depth_tier=_depth_tier,
+        exploit_note=_exploit_note,
     )
 
 

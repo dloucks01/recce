@@ -344,7 +344,9 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                     detail += (f"  CAPTURED {len(creds_here)} cleartext credential(s) "
                                "-> credential store (sprayable): "
                                + ", ".join(c.label for c in creds_here))
-                findings.append(_mk(ip, port, sid, sev, title, cwes, detail, fix))
+                tier, tester_next = _PATH_TIERS.get(sid, ("", ""))
+                findings.append(_mk(ip, port, sid, sev, title, cwes, detail, fix,
+                                    depth_tier=tier, exploit_note=tester_next))
         except Exception:  # noqa: BLE001 - a bad body never breaks the sweep
             continue
     # Exposed .git -> reconstruct the source tree + mine it for secrets/credentials.

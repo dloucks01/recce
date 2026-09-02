@@ -1571,7 +1571,12 @@ def enum_findings(host_ip: str, port: Port,
                 [],
                 (f"root {fp.get('status','?')} · title={fp.get('title','')!r} · "
                  f"server={fp.get('server','')!r} · techs=[{', '.join(techs)}]"),
-                "Informational — feeds default-cred and CVE lookup for the detected stack."))
+                "Informational — feeds default-cred and CVE lookup for the detected stack.",
+                exploit_note=(
+                    "curl -sSkI http://IP:PORT/ ; searchsploit "
+                    + (techs[0].split()[0] if techs else "nginx")
+                    + " ; nmap -sV --script=vulners -p PORT IP"),
+                depth_tier="t0"))
 
     # Path enum — the meat. Merges bundled _PATHS with the user's
     # optional wordlist so both fire in one pool.
@@ -1691,7 +1696,13 @@ def enum_findings(host_ip: str, port: Port,
             [],
             f"{len(free_paths)} path(s) advertised: " + ", ".join(free_paths[:20])
             + ("…" if len(free_paths) > 20 else ""),
-            "Informational — anything a Disallow line names is worth reviewing directly."))
+            "Informational — anything a Disallow line names is worth reviewing directly.",
+            exploit_note=(
+                "curl -sSk http://IP:PORT/robots.txt ; for p in "
+                + " ".join(free_paths[:6])
+                + "; do curl -sSk -o /dev/null -w '%{http_code} %{url_effective}\\n' "
+                "http://IP:PORT$p; done"),
+            depth_tier="t0"))
 
     # OpenAPI / Swagger / GraphQL — full API surface handed to us.
     spec = api_spec_probe(host_ip, port.portid, use_tls)
@@ -1809,7 +1820,13 @@ def enum_findings(host_ip: str, port: Port,
             ["CWE-346"],
             "Access-Control-Allow-Origin: * with Allow-Credentials: true — browsers "
             "typically block this combination, but some setups still leak.",
-            "Set an explicit origin allowlist instead of '*' when credentials are enabled."))
+            "Set an explicit origin allowlist instead of '*' when credentials are enabled.",
+            exploit_note=(
+                "curl -sSk -H 'Origin: https://attacker.example' -D- "
+                "http://IP:PORT/ | grep -i access-control ; then verify a "
+                "cross-origin fetch(url,{credentials:'include'}) can read the "
+                "response body from a non-target origin"),
+            depth_tier="t1"))
 
     # Spring Boot Actuator deep-enum. High-value on Java stacks — /env and
     # /heapdump dump every credential the app is holding.

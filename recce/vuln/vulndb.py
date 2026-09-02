@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import re
 
+from ..core.depth import T0_ENUM
 from ..core.models import Evidence, Host, Port, Vuln
+from .kev import any_kev
 
 
 def _ver_tuple(v: str) -> tuple[int, ...]:
@@ -1094,12 +1096,30 @@ def assess_host(host: Host) -> list[Vuln]:
                 note = ("  NOTE: distro-packaged build - the fix may be backported with "
                         "the version unchanged; verify the package before relying on "
                         "this version match.")
+            # Depth stamping: a version-db match is BY CONSTRUCTION a banner/version
+            # inference (Evidence kind "version-range"), never a live-vulnerable probe -
+            # so tier=T0_ENUM per recce.core.depth. exploit_note prefixes "KEV" when any
+            # associated CVE is in the CISA Known-Exploited catalogue so the operator
+            # sees the "fix-first / verify-first" signal on the ExploitSurface. Additions
+            # only; leaves the rest of the emission untouched.
+            cves = list(sig.get("cves", []))
+            _kev_prefix = "KEV: " if any_kev(cves) else ""
+            _first_cve = cves[0] if cves else ""
+            _cve_hint = f" (verify {_first_cve})" if _first_cve else ""
+            _exploit_note = (
+                f"{_kev_prefix}Banner-only lead - confirm before trusting: "
+                f"`nmap -sV -p {port.portid} {host.ip}` then run the matching "
+                f"detection script (e.g. `nmap --script vuln -p {port.portid} "
+                f"{host.ip}`) or `searchsploit {port.product or port.service}"
+                f" {port.version}`{_cve_hint}. Expect a live VULNERABLE state or "
+                f"a matching PoC before treating as exploitable."
+            )
             findings.append(Vuln(
                 ip=host.ip, port=port.portid, protocol=port.protocol,
                 script_id="version-db", state="version match",
                 title=sig["title"],
                 output=f"{banner} on {port.portid}/{port.protocol} - {sig['desc']}{note}",
-                severity=sig["severity"], ids=list(sig.get("cves", [])),
+                severity=sig["severity"], ids=cves,
                 cwes=list(sig.get("cwe", [])),
                 source="version-db", remediation=remediation,
                 confidence=conf,
@@ -1108,6 +1128,8 @@ def assess_host(host: Host) -> list[Vuln]:
                 # version really is in range) but `kind` marks it inference-only.
                 evidence=[Evidence(kind="version-range", positive=True,
                                    detail=f"{banner}{note}"[:120])],
+                depth_tier=T0_ENUM,
+                exploit_note=_exploit_note,
             ))
     return findings
 

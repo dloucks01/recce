@@ -48,11 +48,13 @@ def url_for(ip: str, port: Port) -> str:
 
 
 def _mk(ip: str, port: Port, sid: str, sev: str, title: str, cwes, output: str,
-        remediation: str, confidence: str = "confirmed") -> Vuln:
+        remediation: str, confidence: str = "confirmed",
+        depth_tier: str = "", exploit_note: str = "") -> Vuln:
     return Vuln(ip=ip, port=port.portid, protocol=port.protocol, script_id=sid,
                 state="finding", title=title, output=output, severity=sev,
                 cwes=list(cwes), source="web", remediation=remediation,
-                confidence=confidence)
+                confidence=confidence, depth_tier=depth_tier,
+                exploit_note=exploit_note)
 
 
 
