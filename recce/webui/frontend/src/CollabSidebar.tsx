@@ -3,7 +3,8 @@ import { useCollab } from "./collab";
 import { ChatPanel } from "./ChatPanel";
 import { AssignmentsPanel } from "./AssignmentsPanel";
 import { CredentialsPanel } from "./CredentialsPanel";
-import { Host } from "./api";
+import { Host, postJobCancel } from "./api";
+import { toast } from "./toast";
 import { Nav } from "./views";
 
 function useSidebarResize(defaultW = 340) {
@@ -144,6 +145,19 @@ export function CollabSidebar({ hosts, nav }: { hosts: Host[]; nav?: Nav }) {
                     {j.cmd.split(" ").slice(0, 3).join(" ")}
                   </div>
                   <div className="job-time">{timeAgo(j.started)}</div>
+                  <button className="job-cancel"
+                          title="cancel this running job"
+                          onClick={async () => {
+                            if (!confirm(`Cancel job "${j.cmd.slice(0, 60)}"?`)) return;
+                            try {
+                              await postJobCancel(j.id);
+                              toast.show("Cancel signalled — job winding down");
+                            } catch (e) {
+                              toast.show(`Cancel failed: ${(e as Error).message}`);
+                            }
+                          }}>
+                    ✕
+                  </button>
                 </div>
               ))}
             </section>

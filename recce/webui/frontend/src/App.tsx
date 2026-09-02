@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { postTick, postNote } from "./api";
-import { ImportModal, ShortcutHelp, CommandPalette, EncDecModal } from "./modals";
+import { ImportModal, ShortcutHelp, CommandPalette, EncDecModal, DoctorModal, ScopeModal } from "./modals";
 import { ToolsMenu } from "./ToolsMenu";
 import { getSessions, getCredentials, getListeners, startListener, SessionInfo, Credential } from "./api";
 import { useEngagement } from "./useEngagement";
@@ -43,6 +43,7 @@ import { ScanTab } from "./ScanTab";
 import { ReportTab } from "./ReportTab";
 import { CollabSidebar } from "./CollabSidebar";
 import { AutocrackStatus } from "./components/AutocrackStatus";
+import { ProxyBadge } from "./components/ProxyBadge";
 import { toast, Toast } from "./toast";
 
 // Tester identity (localStorage-persisted)
@@ -176,6 +177,8 @@ export default function App() {
   // UI state
   const [showImport, setShowImport] = useState(false);
   const [showEncDec, setShowEncDec] = useState(false);
+  const [showDoctor, setShowDoctor] = useState(false);
+  const [showScope, setShowScope] = useState(false);
   const [activeToast, setActiveToast] = useState<Toast | null>(null);
   const [scanRunning, setScanRunning] = useState(false);
   const [, setScanLog] = useState<string[]>([]);
@@ -377,10 +380,13 @@ export default function App() {
             <ToolsMenu
               onImport={() => setShowImport(true)}
               onEncDec={() => setShowEncDec(true)}
+              onDoctor={() => setShowDoctor(true)}
+              onScope={() => setShowScope(true)}
             />
             <ActivityButton />
             <ChatButton />
             <AutocrackStatus />
+            <ProxyBadge />
           </div>
           <div className="header-util">
             <button className="theme-tog" onClick={() => setDensity(cycleDensity(density))}
@@ -518,6 +524,8 @@ export default function App() {
       {showShortcuts && <ShortcutHelp onClose={() => setShowShortcuts(false)} />}
 
       {showEncDec && <EncDecModal onClose={() => setShowEncDec(false)} />}
+      {showDoctor && <DoctorModal onClose={() => setShowDoctor(false)} />}
+      {showScope && <ScopeModal onClose={() => setShowScope(false)} />}
 
       {showPalette && (
         <CommandPalette

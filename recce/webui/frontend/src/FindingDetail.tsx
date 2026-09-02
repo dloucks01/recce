@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { VulnDetail, PocDossier, getPoc } from "./api";
+import { VulnDetail, PocDossier, getPoc, postWriteupDocx, deleteFinding as apiDeleteFinding } from "./api";
 import { SevTag, NoteCell } from "./ui";
+import { toast } from "./toast";
 
 function CopyBtn({ text, label }: { text: string; label: string }) {
   const [ok, setOk] = useState(false);
@@ -122,15 +123,18 @@ function getImpact(v: VulnDetail): string | null {
 }
 
 export function FindingDetail(
-  { v, onNote, onAddToReport, onJumpToHost }: {
+  { v, onNote, onAddToReport, onJumpToHost, onDeleted }: {
     v: VulnDetail;
     onNote: (key: string, text: string) => void;
     onAddToReport?: (key: string) => void;
     onJumpToHost?: (ip: string) => void;
+    onDeleted?: (key: string) => void;                  // notify parent so it can drop the row
   }
 ) {
   const suggestions = getSuggestions(v);
   const impact = getImpact(v);
+  const [writeupBusy, setWriteupBusy] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   // PoC dossier — lazy-fetched on click. Cached per finding so re-open is
   // instant. Only offered when the finding has a real CVE reference.
@@ -347,6 +351,44 @@ export function FindingDetail(
               + Add to report
             </button>
           )}
+          {/* Write-up: pull the per-finding docx from /api/writeup and hand it
+              to a download anchor. Was CLI-only (`recce writeup`) until now. */}
+          <button className="fd-copy" disabled={writeupBusy}
+                  onClick={async () => {
+                    setWriteupBusy(true);
+                    try {
+                      const blob = await postWriteupDocx(v.key);
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `writeup-${v.key.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 80)}.docx`;
+                      document.body.appendChild(a); a.click(); a.remove();
+                      URL.revokeObjectURL(url);
+                      toast.show("Write-up downloaded");
+                    } catch (e) {
+                      toast.show(`Write-up failed: ${(e as Error).message}`);
+                    } finally { setWriteupBusy(false); }
+                  }}
+                  title="Download a Word write-up for just this finding">
+            {writeupBusy ? "Building…" : "Write-up (.docx)"}
+          </button>
+          {/* Permanent delete — with confirm. Behaviourally distinct from
+              Dismiss (which hides but keeps the record). */}
+          <button className="fd-copy fd-action-danger" disabled={deleteBusy}
+                  onClick={async () => {
+                    if (!confirm(`Permanently DELETE the finding "${v.title}"? (This is not the same as Dismiss — the row is gone from the DB.)`)) return;
+                    setDeleteBusy(true);
+                    try {
+                      await apiDeleteFinding(v.ip, v.key);
+                      toast.show("Finding deleted");
+                      onDeleted?.(v.key);
+                    } catch (e) {
+                      toast.show(`Delete failed: ${(e as Error).message}`);
+                    } finally { setDeleteBusy(false); }
+                  }}
+                  title="Permanently delete this finding from the engagement">
+            {deleteBusy ? "Deleting…" : "Delete"}
+          </button>
         </div>
       </div>
 

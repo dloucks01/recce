@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { deleteCredential as apiDeleteCredential } from "./api";
+import { toast } from "./toast";
 
 interface Credential {
   username: string;
@@ -96,6 +98,26 @@ export function CredentialsPanel() {
               <div className="cred-footer">
                 {c.source && <span className="cred-source">from {c.source}</span>}
                 {c.origin_ip && <span className="cred-by">on {c.origin_ip}</span>}
+                <button className="btn danger sm cred-delete"
+                        title="Permanently delete this credential from the store"
+                        onClick={async () => {
+                          const label = c.label || c.username || "(unlabeled)";
+                          if (!confirm(`Delete credential "${label}"? This is permanent.`)) return;
+                          try {
+                            await apiDeleteCredential({
+                              username: c.username || "",
+                              secret: c.secret || "",
+                              kind: c.kind || "password",
+                              domain: c.domain || "",
+                            });
+                            setCreds((prev) => prev.filter((_, j) => j !== i));
+                            toast.show("Credential deleted");
+                          } catch (e) {
+                            toast.show(`Delete failed: ${(e as Error).message}`);
+                          }
+                        }}>
+                  Delete
+                </button>
               </div>
             </div>
           ))

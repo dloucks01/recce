@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Finding, VulnDetail, SEVS, getHost, getExploitHint,
-  FINDING_STATUSES, FINDING_STATUS_LABEL, FindingStatus, setFindingStatus } from "../api";
+  FINDING_STATUSES, FINDING_STATUS_LABEL, FindingStatus, setFindingStatus,
+  postBulkReview } from "../api";
 import { SevTag, NoteCell, useBounded } from "../ui";
 import { FindingDetail } from "../FindingDetail";
 import { useCollab } from "../collab";
@@ -132,13 +133,23 @@ export function Findings(
   }
   function bulkTick(reviewed: boolean) {
     const keys = [...selected].filter(k => shown.find(x => x.key === k && x.reviewed !== reviewed));
+    if (keys.length === 0) { clearSel(); return; }
+    // Fire the batch endpoint for efficiency (one HTTP round-trip vs. N).
+    // Also update the local list optimistically so the tick flips right
+    // away without waiting for a refresh.
+    postBulkReview(keys, reviewed).catch(() => {
+      // On failure, fall back to per-key ticks so at least some progress
+      // registers instead of silently dropping the request.
+      keys.forEach(k => onTick(k, reviewed));
+    });
     keys.forEach(k => onTick(k, reviewed));
-    if (keys.length > 0) {
-      toast.show(`${reviewed ? "marked" : "reopened"} ${keys.length} finding(s)`, {
-        label: "Undo",
-        onClick: () => keys.forEach(k => onTick(k, !reviewed)),
-      });
-    }
+    toast.show(`${reviewed ? "marked" : "reopened"} ${keys.length} finding(s)`, {
+      label: "Undo",
+      onClick: () => {
+        postBulkReview(keys, !reviewed).catch(() => {});
+        keys.forEach(k => onTick(k, !reviewed));
+      },
+    });
     clearSel();
   }
 

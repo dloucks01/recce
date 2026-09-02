@@ -822,3 +822,79 @@ export const getAttackChainCloud = () =>
   getJSON<AttackChainResponse>("/api/attack-chain/cloud");
 export const getAttackChainWeb = () =>
   getJSON<AttackChainResponse>("/api/attack-chain/web");
+
+
+// ---------------------------------------------------------------------------
+// IA-restructure follow-up: wrappers for the endpoints that were CLI-only
+// until Sept 2026. Each helper is a thin post/getJSON around an existing
+// backend route — the routes themselves are unchanged.
+// ---------------------------------------------------------------------------
+
+// Vulndb / CVE-DB state + refresh.
+export type VerifyState = { pending: number; already_ran: number; plan: string[]; completed: string[] };
+export const getVerify = () => getJSON<VerifyState>("/api/verify");
+export const postVerify = () => post("/api/verify", {});
+
+// Engagement doctor (runs the audit) + the audit's persistent issues list.
+export type DoctorIssue = { severity: string; kind: string; message: string; hint?: string };
+export type DoctorState = { issues: DoctorIssue[]; counts: Record<string, number> };
+export const getIssues = () => getJSON<DoctorState>("/api/issues");
+export const postDoctor = () => post("/api/doctor", {});
+
+// Scope editor: list / add / delete an in-scope subnet.
+export type ScopeEntry = { subnet: string; size: number };
+export const getScope = () => getJSON<ScopeEntry[]>("/api/scope");
+export const postScope = (subnet: string, note = "") => post("/api/scope", { subnet, note });
+export async function deleteScope(subnet: string) {
+  const r = await fetch(`/api/scope/${encodeURIComponent(subnet)}`, { method: "DELETE" });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? r.statusText);
+  return r.json();
+}
+
+// Field-kit + engagement backup — both return a ZIP body; UI triggers a
+// download via a temporary object URL. Fetch as blob rather than JSON.
+async function _postBlob(url: string): Promise<Blob> {
+  const r = await fetch(url, { method: "POST", headers: jsonHeaders() });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? r.statusText);
+  return r.blob();
+}
+export const postFieldkitExport = () => _postBlob("/api/fieldkit-export");
+export const postBackup = () => _postBlob("/api/backup");
+
+// Per-finding write-up (docx). Returns the DOCX bytes as a blob so the UI
+// can hand it straight to a download anchor.
+export async function postWriteupDocx(key: string): Promise<Blob> {
+  const r = await fetch("/api/writeup", {
+    method: "POST", headers: jsonHeaders(),
+    body: JSON.stringify({ key }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? r.statusText);
+  return r.blob();
+}
+
+// Deletes — findings by (ip, key), credentials by their {username, secret,
+// kind, domain} tuple (the store dedupe key — no separate id).
+export const deleteFinding = (ip: string, key: string) =>
+  post("/api/delete/finding", { ip, key });
+export const deleteCredential = (b: { username: string; secret: string; kind: string; domain?: string }) =>
+  post("/api/delete/credential", b);
+
+// Bulk-review — mark many findings reviewed in one call.
+export const postBulkReview = (keys: string[], reviewed = true) =>
+  post("/api/bulk-review", { keys, reviewed });
+
+// Proxy indicator (state only; setting the proxy is a serve-time flag).
+export type ProxyState = { url: string; enabled: boolean; kind: string };
+export const getProxy = () => getJSON<ProxyState>("/api/proxy");
+
+// Job cancel (a scan in flight can be aborted from the jobs list).
+export const postJobCancel = (jid: string) =>
+  post(`/api/jobs/${encodeURIComponent(jid)}/cancel`, {});
+
+// Loot rescan — re-scan uploaded loot evidence.
+export const postLootScanEvidence = () => post("/api/loot/scan-evidence", {});
+
+// SQLi tester — single-URL probe (a full sqlmap run stays CLI-only).
+export type SqliResult = { vulnerable: boolean; techniques: string[]; evidence?: string; error?: string };
+export const postSqliTest = (url: string, param?: string) =>
+  post("/api/sqli/test", { url, param }) as Promise<SqliResult>;
