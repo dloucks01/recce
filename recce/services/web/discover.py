@@ -117,7 +117,11 @@ def _content_discovery(ip: str, port: Port, base: str, auth: dict | None) -> lis
                             f"A curated wordlist against {base} surfaced: {listing}."
                             + ("" if len(surface) <= 40 else f" (+{len(surface) - 40} more)"),
                             "Review each surface; a 401/403 marks a real (protected) resource, "
-                            "a 200 an exposed one. Remove what shouldn't be reachable."))
+                            "a 200 an exposed one. Remove what shouldn't be reachable.",
+                            depth_tier="t1",
+                            exploit_note=(f"curl -sk {base}<path> for each notable listing above; 200 "
+                                          "responses are exposed content. Pipe through ffuf -w rockyou-web.txt "
+                                          "-u {base}/FUZZ -mc 200,301,302,401,403 to deepen enum.")))
     return findings
 
 
@@ -220,7 +224,16 @@ def _brute_wordlist_dirs(ip: str, port: Port, base: str, auth: dict | None, limi
                         findings.append(_mk(ip, port, f"web-enum-{category}", "medium" if r[0] == 401 else "low",
                             f"{category.title()} path found: {word}", ["CWE-200"],
                             f"GET /{word} -> HTTP {r[0]}. Potential {category} endpoint.",
-                            "Restrict access; require authentication", confidence="confirmed"))
+                            "Restrict access; require authentication", confidence="confirmed",
+                            depth_tier="t1" if r[0] in (401, 403) else "t2" if r[0] == 200 else "t1",
+                            exploit_note=(
+                                f"curl -sk http{'s' if port.portid in (443,8443) else ''}://{ip}:{port.portid}/{word} — "
+                                f"if 200, review body for creds/config; if 401, "
+                                f"hydra -L users.txt -P passwords.txt http-get://{ip}:{port.portid}/{word} "
+                                "or nxc smb/http default-cred spray; if 403, try "
+                                "verb-tampering (X-HTTP-Method-Override: PUT), "
+                                "path-traversal (/./{word}, /{word}/../{word}), or "
+                                "case-swap (/ADMIN, /Admin).")))
             except Exception:
                 pass
     return findings[:5]  # Return top 5 to avoid noise

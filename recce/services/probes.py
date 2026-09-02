@@ -63,12 +63,13 @@ def _is_http(port: Port) -> bool:
 
 
 def _mk(host_ip: str, port: Port, sid: str, sev: str, title: str,
-        cwes: list[str], output: str, remediation: str) -> Vuln:
+        cwes: list[str], output: str, remediation: str,
+        depth_tier: str = "", exploit_note: str = "") -> Vuln:
     return Vuln(
         ip=host_ip, port=port.portid, protocol=port.protocol,
         script_id=sid, state="finding", title=title, output=output,
         severity=sev, cwes=cwes, source="probe", remediation=remediation,
-        confidence="confirmed",
+        confidence="confirmed", depth_tier=depth_tier, exploit_note=exploit_note,
     )
 
 
@@ -149,7 +150,14 @@ def http_findings(host_ip: str, port: Port) -> list[Vuln]:
             missing.append(name)
             findings.append(_mk(
                 host_ip, port, "http-headers", sev, title, cwes,
-                f"HTTP {status}: response is missing the '{name}' header.", fix))
+                f"HTTP {status}: response is missing the '{name}' header.", fix,
+                depth_tier="t1",
+                exploit_note=(
+                    f"curl -sI http{'s' if use_tls else ''}://{host_ip}:{port.portid}/ | "
+                    f"grep -i '{name}' — confirm still absent, then check whether the "
+                    "missing header actually enables a real primitive on this app "
+                    "(e.g. CSP-absent + reflected input → XSS; HSTS-absent + cleartext "
+                    "80 open → SSL-strip on same LAN).")))
 
     # Server / X-Powered-By banner disclosure (version leakage).
     banner = "; ".join(
@@ -160,7 +168,11 @@ def http_findings(host_ip: str, port: Port) -> list[Vuln]:
             host_ip, port, "http-headers", "info",
             "Server banner discloses software version", ["CWE-200"],
             f"HTTP {status}: {banner}",
-            "Suppress version details in Server/X-Powered-By response headers."))
+            "Suppress version details in Server/X-Powered-By response headers.",
+            depth_tier="t0",
+            exploit_note=(f"searchsploit '{banner[:60]}' — cross-reference the disclosed "
+                          "version against public CVEs. If any CVE has a public POC, "
+                          "run recce prove or the matching msf module.")))
 
     # Deep HTTP: bundled path enum + framework fingerprint. Lives in
     # services.http because it will grow with each Tier-A HTTP item (methods,

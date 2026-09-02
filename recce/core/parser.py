@@ -262,6 +262,28 @@ def _classify_vuln(host_ip: str, port: Port | None, script: Script) -> Vuln | No
             f" {port.version if port else ''}`. Expect a State: VULNERABLE line "
             f"or a working PoC before treating as exploitable."
         )
+    elif re.search(r"cve[-_]?\d{4}[-_]?\d{3,7}", sid, re.I):
+        # nmap NSE vuln detectors (http-vuln-cveYYYY-NNNN, smb-vuln-*,
+        # ssh-vuln-*, ftp-vuln-*, etc.) — positive=True means NSE reported
+        # State: VULNERABLE (proven-vulnerable primitive); otherwise it's
+        # a version-family lead. Never auto-promote past t2.
+        _depth_tier = "t2" if positive else "t1"
+        _portid = port.portid if port else "PORT"
+        _first_cve = (sorted([i.upper() for i in ids])[0] if ids else "")
+        _cve_hint = f" ({_first_cve})" if _first_cve else ""
+        if positive:
+            _exploit_note = (
+                f"NSE reported VULNERABLE{_cve_hint}. Chain to msf: "
+                f"`msfconsole -q -x 'search {_first_cve or sid}; use 0; "
+                f"set RHOSTS {host_ip}; set RPORT {_portid}; check; run'`. "
+                "If msf module has no check, run its exploit against a canary path."
+            )
+        else:
+            _exploit_note = (
+                f"NSE detector inconclusive{_cve_hint} - probably a version "
+                f"heuristic. Re-run with `nmap --script vuln -p {_portid} {host_ip}` "
+                "and confirm State: VULNERABLE before treating as exploitable."
+            )
     return Vuln(
         ip=host_ip,
         port=port.portid if port else None,
