@@ -114,6 +114,38 @@ def test_remove_finding_leaves_host_with_no_vulns(store):
     assert len(h.vulns) == 0
 
 
+def test_remove_finding_by_tracking_row_key(store):
+    """The WebGUI + report + tracking-sheet all address findings by
+    ``tracking.vuln_row_key(v)`` (the ``"vuln:{ip}:{port}:{script}:{title[:60]}"``
+    row-key format). Historically remove_finding matched only against the
+    bare ``v.key`` and every /api/delete/finding round-trip 404'd — the
+    frontend can only send the row-key form. Guard both shapes."""
+    from recce.core.tracking import vuln_row_key
+    v = _vuln("10.0.0.1", 22, "ssh-weak", "Weak SSH key")
+    store.upsert_host(_host("10.0.0.1", vulns=[v]))
+    row_key = vuln_row_key(v)
+    assert row_key.startswith("vuln:"), "sanity: tracking row key carries the prefix"
+    assert row_key != v.key, "sanity: bare v.key does NOT carry the prefix"
+    assert store.remove_finding("10.0.0.1", row_key) is True
+    h = store.get_host("10.0.0.1")
+    assert h is not None
+    assert len(h.vulns) == 0
+
+
+def test_remove_finding_by_row_key_leaves_siblings(store):
+    """Deleting one finding by row-key must leave other findings intact
+    (the row-key match is title-scoped, not per-host)."""
+    from recce.core.tracking import vuln_row_key
+    v1 = _vuln("10.0.0.1", 22, "ssh-weak", "Weak SSH key")
+    v2 = _vuln("10.0.0.1", 22, "ssh-weak", "Different SSH title")
+    v3 = _vuln("10.0.0.1", 80, "http-vuln", "HTTP vuln")
+    store.upsert_host(_host("10.0.0.1", vulns=[v1, v2, v3]))
+    assert store.remove_finding("10.0.0.1", vuln_row_key(v2)) is True
+    h = store.get_host("10.0.0.1")
+    titles = {v.title for v in h.vulns}
+    assert titles == {"Weak SSH key", "HTTP vuln"}
+
+
 # --- delete_scope ----------------------------------------------------------
 
 def test_delete_scope_removes_subnet(store):
