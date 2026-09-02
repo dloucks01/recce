@@ -34,8 +34,12 @@ laptop bring-up stays fast:
     docker compose --profile modern up --wait        # +grafana minio ollama jupyter jenkins (P6/P10)
     docker compose --profile heavy up --wait         # +gitlab (multi-GB, ~5 min first boot)
 
-Phase 10 also adds four new `core` targets (telnet .74, tftp .75,
-influxdb .77, ipp/cups .78) that come up on plain `docker compose up`.
+Phase 10 also adds seven new `core` targets (telnet .74, tftp .75,
+influxdb .77, ipp/cups .78, rdp .79, sip .81, ipmi .82) that come up
+on plain `docker compose up` (sip additionally under `messaging`).
+Phase 10 uncovered and fixed a real bug in `recce.services.rdp`
+(`_X224_CR` was 18 bytes with a TPKT length of 19 — real Windows RDP
+was lenient enough to answer anyway; strict-conformant xrdp refused).
 
 `--profile ot` brings up the OT/ICS batch (`.60`–`.65`). First bring-up
 of `ot` is slow — five simulator images build from source, and the S7
@@ -119,7 +123,10 @@ detail.
 | **.76** | jenkins-target | HTTP :8080 · JNLP :50000 | *P10, profile `modern, core`.* Jenkins LTS with runSetupWizard=false and JNLP pinned to 50000. recce `jenkins_jnlp` — `jenkins_agent_listener_discovered`, `jnlp_reachable`, `unauth_evidence` (anonymous authorities on /whoAmI/api/json). |
 | **.77** | influxdb-target | InfluxDB :8086 | *P10, profile `core, databases`.* InfluxDB 1.8 with `INFLUXDB_HTTP_AUTH_ENABLED=false` (its default), pre-seeded db `recce_lab`. recce `db.influxdb` — `influxdb_unauth` (SHOW DATABASES returns rows). |
 | **.78** | ipp-target | IPP/CUPS :631 | *P10, profile `core`.* Debian CUPS + cups-pdf loopback printer, no auth, admin UI open. recce `ipp` — `ipp_cups`, `ipp_printers`, CVE-2024-47176 gate. |
+| **.79** | rdp-target | RDP :3389 | *P10, profile `core`.* xrdp with `security_layer=rdp` (NLA off). recce `rdp` — `rdp_no_nla` (HIGH), `rdp_fingerprint` (STANDARD_RDP accepted). |
 | **.80** | gitlab | HTTP :80 | *P6-heavy, profile `heavy`.* GitLab CE with signup + public projects on. recce `gitlab` — `signin_present`, `public_projects`, `broadcast_messages`, `health_endpoint`, CVE-2021-22205 / CVE-2023-2825 markers. |
+| **.81** | sip-target | SIP :5060 tcp+udp | *P10, profile `messaging, core`.* Kamailio 5.6 answering OPTIONS with a Server banner + REGISTER challenging with a static Digest realm. recce `sip` — `sip_fingerprint` (vendor=kamailio, version=5.6), `sip_ext_enum`. |
+| **.82** | ipmi-sim | IPMI :623/udp | *P10, profile `core`.* Stdlib-Python RMCP responder that answers GCAC + Get Device ID + Get Cipher Suites + RMCP+ Open Session Response. recce `ipmi` — cipher_zero_confirmed, cipher_zero_session_accepted (T2 SAFE proof), null_user, anonymous_login, weak_auth, vendor=Dell, firmware=1.20. |
 
 **Bold rows** are the T1/T2/T3/T5/P6/P10 expansions I added; the un-bolded rows are the base test env.
 **Italic notes** in the T5/P6/P10 rows call out which compose profile each service belongs to.

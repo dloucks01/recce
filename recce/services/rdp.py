@@ -60,16 +60,23 @@ def is_rdp(port: Port) -> bool:
 # X.224 Connection Request + RDP Negotiation Request. Requests all three
 # security types (0x03 = standard | TLS | CredSSP).
 _X224_CR = bytes.fromhex(
-    "030000130ee0000000000001000800030000")  # 19 bytes total
-# Layout:
+    "030000130ee000000000000100080003000000")  # 19 bytes total
+# Layout (see MS-RDPBCGR §2.2.1.1 + ITU-T X.224 §13.3):
 #   03 00 00 13    TPKT: version 3, reserved 0, length 19 (big-endian)
-#   0e             X.224 length indicator
-#   e0             X.224 CR TPDU
-#   00 00 00 00    dst-ref, src-ref (unused)
-#   01             class option
-#   00 08 00       RDP Negotiation Request: type 1, flags 0, length 8
-#   03 00 00 00    requestedProtocols: 3 = RDP+SSL+HYBRID
-# Note: bytes above are already correct; the "030000..." is TPKT.
+#   0e             X.224 length indicator = 14 bytes of TPDU header follow
+#   e0             X.224 CR TPDU code
+#   00 00          dst-ref (unused)
+#   00 00          src-ref (unused)
+#   00             class option (class 0)
+#   01             RDP Neg Req type = TYPE_RDP_NEG_REQ
+#   00             flags = 0
+#   08 00          length = 8 (little-endian)
+#   03 00 00 00    requestedProtocols: 3 = RDP+SSL+HYBRID (little-endian)
+# Historical note: this used to be a 18-byte packet (the last requested-
+# protocols byte was missing). Windows RDP is lenient and answered anyway;
+# strict-conformant xrdp refuses to parse the CR with "libxrdp_force_read:
+# header read error" and closes the socket. The packet is now the full 19
+# bytes the TPKT length header declares — both stacks answer.
 
 
 # Response protocol codes (from RDP Negotiation Response type 2 payload)

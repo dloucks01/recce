@@ -974,6 +974,71 @@ services:
     profiles: [core]
     restart: unless-stopped
 
+  rdp-target:
+    build: ./simulators/rdp
+    hostname: rdp-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.79
+    # xrdp answers the X.224 Connection Request / RDP Negotiation
+    # Request on :3389 pre-auth; no desktop is needed for the recce
+    # rdp probe. security_layer=rdp is set in the image so recce's
+    # rdp_no_nla emission (Standard RDP accepted) fires.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ': < /dev/tcp/127.0.0.1/3389' 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+    profiles: [core]
+    restart: unless-stopped
+
+  # .80 = gitlab (below, `heavy` profile). .81 onwards is P10.
+
+  sip-target:
+    build: ./simulators/sip
+    hostname: sip-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.81
+    # Kamailio 5.x with a minimal cfg answering OPTIONS with a Server
+    # banner recce.services.sip's _VENDOR_PATTERNS recognises. Alias
+    # advertises a private-range hostname so the Contact header carries
+    # an internal identifier (sip_internal_ip_disclosure path).
+    healthcheck:
+      # kamailio's own kamctl is an interactive tool with too many
+      # dependencies for the slim image; instead check the /proc PID
+      # (kamailio double-forks by default).
+      test: ["CMD-SHELL", "pidof kamailio >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    profiles: [messaging, core]
+    restart: unless-stopped
+
+  ipmi-sim:
+    build: ./simulators/ipmi
+    hostname: ipmi-sim
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.82
+    # Stdlib-Python UDP responder on :623. Answers just enough of the
+    # IPMI 1.5/2.0 wire protocol (GCAC, Get Device ID, Get Cipher
+    # Suites, Open Session Request) to fire recce.services.ipmi's
+    # cipher_zero_confirmed, null_user, anonymous_login, weak_auth and
+    # the T2 cipher_zero_session_accepted proof.
+    healthcheck:
+      # python:3.11-slim ships pidof (procps package), not pgrep.
+      # PID 1's comm is "python" — checking pidof confirms the sim
+      # server is still the container's init.
+      test: ["CMD-SHELL", "pidof python >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    profiles: [core]
+    restart: unless-stopped
+
   # ══════════════════════════════════════════════════════════════════════════
   # `heavy` profile — targets recce covers but that are too large to bring
   # up by default (multi-GB image or multi-minute first boot). None land in
