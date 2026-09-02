@@ -22,6 +22,7 @@ import re
 import socket
 import struct
 
+from ...core import proxy
 from ...core.models import Host, Port
 from ..svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
 
@@ -222,20 +223,93 @@ def _recv(sock: socket.socket) -> bytes:
     return buf
 
 
+def _service_connect_probe(ip: str, port: int, sid: str,
+                           timeout: float = _TIMEOUT) -> dict:
+    """T2 SAFE proof: send a TNS CONNECT naming `sid` as the SERVICE_NAME/SID
+    (a real database-service connect, not a listener-status query) and inspect
+    the reply's TNS packet-type byte.
+
+      * ACCEPT (2)  -> listener has a live handler registered for that SID:
+                       PROOF the SID resolves to a running database instance,
+                       not just an echoing listener. NEGOTIATION ONLY - we
+                       never send an AUTH packet, so no session is established
+                       on the DB process and no login attempt is logged.
+      * REDIRECT (5) -> SCAN/RAC listener forwards to an internal cluster
+                        node, still proof the SID is real; captured HOST=/PORT=
+                        returned as evidence.
+      * REFUSE (4) / other -> SID does not resolve; not-vulnerable outcome.
+
+    Single-shot, bounded proxy.scaled() timeout, no writes, no state changes,
+    no exfil beyond the accept/redirect header itself. Returns
+    {ok, reply_type, sid, host, port, sdu, tdu, detail}."""
+    out: dict = {"ok": False, "reply_type": "", "sid": sid, "host": "", "port": 0,
+                 "sdu": 0, "tdu": 0, "detail": ""}
+    if not sid:
+        out["detail"] = "no SID"
+        return out
+    # (SERVICE_NAME=..) vs (SID=..): the listener answers both; SERVICE_NAME is
+    # the 11g+ preferred form. CID identifies the program - harmless bookkeeping.
+    payload = (b"(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=" + sid.encode("ascii", "replace")
+               + b")(SID=" + sid.encode("ascii", "replace")
+               + b")(CID=(PROGRAM=recce)(HOST=recce)(USER=recce))))")
+    try:
+        t = proxy.scaled(timeout)
+        with socket.create_connection((ip, port), timeout=t) as sock:
+            sock.settimeout(t)
+            sock.sendall(_tns_connect(payload))
+            reply = _recv(sock)
+    except (OSError, socket.timeout, struct.error) as e:
+        out["detail"] = str(e) or "connect error"
+        return out
+    if not reply or len(reply) < 5:
+        out["detail"] = "no TNS reply"
+        return out
+    ptype = reply[4]
+    out["reply_type"] = _TNS_TYPES.get(ptype, f"type-{ptype}")
+    if ptype == 2:  # ACCEPT: header carries SDU/TDU echoed by the listener.
+        out["ok"] = True
+        if len(reply) >= 20:
+            try:
+                out["sdu"] = struct.unpack_from(">H", reply, 16)[0]
+                out["tdu"] = struct.unpack_from(">H", reply, 18)[0]
+            except struct.error:
+                pass
+        out["detail"] = (f"listener returned ACCEPT for SERVICE_NAME={sid} "
+                         f"(SDU={out['sdu']}, TDU={out['tdu']})")
+    elif ptype == 5:  # REDIRECT
+        redir = _parse_redirect(reply)
+        if redir:
+            out["ok"] = True
+            out["host"] = redir.get("host", "")
+            out["port"] = redir.get("port", 0)
+            out["detail"] = (f"listener REDIRECTed SERVICE_NAME={sid} to "
+                             f"{out['host']}:{out['port']}")
+        else:
+            out["detail"] = f"REDIRECT for SERVICE_NAME={sid} but no ADDRESS parsed"
+    else:
+        out["detail"] = f"listener returned {out['reply_type']} for SERVICE_NAME={sid}"
+    return out
+
+
 def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     """Send a TNS status/version request and identify the listener. Returns
     {reachable, is_oracle, tns_type, version, banner, version_leaked, error,
-    sids, service_names, instances, machine, known_cves, redirect}.
+    sids, service_names, instances, machine, known_cves, redirect, sid_verified}.
 
     After the initial (COMMAND=version) confirms the listener, best-effort
     (COMMAND=services) + (COMMAND=status) probes are sent on fresh connections;
     a legacy / unhardened listener returns a DATA blob carrying SIDs /
     SERVICE_NAMEs / INSTANCE_NAMEs and the machine hostname (Oracle Note 260986.1).
-    Version -> CVE mapping is an offline lookup off `_CVE_MAP`."""
+    Version -> CVE mapping is an offline lookup off `_CVE_MAP`.
+
+    `sid_verified` is a T2 SAFE proof-of-exploit: one bounded TNS service-connect
+    (never auth) against the first enumerated SID/service; ACCEPT/REDIRECT proves
+    the listener actually hands the connection to a live DB, promoting
+    `oracle_tns_exposed` from wire-fingerprint to server-side proof."""
     res: dict = {"reachable": False, "is_oracle": False, "tns_type": "", "version": "",
                  "banner": "", "version_leaked": False, "error": "",
                  "sids": [], "service_names": [], "instances": [], "machine": "",
-                 "known_cves": [], "redirect": {}}
+                 "known_cves": [], "redirect": {}, "sid_verified": {}}
     payload = b"(CONNECT_DATA=(COMMAND=version))"
     try:
         with socket.create_connection((ip, port), timeout=timeout) as sock:
@@ -296,6 +370,19 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
                     res["redirect"] = redir
         # Offline version -> CVE lookup; empty when version is unknown / post-patch.
         res["known_cves"] = _known_cves(res.get("version", ""))
+        # T2 SAFE proof: ONE bounded service-connect against the first
+        # enumerated SID/service name. ACCEPT (type 2) / REDIRECT (type 5)
+        # proves the listener actually handles a live database service —
+        # server-side evidence beyond the protocol-level fingerprint. Never
+        # sends AUTH; on hardened listeners that refused enumeration we skip
+        # this rather than blindly probing default SID names.
+        first_sid = ""
+        for name in (res["service_names"] or []) + (res["sids"] or []) + (res["instances"] or []):
+            if name:
+                first_sid = name
+                break
+        if first_sid:
+            res["sid_verified"] = _service_connect_probe(ip, port, first_sid, timeout)
     return res
 
 
@@ -371,12 +458,22 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             tgt = f"{h.ip}:{p.portid}"
             ver = pr.get("version", "")
             banner = pr.get("banner", "")
+            # T2 SAFE proof-of-exploit: a service-connect ACCEPT/REDIRECT
+            # against a real SID (never AUTH). When present it means recce
+            # confirmed the listener actually hands the connection to a
+            # running DB instance, not just answers the protocol —
+            # promotes the T1 fingerprint to T2 server-side proof.
+            sv = pr.get("sid_verified") or {}
+            sv_ok = bool(sv.get("ok"))
             detail = ("recce confirmed an Oracle TNS listener"
                       + (f" ({pr.get('tns_type')} response)" if pr.get("tns_type") else "")
                       + (f"; version {ver}" if ver else "")
                       + (f"; banner: {banner}" if banner else "")
                       + ". Exposed listeners allow SID enumeration/brute, TNS Poison "
                         "(CVE-2012-1675), and default-credential access.")
+            if sv_ok:
+                detail += (" Native TNS service-connect proof (no AUTH sent): "
+                           + sv.get("detail", ""))
             out.append(_finding(
                 "high", "Oracle TNS listener exposed", tgt, detail,
                 "odat",
@@ -391,7 +488,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"-p {p.portid}; odat passwordguesser -s {h.ip} -p {p.portid} "
                     "-d <SID> --accounts-file default.txt; sqlplus "
                     f"scott/tiger@{h.ip}:{p.portid}/<SID>."),
-                depth_tier="t1"))
+                depth_tier="t2" if sv_ok else "t1"))
             if pr.get("version_leaked"):
                 out.append(_finding(
                     "medium", "Oracle TNS listener version disclosure", tgt,

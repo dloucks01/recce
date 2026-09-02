@@ -358,6 +358,196 @@ def test_analyze_folds_ntlm_info_into_host_ntlm_store():
     assert "winrm_ntlm_info" in kinds
 
 
+# --- CredSSP T2 SAFE probe ---------------------------------------------------
+
+def _parse_der_len(buf: bytes, off: int) -> tuple[int, int]:
+    """Return (length, new_offset) - the minimum needed for verifier tests."""
+    b = buf[off]
+    off += 1
+    if b < 0x80:
+        return b, off
+    n = b & 0x7F
+    return int.from_bytes(buf[off:off + n], "big"), off + n
+
+
+def test_build_credssp_tsrequest_is_wire_legal_der():
+    """The TSRequest we send on the wire must be a DER SEQUENCE with the
+    right context-specific tags — verify structurally with a hand parser
+    (not the same encoder that built it) so an encoder change can't hide."""
+    ts = winrm._build_credssp_tsrequest(b"\xDE\xAD\xBE\xEF", version=6)
+    assert ts[0] == 0x30                          # outer SEQUENCE
+    _outer_len, off = _parse_der_len(ts, 1)
+    assert ts[off] == 0xA0                        # [0] version
+    ver_len, off2 = _parse_der_len(ts, off + 1)
+    off = off2
+    assert ts[off] == 0x02                        # INTEGER
+    ilen, off = _parse_der_len(ts, off + 1)
+    assert int.from_bytes(ts[off:off + ilen], "big") == 6
+    off += ilen
+    assert ts[off] == 0xA1                        # [1] negoTokens
+    _nlen, off = _parse_der_len(ts, off + 1)
+    # NegoData SEQUENCE OF NegoDataItem SEQUENCE { [0] OCTET STRING }
+    assert ts[off] == 0x30 and ts[off + 2] == 0x30
+    # The negoToken bytes we passed in must appear verbatim inside.
+    assert b"\xDE\xAD\xBE\xEF" in ts
+
+
+def _credssp_ts_response_with_type2(nb_computer: str = "WIN10") -> bytes:
+    """Build a wire-legal TSRequest carrying an NTLM Type-2 as negoToken,
+    from the DER + MS-NLMP specs (not by round-tripping our own encoder)."""
+    type2 = _build_type2_challenge(nb_computer=nb_computer)
+    # Use the module helper only for the outer DER frame; the inner Type-2
+    # is built independently by the fixture above.
+    return winrm._build_credssp_tsrequest(type2, version=6)
+
+
+def _credssp_server(*, offer_auth: str = "Negotiate, CredSSP",
+                    credssp_response: bytes | None = None) -> HTTPServer:
+    """POST /wsman without Authorization -> 200 Identify + offer_auth.
+    POST /wsman with Authorization: CredSSP -> 401 with WWW-Authenticate:
+    CredSSP <b64 credssp_response> when credssp_response is bytes (a live
+    handler); an empty bytes value re-advertises without a token body
+    (handler not wired); None means the CredSSP path returns a raw 500."""
+    body = _IDENTIFY_XML.encode("utf-8")
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a, **k):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0") or 0))
+            authz = self.headers.get("Authorization", "")
+            if authz.lower().startswith("credssp "):
+                if credssp_response is None:
+                    self.send_response(500)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if credssp_response == b"":
+                    # Patched/not-wired: re-advertises option list with no
+                    # CredSSP token body.
+                    self.send_response(401)
+                    for scheme in offer_auth.split(","):
+                        self.send_header("WWW-Authenticate", scheme.strip())
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                b64 = base64.b64encode(credssp_response).decode("ascii")
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", f"CredSSP {b64}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            # Identify + auth advertisement.
+            self.send_response(200)
+            self.send_header("Content-Type", "application/soap+xml;charset=UTF-8")
+            for scheme in offer_auth.split(","):
+                self.send_header("WWW-Authenticate", scheme.strip())
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_credssp_probe_detects_live_handler_and_surfaces_evidence():
+    """Vulnerable-path: a CredSSP handler that echoes a real TSRequest
+    continuation token is proof the SSP is wired — probe returns evidence."""
+    resp = _credssp_ts_response_with_type2(nb_computer="WIN10")
+    srv = _credssp_server(credssp_response=resp)
+    try:
+        pr = winrm.probe("127.0.0.1", srv.server_address[1], timeout=2.0)
+    finally:
+        _stop(srv)
+    live = pr.get("credssp_live") or {}
+    assert live, "credssp_live evidence should be present against a live handler"
+    assert live.get("response_len", 0) > 0
+    ntlm_info = live.get("ntlm_info") or {}
+    assert ntlm_info.get("netbios_computer") == "WIN10"
+
+
+def test_credssp_probe_quiet_when_handler_not_wired():
+    """Patched-path: CredSSP advertised in Options but the handler answers a
+    CredSSP request by re-advertising (no token body). Must NOT set
+    credssp_live so winrm_credssp stays T1."""
+    srv = _credssp_server(credssp_response=b"")
+    try:
+        pr = winrm.probe("127.0.0.1", srv.server_address[1], timeout=2.0)
+    finally:
+        _stop(srv)
+    assert "credssp_live" not in pr
+
+
+def test_credssp_probe_quiet_on_timeout(monkeypatch):
+    """Timeout-path: if _credssp_probe raises socket.timeout internally, the
+    probe swallows the error and the T1 posture is preserved."""
+    import http.client as _hc
+
+    def _raise_timeout(*a, **k):
+        raise socket.timeout("credssp probe hung")
+
+    monkeypatch.setattr(_hc.HTTPConnection, "request", _raise_timeout)
+    got = winrm._credssp_probe("127.0.0.1", 5985, tls=False, timeout=1.0)
+    assert got is None
+
+
+def test_credssp_probe_skipped_when_credssp_not_advertised():
+    """If CredSSP is not in the WWW-Authenticate list, probe() must NOT fire
+    the extra round-trip — the credssp_live key stays absent."""
+    srv = _credssp_server(offer_auth="Negotiate, Kerberos",
+                          credssp_response=b"unreachable")
+    try:
+        pr = winrm.probe("127.0.0.1", srv.server_address[1], timeout=2.0)
+    finally:
+        _stop(srv)
+    assert "credssp_live" not in pr
+
+
+def test_findings_promote_credssp_to_t2_with_evidence():
+    """When credssp_live evidence is present, winrm_credssp is emitted with
+    depth_tier='t2' and the detail carries the CredSSP handler evidence."""
+    fs = winrm.findings([_host()], {("10.0.0.10", 5985): {
+        "reachable": True, "port": 5985, "tls": False,
+        "auth": ["Negotiate", "CredSSP"],
+        "credssp_live": {"response_len": 187,
+                         "ntlm_info": {"netbios_computer": "DC01",
+                                       "dns_computer": "dc01.corp.local",
+                                       "dns_domain": "corp.local",
+                                       "os_version": "10.0.20348"}}}})
+    f = next(f for f in fs if f["kind"] == "winrm_credssp")
+    assert f["depth_tier"] == "t2"
+    for token in ("continuation token", "DC01", "corp.local", "10.0.20348",
+                  "187B"):
+        assert token in f["detail"]
+
+
+def test_findings_keep_credssp_at_t1_without_evidence():
+    """T1 path unchanged: without credssp_live evidence the finding stays
+    at depth_tier='t1' and the detail carries no evidence sentence."""
+    fs = winrm.findings([_host()], {("10.0.0.10", 5985): {
+        "reachable": True, "port": 5985, "tls": False,
+        "auth": ["Negotiate", "CredSSP"]}})
+    f = next(f for f in fs if f["kind"] == "winrm_credssp")
+    assert f["depth_tier"] == "t1"
+    assert "continuation token" not in f["detail"]
+
+
+def test_credssp_probe_ignores_bare_credssp_option_reply():
+    """Distinguish a live-handler response 'CredSSP <b64token>' from a bare
+    'CredSSP' option re-advertisement (no token body). Only the former is
+    evidence of a live SSP."""
+    srv = _credssp_server(offer_auth="CredSSP", credssp_response=b"")
+    try:
+        pr = winrm.probe("127.0.0.1", srv.server_address[1], timeout=2.0)
+    finally:
+        _stop(srv)
+    # CredSSP was in the initial advertisement so the probe DID fire, but
+    # the handler answered without a token body -> no credssp_live.
+    assert "credssp_live" not in pr
+
+
 def test_analyze_does_not_clobber_a_preexisting_dns_domain():
     """LDAP writes host.ntlm['dns_domain'] first in practice — WinRM must
     only fill blanks, never overwrite a value another module established."""

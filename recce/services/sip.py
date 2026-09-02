@@ -15,6 +15,7 @@ import ipaddress
 import re
 import socket
 
+from ..core import proxy
 from ..core.models import Host, Port
 
 
@@ -230,6 +231,20 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
             out["ext_enum"] = enumerate_extensions(ip, port, timeout=timeout)
         except OSError:
             pass
+    # T2 SAFE evidence capture: one controlled REGISTER for a fixed canary
+    # user elicits a fresh server-generated nonce bound to the disclosed
+    # realm — a distinct second read that proves the realm token is real,
+    # enforced auth material and not just a banner byte. Non-destructive (no
+    # matching credential -> no binding created), single UDP round-trip,
+    # timeout bounded by _t2_bounded_timeout. When present, promotes
+    # sip_fingerprint from T0 -> T2 with captured evidence attached to the
+    # finding. Skip when we have no realm (nothing to prove enforced) or when
+    # transport is TCP (this is the UDP-side primitive).
+    if (out.get("reachable") and out.get("transport") == "udp"
+            and out.get("realm")):
+        evidence = capture_realm_challenge_evidence(ip, port, timeout)
+        if evidence is not None:
+            out["realm_challenge_evidence"] = evidence
     return out
 
 
@@ -271,6 +286,70 @@ def _sip_status(reply: bytes) -> int:
         return int(reply.split(b" ", 2)[1])
     except (ValueError, IndexError):
         return 0
+
+
+# --- T2 SAFE evidence: capture a live realm-bound Digest challenge -----------
+# The T0 signal for sip_fingerprint is "OPTIONS reply named a realm=..." — a
+# banner-level advertisement. T2 wants concrete proof that the disclosed realm
+# is real, enforced auth material: a single controlled REGISTER for a fixed
+# canary username elicits a fresh 401/407 whose WWW-Authenticate binds the
+# SAME realm to a server-generated nonce (RFC 3261 §22.4: nonces are per-
+# challenge, server-issued, MUST NOT be predictable). Capturing that nonce
+# proves live auth machinery is exposed, not just a banner byte. One UDP
+# round-trip, timeout bounded [2, 6] and proxy.scaled, no writes, no state
+# change on the PBX (a REGISTER without credentials never creates a binding —
+# the server issues the challenge and drops).
+_T2_EVIDENCE_TIMEOUT_MIN = 2.0
+_T2_EVIDENCE_TIMEOUT_MAX = 6.0
+_T2_CANARY_USER = "recce-canary"
+
+
+def _t2_bounded_timeout(timeout: float) -> float:
+    """Clamp base timeout to 2-6s, then scale for proxy latency (proxy.scaled)."""
+    base = max(_T2_EVIDENCE_TIMEOUT_MIN, min(_T2_EVIDENCE_TIMEOUT_MAX, timeout))
+    return proxy.scaled(base)
+
+
+def capture_realm_challenge_evidence(ip: str, port: int, timeout: float,
+                                     user: str = _T2_CANARY_USER) -> dict | None:
+    """T2 SAFE proof: one UDP REGISTER for a fixed canary username, capture the
+    resulting Digest challenge.
+
+    Returns {'realm', 'nonce', 'status', ...} when the server issues a real
+    401/407 Digest challenge with both realm and nonce present; None on
+    timeout, non-challenge reply, or missing fields. Never raises. No writes,
+    no state change on the PBX — a REGISTER without matching credentials is
+    rejected with a challenge before any registration is created.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind(("", 0))
+        s.settimeout(_t2_bounded_timeout(timeout))
+        src = s.getsockname()[1]
+        s.sendto(_register(src, ip, port, user), (ip, port))
+        data, _ = s.recvfrom(65535)
+    except (OSError, socket.timeout):
+        return None
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+    if not data or not data.startswith(b"SIP/"):
+        return None
+    status = _sip_status(data)
+    if status not in _401_407:
+        return None
+    d = _parse_digest_challenge(data)
+    if not d.get("nonce") or not d.get("realm"):
+        return None
+    out: dict = {"realm": d["realm"], "nonce": d["nonce"], "status": status,
+                 "canary_user": user}
+    if d.get("algorithm"):
+        out["algorithm"] = d["algorithm"]
+    if d.get("qop"):
+        out["qop"] = d["qop"]
+    return out
 
 
 def enumerate_extensions(ip: str, port: int, extensions=_EXT_RANGE,
@@ -356,16 +435,43 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             server = pr.get("server") or "unknown"
             realm = pr.get("realm") or ""
             methods = pr.get("methods") or ""
-            out.append(_finding(
-                "low", "SIP endpoint discloses server / realm via unauth OPTIONS",
-                tgt,
+            # T2 SAFE proof: captured server-side evidence from one controlled
+            # canary REGISTER (distinct from the OPTIONS that first advertised
+            # the realm). When present, the server bound the SAME realm to a
+            # fresh, server-generated nonce (RFC 3261 §22.4) — the realm is
+            # enforced auth material, not a decorative banner. Promotes T0 ->
+            # T2. When absent, the finding stays T0 with its unchanged detail.
+            realm_ev = pr.get("realm_challenge_evidence") or {}
+            detail = (
                 f"SIP OPTIONS on {tgt} ({pr.get('transport', '?').upper()}) returned "
                 f"status {pr.get('status', '?')} — Server: {server}"
                 + (f", realm=\"{realm}\"" if realm else "")
                 + (f", Allow: {methods}" if methods else "")
                 + ". Enough to fingerprint the PBX (Asterisk / FreeSWITCH / "
                 "Kamailio / Cisco CUCM) and start extension enumeration + "
-                "auth attacks against the named realm.",
+                "auth attacks against the named realm.")
+            if realm_ev:
+                detail += (
+                    f"\n\nT2 proof — captured server-side evidence "
+                    f"(one canary REGISTER, live RFC 3261 §22.4 Digest "
+                    f"challenge bound to the same realm):\n"
+                    f"    canary user: {realm_ev.get('canary_user', _T2_CANARY_USER)!r}\n"
+                    f"    reply status: {realm_ev.get('status')}\n"
+                    f"    realm: {realm_ev.get('realm')!r}\n"
+                    f"    nonce: {realm_ev.get('nonce')!r}\n"
+                    + (f"    algorithm: {realm_ev.get('algorithm')}\n"
+                       if realm_ev.get("algorithm") else "")
+                    + (f"    qop: {realm_ev.get('qop')}\n"
+                       if realm_ev.get("qop") else "")
+                    + "The server issued a fresh server-generated nonce on the "
+                      "disclosed realm — the realm is enforced auth material, "
+                      "not a decorative banner. Nonce is ready to key a "
+                      "sipcrack / hashcat -m 11400 pipeline the moment a "
+                      "matching hash lands.")
+            depth_tier = "t2" if realm_ev else "t0"
+            out.append(_finding(
+                "low", "SIP endpoint discloses server / realm via unauth OPTIONS",
+                tgt, detail,
                 "svmap / svwar / sipvicious",
                 f"svmap.py {h.ip}:{p.portid}   # then svwar.py -e100-999 -m INVITE "
                 f"{h.ip}:{p.portid}",
@@ -376,7 +482,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 ["CWE-200"], kind="sip_fingerprint",
                 exploit_note=(
                     "svmap.py <ip>:<port>; searchsploit <vendor> <version>"),
-                depth_tier="t0"))
+                depth_tier=depth_tier))
 
             # Extension enumeration signals:
             #   existing[] populated -> the server distinguishes 401/407 vs 404,

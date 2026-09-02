@@ -390,6 +390,132 @@ def slp_probe(ip: str, port: int = _DEFAULT_PORT,
     return out
 
 
+# --- T2 SAFE proof: GameSpy Query protocol (UDP) ----------------------------
+#
+# The Server List Ping caps its `players.sample` at (by default) 12 entries and
+# ships them as opaque display strings. server.properties `enable-query=true`
+# lights up a *separate* UDP responder on the same port that speaks the legacy
+# GameSpy Query protocol — a two-packet exchange returning a superset of SLP
+# information designed for admin monitoring:
+#
+#   * FULL player list (not sample-limited)
+#   * plugin inventory (post-Bukkit/Spigot/Paper only)
+#   * world name (`map`) and other server-property fields
+#
+# Wire (fenix.mojang.com "Query" and the original GameSpy spec):
+#   handshake  send:  fe fd 09 [session_id:4]
+#              recv:  09 [session_id:4] <null-terminated ASCII decimal token>
+#   full stat  send:  fe fd 00 [session_id:4] [token:4] 00 00 00 00
+#              recv:  00 [session_id:4] <11-byte preamble>
+#                     <k\0v\0 …> \x00\x01player_\x00\x00 <name\0…\x00>
+#
+# Single controlled read, no writes, bounded 2-6 s per RULES. Session id is a
+# fixed sentinel (0x01010101); the GameSpy spec says the server only reads the
+# low 4 bits of each byte, and we still verify the reply echoes exactly what
+# we sent so a spoofed packet from a bystander cannot forge evidence.
+
+_QUERY_TIMEOUT = 3.0
+_QUERY_MAGIC = b"\xfe\xfd"
+_QUERY_TYPE_HANDSHAKE = 0x09
+_QUERY_TYPE_STAT = 0x00
+_QUERY_MAX = 32 * 1024
+_QUERY_SESSION_ID = 0x01010101
+
+
+def _t2_bounded_timeout(timeout: float) -> float:
+    """Clamp a T2 probe timeout into the [2, 6] s band, then proxy-scale it."""
+    return proxy.scaled(max(2.0, min(6.0, float(timeout))))
+
+
+def _parse_query_full_stat(body: bytes) -> dict:
+    """Split a GameSpy full-stat body (after the leading 5-byte type+session
+    header the caller has already consumed) into {kv, players}. The 11-byte
+    'splitnum\\x00\\x80\\x00' preamble is discarded; key/value pairs run until
+    the fixed marker `\\x00\\x01player_\\x00\\x00`; the remainder is
+    null-terminated player names ended by a double-null."""
+    if len(body) < 11:
+        return {}
+    body = body[11:]                                   # skip splitnum preamble
+    marker = b"\x00\x01player_\x00\x00"
+    idx = body.find(marker)
+    if idx < 0:
+        return {}
+    kv_blob = body[:idx]
+    players_blob = body[idx + len(marker):]
+    parts = kv_blob.split(b"\x00")
+    kv: dict[str, str] = {}
+    for i in range(0, len(parts) - 1, 2):
+        k = parts[i].decode("utf-8", "replace")
+        v = parts[i + 1].decode("utf-8", "replace")
+        if k:
+            kv[k] = v
+    players = [p.decode("utf-8", "replace")
+               for p in players_blob.split(b"\x00") if p]
+    return {"kv": kv, "players": players}
+
+
+def query_probe(ip: str, port: int = _DEFAULT_PORT,
+                timeout: float = _QUERY_TIMEOUT) -> dict:
+    """One GameSpy full-stat exchange over UDP. Returns
+    {reachable, hostname, version, plugins, world, players, raw_kv, error}.
+    reachable=True only when we sent handshake + full-stat AND received a
+    matched session-id reply — proof the server actively opted into the query
+    protocol via `enable-query=true`. Read-only; no server state changes."""
+    out: dict = {"reachable": False, "error": ""}
+    to = _t2_bounded_timeout(timeout)
+    sid = _QUERY_SESSION_ID
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(to)
+        sock.sendto(_QUERY_MAGIC + struct.pack(">Bi",
+                                               _QUERY_TYPE_HANDSHAKE, sid),
+                    (ip, port))
+        data, _ = sock.recvfrom(_QUERY_MAX)
+        if len(data) < 5 or data[0] != _QUERY_TYPE_HANDSHAKE:
+            out["error"] = "handshake reply malformed"
+            return out
+        if struct.unpack(">i", data[1:5])[0] != sid:
+            out["error"] = "handshake session-id mismatch"
+            return out
+        try:
+            token = int(data[5:].split(b"\x00", 1)[0].decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as e:
+            out["error"] = f"bad challenge token: {e}"
+            return out
+        sock.sendto(_QUERY_MAGIC
+                    + struct.pack(">Bi", _QUERY_TYPE_STAT, sid)
+                    + struct.pack(">i", token)
+                    + b"\x00\x00\x00\x00",                # full-stat selector
+                    (ip, port))
+        data2, _ = sock.recvfrom(_QUERY_MAX)
+    except OSError as e:
+        out["error"] = str(e) or e.__class__.__name__
+        return out
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    if len(data2) < 5 or data2[0] != _QUERY_TYPE_STAT:
+        out["error"] = "stat reply malformed"
+        return out
+    if struct.unpack(">i", data2[1:5])[0] != sid:
+        out["error"] = "stat session-id mismatch"
+        return out
+    parsed = _parse_query_full_stat(data2[5:])
+    kv = parsed.get("kv", {})
+    out["reachable"] = True
+    out["hostname"] = kv.get("hostname", "")
+    out["version"] = kv.get("version", "")
+    out["plugins"] = kv.get("plugins", "")
+    out["world"] = kv.get("map", "")
+    out["numplayers"] = kv.get("numplayers", "")
+    out["maxplayers"] = kv.get("maxplayers", "")
+    out["players"] = parsed.get("players", [])
+    out["raw_kv"] = kv
+    return out
+
+
 # --- RCON companion (25575/tcp) --------------------------------------------
 
 _RCON_AUTH = 3
@@ -452,8 +578,16 @@ def rcon_probe(ip: str, port: int = _RCON_DEFAULT_PORT,
 # --- Targets / probe entrypoint / findings ---------------------------------
 
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
-          check_rcon: bool = True, rcon_port: int = _RCON_DEFAULT_PORT) -> dict:
-    """SLP probe + version-derived Log4Shell classification + optional RCON."""
+          check_rcon: bool = True, rcon_port: int = _RCON_DEFAULT_PORT,
+          check_query: bool = True) -> dict:
+    """SLP probe + version-derived Log4Shell classification + optional RCON.
+
+    When SLP surfaced a non-empty player sample AND `check_query` is on, an
+    additional single UDP round-trip against the GameSpy Query protocol is
+    attempted; when the server has `enable-query=true` its reply is captured
+    into `query_evidence` and the corresponding finding lifts to T2. Query is
+    skipped when there's no T1 roster to promote — that keeps the T1-only path
+    (and its timing) unchanged for servers with a hidden sample."""
     out = slp_probe(ip, port, timeout=timeout)
     if not out.get("reachable"):
         return out
@@ -465,6 +599,10 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         rc = rcon_probe(ip, rcon_port, timeout=min(timeout, _RCON_TIMEOUT))
         if rc.get("reachable"):
             out["rcon"] = rc
+    if check_query and out.get("players_sample"):
+        q = query_probe(ip, port, timeout=min(timeout, _QUERY_TIMEOUT))
+        if q.get("reachable"):
+            out["query_evidence"] = q
     return out
 
 
@@ -531,14 +669,38 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             sample = pr.get("players_sample") or []
             if sample:
                 names = ", ".join(pl["name"] for pl in sample[:10] if pl.get("name"))
+                base_detail = (
+                    f"Server List Ping returned {len(sample)} player sample "
+                    f"entry(ies): {names}. On a corp-owned server these are "
+                    f"employee Mojang accounts — usernames frequently mirror "
+                    f"corp usernames and the UUID is a stable identity pivot.")
+                roster_tier = "t1"
+                q = pr.get("query_evidence") or {}
+                if q.get("reachable"):
+                    qplayers = q.get("players") or []
+                    sample_lower = {s["name"].lower()
+                                    for s in sample if s.get("name")}
+                    extra = [n for n in qplayers
+                             if n.lower() not in sample_lower]
+                    plugins = (q.get("plugins") or "")[:200]
+                    world = q.get("world") or ""
+                    roster_tier = "t2"
+                    base_detail += (
+                        f"\nT2 proof (GameSpy Query, UDP {p.portid}): "
+                        f"single controlled handshake+full-stat round trip "
+                        f"returned FULL roster of {len(qplayers)} name(s) "
+                        f"({', '.join(qplayers[:12])}"
+                        f"{'…' if len(qplayers) > 12 else ''}) — "
+                        f"{len(extra)} not visible via SLP; "
+                        f"plugins='{plugins}'; world='{world}'. "
+                        f"enable-query=true was left on in server.properties "
+                        f"and the reply is a designed-for-monitoring "
+                        f"superset of SLP.")
                 out.append(_finding(
                     "medium",
                     "Minecraft SLP discloses player roster (usernames + UUIDs) "
                     "unauthenticated", tgt,
-                    f"Server List Ping returned {len(sample)} player sample "
-                    f"entry(ies): {names}. On a corp-owned server these are "
-                    f"employee Mojang accounts — usernames frequently mirror "
-                    f"corp usernames and the UUID is a stable identity pivot.",
+                    base_detail,
                     f"# read the sample directly:\n"
                     f"mcstatus {h.ip}:{p.portid} status",
                     "Mojang exposes no server-side toggle to suppress the "
@@ -548,7 +710,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     exploit_note=(
                         f"mcstatus {h.ip}:{p.portid} status  # then for each "
                         "username: kerbrute userenum against corp KDC"),
-                    depth_tier="t1"))
+                    depth_tier=roster_tier))
 
             motd = (pr.get("motd_text") or "").strip()
             fqdns = sorted({m.group(1).lower() for m in _FQDN_TOKEN_RE.finditer(motd)})

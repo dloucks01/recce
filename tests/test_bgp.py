@@ -523,6 +523,264 @@ class FindingsTest(unittest.TestCase):
         self.assertTrue(any(v.script_id.startswith("bgp:") for v in by_ip[h.ip]))
 
 
+class T2HijackReadyEvidenceTest(unittest.TestCase):
+    """T2 SAFE proof: capture_hijack_ready_evidence sends one controlled OPEN
+    with the disclosed expected-AS and returns real peer OPEN evidence when
+    the session would progress to OpenConfirm. No writes, no KEEPALIVE, no
+    UPDATE — non-destructive by construction."""
+
+    def setUp(self):
+        self._orig = bgp._single_open
+
+    def tearDown(self):
+        bgp._single_open = self._orig
+
+    def test_vulnerable_peer_replies_open_with_correct_as(self):
+        # Peer only replies OPEN when My-AS = expected 65500 (its configured
+        # neighbor AS). Any other My-AS yields NOTIFICATION.
+        peer_open_wire = _build_open_wire(4, 65200, 90, "10.9.9.9")
+        notif = struct.pack(">BB", 2, 2) + struct.pack(">I", 65500)
+        captured_my_as = []
+
+        def fake(ip, port, my_as, timeout, hold_time=180,
+                 router_id="192.0.2.1", version=4):
+            captured_my_as.append(my_as)
+            if my_as == 65500:
+                return {"tcp_ok": True, "wrote_open": True,
+                        "peer_reply_kind": "open",
+                        "header": {"length": len(peer_open_wire), "type": 1},
+                        "open": bgp._parse_open(peer_open_wire[19:]),
+                        "notification": None, "peer_rst": False, "error": ""}
+            return {"tcp_ok": True, "wrote_open": True,
+                    "peer_reply_kind": "notification", "header": None,
+                    "open": None,
+                    "notification": bgp._parse_notification(notif),
+                    "peer_rst": False, "error": ""}
+        bgp._single_open = fake
+
+        ev = bgp.capture_hijack_ready_evidence("10.0.0.1", 179,
+                                               expected_as=65500,
+                                               timeout=4.0)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["peer_reply_kind"], "open")
+        self.assertEqual(ev["peer_asn"], 65200)
+        self.assertEqual(ev["peer_router_id"], "10.9.9.9")
+        self.assertEqual(ev["peer_version"], 4)
+        self.assertEqual(ev["peer_hold_time"], 90)
+        self.assertEqual(ev["my_as_used"], 65500)
+        self.assertEqual(captured_my_as, [65500])
+
+    def test_patched_peer_replies_notification_returns_none(self):
+        # Peer still rejects even the "correct" AS (e.g. TCP-MD5 required or
+        # additional ACL) → NOTIFICATION back → no T2 evidence.
+        notif = struct.pack(">BB", 2, 2) + struct.pack(">I", 65500)
+
+        def fake(ip, port, my_as, timeout, hold_time=180,
+                 router_id="192.0.2.1", version=4):
+            return {"tcp_ok": True, "wrote_open": True,
+                    "peer_reply_kind": "notification", "header": None,
+                    "open": None,
+                    "notification": bgp._parse_notification(notif),
+                    "peer_rst": False, "error": ""}
+        bgp._single_open = fake
+
+        ev = bgp.capture_hijack_ready_evidence("10.0.0.1", 179,
+                                               expected_as=65500,
+                                               timeout=4.0)
+        self.assertIsNone(ev)
+
+    def test_timeout_returns_none(self):
+        def fake(ip, port, my_as, timeout, hold_time=180,
+                 router_id="192.0.2.1", version=4):
+            return {"tcp_ok": True, "wrote_open": True,
+                    "peer_reply_kind": "silent", "header": None,
+                    "open": None, "notification": None,
+                    "peer_rst": True, "error": ""}
+        bgp._single_open = fake
+        ev = bgp.capture_hijack_ready_evidence("10.0.0.1", 179,
+                                               expected_as=65500,
+                                               timeout=4.0)
+        self.assertIsNone(ev)
+
+    def test_bounded_timeout_clamped(self):
+        # 30s asked → clamped down to <=6s; 0.1s asked → clamped up to >=2s.
+        self.assertEqual(bgp._t2_bounded_timeout(30.0), 6.0)
+        self.assertEqual(bgp._t2_bounded_timeout(0.1), 2.0)
+        self.assertEqual(bgp._t2_bounded_timeout(4.0), 4.0)
+
+    def test_invalid_expected_as_returns_none_without_probe(self):
+        called = []
+
+        def fake(*a, **kw):
+            called.append(1)
+            return None
+        bgp._single_open = fake
+        self.assertIsNone(
+            bgp.capture_hijack_ready_evidence("10.0.0.1", 179, 0, 4.0))
+        self.assertIsNone(
+            bgp.capture_hijack_ready_evidence("10.0.0.1", 179,
+                                              0x100000000, 4.0))
+        self.assertEqual(called, [])
+
+    def test_oserror_swallowed_returns_none(self):
+        def fake(*a, **kw):
+            raise OSError("boom")
+        bgp._single_open = fake
+        self.assertIsNone(
+            bgp.capture_hijack_ready_evidence("10.0.0.1", 179, 65500, 4.0))
+
+
+class T2ProbeIntegrationTest(unittest.TestCase):
+    """probe() auto-runs the T2 evidence capture after a NOTIFICATION 2/2
+    discloses the expected AS. Verified with _single_open substituted out."""
+
+    def setUp(self):
+        self._orig = bgp._single_open
+
+    def tearDown(self):
+        bgp._single_open = self._orig
+
+    def test_probe_captures_hijack_ready_evidence_after_notification(self):
+        n_body = struct.pack(">BB", 2, 2) + struct.pack(">I", 65500)
+        peer_open = _build_open_wire(4, 65200, 90, "10.9.9.9")
+
+        def fake(ip, port, my_as, timeout, hold_time=180,
+                 router_id="192.0.2.1", version=4):
+            if my_as == 65001 and version == 4:
+                return {"tcp_ok": True, "wrote_open": True,
+                        "peer_reply_kind": "notification", "header": None,
+                        "open": None,
+                        "notification": bgp._parse_notification(n_body),
+                        "peer_rst": False, "error": ""}
+            if my_as == 65500:
+                return {"tcp_ok": True, "wrote_open": True,
+                        "peer_reply_kind": "open",
+                        "header": {"length": len(peer_open), "type": 1},
+                        "open": bgp._parse_open(peer_open[19:]),
+                        "notification": None, "peer_rst": False, "error": ""}
+            # version=5 probe (or as_enumerate) — silent.
+            return {"tcp_ok": True, "wrote_open": True,
+                    "peer_reply_kind": "silent", "header": None,
+                    "open": None, "notification": None,
+                    "peer_rst": False, "error": ""}
+        bgp._single_open = fake
+
+        r = bgp.probe("10.0.0.1", 179, timeout=1.0)
+        self.assertEqual(r["expected_as"], 65500)
+        ev = r["hijack_ready_evidence"]
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["peer_asn"], 65200)
+        self.assertEqual(ev["peer_router_id"], "10.9.9.9")
+        self.assertEqual(ev["my_as_used"], 65500)
+
+    def test_probe_does_not_run_t2_when_first_open_succeeded(self):
+        # If the first probe already got a peer OPEN, we already have full
+        # evidence — no need for a second controlled OPEN. Also confirms the
+        # T1 path is unchanged when NO NOTIFICATION-driven expected_as exists.
+        peer_open = _build_open_wire(4, 65200, 90, "10.9.9.9")
+
+        def fake(ip, port, my_as, timeout, hold_time=180,
+                 router_id="192.0.2.1", version=4):
+            if version == 5:
+                return {"tcp_ok": True, "wrote_open": True,
+                        "peer_reply_kind": "silent", "header": None,
+                        "open": None, "notification": None,
+                        "peer_rst": False, "error": ""}
+            return {"tcp_ok": True, "wrote_open": True,
+                    "peer_reply_kind": "open",
+                    "header": {"length": len(peer_open), "type": 1},
+                    "open": bgp._parse_open(peer_open[19:]),
+                    "notification": None, "peer_rst": False, "error": ""}
+        bgp._single_open = fake
+
+        r = bgp.probe("10.0.0.1", 179, timeout=1.0)
+        self.assertEqual(r["peer_reply_kind"], "open")
+        # T2 evidence capture is gated on peer_reply_kind != "open" — since
+        # the first probe already got a full OPEN back, no need for a second
+        # controlled OPEN. hijack_ready_evidence therefore stays None.
+        self.assertIsNone(r["hijack_ready_evidence"])
+
+
+class T2FindingsPromotionTest(unittest.TestCase):
+    """When hijack_ready_evidence is present, bgp_expected_as_disclosed is
+    promoted from t1 → t2 with real server-side evidence in the output field."""
+
+    def _host(self, ip="10.0.0.1"):
+        h = Host(ip=ip)
+        h.ports.append(Port(portid=179, service="bgp", state="open"))
+        return h
+
+    def test_expected_as_finding_stays_t1_without_evidence(self):
+        h = self._host()
+        n = bgp._parse_notification(struct.pack(">BB", 2, 2)
+                                    + struct.pack(">I", 65500))
+        probes = {(h.ip, 179): {
+            "reachable": True, "tcp_ok": True,
+            "peer_reply_kind": "notification",
+            "open": None, "notification": n,
+            "expected_as": 65500, "expected_as_my_as": 65001,
+            "peer_max_version": None, "md5_hint": False,
+            "hijack_ready_evidence": None,
+        }}
+        fs = bgp.findings([h], probes)
+        ea = [f for f in fs if f["kind"] == "bgp_expected_as_disclosed"]
+        self.assertEqual(len(ea), 1)
+        self.assertEqual(ea[0]["depth_tier"], "t1")
+        self.assertNotIn("output", ea[0])
+
+    def test_expected_as_finding_promoted_to_t2_with_evidence(self):
+        h = self._host()
+        n = bgp._parse_notification(struct.pack(">BB", 2, 2)
+                                    + struct.pack(">I", 65500))
+        probes = {(h.ip, 179): {
+            "reachable": True, "tcp_ok": True,
+            "peer_reply_kind": "notification",
+            "open": None, "notification": n,
+            "expected_as": 65500, "expected_as_my_as": 65001,
+            "peer_max_version": None, "md5_hint": False,
+            "hijack_ready_evidence": {
+                "peer_reply_kind": "open",
+                "peer_asn": 65200,
+                "peer_router_id": "10.9.9.9",
+                "peer_version": 4,
+                "peer_hold_time": 90,
+                "my_as_used": 65500,
+            },
+        }}
+        fs = bgp.findings([h], probes)
+        ea = [f for f in fs if f["kind"] == "bgp_expected_as_disclosed"]
+        self.assertEqual(len(ea), 1)
+        self.assertEqual(ea[0]["depth_tier"], "t2")
+        # Real server-side evidence carried in the output field.
+        self.assertIn("output", ea[0])
+        self.assertIn("peer_asn=65200", ea[0]["output"])
+        self.assertIn("my_as_used=65500", ea[0]["output"])
+        self.assertIn("10.9.9.9", ea[0]["output"])
+        # The T1 detail is preserved; the T2 evidence is appended.
+        self.assertIn("OpenConfirm", ea[0]["detail"])
+        self.assertIn("no KEEPALIVE", ea[0]["detail"].replace("NO KEEPALIVE",
+                                                              "no KEEPALIVE"))
+
+    def test_t1_findings_unchanged_when_no_expected_as(self):
+        # Sanity: with no expected_as, no bgp_expected_as_disclosed emitted.
+        h = self._host()
+        probes = {(h.ip, 179): {
+            "reachable": True, "tcp_ok": True, "peer_reply_kind": "open",
+            "open": {"version": 4, "asn": 65100, "asn2": 65100,
+                     "hold_time": 180, "router_id": "10.9.9.9",
+                     "capabilities": [], "afi_safis": [],
+                     "graceful_restart": None,
+                     "has_route_refresh": False, "has_4byte_as": False},
+            "notification": None,
+            "expected_as": None, "expected_as_my_as": None,
+            "peer_max_version": None, "md5_hint": False,
+            "hijack_ready_evidence": None,
+        }}
+        fs = bgp.findings([h], probes)
+        kinds = {f["kind"] for f in fs}
+        self.assertNotIn("bgp_expected_as_disclosed", kinds)
+
+
 class BgpTargetsTest(unittest.TestCase):
     def test_bgp_targets_matches_179_and_service_name(self):
         h1 = Host(ip="10.0.0.1")

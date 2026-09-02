@@ -525,6 +525,92 @@ class FindingsTest(unittest.TestCase):
         self.assertIn("ndmp_legacy_version", kinds)
 
 
+class NBDExportListT2PromotionTest(unittest.TestCase):
+    """T1->T2 SAFE proof promotion for nbd_export_list.
+
+    T2 evidence is a single controlled NBD_OPT_INFO round-trip past the T1
+    NBD_OPT_LIST enumeration. When the server hands back a real
+    NBD_INFO_EXPORT block (size + transmission-flag bits) for at least one
+    listed export, that is server-side wire evidence of a read succeeding
+    without authentication; depth_tier lifts to "t2" and the finding
+    detail carries the proof line. When only the list came back (INFO
+    never ran / returned nothing), the finding stays at "t1"."""
+
+    def _mk_host(self) -> Host:
+        return Host(ip="10.0.0.5",
+                    ports=[Port(portid=10809, service="", state="open")])
+
+    def _get_list_finding(self, fs: list[dict]) -> dict:
+        matches = [f for f in fs if f["kind"] == "nbd_export_list"]
+        self.assertEqual(len(matches), 1, "expected exactly one export_list "
+                         f"finding, got {len(matches)}")
+        return matches[0]
+
+    def test_promotes_to_t2_when_info_evidence_present(self):
+        # Vulnerable path: OPT_LIST + OPT_INFO both returned real bytes.
+        host = self._mk_host()
+        probes = {("10.0.0.5", 10809): {
+            "reachable": True, "style": "fixed-newstyle",
+            "exports": [
+                {"name": "backups", "description": "nightly",
+                 "size": 100 * 1024 ** 3,
+                 "flags_raw": nn.NBD_FLAG_HAS_FLAGS | nn.NBD_FLAG_READ_ONLY,
+                 "flags": ["HAS_FLAGS", "READ_ONLY"]},
+            ],
+        }}
+        f = self._get_list_finding(nn.findings([host], probes))
+        self.assertEqual(f["depth_tier"], "t2")
+        self.assertIn("T2 proof", f["detail"])
+        self.assertIn("NBD_OPT_INFO", f["detail"])
+        self.assertIn("'backups'", f["detail"])
+        # Real wire evidence bytes surface: flags list + hex flags_raw.
+        self.assertIn("READ_ONLY", f["detail"])
+        # HAS_FLAGS(1) | READ_ONLY(2) = 0x0003.
+        self.assertIn("0x0003", f["detail"])
+
+    def test_promotes_when_size_alone_present(self):
+        # Some servers hand back size with no additional flag decoding.
+        host = self._mk_host()
+        probes = {("10.0.0.5", 10809): {
+            "reachable": True, "style": "fixed-newstyle",
+            "exports": [
+                {"name": "vol0", "description": "",
+                 "size": 512 * 1024 * 1024,
+                 "flags_raw": 0, "flags": []},
+            ],
+        }}
+        f = self._get_list_finding(nn.findings([host], probes))
+        self.assertEqual(f["depth_tier"], "t2")
+        self.assertIn("T2 proof", f["detail"])
+        self.assertIn("'vol0'", f["detail"])
+
+    def test_stays_t1_when_info_never_ran(self):
+        # Patched-ish / degraded path: server listed exports but NBD_OPT_INFO
+        # returned nothing (no size, no flags decoded, empty flags list).
+        host = self._mk_host()
+        probes = {("10.0.0.5", 10809): {
+            "reachable": True, "style": "fixed-newstyle",
+            "exports": [
+                {"name": "hidden", "description": "",
+                 "size": 0, "flags_raw": 0, "flags": []},
+            ],
+        }}
+        f = self._get_list_finding(nn.findings([host], probes))
+        self.assertEqual(f["depth_tier"], "t1")
+        self.assertNotIn("T2 proof", f["detail"])
+
+    def test_no_finding_when_probe_timed_out(self):
+        # Timeout / unreachable: no exports at all -> no export_list finding.
+        host = self._mk_host()
+        probes = {("10.0.0.5", 10809): {
+            "reachable": False, "style": "", "exports": [], "error": "timeout",
+        }}
+        fs = nn.findings([host], probes)
+        self.assertFalse(
+            any(f["kind"] == "nbd_export_list" for f in fs),
+            "no finding should be emitted when the probe returned no exports")
+
+
 class RunbookAndF2VTest(unittest.TestCase):
     def test_runbook_nbd_shape(self):
         rb = nn.runbook("10.0.0.5", 10809)

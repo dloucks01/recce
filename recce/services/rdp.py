@@ -41,6 +41,7 @@ import socket
 import ssl
 import struct
 
+from ..core import proxy
 from ..core.models import Host, Port
 
 
@@ -339,6 +340,86 @@ def probe_ntlm_info(ip: str, port: int = _DEFAULT_PORT,
     return info or None
 
 
+# --- T2 confirmation: "Standard RDP only" NegReq -------------------------------
+#
+# The T1 finding rests on selecting protocol=0 when we asked for 3 (STD|SSL|HYBRID).
+# For T2, prove the Standard RDP path is *genuinely reachable on its own*: send an
+# X.224 CR whose RDP NegRequest requests ONLY requestedProtocols=0x00. A server that
+# truly enforces NLA replies with a NegFailure (SSL_REQUIRED_BY_SERVER=0x01 or
+# HYBRID_REQUIRED_BY_SERVER=0x05); a server that accepts the cleartext-auth path
+# replies with a NegResponse selectedProtocol=0. Single-shot TCP roundtrip, no
+# writes, no state change, bounded by proxy.scaled(timeout).
+#
+# Layout of _X224_CR_STANDARD_ONLY (19 bytes total, MS-RDPBCGR 2.2.1.1):
+#   03 00 00 13     TPKT v3, length=19
+#   0e              X.224 LI = 14
+#   e0              X.224 CR TPDU
+#   00 00 00 00     dst-ref, src-ref
+#   01              class option
+#   00 08 00        RDP NegRequest: type=1, flags=0, length=8 (LE)
+#   00 00 00 00     requestedProtocols = 0x00000000 (STANDARD_RDP only)
+_X224_CR_STANDARD_ONLY = bytes.fromhex(
+    "030000130ee0000000000001000800000000")
+
+
+def probe_standard_only(ip: str, port: int = _DEFAULT_PORT,
+                        timeout: float = _TIMEOUT) -> dict | None:
+    """T2 verifier for rdp_no_nla. Confirms Standard RDP is genuinely selectable
+    on its own by asking for requestedProtocols=0x00 and reading the server's
+    NegResponse / NegFailure. Returns:
+        {"confirmed": True,  "selected_protocol": 0, "phase": "neg_response",
+         "evidence": "..."}                        -> definitive NLA bypass
+        {"confirmed": False, "failure_code": ..,  "failure_reason": "...",
+         "phase": "neg_failure", "evidence": "..."} -> server actually enforces NLA
+        {"confirmed": None,  ...}                   -> could not decide
+    Never returns None on OSError so callers can distinguish 'probe ran, no signal'
+    from 'probe never got off the ground' (returns None only on connect failure)."""
+    t = proxy.scaled(timeout)
+    try:
+        with socket.create_connection((ip, port), timeout=t) as s:
+            s.settimeout(t)
+            s.sendall(_X224_CR_STANDARD_ONLY)
+            data = s.recv(4096)
+    except OSError:
+        return None
+    if len(data) < 19 or data[0] != 0x03:
+        return {"confirmed": None, "phase": "tpkt",
+                "evidence": "server closed / non-TPKT reply to Standard-only NegReq"}
+    ptype = data[11]
+    if ptype == 0x02:                                  # NegResponse
+        try:
+            proto = struct.unpack("<I", data[15:19])[0]
+        except struct.error:
+            return {"confirmed": None, "phase": "neg_response",
+                    "evidence": "malformed NegResponse (short selectedProtocol)"}
+        if proto == 0x00:
+            ev = ("X.224 CR with requestedProtocols=0x00 (STANDARD_RDP only) "
+                  "received a NegResponse selectedProtocol=0 — the cleartext-auth "
+                  "path is reachable on its own, not merely tolerated as a "
+                  "fallback. NLA is genuinely not required.")
+            return {"confirmed": True, "selected_protocol": 0,
+                    "phase": "neg_response", "evidence": ev}
+        return {"confirmed": None, "selected_protocol": proto,
+                "phase": "neg_response",
+                "evidence": (f"Standard-only NegReq unexpectedly negotiated "
+                             f"protocol=0x{proto:x} (server upgraded us despite "
+                             f"requestedProtocols=0).")}
+    if ptype == 0x03:                                  # NegFailure
+        try:
+            code = struct.unpack("<I", data[15:19])[0]
+        except struct.error:
+            return {"confirmed": None, "phase": "neg_failure",
+                    "evidence": "malformed NegFailure (short failureCode)"}
+        label = _FAILURE_CODES.get(code, f"unknown(0x{code:x})")
+        ev = (f"X.224 CR with requestedProtocols=0x00 was refused with "
+              f"{label} (0x{code:x}); the server actively rejects the "
+              f"cleartext-auth Standard RDP path. NLA enforcement is real.")
+        return {"confirmed": False, "failure_code": code,
+                "failure_reason": label, "phase": "neg_failure", "evidence": ev}
+    return {"confirmed": None, "phase": f"ptype=0x{ptype:x}",
+            "evidence": f"unrecognized NegReq reply type 0x{ptype:x}"}
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
     """One TCP roundtrip. Returns {reachable, protocol, protocol_code,
     failure_reason, nla_required, standard_rdp_accepted}."""
@@ -415,14 +496,37 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             # NLA off = accepts Standard RDP = larger BlueKeep-family surface,
             # plus enables MitM auth prompt attacks.
             if pr.get("standard_rdp_accepted"):
+                # T2 promotion: when the confirming "Standard RDP only" NegReq
+                # (probe_standard_only) also came back with selectedProtocol=0,
+                # we have a definitive second wire observation that the cleartext
+                # path is genuinely reachable on its own — not merely tolerated as
+                # a fallback. Add the confirming evidence to detail and stamp
+                # depth_tier="t2".
+                confirm = (pr or {}).get("nla_confirm") or {}
+                if confirm.get("confirmed") is True:
+                    detail = (
+                        "Server accepted Standard RDP security (selectedProtocol=0). "
+                        "BlueKeep-family exposure (CVE-2019-0708 on Win7/2008 R2, "
+                        "CVE-2020-0609/0610 gateway CVEs) is materially larger "
+                        "without NLA. A cred-harvesting attacker on-path can "
+                        "present a fake login and receive plaintext credentials."
+                        "\n\nT2 confirming evidence: " + confirm.get("evidence", ""))
+                    tier = "t2"
+                else:
+                    detail = (
+                        "Server accepted Standard RDP security (selectedProtocol=0). "
+                        "BlueKeep-family exposure (CVE-2019-0708 on Win7/2008 R2, "
+                        "CVE-2020-0609/0610 gateway CVEs) is materially larger "
+                        "without NLA. A cred-harvesting attacker on-path can "
+                        "present a fake login and receive plaintext credentials.")
+                    tier = "t1"
+                    if confirm.get("evidence"):
+                        detail += ("\n\nT2 confirm probe did not decide: "
+                                   + confirm["evidence"])
                 out.append(_finding(
                     "high",
                     "RDP: Network Level Authentication (NLA) not required", tgt,
-                    "Server accepted Standard RDP security (selectedProtocol=0). "
-                    "BlueKeep-family exposure (CVE-2019-0708 on Win7/2008 R2, "
-                    "CVE-2020-0609/0610 gateway CVEs) is materially larger without "
-                    "NLA. A cred-harvesting attacker on-path can present a fake "
-                    "login and receive plaintext credentials.",
+                    detail,
                     f"xfreerdp /v:{h.ip}:{p.portid} /sec:rdp",
                     "Require NLA on every RDP host (Group Policy: Computer "
                     "Configuration > Admin Templates > Windows Components > "
@@ -435,7 +539,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "RDP; nmap -p <port> --script rdp-vuln-ms12-020,"
                         "rdp-enum-encryption <ip>; if Win7/2008R2: nmap --script "
                         "rdp-vuln-cve-2019-0708 (safe check, does NOT trigger BSOD)."),
-                    depth_tier="t1"))
+                    depth_tier=tier))
             # Fingerprint always — pairs with any severity finding above.
             proto = pr.get("protocol") or pr.get("failure_reason") or "?"
             out.append(_finding(
@@ -538,6 +642,14 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             info = probe_ntlm_info(t["ip"], t["port"])
             if info:
                 pr["ntlm_info"] = info
+        # T2 confirmation for rdp_no_nla: one extra single-shot TCP round trip
+        # only when the base probe already saw Standard RDP accepted. Sends a
+        # Standard-only NegReq (requestedProtocols=0x00) to prove NLA can be
+        # bypassed on its own, not merely tolerated in a multi-option offer.
+        if pr and pr.get("standard_rdp_accepted"):
+            conf = probe_standard_only(t["ip"], t["port"])
+            if conf is not None:
+                pr["nla_confirm"] = conf
         return pr
     if active:
         for t, pr in svcprobe.iter_probe(

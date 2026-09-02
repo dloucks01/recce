@@ -244,3 +244,229 @@ def test_md5_only_finding_suppressed_when_no_nonce_present():
     }}
     fs = S.findings([h], pr)
     assert not any(f["kind"] == "sip_digest_md5_only" for f in fs)
+
+
+# ---- T2 SAFE evidence: realm-bound Digest challenge capture ---------------
+# Promotes sip_fingerprint (a.k.a. sip_realm_disclosure) from T0 -> T2 with a
+# single controlled REGISTER for a fixed canary username. The reply is a real
+# 401/407 whose WWW-Authenticate binds the disclosed realm to a server-
+# generated nonce (RFC 3261 §22.4).
+
+_T2_CHALLENGE_REPLY = (
+    b"SIP/2.0 401 Unauthorized\r\n"
+    b"Via: SIP/2.0/UDP recce:5060;branch=z9hG4bK-recce-r-recce-canary\r\n"
+    b"From: <sip:recce-canary@10.0.0.10>;tag=recce-r-recce-canary\r\n"
+    b"To: <sip:recce-canary@10.0.0.10>;tag=srv\r\n"
+    b"Call-ID: recce-r-recce-canary@recce\r\n"
+    b"CSeq: 1 REGISTER\r\n"
+    b"WWW-Authenticate: Digest realm=\"asterisk\","
+    b" nonce=\"fe1c9d7a1b2c3d4e5f6a7b8c9d0e1f20\","
+    b" opaque=\"cafe\", algorithm=MD5, qop=\"auth\"\r\n"
+    b"Content-Length: 0\r\n\r\n"
+)
+
+_T2_PROXY_CHALLENGE_REPLY = (
+    b"SIP/2.0 407 Proxy Authentication Required\r\n"
+    b"Via: SIP/2.0/UDP recce:5060\r\n"
+    b"Proxy-Authenticate: Digest realm=\"kamailio\", nonce=\"bb00cc11\","
+    b" algorithm=SHA-256, qop=\"auth\"\r\n"
+    b"Content-Length: 0\r\n\r\n"
+)
+
+_T2_OK_REPLY = (
+    b"SIP/2.0 200 OK\r\n"
+    b"Via: SIP/2.0/UDP recce:5060\r\n"
+    b"Content-Length: 0\r\n\r\n"
+)
+
+
+def test_capture_realm_challenge_evidence_extracts_realm_and_nonce():
+    port, sock = _serve_once(_T2_CHALLENGE_REPLY)
+    try:
+        ev = S.capture_realm_challenge_evidence("127.0.0.1", port, timeout=1.5)
+    finally:
+        sock.close()
+    assert ev is not None
+    assert ev["status"] == 401
+    assert ev["realm"] == "asterisk"
+    assert ev["nonce"] == "fe1c9d7a1b2c3d4e5f6a7b8c9d0e1f20"
+    assert ev["algorithm"] == "MD5"
+    assert ev["qop"] == "auth"
+    assert ev["canary_user"] == "recce-canary"
+
+
+def test_capture_realm_challenge_evidence_accepts_proxy_authenticate():
+    # A 407 with Proxy-Authenticate is an equally valid Digest challenge for
+    # T2 evidence — outbound-proxy SIP endpoints challenge that way.
+    port, sock = _serve_once(_T2_PROXY_CHALLENGE_REPLY)
+    try:
+        ev = S.capture_realm_challenge_evidence("127.0.0.1", port, timeout=1.5)
+    finally:
+        sock.close()
+    assert ev is not None
+    assert ev["status"] == 407
+    assert ev["realm"] == "kamailio"
+    assert ev["nonce"] == "bb00cc11"
+    assert ev["algorithm"] == "SHA-256"
+
+
+def test_capture_realm_challenge_evidence_returns_none_on_200():
+    # A 200 OK on the canary REGISTER means no auth challenge — no T2 evidence
+    # to attach. (An unauthenticated-REGISTER 200 is instead the ext_enum
+    # seen_ok=True primitive, already handled at T2 by sip_ext_enum.)
+    port, sock = _serve_once(_T2_OK_REPLY)
+    try:
+        ev = S.capture_realm_challenge_evidence("127.0.0.1", port, timeout=1.5)
+    finally:
+        sock.close()
+    assert ev is None
+
+
+def test_capture_realm_challenge_evidence_returns_none_on_timeout():
+    # Bind a UDP port with no responder -> recvfrom must time out and the
+    # function must return None cleanly, never raise.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    try:
+        ev = S.capture_realm_challenge_evidence("127.0.0.1", port, timeout=0.3)
+    finally:
+        sock.close()
+    assert ev is None
+
+
+def test_capture_realm_challenge_evidence_returns_none_when_no_nonce():
+    # A challenge missing the nonce (or realm) is not usable evidence — must
+    # NOT emit half-parsed output that a downstream hashcat feed would choke on.
+    reply = (b"SIP/2.0 401 Unauthorized\r\n"
+             b"WWW-Authenticate: Digest realm=\"x\", algorithm=MD5\r\n\r\n")
+    port, sock = _serve_once(reply)
+    try:
+        ev = S.capture_realm_challenge_evidence("127.0.0.1", port, timeout=1.5)
+    finally:
+        sock.close()
+    assert ev is None
+
+
+def test_t2_bounded_timeout_clamps_to_range():
+    # Bounded 2.0-6.0s so a caller passing a tiny 0.1s or a large 30s still
+    # yields a sane per-request budget. proxy.scaled is identity when direct.
+    assert S._t2_bounded_timeout(0.1) == 2.0
+    assert S._t2_bounded_timeout(30.0) == 6.0
+    assert S._t2_bounded_timeout(3.0) == 3.0
+
+
+def test_fingerprint_finding_stays_t0_without_evidence():
+    # Backward-compat: no realm_challenge_evidence in the probe dict ->
+    # depth_tier stays t0, detail text unchanged from the T1 path.
+    h = Host(ip="203.0.113.10",
+             ports=[Port(portid=5060, protocol="udp", state="open", service="sip")])
+    pr = {("203.0.113.10", 5060): {
+        "reachable": True, "transport": "udp", "status": 200,
+        "server": "Asterisk PBX 18.0.0", "realm": "asterisk",
+    }}
+    fs = S.findings([h], pr)
+    f = next(f for f in fs if f["kind"] == "sip_fingerprint")
+    assert f["depth_tier"] == "t0"
+    assert "T2 proof" not in f["detail"]
+
+
+def test_fingerprint_finding_promoted_to_t2_when_evidence_captured():
+    # With realm_challenge_evidence present, the finding upgrades to T2 and
+    # emits the captured realm + nonce + canary user in the detail block.
+    h = Host(ip="203.0.113.10",
+             ports=[Port(portid=5060, protocol="udp", state="open", service="sip")])
+    pr = {("203.0.113.10", 5060): {
+        "reachable": True, "transport": "udp", "status": 200,
+        "server": "Asterisk PBX 18.0.0", "realm": "asterisk",
+        "realm_challenge_evidence": {
+            "realm": "asterisk",
+            "nonce": "fe1c9d7a1b2c3d4e5f6a7b8c9d0e1f20",
+            "status": 401, "algorithm": "MD5", "qop": "auth",
+            "canary_user": "recce-canary",
+        },
+    }}
+    fs = S.findings([h], pr)
+    f = next(f for f in fs if f["kind"] == "sip_fingerprint")
+    assert f["depth_tier"] == "t2"
+    assert "T2 proof" in f["detail"]
+    assert "asterisk" in f["detail"]
+    assert "fe1c9d7a1b2c3d4e5f6a7b8c9d0e1f20" in f["detail"]
+    assert "recce-canary" in f["detail"]
+    assert "MD5" in f["detail"]
+
+
+def test_probe_captures_realm_challenge_evidence_end_to_end(monkeypatch):
+    # End-to-end: probe() sends OPTIONS, then a follow-on canary REGISTER,
+    # capturing the challenge into realm_challenge_evidence. The ephemeral
+    # server answers both datagrams from the same socket. ext_enum is
+    # neutralised so the test isolates the T2 capture from svwar-style probes.
+    monkeypatch.setattr(S, "enumerate_extensions",
+                        lambda ip, port, extensions=None, timeout=3.0: {})
+    options_reply = (
+        b"SIP/2.0 200 OK\r\n"
+        b"Via: SIP/2.0/UDP recce:5060;branch=z9hG4bK-recce\r\n"
+        b"From: <sip:recce@recce.local>;tag=recce\r\n"
+        b"To: <sip:127.0.0.1>;tag=srv\r\n"
+        b"Server: Asterisk PBX 18.0.0\r\n"
+        b"WWW-Authenticate: Digest realm=\"asterisk\", nonce=\"opt-n\","
+        b" algorithm=MD5\r\n"
+        b"Content-Length: 0\r\n\r\n"
+    )
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+
+    def _serve():
+        try:
+            # First datagram = OPTIONS -> reply with realm.
+            _, addr = sock.recvfrom(4096)
+            sock.sendto(options_reply, addr)
+            # Second datagram = canary REGISTER -> reply with fresh challenge.
+            _, addr = sock.recvfrom(4096)
+            sock.sendto(_T2_CHALLENGE_REPLY, addr)
+        except OSError:
+            pass
+
+    threading.Thread(target=_serve, daemon=True).start()
+    try:
+        pr = S.probe("127.0.0.1", port, timeout=1.5)
+    finally:
+        sock.close()
+    assert pr["reachable"]
+    assert pr.get("realm") == "asterisk"
+    ev = pr.get("realm_challenge_evidence")
+    assert ev is not None
+    assert ev["realm"] == "asterisk"
+    assert ev["nonce"] == "fe1c9d7a1b2c3d4e5f6a7b8c9d0e1f20"
+    assert ev["canary_user"] == "recce-canary"
+
+
+def test_probe_skips_realm_challenge_capture_when_no_realm(monkeypatch):
+    # When OPTIONS returned no realm= (many PBXes on a plain OPTIONS), the T2
+    # capture is skipped entirely — nothing to prove enforced, no wasted
+    # packet. Verified by counting REGISTER calls, which must be zero.
+    monkeypatch.setattr(S, "enumerate_extensions",
+                        lambda ip, port, extensions=None, timeout=3.0: {})
+    calls = {"n": 0}
+
+    def _fail_capture(*a, **kw):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(S, "capture_realm_challenge_evidence", _fail_capture)
+    options_reply = (
+        b"SIP/2.0 200 OK\r\n"
+        b"Via: SIP/2.0/UDP recce:5060\r\n"
+        b"Server: Kamailio 5.4.4\r\n"
+        b"Content-Length: 0\r\n\r\n"
+    )
+    port, sock = _serve_once(options_reply)
+    try:
+        pr = S.probe("127.0.0.1", port, timeout=1.5)
+    finally:
+        sock.close()
+    assert pr["reachable"]
+    assert "realm" not in pr
+    assert calls["n"] == 0
+    assert "realm_challenge_evidence" not in pr

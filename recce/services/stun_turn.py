@@ -18,6 +18,17 @@ Four related exposures live on these ports and each takes a different packet:
     RFC1918 SHOULD be refused. A server that accepts one is a bidirectional
     SSRF into the internal network — cloud metadata reach on cloud hosts.
 
+T2 SAFE probe (promotes turn_realm_disclosure T1 -> T2):
+  * When the first Allocate is answered 401 with REALM + NONCE, we replay
+    a second Allocate that echoes USERNAME + REALM + NONCE back (with no
+    MESSAGE-INTEGRITY). A cooperative long-term-credential authenticator
+    MUST parse the challenge attributes and reject the missing/invalid MI
+    with a protocol-compliant error (400 Bad Request / 401 Unauthorized
+    with a fresh NONCE / 438 Stale Nonce). A well-formed error back is
+    proof the challenge is LIVE authenticator state — not a static banner
+    from a firewalled port or a stub daemon. Read-only, single follow-up
+    round-trip, bounded 2-3s, no writes, no credentials tried.
+
 Probes are single UDP datagrams where the protocol allows it; the TCP
 transport check uses RFC 4571 2-byte length framing, and TURNS uses TLS
 via stdlib ssl. Airgap-safe: stdlib socket + struct + ssl only.
@@ -54,6 +65,7 @@ _MT_REFRESH_REQUEST = 0x0004
 # Attributes.
 _A_MAPPED_ADDRESS = 0x0001
 _A_CHANGE_REQUEST = 0x0003
+_A_USERNAME = 0x0006
 _A_ERROR_CODE = 0x0009
 _A_LIFETIME = 0x000D
 _A_REALM = 0x0014
@@ -66,6 +78,14 @@ _A_SOFTWARE = 0x8022
 _A_OTHER_ADDRESS = 0x802C
 
 _INTERNAL_PEERS = ("169.254.169.254", "127.0.0.1", "10.0.0.1")
+
+# T2 realm-challenge probe: username sent as part of the follow-up Allocate
+# that echoes the returned REALM + NONCE. Chosen to be visibly non-real so
+# the server never treats it as a valid client attempt — the point is to
+# elicit a protocol-compliant error, not to authenticate.
+_T2_PROBE_USERNAME = b"recce-probe"
+# Bounded timeout ceiling for the T2 realm-challenge probe (seconds).
+_T2_TIMEOUT_MAX = 3.0
 
 
 def is_stun(port: Port) -> bool:
@@ -121,6 +141,20 @@ def _create_perm_request(peer_ip: str, txid: bytes) -> bytes:
     """CreatePermission naming a single IPv4 peer via XOR-PEER-ADDRESS."""
     return _stun_message(_MT_CREATE_PERM_REQUEST, txid,
                          _attr(_A_XOR_PEER_ADDRESS, _xor_ipv4_value(peer_ip, txid)))
+
+
+def _allocate_with_challenge(username: bytes, realm: bytes, nonce: bytes,
+                             txid: bytes) -> bytes:
+    """Second Allocate carrying USERNAME + REALM + NONCE echoed back from
+    the 401 response, without MESSAGE-INTEGRITY. RFC 8656 §7.2: a server
+    that answered 401 the first time processes the challenge attributes on
+    the follow-up and rejects the missing MI with a protocol-compliant
+    error (400 / 401-with-fresh-NONCE / 438). No credentials are sent."""
+    body = (_attr(_A_REQUESTED_TRANSPORT, bytes([17, 0, 0, 0]))
+            + _attr(_A_USERNAME, username)
+            + _attr(_A_REALM, realm)
+            + _attr(_A_NONCE, nonce))
+    return _stun_message(_MT_ALLOCATE_REQUEST, txid, body)
 
 
 def _refresh_zero(txid: bytes) -> bytes:
@@ -479,6 +513,12 @@ def _probe_turn(ip: str, port: int, timeout: float, out: dict) -> None:
         if code == 401 and (a.get("realm") or a.get("nonce")):
             out["turn_realm"] = a.get("realm", "")
             out["turn_nonce"] = a.get("nonce", "")
+            # T2 SAFE proof: replay Allocate echoing the returned REALM +
+            # NONCE with a probe USERNAME (no MESSAGE-INTEGRITY). A
+            # protocol-compliant error back is evidence the auth machinery
+            # is LIVE authenticator state, not static banner text from a
+            # firewalled port or a stub daemon.
+            _probe_turn_realm_challenge(ip, port, timeout, out)
     elif mt == _MT_ALLOCATE_SUCCESS:
         # Unauthenticated Allocate accepted — open relay.
         out["turn_open_relay"] = True
@@ -511,6 +551,57 @@ def _probe_internal_relay(ip: str, port: int, timeout: float,
             accepted.append(peer)
     if accepted:
         out["turn_internal_relay"] = accepted
+
+
+def _probe_turn_realm_challenge(ip: str, port: int, timeout: float,
+                                out: dict) -> None:
+    """T2 SAFE proof for turn_realm_disclosure — single-shot UDP replay of
+    Allocate echoing the returned REALM + NONCE plus a probe USERNAME (no
+    MESSAGE-INTEGRITY). A protocol-compliant Allocate error response back
+    is captured verbatim as evidence: the challenge is being processed by
+    the auth path, not merely printed once as a banner.
+
+    Non-destructive: no credentials tried, no allocation created (no MI
+    means the request is rejected before any state is taken), bounded
+    timeout, one datagram out and one back."""
+    realm = out.get("turn_realm") or ""
+    nonce = out.get("turn_nonce") or ""
+    if not realm or not nonce:
+        return
+    try:
+        realm_b = realm.encode("utf-8")
+        nonce_b = nonce.encode("utf-8")
+    except (UnicodeError, AttributeError):
+        return
+    if not realm_b or not nonce_b:
+        return
+    txid = _txid()
+    try:
+        req = _allocate_with_challenge(_T2_PROBE_USERNAME, realm_b,
+                                       nonce_b, txid)
+    except (ValueError, struct.error):
+        return
+    reply = _udp_exchange(ip, port, req, min(timeout, _T2_TIMEOUT_MAX))
+    if not reply:
+        return
+    parsed = _parse_response(reply)
+    if not parsed or parsed.get("txid") != txid:
+        return
+    if parsed.get("msg_type") != _MT_ALLOCATE_ERROR:
+        return
+    a = parsed.get("attrs", {})
+    ec = a.get("error_code")
+    if not ec:
+        return
+    second_nonce = a.get("nonce", "") or ""
+    second_realm = a.get("realm", "") or ""
+    out["turn_realm_challenge_evidence"] = {
+        "error_code": ec,
+        "error_reason": a.get("error_reason", ""),
+        "nonce_rotated": bool(second_nonce) and second_nonce != nonce,
+        "realm_echoed": bool(second_realm) and second_realm == realm,
+        "response_bytes": len(reply),
+    }
 
 
 def _probe_turns(ip: str, port: int, timeout: float, out: dict) -> dict:
@@ -567,6 +658,25 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             tgt = f"{h.ip}:{p.portid}"
 
             if pr.get("turn_realm") or pr.get("turn_nonce"):
+                tier = "t1"
+                extra = ""
+                ev = pr.get("turn_realm_challenge_evidence")
+                if ev and ev.get("error_code"):
+                    tier = "t2"
+                    ec = ev.get("error_code")
+                    reason = ev.get("error_reason", "")
+                    nonce_state = ("rotated to a fresh NONCE"
+                                   if ev.get("nonce_rotated") else
+                                   "reused the same NONCE")
+                    extra = (
+                        f" T2 PROOF: a follow-up Allocate that echoed USERNAME "
+                        f"+ REALM + NONCE back (no MESSAGE-INTEGRITY) was "
+                        f"processed by the auth machinery — server returned "
+                        f"error {ec} ({reason!r}) and {nonce_state}. That is "
+                        f"proof the REALM/NONCE are LIVE authenticator state "
+                        f"driving a long-term-credential challenge loop, not "
+                        f"static banner text from a firewalled port or stub "
+                        f"daemon.")
                 out.append(_finding(
                     "medium",
                     "TURN Allocate discloses REALM and NONCE without authentication",
@@ -575,7 +685,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"REALM={pr.get('turn_realm','')!r} NONCE={pr.get('turn_nonce','')!r}. "
                     f"The REALM leaks the deployment's identity namespace "
                     f"(SIP domain / Kerberos realm / AD DNS domain) without credentials "
-                    f"— feed it into ldap/kerberos/sip/smtp cross-service correlation.",
+                    f"— feed it into ldap/kerberos/sip/smtp cross-service correlation."
+                    + extra,
                     f"python3 -c \"import socket,struct,os;"
                     f"s=socket.socket(2,2);"
                     f"s.sendto(bytes.fromhex('000300082112a442')+os.urandom(12)+"
@@ -591,7 +702,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "os.urandom(12)+bytes.fromhex('0019000411000000'),"
                         f"('{h.ip}',{p.portid}));"
                         "print(s.recvfrom(4096)[0])\""),
-                    depth_tier="t1"))
+                    depth_tier=tier))
 
             if pr.get("turn_open_relay"):
                 relayed = pr.get("turn_relayed_address") or "unknown"

@@ -176,7 +176,10 @@ class _FakeStunTurn(threading.Thread):
     def __init__(self, *, software=b"coturn-4.5.2 test", realm=b"corp.example",
                  nonce=b"abcdefabcdef0123", other_address=None,
                  open_relay=False, accept_internal=False,
-                 answer_binding=True, answer_allocate=True):
+                 answer_binding=True, answer_allocate=True,
+                 challenge_nonce=b"deadbeefdeadbeef0000",
+                 challenge_error=(401, "Unauthorized"),
+                 answer_challenge=True):
         super().__init__()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("127.0.0.1", 0))
@@ -190,6 +193,13 @@ class _FakeStunTurn(threading.Thread):
         self.accept_internal = accept_internal
         self.answer_binding = answer_binding
         self.answer_allocate = answer_allocate
+        # T2 realm-challenge behavior: on a follow-up Allocate that carries
+        # USERNAME, echo a fresh NONCE + protocol-compliant error. Set
+        # answer_challenge=False to simulate a stub daemon whose banner is
+        # not backed by a live authenticator.
+        self.challenge_nonce = challenge_nonce
+        self.challenge_error = challenge_error
+        self.answer_challenge = answer_challenge
         self.stop_flag = threading.Event()
 
     def run(self):
@@ -224,7 +234,20 @@ class _FakeStunTurn(threading.Thread):
                 self.sock.sendto(_stun_hdr(st._MT_BINDING_SUCCESS, txid, body),
                                  addr)
             elif msg_type == st._MT_ALLOCATE_REQUEST and self.answer_allocate:
-                if self.open_relay:
+                # Distinguish a first-Allocate (no USERNAME) from a T2
+                # challenge replay (USERNAME + REALM + NONCE echoed back).
+                attrs = dict(st._iter_attrs(data[20:]))
+                is_challenge = st._A_USERNAME in attrs
+                if is_challenge and not self.answer_challenge:
+                    continue
+                if is_challenge:
+                    ec, reason = self.challenge_error
+                    body = (_tlv(st._A_ERROR_CODE, _error_code(ec, reason))
+                            + _tlv(st._A_REALM, self.realm)
+                            + _tlv(st._A_NONCE, self.challenge_nonce))
+                    self.sock.sendto(_stun_hdr(st._MT_ALLOCATE_ERROR, txid,
+                                               body), addr)
+                elif self.open_relay:
                     body = _tlv(st._A_XOR_RELAYED_ADDRESS,
                                 _xor_mapped_ipv4("198.51.100.77", 49200))
                     body += _tlv(st._A_SOFTWARE, self.software)
@@ -558,3 +581,148 @@ def test_tcp_transport_detected_via_rfc4571_framing():
             listener.close()
         except OSError:
             pass
+
+
+# --- T2 realm-challenge promotion --------------------------------------------
+#
+# T1 keeps: an unauthenticated Allocate answered 401 with REALM+NONCE (the
+# module already parses this).
+# T2 adds:  a single follow-up Allocate echoes USERNAME + REALM + NONCE
+# back (no MESSAGE-INTEGRITY). A protocol-compliant Allocate error in
+# reply proves the challenge is LIVE authenticator state — not banner
+# text a firewalled port or stub daemon could parrot back.
+
+def test_allocate_with_challenge_wire_layout_carries_username_realm_nonce():
+    """The T2 replay MUST advertise REQUESTED-TRANSPORT (still an Allocate)
+    plus the three challenge attributes and no MESSAGE-INTEGRITY."""
+    txid = bytes(range(12))
+    req = st._allocate_with_challenge(b"user", b"corp.example",
+                                       b"nonceval1234", txid)
+    # Allocate request type + magic + txid.
+    assert req[:2] == b"\x00\x03"
+    assert req[4:8] == _MAGIC
+    assert req[8:20] == txid
+    body = req[20:]
+    attrs = dict(st._iter_attrs(body))
+    assert st._A_REQUESTED_TRANSPORT in attrs
+    assert attrs[st._A_REQUESTED_TRANSPORT][:1] == b"\x11"  # UDP=17
+    assert attrs[st._A_USERNAME] == b"user"
+    assert attrs[st._A_REALM] == b"corp.example"
+    assert attrs[st._A_NONCE] == b"nonceval1234"
+    # No MESSAGE-INTEGRITY (0x0008) — the whole point of the probe.
+    assert 0x0008 not in attrs
+
+
+def test_realm_challenge_evidence_captured_when_server_answers_the_replay():
+    """Vulnerable path: server processes the challenge replay and returns
+    a fresh 401 + rotated NONCE. Evidence populated, tier upgrades."""
+    pr = _probe(realm=b"CORP.EXAMPLE.LOCAL", nonce=b"origNONCE0000000",
+                challenge_nonce=b"freshNONCE111111",
+                challenge_error=(401, "Unauthorized"))
+    assert pr["turn_realm"] == "CORP.EXAMPLE.LOCAL"
+    ev = pr.get("turn_realm_challenge_evidence")
+    assert ev is not None
+    assert ev["error_code"] == 401
+    assert ev["error_reason"] == "Unauthorized"
+    assert ev["nonce_rotated"] is True
+    assert ev["realm_echoed"] is True
+    assert ev["response_bytes"] > 0
+
+
+def test_realm_challenge_evidence_reports_stale_nonce_error_code():
+    """Servers may reply 438 Stale Nonce on any USERNAME-bearing Allocate
+    that quotes a NONCE it did not issue — also a live-authenticator signal."""
+    pr = _probe(realm=b"corp.example", nonce=b"nonce-a-0000",
+                challenge_nonce=b"nonce-b-1111",
+                challenge_error=(438, "Stale Nonce"))
+    ev = pr.get("turn_realm_challenge_evidence")
+    assert ev and ev["error_code"] == 438
+    assert ev["error_reason"] == "Stale Nonce"
+
+
+def test_realm_challenge_no_evidence_when_server_ignores_replay():
+    """Stub daemon that answered the first Allocate 401 but never replies
+    to the challenge replay: T2 evidence stays absent, T1 remains T1."""
+    pr = _probe(realm=b"corp.example", nonce=b"stubnonce00000000",
+                answer_challenge=False)
+    assert pr["turn_realm"] == "corp.example"
+    assert pr.get("turn_realm_challenge_evidence") is None
+
+
+def test_realm_finding_promoted_to_t2_when_challenge_evidence_present():
+    pr = {"reachable": True, "speaks_turn": True,
+          "turn_realm": "corp.example", "turn_nonce": "abc",
+          "turn_realm_challenge_evidence": {
+              "error_code": 401, "error_reason": "Unauthorized",
+              "nonce_rotated": True, "realm_echoed": True,
+              "response_bytes": 68}}
+    f = next(x for x in _f(pr) if x["kind"] == "turn_realm_disclosure")
+    assert f["depth_tier"] == "t2"
+    assert "T2 PROOF" in f["detail"]
+    assert "rotated" in f["detail"]
+    assert "401" in f["detail"]
+
+
+def test_realm_finding_stays_t1_without_challenge_evidence():
+    pr = {"reachable": True, "speaks_turn": True,
+          "turn_realm": "corp.example", "turn_nonce": "abc"}
+    f = next(x for x in _f(pr) if x["kind"] == "turn_realm_disclosure")
+    assert f["depth_tier"] == "t1"
+    assert "T2 PROOF" not in f["detail"]
+
+
+def test_realm_finding_stays_t1_when_evidence_has_no_error_code():
+    """An evidence dict without a real error code — e.g. server responded
+    non-Allocate-Error — must NOT promote."""
+    pr = {"reachable": True, "speaks_turn": True,
+          "turn_realm": "corp.example", "turn_nonce": "abc",
+          "turn_realm_challenge_evidence": {"error_code": 0}}
+    f = next(x for x in _f(pr) if x["kind"] == "turn_realm_disclosure")
+    assert f["depth_tier"] == "t1"
+
+
+def test_realm_challenge_probe_bounded_timeout_yields_no_evidence(monkeypatch):
+    """A dropped follow-up (network timeout) MUST leave the T1 finding
+    intact — no evidence, no promotion."""
+    # First _udp_exchange call returns a real 401; second (the T2 replay)
+    # returns None to simulate a timeout.
+    calls = []
+    real_udp = st._udp_exchange
+
+    def _fake_udp(ip, port, payload, timeout):
+        calls.append((len(payload), timeout))
+        attrs = dict(st._iter_attrs(payload[20:]))
+        if st._A_USERNAME in attrs:
+            # Bounded per the T2 ceiling.
+            assert timeout <= st._T2_TIMEOUT_MAX
+            return None
+        return real_udp(ip, port, payload, timeout)
+
+    monkeypatch.setattr(st, "_udp_exchange", _fake_udp)
+    pr = _probe(realm=b"corp.example", nonce=b"noncenoncenonce0")
+    assert pr["turn_realm"] == "corp.example"
+    assert pr.get("turn_realm_challenge_evidence") is None
+    # Confirm the probe was in fact attempted (a USERNAME-bearing send).
+    assert any(True for _len, _t in calls if _len > 28)
+
+
+def test_realm_challenge_probe_no_op_when_no_realm_or_nonce():
+    out = {}
+    # Neither realm nor nonce — the probe MUST return without any traffic.
+    st._probe_turn_realm_challenge("127.0.0.1", 1, timeout=1.0, out=out)
+    assert out == {}
+
+
+def test_realm_challenge_probe_ignores_wrong_txid_reply(monkeypatch):
+    """A reply whose txid doesn't match the probe's transaction MUST NOT
+    be treated as evidence (guards against on-wire race with other UDP)."""
+    def _fake_udp(ip, port, payload, timeout):
+        # Craft a valid Allocate-Error but with a bogus txid.
+        body = (_tlv(st._A_ERROR_CODE, _error_code(401, "Unauthorized"))
+                + _tlv(st._A_REALM, b"corp.example"))
+        return _stun_hdr(st._MT_ALLOCATE_ERROR, bytes(12), body)
+
+    monkeypatch.setattr(st, "_udp_exchange", _fake_udp)
+    out = {"turn_realm": "corp.example", "turn_nonce": "abc"}
+    st._probe_turn_realm_challenge("127.0.0.1", 1, timeout=1.0, out=out)
+    assert "turn_realm_challenge_evidence" not in out

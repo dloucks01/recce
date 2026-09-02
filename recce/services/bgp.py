@@ -457,6 +457,66 @@ def version_probe(ip: str, port: int = _DEFAULT_PORT,
     return out
 
 
+# --- T2 SAFE evidence: hijack-readiness proof via disclosed AS ---------------
+# T1 signal for bgp_expected_as_disclosed is "peer NOTIFICATION 2/2 carried the
+# configured expected local AS". T2 wants concrete server-side evidence in the
+# finding output: a controlled re-OPEN with that expected AS + the peer's own
+# AS pair, capturing the peer's REAL OPEN reply. If the peer replies its own
+# OPEN, the session progressed to OpenConfirm (RFC 4271 sec. 8.2.2) — the
+# session WOULD establish with a legitimate My-AS. Non-destructive: recce
+# never sends KEEPALIVE, so the peer's FSM times out on OpenConfirm and drops
+# the session; the RIB is untouched. Single controlled round-trip, timeout
+# clamped to 2-6s (proxy.scaled inside _single_open). No writes, no state
+# change to the RIB.
+_T2_EVIDENCE_TIMEOUT_MIN = 2.0
+_T2_EVIDENCE_TIMEOUT_MAX = 6.0
+
+
+def _t2_bounded_timeout(timeout: float) -> float:
+    """Clamp base timeout to 2-6s. _single_open applies proxy.scaled itself,
+    so we clamp only — never pre-scale (would double-scale on proxy)."""
+    return max(_T2_EVIDENCE_TIMEOUT_MIN, min(_T2_EVIDENCE_TIMEOUT_MAX, timeout))
+
+
+def capture_hijack_ready_evidence(ip: str, port: int, expected_as: int,
+                                  timeout: float = _TIMEOUT,
+                                  router_id: str = "192.0.2.1") -> dict | None:
+    """T2 SAFE proof: one controlled OPEN using the disclosed expected-AS.
+
+    Returns {'peer_reply_kind': 'open', 'peer_asn', 'peer_router_id',
+             'peer_version', 'peer_hold_time', 'my_as_used'} when the peer
+    answers with its own OPEN — deterministic evidence the session WOULD
+    establish for a legitimate peer-AS/local-AS pair (progresses to
+    OpenConfirm per RFC 4271 sec. 8.2.2). Returns None on any non-OPEN reply
+    (NOTIFICATION / silent / RST / timeout / socket error) — the T1 finding
+    then stays T1. No UPDATE, no KEEPALIVE: the peer's FSM times out on
+    OpenConfirm and drops the session — the RIB is not modified.
+    """
+    # Reject implausible AS values — a 0 or over-max AS in the NOTIFICATION
+    # data would be a parse artefact, not a real configured value.
+    if not isinstance(expected_as, int) or expected_as < 1 or expected_as > 0xFFFFFFFF:
+        return None
+    try:
+        r = _single_open(ip, port, my_as=expected_as,
+                         timeout=_t2_bounded_timeout(timeout),
+                         router_id=router_id)
+    except OSError:
+        return None
+    if not r or r.get("peer_reply_kind") != "open":
+        return None
+    op = r.get("open") or {}
+    if not op:
+        return None
+    return {
+        "peer_reply_kind": "open",
+        "peer_asn": op.get("asn"),
+        "peer_router_id": op.get("router_id"),
+        "peer_version": op.get("version"),
+        "peer_hold_time": op.get("hold_time"),
+        "my_as_used": expected_as,
+    }
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
           my_as: int = 65001, router_id: str = "192.0.2.1") -> dict:
     """Primary probe: one BGP OPEN, capture the peer's reply, then a
@@ -474,6 +534,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         "peer_reply_kind": "", "open": None, "notification": None,
         "expected_as": None, "expected_as_my_as": None,
         "peer_max_version": None, "md5_hint": False,
+        "hijack_ready_evidence": None,
     }
     r = _single_open(ip, port, my_as=my_as, timeout=timeout,
                      router_id=router_id)
@@ -513,6 +574,22 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
             vp = version_probe(ip, port, timeout=timeout)
             if vp.get("peer_max_version"):
                 out["peer_max_version"] = vp["peer_max_version"]
+        except OSError:
+            pass
+    # T2 SAFE evidence capture: only when the peer disclosed an expected AS
+    # via NOTIFICATION (i.e. the first probe did NOT already get a full OPEN
+    # back). One controlled re-OPEN using that AS; if the peer replies its
+    # own OPEN, session-hijack-readiness is proven with captured server-side
+    # evidence in the finding output. No writes, no state change to the RIB.
+    if (out["expected_as"]
+            and out["peer_reply_kind"] != "open"
+            and out["hijack_ready_evidence"] is None):
+        try:
+            ev = capture_hijack_ready_evidence(
+                ip, port, out["expected_as"], timeout=timeout,
+                router_id=router_id)
+            if ev is not None:
+                out["hijack_ready_evidence"] = ev
         except OSError:
             pass
     return out
@@ -784,16 +861,36 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
 
             # bgp_expected_as_disclosed — peer's configured neighbor AS.
             if pr.get("expected_as"):
-                out.append(_finding(
-                    "high",
-                    "BGP peer discloses expected local AS via NOTIFICATION "
-                    "'Bad Peer AS'", tgt,
+                # T2 promotion: if a controlled re-OPEN with the disclosed AS
+                # produced a full OPEN reply, we have concrete evidence the
+                # session WOULD establish — attach it to the finding output
+                # and lift depth_tier from t1 to t2.
+                ev = pr.get("hijack_ready_evidence")
+                ea_tier = "t2" if ev else "t1"
+                ea_detail = (
                     f"Peer expects local AS = {pr['expected_as']} (extracted "
                     f"from NOTIFICATION 2/2 data field; matching My-AS in "
                     f"probe = {pr.get('expected_as_my_as')}). Combined with "
                     f"the peer's own AS ({op.get('asn','?')}) this is the "
                     f"full neighbor-AS pair — enough to complete a BGP "
-                    f"session from any host that can reach 179.",
+                    f"session from any host that can reach 179.")
+                if ev:
+                    ea_detail += (
+                        f" T2 evidence: a controlled re-OPEN using My-AS="
+                        f"{ev.get('my_as_used')} produced a full OPEN reply "
+                        f"from the peer (peer_asn={ev.get('peer_asn')}, "
+                        f"router_id={ev.get('peer_router_id')!r}, "
+                        f"version={ev.get('peer_version')}, hold_time="
+                        f"{ev.get('peer_hold_time')}s) — session progressed "
+                        f"to OpenConfirm (RFC 4271 sec. 8.2.2). recce sent "
+                        f"NO KEEPALIVE and NO UPDATE, so the peer's FSM "
+                        f"times out on OpenConfirm and drops the session "
+                        f"with no change to the RIB.")
+                f = _finding(
+                    "high",
+                    "BGP peer discloses expected local AS via NOTIFICATION "
+                    "'Bad Peer AS'", tgt,
+                    ea_detail,
                     f"nmap --script bgp-info -p {p.portid} {h.ip}",
                     "Restrict TCP/179 to configured neighbors. Require "
                     "TCP-MD5 / TCP-AO so knowing the AS pair alone is "
@@ -805,7 +902,16 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "192.0.2.1;} — session comes up = full-hijack "
                         "primitive."
                     ),
-                    depth_tier="t1"))
+                    depth_tier=ea_tier)
+                if ev:
+                    f["output"] = (
+                        f"hijack-ready evidence: my_as_used="
+                        f"{ev.get('my_as_used')}; peer replied OPEN with "
+                        f"peer_asn={ev.get('peer_asn')} "
+                        f"router_id={ev.get('peer_router_id')!r} "
+                        f"version={ev.get('peer_version')} "
+                        f"hold_time={ev.get('peer_hold_time')}s")
+                out.append(f)
 
             # bgp_version_probe — extracted version ceiling.
             if pr.get("peer_max_version"):

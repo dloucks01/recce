@@ -26,6 +26,7 @@ import socket
 import ssl
 import struct
 
+from ..core import proxy
 from ..core.models import Host, Port
 
 
@@ -216,6 +217,112 @@ def _ntlm_challenge(ip: str, port: int, tls: bool, timeout: float) -> dict | Non
     return None
 
 
+# --- ASN.1 DER helpers (minimal, just enough for a CredSSP TSRequest) --------
+# TSRequest is defined in MS-CSSP §2.2.1. We build only the outermost SEQUENCE
+# with [0] version + [1] negoTokens (a SEQUENCE OF SEQUENCE { [0] OCTET STRING }).
+
+def _der_len(n: int) -> bytes:
+    if n < 0x80:
+        return bytes([n])
+    b = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(b)]) + b
+
+
+def _der_tlv(tag: int, value: bytes) -> bytes:
+    return bytes([tag]) + _der_len(len(value)) + value
+
+
+def _der_integer(n: int) -> bytes:
+    if n == 0:
+        return _der_tlv(0x02, b"\x00")
+    b = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    if b[0] & 0x80:
+        b = b"\x00" + b
+    return _der_tlv(0x02, b)
+
+
+def _der_octet_string(v: bytes) -> bytes:
+    return _der_tlv(0x04, v)
+
+
+def _der_sequence(*parts: bytes) -> bytes:
+    return _der_tlv(0x30, b"".join(parts))
+
+
+def _der_explicit(tag_num: int, inner: bytes) -> bytes:
+    """Context-specific [n] EXPLICIT (constructed): 0xA0 | n."""
+    return _der_tlv(0xA0 | tag_num, inner)
+
+
+def _build_credssp_tsrequest(nego_token: bytes, version: int = 6) -> bytes:
+    """TSRequest ::= SEQUENCE { [0] version INTEGER, [1] negoTokens NegoData }
+    where NegoData ::= SEQUENCE OF SEQUENCE { [0] negoToken OCTET STRING }."""
+    nego_data_item = _der_sequence(_der_explicit(0, _der_octet_string(nego_token)))
+    nego_data = _der_sequence(nego_data_item)
+    return _der_sequence(_der_explicit(0, _der_integer(version)),
+                         _der_explicit(1, nego_data))
+
+
+def _credssp_probe(ip: str, port: int, tls: bool, timeout: float) -> dict | None:
+    """T2 evidence: send a minimal CredSSP TSRequest carrying an NTLMSSP
+    NEGOTIATE (Type-1) in negoTokens. A live CredSSP handler responds with a
+    401 whose WWW-Authenticate: CredSSP <base64> carries a continuation
+    TSRequest (typically containing the NTLM Type-2 CHALLENGE) — proof the
+    SSP is genuinely wired on the server and processing delegation tokens,
+    not just advertised in Options. If the handler is not active the server
+    either re-advertises the auth list without a CredSSP token body or 500s.
+    All read-only, single-shot, no credentials sent."""
+    from ..ad import ntlm
+    conn = None
+    try:
+        ts = _build_credssp_tsrequest(ntlm.type1())
+        token = base64.b64encode(ts).decode("ascii")
+        if tls:
+            ctx = ssl._create_unverified_context()      # noqa: S323 - self-signed is the norm
+            conn = http.client.HTTPSConnection(ip, port, timeout=timeout, context=ctx)
+        else:
+            conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+        conn.request("POST", "/wsman", body=_IDENTIFY,
+                     headers={"Content-Type": "application/soap+xml;charset=UTF-8",
+                              "Authorization": f"CredSSP {token}",
+                              "User-Agent": "recce-winrm/1.0"})
+        r = conn.getresponse()
+        r.read(4096)                                    # drain to free the conn
+    except (OSError, http.client.HTTPException, ssl.SSLError, socket.timeout):
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+    if r.status not in (401, 200):
+        return None
+    for k, v in r.getheaders():
+        if k.lower() != "www-authenticate":
+            continue
+        # Real CredSSP handler answer: "CredSSP <base64 TSRequest>".
+        # A bare "CredSSP" (no token) is just an option re-advertisement.
+        parts = v.strip().split(None, 1)
+        if len(parts) != 2 or parts[0].lower() != "credssp":
+            continue
+        try:
+            raw = base64.b64decode(parts[1].strip(), validate=False)
+        except (ValueError, TypeError):
+            continue
+        # A TSRequest is a DER SEQUENCE (0x30 ...). If the server also
+        # embedded an NTLM Type-2 in negoTokens we surface it as evidence:
+        # this proves the SSP chain SPNEGO/NTLM through CredSSP is live.
+        if len(raw) < 2 or raw[0] != 0x30:
+            continue
+        out: dict = {"response_len": len(raw)}
+        ntlm_info = _parse_ntlm_challenge(raw)
+        if ntlm_info:
+            out["ntlm_info"] = ntlm_info
+        return out
+    return None
+
+
 def probe(ip: str, port: int = _HTTP_PORT, timeout: float = _TIMEOUT) -> dict:
     """Probe whatever port we were handed; auto-select TLS for 5986/443."""
     tls = port in (_HTTPS_PORT, 443)
@@ -238,6 +345,15 @@ def probe(ip: str, port: int = _HTTP_PORT, timeout: float = _TIMEOUT) -> dict:
         info = _ntlm_challenge(ip, port, tls, timeout)
         if info:
             out["ntlm_info"] = info
+    # T2 SAFE probe: iff CredSSP is advertised, send one minimal TSRequest to
+    # confirm the SSP is actually wired (not just registered in Options).
+    # Bounded to proxy.scaled() so the extra RTT stays within budget on slow
+    # links. Quiet on failure: absent evidence keeps winrm_credssp at T1.
+    if "CredSSP" in (out.get("auth") or []):
+        scaled = proxy.scaled(min(max(timeout, 2.0), 6.0))
+        cs = _credssp_probe(ip, port, tls, scaled)
+        if cs:
+            out["credssp_live"] = cs
     return out
 
 
@@ -409,13 +525,34 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     depth_tier="t1"))
 
             if "CredSSP" in auth:
+                # T2 SAFE promotion: if the CredSSP SSP responded to a minimal
+                # TSRequest with a continuation token (a real DER TSRequest in
+                # WWW-Authenticate: CredSSP <b64>), the handler is genuinely
+                # wired and processing delegation tokens - not just advertised.
+                # Absent that evidence, the finding stays T1 (advertisement only).
+                cs_live = pr.get("credssp_live") or {}
+                tier = "t2" if cs_live else "t1"
+                extra_detail = ""
+                if cs_live:
+                    ev_bits = [f"TSRequest response={cs_live.get('response_len', 0)}B"]
+                    ni = cs_live.get("ntlm_info") or {}
+                    for k, label in (("netbios_computer", "NetBIOS name"),
+                                     ("dns_computer", "DNS FQDN"),
+                                     ("dns_domain", "AD DNS domain"),
+                                     ("os_version", "OS build")):
+                        v = ni.get(k)
+                        if v:
+                            ev_bits.append(f"{label}={v}")
+                    extra_detail = (" Evidence: server echoed a CredSSP "
+                                    "continuation token (" + "; ".join(ev_bits)
+                                    + ") - handler is live, not just advertised.")
                 out.append(_finding(
                     "medium",
                     "WinRM offers CredSSP (delegates credentials to this host)", tgt,
                     "CredSSP forwards the caller's plaintext credentials to this "
                     "server so they can be re-used against a third system. On a "
                     "compromised server that is a credential-theft primitive; "
-                    "MS-recommended only for controlled scenarios.",
+                    "MS-recommended only for controlled scenarios." + extra_detail,
                     "review", "Get-WSManCredSSP",
                     "Disable CredSSP unless a specific workflow requires it "
                     "(Disable-WSManCredSSP Server); if kept, restrict which "
@@ -425,7 +562,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Once on the host: mimikatz # sekurlsa::logonpasswords; "
                         "or nxc winrm <ip> -u <admin> -p <p> -M lsassy for "
                         "remote LSASS dump (needs local admin)."),
-                    depth_tier="t1"))
+                    depth_tier=tier))
     return out
 
 

@@ -197,6 +197,9 @@ class _FakeSock:
         take, self._buf = self._buf[:n], self._buf[n:]
         return take
 
+    def close(self):
+        pass
+
 
 def _resp_pdu(stub: bytes, flags: int) -> bytes:
     """Build a co-response PDU: 16B CO header + 8B response header + stub."""
@@ -281,6 +284,167 @@ def test_towers_in_returns_zero_port_when_no_tcp_floor():
     towers = msrpc._towers_in(blob)
     assert len(towers) == 1
     assert towers[0]["tcp_port"] == 0
+
+
+# --- T2 promotion: bench-safe coercion-interface bind verify ----------------
+
+def _bind_ack_pdu(call_id: int = 1) -> bytes:
+    """Minimal DCE/RPC bind_ack PDU. Only the ptype byte (12) is checked by
+    `_bind`, but the frag_length in the header must match the real body so
+    `_recv_pdu` reassembles correctly. Body is 8 bytes of zeros — the
+    bind_ack fields are not parsed."""
+    body = b"\x00" * 8
+    hdr = struct.pack("<BBBB4sHHI",
+                      5, 0, 12, 0x03,        # ptype=12 (bind_ack), FIRST+LAST
+                      b"\x10\x00\x00\x00",
+                      16 + len(body), 0, call_id)
+    return hdr + body
+
+
+def _bind_nak_pdu(call_id: int = 1) -> bytes:
+    """bind_nak (ptype 13) — the server refused to bind."""
+    body = b"\x00" * 2
+    hdr = struct.pack("<BBBB4sHHI",
+                      5, 0, 13, 0x03,
+                      b"\x10\x00\x00\x00",
+                      16 + len(body), 0, call_id)
+    return hdr + body
+
+
+def test_verify_coercion_bindable_no_endpoints_is_empty():
+    """No coercion UUIDs OR no endpoints -> empty list (no probe fires)."""
+    assert msrpc.verify_coercion_bindable("10.0.0.10", [], []) == []
+    assert msrpc.verify_coercion_bindable(
+        "10.0.0.10", [{"uuid": "c681d488-d850-11d0-8c52-00c04fd90f7e",
+                       "tcp_port": 49670, "ver_major": 1, "ver_minor": 0}],
+        []) == []
+
+
+def test_verify_coercion_bindable_records_bind_ack(monkeypatch):
+    """A bind_ack PDU on the disclosed dynamic port promotes the record to
+    bindable=True with evidence naming the interface + port."""
+    petitpotam = "c681d488-d850-11d0-8c52-00c04fd90f7e"
+    fake = _FakeSock([_bind_ack_pdu()])
+
+    def _fake_conn(addr, timeout=None):
+        return fake
+
+    monkeypatch.setattr(msrpc.socket, "create_connection", _fake_conn)
+    res = msrpc.verify_coercion_bindable(
+        "10.0.0.10",
+        [{"uuid": petitpotam, "tcp_port": 49670,
+          "ver_major": 1, "ver_minor": 0}],
+        [petitpotam], timeout=2.0)
+    assert len(res) == 1
+    assert res[0]["bindable"] is True
+    assert res[0]["port"] == 49670
+    assert "MS-EFSR" in res[0]["evidence"]
+    assert "49670" in res[0]["evidence"]
+
+
+def test_verify_coercion_bindable_records_bind_nak(monkeypatch):
+    """A bind_nak (or any non-ack response) records bindable=False. The
+    coercion interface was listed by EPM but is not currently serving."""
+    petitpotam = "c681d488-d850-11d0-8c52-00c04fd90f7e"
+    fake = _FakeSock([_bind_nak_pdu()])
+    monkeypatch.setattr(msrpc.socket, "create_connection",
+                        lambda addr, timeout=None: fake)
+    res = msrpc.verify_coercion_bindable(
+        "10.0.0.10",
+        [{"uuid": petitpotam, "tcp_port": 49670,
+          "ver_major": 1, "ver_minor": 0}],
+        [petitpotam], timeout=2.0)
+    assert len(res) == 1
+    assert res[0]["bindable"] is False
+    assert "did NOT" in res[0]["evidence"]
+
+
+def test_verify_coercion_bindable_records_tcp_timeout(monkeypatch):
+    """When TCP itself refuses / times out, we record bindable=False with a
+    'closed' evidence string — a hardened / firewalled dynamic port."""
+    petitpotam = "c681d488-d850-11d0-8c52-00c04fd90f7e"
+
+    def _refuse(addr, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(msrpc.socket, "create_connection", _refuse)
+    res = msrpc.verify_coercion_bindable(
+        "10.0.0.10",
+        [{"uuid": petitpotam, "tcp_port": 49670,
+          "ver_major": 1, "ver_minor": 0}],
+        [petitpotam], timeout=2.0)
+    assert len(res) == 1
+    assert res[0]["bindable"] is False
+    assert "unreachable" in res[0]["evidence"]
+
+
+def test_verify_coercion_bindable_skips_non_coercion_endpoints(monkeypatch):
+    """Only UUIDs in the coercion_uuids arg get probed — a random WMI dynamic
+    port must NOT trigger a bind attempt (guards against accidentally probing
+    interfaces the operator did not opt into)."""
+    wmi = "8bc3f05e-d86b-11d0-a075-00c04fb68820"
+    called = []
+    monkeypatch.setattr(msrpc.socket, "create_connection",
+                        lambda addr, timeout=None: called.append(addr))
+    res = msrpc.verify_coercion_bindable(
+        "10.0.0.10",
+        [{"uuid": wmi, "tcp_port": 49671,
+          "ver_major": 1, "ver_minor": 0}],
+        ["c681d488-d850-11d0-8c52-00c04fd90f7e"],  # PetitPotam, not WMI
+        timeout=2.0)
+    assert res == []
+    assert called == []
+
+
+def test_coercion_finding_promotes_to_t2_when_bindable_evidence_present():
+    """The msrpc_coercion finding stays high but flips depth_tier to t2 and
+    carries the bind_ack evidence in `output` when coercion_bindable shows a
+    live interface. Detail text gains a 'T2 wire evidence' block."""
+    petitpotam = "c681d488-d850-11d0-8c52-00c04fd90f7e"
+    fs = msrpc.findings([_host()], _pr(
+        interfaces=[petitpotam],
+        coercion=[petitpotam],
+        coercion_bindable=[{
+            "uuid": petitpotam, "port": 49670, "bindable": True,
+            "evidence": (
+                "DCE/RPC bind_ack from 10.0.0.10:49670 for MS-EFSR "
+                "(lsarpc-efs) v1.0 — coercion interface accepts fresh binds "
+                "right now (no coerce request issued).")}]))
+    f = next(f for f in fs if f["kind"] == "msrpc_coercion")
+    assert f["severity"] == "high"
+    assert f["depth_tier"] == "t2"
+    assert "T2 wire evidence" in f["detail"]
+    assert "bind_ack" in f["output"]
+    assert "49670" in f["output"]
+
+
+def test_coercion_finding_stays_t1_when_no_bindable_evidence():
+    """No coercion_bindable data (e.g. named-pipe-only interfaces with no
+    disclosed TCP port) — finding must stay at T1 with NO output field, so
+    the T1 code path is unchanged for the majority of hosts."""
+    petitpotam = "c681d488-d850-11d0-8c52-00c04fd90f7e"
+    fs = msrpc.findings([_host()], _pr(
+        interfaces=[petitpotam], coercion=[petitpotam]))
+    f = next(f for f in fs if f["kind"] == "msrpc_coercion")
+    assert f["depth_tier"] == "t1"
+    assert "T2 wire evidence" not in f["detail"]
+    assert "output" not in f  # no evidence key emitted on the T1 path
+
+
+def test_coercion_finding_stays_t1_when_bindable_all_false():
+    """coercion_bindable populated but every entry bindable=False (port
+    advertised but closed / bind_nak) — this is honest T1 territory: EPM
+    listed the interface but we could not confirm it live."""
+    petitpotam = "c681d488-d850-11d0-8c52-00c04fd90f7e"
+    fs = msrpc.findings([_host()], _pr(
+        interfaces=[petitpotam],
+        coercion=[petitpotam],
+        coercion_bindable=[{"uuid": petitpotam, "port": 49670,
+                            "bindable": False,
+                            "evidence": "did NOT bind_ack"}]))
+    f = next(f for f in fs if f["kind"] == "msrpc_coercion")
+    assert f["depth_tier"] == "t1"
+    assert "T2 wire evidence" not in f["detail"]
 
 
 def test_dynport_finding_emits_kind_and_names_ports():

