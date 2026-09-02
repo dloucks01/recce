@@ -864,6 +864,117 @@ services:
     restart: unless-stopped
 
   # ══════════════════════════════════════════════════════════════════════════
+  # Phase 10 — horizontal expansion. Five new canaries for recce modules
+  # that shipped without a live target in the compose plane:
+  #   .74 telnet   (recce.services.telnet)
+  #   .75 tftp     (recce.services.tftp)
+  #   .76 jenkins  (recce.services.jenkins_jnlp + HTTP fingerprint)
+  #   .77 influxdb (recce.services.db.influxdb)
+  #   .78 ipp      (recce.services.ipp)
+  # Small (<300 MB each); every canary is unhardened by design so the
+  # module's t1/t2 findings actually fire against it.
+  # ══════════════════════════════════════════════════════════════════════════
+
+  telnet-target:
+    build: ./simulators/telnet
+    hostname: telnet-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.74
+    # busybox telnetd is a foreground process; nc as healthcheck asks the
+    # port to answer with the IAC negotiation bytes it always sends.
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 23 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    profiles: [core]
+    restart: unless-stopped
+
+  tftp-target:
+    build: ./simulators/tftp
+    hostname: tftp-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.75
+    # tftpd-hpa binds UDP :69 — verify the socket answers to an RRQ for
+    # test.txt. Uses busybox tftp (bundled in tftpd-hpa image? no — falls
+    # back to a plain UDP connect check via bash).
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /srv/tftp/running-config && test -f /srv/tftp/test.txt"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    profiles: [core]
+    restart: unless-stopped
+
+  jenkins-target:
+    image: jenkins/jenkins:lts-jdk21
+    hostname: jenkins-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.76
+    # Skip the "unlock Jenkins" wizard so the HTTP twin and the JNLP
+    # listener are both live on first boot.
+    environment:
+      # * runSetupWizard=false — skip the "unlock Jenkins" wizard so the
+      #   HTTP twin (/tcpSlaveAgentListener/) is live on first boot.
+      # * jenkins.model.Jenkins.slaveAgentPort=50000 — pin the JNLP agent
+      #   listener to the well-known port. In JENKINS_HOME=null-config
+      #   this defaults to random; only when set here does the probe find
+      #   50000/tcp open. (The env var JENKINS_SLAVE_AGENT_PORT only
+      #   affects derived scripts, not the JVM.)
+      JAVA_OPTS: >-
+        -Djenkins.install.runSetupWizard=false
+        -Djenkins.model.Jenkins.slaveAgentPort=50000
+        -Dhudson.model.DownloadService.noSignatureCheck=true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/login >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    profiles: [modern, core]
+    restart: unless-stopped
+
+  influxdb-target:
+    image: influxdb:1.8
+    hostname: influxdb-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.77
+    # InfluxDB 1.x ships with auth DISABLED by default — that is the
+    # exact posture recce.services.db.influxdb is designed to catch.
+    # A pre-created database gives SHOW DATABASES something to return.
+    environment:
+      INFLUXDB_DB: recce_lab
+      INFLUXDB_HTTP_AUTH_ENABLED: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8086/ping >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    profiles: [core, databases]
+    restart: unless-stopped
+
+  ipp-target:
+    build: ./simulators/cups
+    hostname: ipp-target
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.78
+    # CUPS binds :631. Wait for the daemon socket + at least one printer
+    # queue so recce.services.ipp.ipp_printers has content to enumerate.
+    healthcheck:
+      test: ["CMD-SHELL", "lpstat -r >/dev/null 2>&1 && lpstat -p RecceLabPDF >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    profiles: [core]
+    restart: unless-stopped
+
+  # ══════════════════════════════════════════════════════════════════════════
   # `heavy` profile — targets recce covers but that are too large to bring
   # up by default (multi-GB image or multi-minute first boot). None land in
   # `core` — bring up explicitly with `docker compose --profile heavy up -d`.

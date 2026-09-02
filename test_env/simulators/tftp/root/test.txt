@@ -1,0 +1,3 @@
+recce-lab TFTP canary — this file exercises the medium-severity path
+of recce.services.tftp when the tester requests test.txt without
+hitting a filename that matches the config-file heuristic.

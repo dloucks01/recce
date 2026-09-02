@@ -1,0 +1,22 @@
+!
+! Cisco IOS running-config — LAB-ONLY MOCK CONTENT, no real device
+! No real credentials, no real hostnames — every field is a placeholder
+! for exercising recce's TFTP config-file heuristic (tftp_readable
+! elevates to CRITICAL when the filename matches a device-config).
+!
+version 15.2
+hostname recce-lab-router
+!
+enable secret 5 $1$xyz$LABLABLABLABLABLABLABLAB0
+!
+username labuser privilege 15 secret 5 $1$abc$LABLABLABLABLABLABLABLAB1
+!
+snmp-server community recce-lab-ro RO
+snmp-server community recce-lab-rw RW
+!
+line vty 0 4
+ password 7 021605481A011B01
+ login local
+ transport input telnet ssh
+!
+end
