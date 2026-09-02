@@ -73,6 +73,15 @@ _CASES = [
      "snap7-cli"),
     ("chain_esxi_vcenter_takeover", "vsphere_cve_2024_37085", "critical",
      "ESX Admins"),
+    ("chain_dns_forest_map", "dns_axfr", "high", "rootDomainNamingContext"),
+    ("chain_java_rmi_jmx_deser", "jmx_rmi_open", "critical",
+     "rmi-dumpregistry"),
+    ("chain_snmp_write_reconfig", "snmp_write_community", "critical",
+     "ccCopyEntry"),
+    ("chain_sip_rtp_eavesdrop", "sip_options_open", "high", "sngrep"),
+    ("chain_k8s_token_to_rbac_privesc", "kubelet_anon", "critical",
+     "auth can-i --list"),
+    ("chain_http_lfi_to_rce", "http_lfi", "critical", "php://filter"),
 ]
 
 
