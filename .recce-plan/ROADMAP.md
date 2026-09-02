@@ -8,6 +8,41 @@ tool.
 ## Session-recovery context (read this first)
 
 **Since this roadmap was authored, the following also shipped** (chronological, HEAD-first):
+- **P5 honesty-audit close-out (cc304cf, e65e0a5, cb02e00, bd88c33, 9265e16, f23c87e):**
+  audit pass triggered by "are we at a good point?" — surfaced real gaps
+  by running recce against the live compose test env (172.20.0.10-49,
+  31 containers). Fixed everything actionable in one arc:
+  * **Untiered kinds:** live scan produced 138/212 (65%) findings with
+    empty `depth_tier`. Fan-out tiered 53 kinds in web/checks + http +
+    vulndb + parser (bd88c33), then 5 leftover kinds in
+    web/discover + probes + parser NSE cases (cb02e00), then the last
+    tls-cert/tls-proto in probes.py (e65e0a5). Rate now **0%**
+    (only skipped kinds are UDP-only ones that need `sudo` to probe).
+  * **SSH test race** (40-60% flake): real bug in the fake server's
+    ident-drain — `conn.recv(4096)` pulled ident + KEXINIT + KEXDH_INIT
+    into one buffer but split only on \n, discarding the binary tail.
+    Rewrote with a shared buffered reader. Now 5/5 pass in 0.26s each.
+  * **CWE-214 + CWE-1394 unclassified**: added to _CWE_TYPE + _CWE_NAME
+    + core cwe.NAMES fallback (f23c87e).
+  * **`_targets` filter brittleness** (backlog item): hoisted
+    `_module_scoped_check` with qualname dot-check so class-nested
+    `_targets` methods never shadow the real module-scope helper.
+  * **GUI parity for CLI-only features (cc304cf, all 5 in one shot):**
+    - BloodHound zip download button (routes/bloodhound_export.py +
+      ExploitSurface button + status probe)
+    - Dedicated Suggest tab (routes/suggest_digest.py +
+      views/SuggestDigest.tsx + nav entry)
+    - Per-finding Prove button (recce/act/prove_dispatch.py shared by
+      CLI+endpoint, routes/prove_endpoint.py, ExploitSurface verdict
+      chip + evidence + finish line)
+    - Auto-crack watcher status widget (routes/autocrack_status.py +
+      components/AutocrackStatus.tsx in top bar)
+    - Chain-rules extracted from scan.py to routes/chain_rules.py
+      (pure refactor, re-export preserves test imports)
+  * Full test suite: **3959 passed, 0 failed, 13 skipped** (32:50).
+- **P3-2 batch 2 (4520b7e):** 6 more chain-correlation rules (dns forest
+  map, java rmi/jmx deser, snmp write reconfig, sip/rtp eavesdrop, k8s
+  token→RBAC privesc, http lfi→rce). Total chain rules now 18.
 - **P3-1 (fb3364e):** 12 cross-service chain-correlation rules in
   `/api/scan/suggestions` — AD-Kerberos, cloud IMDS pivot, container
   escape, HashiCorp stack, NTLM harvest, unauth datastore data-mine,
@@ -34,13 +69,21 @@ tool.
   shared-surface consumers).
 
 **Still open / externally blocked:**
-- P1-1 compose OT profile — Docker Hub unreachable from build box.
+- P1-1 compose OT profile — Docker Hub is reachable now; the core+db+
+  messaging+media profiles are up (31 containers). OT profile
+  bring-up (bacnet-sim/enip-sim/opcua-sim/s7 etc.) still deferred —
+  they're authored in test_env/docker-compose.yml, just not `up`'d.
 - P1-2 Vagrant plane — needs user real-time (~4GB VM downloads).
 - P2-2 remainder — Log4Shell OOB, HTTP request smuggling active PoC,
   HTTP/2 rapid-reset, Spring4Shell — all require OOB callback
   infrastructure recce doesn't have.
 - P0-1 long tail — ~120+ candidates remain in the audit, but batches
   2-6 confirm the highest-value ones already shipped.
+
+**Audit close-out declared complete as of cc304cf** — everything
+actionable in the current environment is done. Next open item is a
+scope pivot (new capability class, new attack chain, or the externally-
+blocked items above).
 
 ---
 
