@@ -155,6 +155,7 @@ export type ScanSuggestion = {
   confidence: "high" | "medium" | "low";
   source: string;
   external_cmd?: string;
+  severity?: "critical" | "high" | "medium" | "low";
 };
 
 export async function getCommands(): Promise<CmdCatalog> {

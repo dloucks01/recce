@@ -159,3 +159,29 @@ select.sv2-input { font-family: var(--sans); appearance: auto; }
 }
 .sv2-target-fill:hover:not(:disabled) { border-color: var(--accent); }
 .sv2-target-fill:disabled { opacity: .5; cursor: not-allowed; }
+
+/* "recce suggests…" — cross-engagement hint cards above the command grid.
+   Chain-correlation rules (P3-1/P3-2) emit `severity`; legacy suggestions
+   emit `confidence` and render a colored dot instead. */
+.sv2-suggestions { display: flex; flex-direction: column; gap: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 18px; box-shadow: var(--shadow-sm); }
+.sv2-suggestions-h { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.sv2-suggestions-label { font-size: 13px; font-weight: 800; color: var(--accent); text-transform: none; }
+.sv2-suggestions-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
+.sv2-suggest-card { display: flex; flex-direction: column; gap: 6px; background: var(--surface2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; }
+.sv2-suggest-card-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.sv2-suggest-card-title { font-size: 12px; font-weight: 700; color: var(--text); text-transform: capitalize; }
+.sv2-suggest-card-cmd { font-size: 10px; color: var(--faint); }
+.sv2-suggest-row { display: flex; align-items: flex-start; gap: 8px; padding-top: 6px; border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent); }
+.sv2-suggest-row:first-of-type { border-top: 0; padding-top: 0; }
+.sv2-suggest-reason { flex: 1; font-size: 12px; color: var(--text); line-height: 1.5; word-break: break-word; }
+.sv2-suggest-value { margin-top: 4px; font-size: 11px; }
+.sv2-suggest-value.mono { font-family: var(--mono); background: color-mix(in srgb, var(--bg) 60%, var(--surface)); padding: 4px 6px; border-radius: 4px; word-break: break-all; }
+.sv2-suggest-actions { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; flex-shrink: 0; }
+.sv2-suggest-fill { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); cursor: pointer; }
+.sv2-suggest-fill:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.sv2-suggest-fill:disabled { opacity: .5; cursor: not-allowed; }
+.sv2-suggest-dismiss { font-size: 14px; line-height: 1; padding: 2px 6px; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--faint); cursor: pointer; }
+.sv2-suggest-dismiss:hover { color: var(--text); border-color: var(--line); }
+.sv2-conf-high { color: var(--crit); }
+.sv2-conf-medium { color: var(--med); }
+.sv2-conf-low { color: var(--faint); }

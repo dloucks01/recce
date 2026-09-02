@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { CmdCatalog, CmdSpec, getCommands, postCommand, Host, getJSON, ScanSuggestion } from "./api";
+import { SevTag } from "./ui";
 import { ScanConsole } from "./scan/ScanConsole";
 
 interface Job {
@@ -376,12 +377,32 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
     () => suggestions.filter((s) => !dismissedSuggestions.has(s.key)),
     [suggestions, dismissedSuggestions]);
   const groupedSuggestions = useMemo(() => {
+    // Sort within each bucket by severity, then order buckets by their
+    // hottest hint so critical chain-rules float to the top of the grid.
+    const rank = (s: ScanSuggestion) => {
+      const sev = s.severity || "";
+      if (sev === "critical") return 0;
+      if (sev === "high") return 1;
+      if (sev === "medium") return 2;
+      if (sev === "low") return 3;
+      // No severity (legacy suggestion) — fall back to confidence.
+      if (s.confidence === "high") return 4;
+      if (s.confidence === "medium") return 5;
+      return 6;
+    };
     const g: Record<string, ScanSuggestion[]> = {};
     for (const s of visibleSuggestions) {
       const bucket = s.command || `~${s.source}`;
       (g[bucket] ||= []).push(s);
     }
-    return g;
+    for (const bucket of Object.keys(g)) {
+      g[bucket].sort((a, b) => rank(a) - rank(b));
+    }
+    const ordered: Record<string, ScanSuggestion[]> = {};
+    Object.entries(g)
+      .sort(([, a], [, b]) => rank(a[0]) - rank(b[0]))
+      .forEach(([k, v]) => { ordered[k] = v; });
+    return ordered;
   }, [visibleSuggestions]);
 
   function dismissSuggestion(key: string) {
@@ -545,7 +566,11 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
                   {items.map((s) => (
                     <div key={s.key} className="sv2-suggest-row">
                       <div className="sv2-suggest-reason">
-                        <span className={`sv2-conf-${s.confidence}`}>●</span>
+                        {s.severity ? (
+                          <SevTag severity={s.severity} />
+                        ) : (
+                          <span className={`sv2-conf-${s.confidence}`}>●</span>
+                        )}
                         {" "}{s.reason}
                         {s.suggested_value && s.field && (
                           <div className="sv2-suggest-value">
