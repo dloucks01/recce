@@ -146,6 +146,8 @@ NAMES: dict[str, str] = {
     "CWE-1321": "Improperly Controlled Modification of Object Prototype Attributes",
     "CWE-1336": "Server-Side Template Injection (Improper Template Neutralization)",
     "CWE-1392": "Use of Default Credentials",
+    "CWE-1394": "Use of Default Cryptographic Key",
+    "CWE-214": "Invocation of Process Using Visible Sensitive Information",
     "CWE-73": "External Control of File Name or Path",
     "CWE-184": "Incomplete List of Disallowed Inputs",
     "CWE-208": "Observable Timing Discrepancy",
