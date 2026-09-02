@@ -32,7 +32,8 @@ __all__ = ['cmd_web', 'cmd_smb', 'cmd_ftp', 'cmd_docker', 'cmd_kubernetes', 'cmd
            'cmd_zabbix', 'cmd_vault', 'cmd_vsphere', 'cmd_jenkins_jnlp',
            'cmd_cups_lpd', 'cmd_nbd_ndmp', 'cmd_slp', 'cmd_bgp', 'cmd_stun',
            'cmd_xmpp', 'cmd_guacamole', 'cmd_minecraft', 'cmd_nisyp',
-           'cmd_coap', 'cmd_cloud_metadata']
+           'cmd_coap', 'cmd_cloud_metadata', 'cmd_ollama', 'cmd_gitlab',
+           'cmd_grafana', 'cmd_jupyterhub', 'cmd_minio']
 
 
 def cmd_web(args: argparse.Namespace) -> int:
@@ -773,6 +774,101 @@ def cmd_docker_registry(args: argparse.Namespace) -> int:
         no_targets="[!] No Docker Registry endpoints (port 5000). "
                    "Run `enum` against the registry hosts first.",
         fmt=_fmt_simple(lambda t, a: f"{t.get('repositories',0)} repo(s)"))
+
+
+def cmd_gitlab(args: argparse.Namespace) -> int:
+    """GitLab CE/EE self-hosted probe: sign-in fingerprint, /api/v4/version,
+    /-/health surface, public projects, broadcast messages, and version-
+    gated CVE markers (CVE-2021-22205 unauth RCE, CVE-2023-2825 traversal).
+    Read-only — never sprays creds."""
+    return _run_service_scan(
+        args, module="gitlab", source="gitlab", label="GitLab",
+        noun="GitLab endpoint(s)",
+        no_targets="[!] No GitLab endpoints in the datastore (80/443/8080/"
+                   "8443 fronted by GitLab). Run `enum` against the app "
+                   "hosts first.",
+        fmt=_fmt_simple(lambda t, a: (
+            (t.get('version') or 'gitlab')
+            + (' CVE-2021-22205' if t.get('cve_2021_22205') else '')
+            + (' CVE-2023-2825' if t.get('cve_2023_2825') else '')
+            + (f" {t.get('public_projects', 0)} public"
+               if t.get('public_projects') else ''))))
+
+
+def cmd_jupyterhub(args: argparse.Namespace) -> int:
+    """Jupyter Server / JupyterHub probe (8888/8000/8443): /api version
+    fingerprint, /hub/api/info for JupyterHub detection, and GET-only
+    checks against /api/kernels (RCE oracle — never POSTed) and
+    /api/contents (notebook filesystem, often leaking cleartext secrets)."""
+    return _run_service_scan(
+        args, module="jupyterhub", source="jupyterhub", label="Jupyter",
+        noun="Jupyter endpoint(s)",
+        no_targets="[!] No Jupyter/JupyterHub endpoints in the datastore "
+                   "(port 8888/8000/8443). Run `enum` against the "
+                   "notebook hosts first.",
+        fmt=_fmt_simple(lambda t, a: (
+            ('jupyterhub' if t.get('is_hub') else 'jupyter')
+            + (f" v{t.get('version')}" if t.get('version') else '')
+            + (' KERNELS-UNAUTH (RCE)' if t.get('kernels_no_auth') else '')
+            + (' CONTENTS-UNAUTH' if t.get('contents_no_auth') else ''))))
+
+
+def cmd_grafana(args: argparse.Namespace) -> int:
+    """Grafana dashboards probe (3000/tcp): /api/health fingerprint +
+    version disclosure, /api/gnet/plugins unauth catalog leak, one
+    SAFE single-shot admin:admin marker (NEVER sprays), and version-
+    gated CVE emissions (CVE-2021-43798 traversal file-read,
+    CVE-2024-9264 DuckDB SQLi RCE)."""
+    return _run_service_scan(
+        args, module="grafana", source="grafana", label="Grafana",
+        noun="Grafana endpoint(s)",
+        no_targets="[!] No Grafana endpoints in the datastore (port 3000). "
+                   "Run `enum` against the monitoring hosts first.",
+        fmt=_fmt_simple(lambda t, a: (
+            (t.get('version') or 'grafana')
+            + (' DEFAULT-CREDS' if t.get('default_admin_creds') else '')
+            + (' CVE-2021-43798' if t.get('cve_2021_43798') else '')
+            + (' CVE-2024-9264' if t.get('cve_2024_9264') else '')
+            + (' plugin-list' if t.get('plugin_list_exposed') else ''))))
+
+
+def cmd_ollama(args: argparse.Namespace) -> int:
+    """Ollama local-LLM daemon probe (11434/tcp): unauth /api/version +
+    /api/tags model inventory + /api/generate reachability check
+    (safe: probes with an invalid model so no inference runs).
+    Version-gates CVE-2024-37032 (< 0.1.34)."""
+    return _run_service_scan(
+        args, module="ollama", source="ollama", label="Ollama",
+        noun="Ollama endpoint(s)",
+        no_targets="[!] No Ollama endpoints in the datastore (port 11434). "
+                   "Run `enum` against the AI-workload hosts first.",
+        fmt=_fmt_simple(lambda t, a: 'v' + (t.get('version','?') or '?') +
+                                     (f"  {t.get('model_count',0)} model(s)"
+                                      if t.get('models_exposed') else '') +
+                                     ('  GENERATE-OPEN'
+                                      if t.get('generate_open') else '') +
+                                     ('  CVE-2024-37032'
+                                      if t.get('cve_2024_37032') else '')))
+
+
+def cmd_minio(args: argparse.Namespace) -> int:
+    """MinIO S3 object-store probe (9000/9001): /minio/health/live +
+    Server header fingerprint, anonymous bucket listing on GET /, one
+    SAFE single-shot AWS4-signed minioadmin/minioadmin marker (NEVER
+    sprays), and fingerprint-gated CVE-2023-28432 env-leak check
+    (POST /minio/bootstrap/v1/verify)."""
+    return _run_service_scan(
+        args, module="minio", source="minio", label="MinIO",
+        noun="MinIO endpoint(s)",
+        no_targets="[!] No MinIO endpoints in the datastore (port 9000/9001). "
+                   "Run `enum` against the object-storage hosts first.",
+        fmt=_fmt_simple(lambda t, a: (
+            (t.get('version') or 'minio')
+            + (' DEFAULT-CREDS' if t.get('default_admin_creds') else '')
+            + (' ANON-LIST' if t.get('anonymous_listing') else '')
+            + (f" {t.get('bucket_count', 0)} bucket(s)"
+               if t.get('bucket_count') else '')
+            + (' CVE-2023-28432' if t.get('cve_2023_28432') else ''))))
 
 
 def cmd_vnc(args: argparse.Namespace) -> int:

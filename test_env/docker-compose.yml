@@ -772,5 +772,92 @@ services:
     profiles: [ot, core]
     restart: unless-stopped
 
+  # ══════════════════════════════════════════════════════════════════════════
+  # P6 horizontal expansion — 4 modern services recce didn't cover until this
+  # arc. GitLab CE is intentionally omitted (heavy install; the module is
+  # still there for real-target engagements). Everything else is small
+  # (<200MB) and boots in seconds.
+  # Bring up with `docker compose --profile modern up -d` or add to `core`.
+  # ══════════════════════════════════════════════════════════════════════════
+
+  grafana:
+    image: grafana/grafana:latest
+    hostname: grafana
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.70
+    environment:
+      # Deliberately keep admin/admin on this canary so
+      # recce.services.grafana.grafana_default_creds_admin will fire.
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    profiles: [modern, core]
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    hostname: minio
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.71
+    command: server /data --console-address ":9001"
+    environment:
+      # Same as above — leave defaults so recce's minio_default_creds_admin
+      # + minio_anonymous_root have something to catch.
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    healthcheck:
+      test: ["CMD-SHELL", "mc alias set local http://127.0.0.1:9000 minioadmin minioadmin && exit 0 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    profiles: [modern, core]
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    hostname: ollama
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.72
+    # NO models pulled — recce probes /api/version + /api/tags, which
+    # both succeed with an empty model set. Loading a real model doubles
+    # the image size and isn't needed for the probe surface.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:11434/api/version || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    profiles: [modern, core]
+    restart: unless-stopped
+
+  jupyter:
+    image: jupyter/base-notebook:latest
+    hostname: jupyter
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.73
+    # Disable auth so recce's jupyter_no_auth_kernel_spawn detector fires.
+    # This is deliberately misconfigured — production always requires a token.
+    command: >
+      start-notebook.sh
+      --NotebookApp.token=''
+      --NotebookApp.password=''
+      --NotebookApp.disable_check_xsrf=True
+      --NotebookApp.allow_origin='*'
+      --NotebookApp.ip=0.0.0.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8888/api || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 30
+    profiles: [modern, core]
+    restart: unless-stopped
+
 volumes:
   nfs-share:

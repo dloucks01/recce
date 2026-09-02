@@ -53,6 +53,9 @@ _MODULE_PATH = {
     "sip": "recce.services.sip", "rservices": "recce.services.rservices", "prometheus": "recce.services.prometheus",
     "rdp": "recce.services.rdp", "vnc": "recce.services.vnc",
     "docker_registry": "recce.services.docker_registry",
+    "gitlab": "recce.services.gitlab",
+    "grafana": "recce.services.grafana",
+    "jupyterhub": "recce.services.jupyterhub",
     "api": "recce.services.api", "web": "recce.services.web",
     # T5+ scanner-expansion additions (SSH/mail/OT/monitoring/storage/etc.):
     "ssh": "recce.services.ssh", "telnet": "recce.services.telnet",
@@ -70,6 +73,8 @@ _MODULE_PATH = {
     "stun": "recce.services.stun_turn", "xmpp": "recce.services.xmpp",
     "guacamole": "recce.services.guacamole", "minecraft": "recce.services.minecraft",
     "nisyp": "recce.services.nisyp", "coap": "recce.services.coap",
+    "ollama": "recce.services.ollama",
+    "minio": "recce.services.minio",
 }
 
 def _match_one_host(hosts, selector):
