@@ -544,41 +544,54 @@ class _FakeSSHWeakKexServer:
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
 
+    def _fill(self, conn, n: int) -> bool:
+        """Read until self._buf has at least n bytes. Returns False on EOF."""
+        while len(self._buf) < n:
+            chunk = conn.recv(max(4096, n - len(self._buf)))
+            if not chunk:
+                return False
+            self._buf += chunk
+        return True
+
     def _read_packet(self, conn) -> bytes:
-        hdr = b""
-        while len(hdr) < 4:
-            chunk = conn.recv(4 - len(hdr))
-            if not chunk:
-                return b""
-            hdr += chunk
-        (pkt_len,) = struct.unpack(">I", hdr)
-        body = b""
-        while len(body) < pkt_len:
-            chunk = conn.recv(pkt_len - len(body))
-            if not chunk:
-                return b""
-            body += chunk
+        if not self._fill(conn, 4):
+            return b""
+        (pkt_len,) = struct.unpack(">I", self._buf[:4])
+        if not self._fill(conn, 4 + pkt_len):
+            return b""
+        body = self._buf[4:4 + pkt_len]
+        self._buf = self._buf[4 + pkt_len:]
         pad = body[0]
         return body[1:len(body) - pad]
+
+    def _read_line(self, conn) -> bytes:
+        """Read until \\n; return the line and keep any excess in self._buf.
+        This is where the flake lived — the old implementation slurped up to
+        4096 bytes per recv but only split on newline, so a client that
+        packed ident+KEXINIT+KEXDH_INIT back-to-back into one segment lost
+        every byte after the ident."""
+        while b"\n" not in self._buf:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return b""
+            self._buf += chunk
+        idx = self._buf.index(b"\n")
+        line, self._buf = self._buf[:idx + 1], self._buf[idx + 1:]
+        return line
 
     def _serve(self):
         try:
             conn, _ = self._srv.accept()
         except (socket.timeout, OSError):
             return
+        self._buf = b""
         try:
             conn.settimeout(4.0)
             conn.sendall(self._ident)
-            # Drain client ident line.
-            buf = b""
-            while b"\n" not in buf:
-                chunk = conn.recv(4096)
-                if not chunk:
-                    return
-                buf += chunk
-            # Drain client KEXINIT packet.
-            _ = self._read_packet(conn)
-            # Send server KEXINIT.
+            # RFC 4253 permits either side to send KEXINIT as soon as its
+            # version string is out — we do that immediately so a fast
+            # client that reads KEXINIT before its own drain of ours
+            # doesn't race the server's read-then-send order.
             kex_offer = ("diffie-hellman-group1-sha1,curve25519-sha256"
                          if self._offer_group1 else "curve25519-sha256")
             server_kexinit = _kexinit_payload(
@@ -586,6 +599,11 @@ class _FakeSSHWeakKexServer:
                 "aes128-ctr,aes128-cbc",
                 "hmac-sha2-256,hmac-sha1")
             conn.sendall(_wrap_binary(server_kexinit))
+            # Drain client ident line (may bring KEXINIT + KEXDH_INIT bytes
+            # along; those are preserved in self._buf for the reads below).
+            _ = self._read_line(conn)
+            # Drain client KEXINIT packet.
+            _ = self._read_packet(conn)
             if self.mode == "disconnect_before_kexdh":
                 # SSH_MSG_DISCONNECT (1) + reason=KEY_EXCHANGE_FAILED(3)
                 #   + string("no matching kex") + string("")
