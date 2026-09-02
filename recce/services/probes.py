@@ -270,22 +270,39 @@ def tls_findings(host_ip: str, port: Port,
             findings.append(_mk(
                 host_ip, port, "tls-cert", "low", "Expired TLS certificate",
                 ["CWE-298", "CWE-295"], verify_error,
-                "Renew the certificate; automate renewal."))
+                "Renew the certificate; automate renewal.",
+                depth_tier="t1",
+                exploit_note=(f"openssl s_client -connect {host_ip}:{port.portid} </dev/null 2>/dev/null "
+                              "| openssl x509 -noout -dates — confirm; if the client "
+                              "trusts anyway, note as MitM-substitution risk.")))
         elif "self signed" in low or "self-signed" in low:
             findings.append(_mk(
                 host_ip, port, "tls-cert", "low", "Self-signed TLS certificate",
                 ["CWE-295"], verify_error,
-                "Use a certificate from a trusted CA (internal PKI is fine)."))
+                "Use a certificate from a trusted CA (internal PKI is fine).",
+                depth_tier="t1",
+                exploit_note=(f"openssl s_client -connect {host_ip}:{port.portid} </dev/null "
+                              "| openssl x509 -noout -issuer -subject — same issuer as subject "
+                              "confirms self-signed. Substitute-cert MitM against a client that "
+                              "pinned to the self-signed cert is trivial once you can route.")))
         elif "hostname mismatch" in low or "doesn't match" in low:
             findings.append(_mk(
                 host_ip, port, "tls-cert", "low", "TLS certificate hostname mismatch",
                 ["CWE-297"], verify_error,
-                "Issue a certificate whose SAN matches the service name."))
+                "Issue a certificate whose SAN matches the service name.",
+                depth_tier="t1",
+                exploit_note=(f"openssl s_client -connect {host_ip}:{port.portid} -servername <name> "
+                              "— confirm SAN mismatch. If a downstream service ignores hostname "
+                              "verification, MitM substitution works with any cert this CA signs.")))
         else:
             findings.append(_mk(
                 host_ip, port, "tls-cert", "low", "TLS certificate not trusted",
                 ["CWE-295"], verify_error,
-                "Ensure the presented chain is complete and CA-trusted."))
+                "Ensure the presented chain is complete and CA-trusted.",
+                depth_tier="t1",
+                exploit_note=(f"openssl s_client -showcerts -connect {host_ip}:{port.portid} "
+                              "</dev/null — inspect the chain. Missing intermediate is fixable; "
+                              "unknown-CA at leaf = client bypasses verification or is broken.")))
 
     if isinstance(cert, dict) and known_names:
         # Certificate SAN coverage against every hostname recce has learned
@@ -313,7 +330,11 @@ def tls_findings(host_ip: str, port: Port,
                     "SAN, or move the name(s) to a service that presents a "
                     "matching cert. An attacker able to route traffic for an "
                     "uncovered name can present a substituted certificate "
-                    "without detection."))
+                    "without detection.",
+                    depth_tier="t1",
+                    exploit_note=(f"getent hosts {uncovered[0]} — confirm the name resolves; "
+                                  "if clients actually reach the service by it, MitM "
+                                  "substitution with a valid cert on THAT name is undetected.")))
 
     if isinstance(cert, dict):
         not_after = cert.get("notAfter")
@@ -327,7 +348,11 @@ def tls_findings(host_ip: str, port: Port,
                         host_ip, port, "tls-cert", "info",
                         "TLS certificate expiring soon", ["CWE-298"],
                         f"Certificate expires in ~{days} day(s): {not_after}",
-                        "Renew before expiry to avoid outage/trust warnings."))
+                        "Renew before expiry to avoid outage/trust warnings.",
+                        depth_tier="t0",
+                        exploit_note=("(engagement-hygiene finding — schedule renewal; not a "
+                                      "primitive to exploit unless the org still runs the cert "
+                                      "after expiry and clients bypass verification.)")))
 
     # Negotiated protocol from the default handshake.
     if proto in ("SSLv3", "TLSv1", "TLSv1.0"):
@@ -335,7 +360,11 @@ def tls_findings(host_ip: str, port: Port,
             host_ip, port, "tls-proto", "medium",
             f"Weak TLS protocol negotiated ({proto})", ["CWE-326", "CWE-327"],
             f"Default handshake negotiated {proto}.",
-            "Disable SSLv3/TLS 1.0/1.1; require TLS 1.2+."))
+            "Disable SSLv3/TLS 1.0/1.1; require TLS 1.2+.",
+            depth_tier="t1",
+            exploit_note=(f"testssl.sh {host_ip}:{port.portid} — confirm. If SSLv3/TLSv1 "
+                          "accepted, POODLE / BEAST / Lucky13 depending on cipher set. "
+                          "sslscan {host_ip}:{port.portid} for the full cipher matrix.")))
 
     # Actively probe whether legacy protocols are still accepted.
     for name, protocol_const, cwes, sev in _LEGACY_PROTOCOLS:
@@ -346,7 +375,12 @@ def tls_findings(host_ip: str, port: Port,
                 host_ip, port, "tls-proto", sev,
                 f"Server accepts legacy {name}", cwes,
                 f"A {name} handshake succeeded.",
-                f"Disable {name} on this service; require TLS 1.2+."))
+                f"Disable {name} on this service; require TLS 1.2+.",
+                depth_tier="t1",
+                exploit_note=(f"testssl.sh -p -U {host_ip}:{port.portid} — confirm the "
+                              f"{name}-only handshake and enumerate the ciphersuites the "
+                              "server offers there. Chain to CVE-2014-3566 (POODLE-SSLv3) "
+                              "or the appropriate downgrade attack for the protocol.")))
     return findings
 
 

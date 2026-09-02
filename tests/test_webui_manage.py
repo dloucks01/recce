@@ -400,6 +400,20 @@ def test_scan_context_counts_come_from_the_modules_own_predicate(client):
     assert cmds["smb"]["sample"] == expected[:8]
 
 
+def test_scan_context_fallback_ignores_class_scoped_targets_methods():
+    """The fallback `*_targets` scan must ignore a class-nested method whose
+    display-name ends in `_targets` — only real module-scope helpers count.
+    Guards a subtle shadow the qualname check catches."""
+    from recce.webui.routes.scan import _module_scoped_check
+    class _Spec:
+        def _targets(self, hosts): return []
+        def public_targets(self, hosts): return []
+    def real_targets(hosts): return [{"ip": "10.0.0.1"}]
+    real_targets.__qualname__ = "real_targets"
+    assert _module_scoped_check("real_targets", real_targets) is True
+    assert _module_scoped_check("public_targets", _Spec.public_targets) is False
+
+
 def test_scan_context_explains_udp_only_services(client):
     """`recce ntp` on a TCP-only sweep finds nothing, and the tester has no way
     to know the reason is the protocol rather than the environment."""

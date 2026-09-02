@@ -45,6 +45,18 @@ _OT_SWEEP_MAP = {
 }
 
 
+def _module_scoped_check(name: str, obj) -> bool:
+    """The `_targets(hosts)` fallback lookup for /api/scan/context must
+    accept module-scope helpers only. A class-nested method whose
+    display-name ends in `_targets` — for example `SomeSpec._targets` —
+    otherwise looks identical from `dir(mod)`, and would silently shadow
+    the module's real targets fn. The qualname dot-check excludes it.
+    """
+    return (name.endswith("_targets") and not name.startswith("_")
+            and callable(obj)
+            and "." not in getattr(obj, "__qualname__", name))
+
+
 def _rule_domain(hosts, creds, loot_dir):          # noqa: ARG001
     """known_domains → --domain prefill for credentialed commands."""
     try:
@@ -1041,14 +1053,15 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
             # way — even a class-scoped one — never shadows the module's
             # own targets fn. Fall back to any public `*_targets` for
             # services whose slug and function name genuinely diverge.
+            # `_module_scoped_check` filters out class-nested methods.
             canonical = cmd.replace("-", "_") + "_targets"
             fn = None
             if hasattr(mod, canonical) and callable(getattr(mod, canonical)):
                 fn = getattr(mod, canonical)
             else:
                 fn = next((getattr(mod, n) for n in dir(mod)
-                           if n.endswith("_targets") and not n.startswith("_")
-                           and callable(getattr(mod, n))), None)
+                           if _module_scoped_check(n, getattr(mod, n, None))),
+                          None)
             if fn is None:
                 continue                     # web/api are HTTP-wide; handled below
             try:
