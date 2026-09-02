@@ -27,6 +27,8 @@ from ._common import _Broker
 from ._common import _detect_import_kind, _import_preview, _import_signatures  # noqa: F401
 from .routes import (
     register_act_spray_routes,
+    register_autocrack_status_routes,
+    register_bloodhound_export_routes,
     register_collab_routes,
     register_data_exchange_routes,
     register_engagement_routes,
@@ -35,7 +37,12 @@ from .routes import (
     register_report_routes,
     register_scan_routes,
     register_sessions_routes,
+    register_suggest_digest_routes,
 )
+# Per-finding T2 prove endpoint. Registered directly from its module
+# rather than re-exported through routes/__init__.py — additions-only
+# for this feature keeps the route index untouched.
+from .routes.prove_endpoint import register_prove_endpoint_routes
 
 
 def create_app(eng_dir: str) -> FastAPI:
@@ -140,6 +147,10 @@ def create_app(eng_dir: str) -> FastAPI:
     register_data_exchange_routes(app, ctx)
     register_sessions_routes(app, ctx)
     register_manage_routes(app, ctx)
+    register_bloodhound_export_routes(app, ctx)
+    register_suggest_digest_routes(app, ctx)
+    register_autocrack_status_routes(app, ctx)
+    register_prove_endpoint_routes(app, ctx)
 
     @app.get("/api/events")
     async def events():

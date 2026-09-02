@@ -7,6 +7,7 @@ import { useEngagement } from "./useEngagement";
 import { Dashboard, Findings, Hosts, Services, Exploitation, Credentials, Playbook, Timeline, Topology, Nav, FindingFilters } from "./views";
 import { KnownAssets } from "./views/KnownAssets";
 import { ExploitSurface, ExploitSurfaceCallout } from "./views/ExploitSurface";
+import { SuggestDigest } from "./views/SuggestDigest";
 import { AttackChain } from "./views/AttackChain";
 import { AttackChainCloud } from "./views/AttackChainCloud";
 import { AttackChainWeb } from "./views/AttackChainWeb";
@@ -40,6 +41,7 @@ import { Sessions } from "./sessions";
 import { ScanTab } from "./ScanTab";
 import { ReportTab } from "./ReportTab";
 import { CollabSidebar } from "./CollabSidebar";
+import { AutocrackStatus } from "./components/AutocrackStatus";
 import { toast, Toast } from "./toast";
 
 // Tester identity (localStorage-persisted)
@@ -95,7 +97,7 @@ function cycleDensity(cur: Density): Density {
 }
 
 // Main App
-const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology", "sessions", "timeline", "report", "plan", "exploit", "ad-chain", "cloud-chain", "web-chain", "credentials", "playbook", "assets"];
+const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology", "sessions", "timeline", "report", "plan", "exploit", "suggest", "ad-chain", "cloud-chain", "web-chain", "credentials", "playbook", "assets"];
 const isTab = (t: string): t is TabId => (VALID_TABS as string[]).includes(t);
 
 // Read the initial UI state from the URL once, so a shared link opens in
@@ -309,6 +311,7 @@ export default function App() {
     report: undefined,
     plan: undefined,
     exploit: undefined,
+    suggest: undefined,
     "ad-chain": undefined,
     "cloud-chain": undefined,
     "web-chain": undefined,
@@ -341,6 +344,7 @@ export default function App() {
             />
             <ActivityButton />
             <ChatButton />
+            <AutocrackStatus />
           </div>
           <div className="header-util">
             <button className="theme-tog" onClick={() => setDensity(cycleDensity(density))}
@@ -421,6 +425,7 @@ export default function App() {
           {tab === "report" && <ReportTab findings={findings} onRefresh={() => refresh().catch(() => {})} />}
           {tab === "plan" && <Exploitation nav={nav} />}
           {tab === "exploit" && <ExploitSurface onOpenHost={(ip) => setDrawerIp(ip)} />}
+          {tab === "suggest" && <SuggestDigest onOpenHost={(ip) => setDrawerIp(ip)} />}
           {tab === "ad-chain" && <AttackChain onOpenHost={(ip) => setDrawerIp(ip)} />}
           {tab === "cloud-chain" && <AttackChainCloud onOpenHost={(ip) => setDrawerIp(ip)} />}
           {tab === "web-chain" && <AttackChainWeb onOpenHost={(ip) => setDrawerIp(ip)} />}

@@ -23,6 +23,9 @@ from .act_spray import register_act_spray_routes
 from .data_exchange import register_data_exchange_routes
 from .sessions import register_sessions_routes
 from .manage import register_manage_routes
+from .bloodhound_export import register_bloodhound_export_routes
+from .suggest_digest import register_suggest_digest_routes
+from .autocrack_status import register_autocrack_status_routes
 
 __all__ = [
     "register_engagement_routes",
@@ -34,4 +37,7 @@ __all__ = [
     "register_data_exchange_routes",
     "register_sessions_routes",
     "register_manage_routes",
+    "register_bloodhound_export_routes",
+    "register_suggest_digest_routes",
+    "register_autocrack_status_routes",
 ]

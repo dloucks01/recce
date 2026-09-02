@@ -732,6 +732,51 @@ export type ExploitSurfaceResponse = {
 export const getExploitSurface = () =>
   getJSON<ExploitSurfaceResponse>("/api/exploit-surface");
 
+// --- Suggest tab — the WebUI twin of the `recce suggest` CLI digest ---------
+// Three sections mirroring _suggest.py: engagement metrics, cross-service
+// rule outputs, and proven-exploitable findings. Read-only; the tester
+// uses this as a "given what recce knows, what should I run next?" digest.
+export type SuggestDigestMetrics = {
+  eng_dir: string;
+  host_count: number;
+  cred_count: number;
+  loot_present: boolean;
+  rules_total: number;
+  exploit_findings_total: number;
+};
+export type SuggestDigestRule = {
+  key: string;
+  command: string;
+  field: string;
+  suggested_value: string;
+  reason: string;
+  confidence: "high" | "medium" | "low" | string;
+  source: string;
+  external_cmd?: string;
+  severity?: string;
+};
+export type SuggestDigestFinding = {
+  ip: string;
+  port: number | null;
+  protocol: string;
+  title: string;
+  severity: string;
+  tier: string;
+  tier_label: string;
+  kev: boolean;
+  epss: number;
+  exploit_note: string;
+  cves: string[];
+};
+export type SuggestDigestResponse = {
+  metrics: SuggestDigestMetrics;
+  rules: SuggestDigestRule[];
+  exploit_findings: SuggestDigestFinding[];
+  top: number;
+};
+export const getSuggestDigest = (top: number = 10) =>
+  getJSON<SuggestDigestResponse>(`/api/suggest/digest?top=${top}`);
+
 // --- Phase D + P1 — attack-chain walkthroughs --------------------------------
 // Three sibling narratives — AD (11 steps), Cloud pivot (6 steps), Web n-day
 // (6 steps) — that share one payload shape. Every step reports current

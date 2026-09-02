@@ -1,6 +1,6 @@
 import { Fragment, useState, useEffect, useRef } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "plan" | "exploit" | "ad-chain" | "cloud-chain" | "web-chain" | "credentials" | "playbook" | "assets";
+export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "plan" | "exploit" | "suggest" | "ad-chain" | "cloud-chain" | "web-chain" | "credentials" | "playbook" | "assets";
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
@@ -21,6 +21,10 @@ const TAB_LABELS: Record<TabId, string> = {
   // "what should I do next given what recce has found". Was called
   // "Surface" during Phase C; renamed to Exploit in P0-4.
   exploit: "Exploit",
+  // Suggest — WebUI twin of the `recce suggest` CLI digest. Same three
+  // sections (metrics / fired rules / proven-exploitable findings) so a
+  // GUI tester sees the same "what should I run next?" answer.
+  suggest: "Suggest",
   // Phase D — end-to-end AD attack-chain walkthrough. Default-visible so
   // a tester on an AD engagement lands one click from the whole story.
   "ad-chain": "AD Chain",
@@ -49,7 +53,7 @@ const TAB_LABELS: Record<TabId, string> = {
 //
 // Testers can still drag-and-drop within the visible set to reorder.
 const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                           "exploit", "ad-chain", "cloud-chain", "web-chain",
+                           "exploit", "suggest", "ad-chain", "cloud-chain", "web-chain",
                            "plan", "sessions", "credentials", "report",
                            "playbook", "timeline", "assets"];
 // The DEFAULT visible set. Everything after "report" is optional.
@@ -60,7 +64,7 @@ const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services",
 // walkthroughs (Phase D + P1-5 + P1-6) — grouped together so a tester lands
 // one click from whichever compromise story matches the engagement.
 const DEFAULT_VISIBLE: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                                   "exploit", "ad-chain", "cloud-chain", "web-chain",
+                                   "exploit", "suggest", "ad-chain", "cloud-chain", "web-chain",
                                    "plan", "sessions", "credentials", "report"];
 
 // Visual group boundaries — a divider is inserted BEFORE these tab ids

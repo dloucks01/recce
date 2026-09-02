@@ -47,6 +47,12 @@ _state: dict[str, Any] = {
     "total_absorbed": 0,       # int — cumulative since start
     "out_dir": None,           # str | None
     "interval": None,          # float | None
+    # P1-8b (status widget): size of the most recent scan BEFORE dedup —
+    # "queue_size" the UI shows so the tester can tell whether hashcat is
+    # producing anything for the loop to chew on; and the last successfully
+    # absorbed crack so a "just cracked X" pill has something to render.
+    "last_scan_size": 0,       # int — len(new_creds) from most recent absorb()
+    "most_recent_crack": None,  # {"username","hash_type","ts"} | None
 }
 _lock = threading.Lock()
 
@@ -64,6 +70,9 @@ def watcher_status() -> dict[str, Any]:
             "total_absorbed": _state["total_absorbed"],
             "out_dir": _state["out_dir"],
             "interval": _state["interval"],
+            "last_scan_size": _state["last_scan_size"],
+            "most_recent_crack": (dict(_state["most_recent_crack"])
+                                  if _state["most_recent_crack"] else None),
         }
 
 
@@ -99,6 +108,8 @@ def start_watcher(store: Any,
             "total_absorbed": 0,
             "out_dir": out_dir,
             "interval": float(interval_seconds),
+            "last_scan_size": 0,
+            "most_recent_crack": None,
         })
     thread.start()
     return thread
@@ -156,10 +167,21 @@ def _tick(store: Any, out_dir: str, log: logging.Logger) -> int:
     creds = store.all_credentials()
     new_creds = hashloot.absorb_default_potfiles(creds, out_dir) or []
     added = 0
+    latest: Optional[dict[str, Any]] = None
     for c in new_creds:
         try:
             if store.add_credential(c):
                 added += 1
+                # Capture the last successful add so the status widget has
+                # a "just cracked X" line to show. `kind` is the recovered-
+                # secret shape (password / nthash / …); the hashcat mode
+                # that produced it isn't preserved on the Credential, so we
+                # use kind as hash_type — good enough for a status pill.
+                latest = {
+                    "username": getattr(c, "label", "") or getattr(c, "username", ""),
+                    "hash_type": getattr(c, "kind", "") or "password",
+                    "ts": time.time(),
+                }
         except Exception:
             log.exception("crack-watcher: add_credential failed for %s",
                           getattr(c, "label", "?"))
@@ -167,6 +189,9 @@ def _tick(store: Any, out_dir: str, log: logging.Logger) -> int:
         _state["last_run_ts"] = time.time()
         _state["last_absorbed"] = added
         _state["total_absorbed"] += added
+        _state["last_scan_size"] = len(new_creds)
+        if latest is not None:
+            _state["most_recent_crack"] = latest
     if added:
         log.info("crack-watcher: %d new crack(s) absorbed", added)
     else:
