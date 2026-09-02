@@ -1,107 +1,127 @@
 import { Fragment, useState, useEffect, useRef } from "react";
 
-export type TabId = "dashboard" | "scan" | "findings" | "hosts" | "services" | "topology" | "sessions" | "timeline" | "report" | "plan" | "exploit" | "suggest" | "ad-chain" | "cloud-chain" | "web-chain" | "credentials" | "playbook" | "assets";
+/**
+ * IA restructure (Sept 2026): the workbench collapsed 18 tabs into 11 by
+ * folding overlapping surfaces into sub-tabs on three parent tabs:
+ *
+ *   * Data      = hosts | services | assets       (the "what's out there" trio)
+ *   * Attack    = surface | suggest | ad | cloud | web
+ *                                                 (all the "what to do next" surfaces)
+ *   * Plan      = actions | phases                (Exploitation card view + Playbook track)
+ *
+ * The old tab ids (hosts, services, assets, exploit, suggest, ad-chain,
+ * cloud-chain, web-chain, playbook) are migrated on read from either
+ * localStorage OR ?tab= URL so a shared link opens on the right sub-tab.
+ */
+export type TabId =
+  | "dashboard" | "scan" | "data" | "findings" | "attack" | "plan"
+  | "topology" | "sessions" | "timeline" | "credentials" | "report";
+
+export type DataSub = "hosts" | "services" | "assets";
+export type AttackSub = "surface" | "suggest" | "ad" | "cloud" | "web";
+export type PlanSub = "actions" | "phases";
+export type AnySub = DataSub | AttackSub | PlanSub;
 
 const TAB_LABELS: Record<TabId, string> = {
   dashboard: "Dashboard",
   scan: "Scan",
+  data: "Data",
   findings: "Findings",
-  hosts: "Hosts",
-  services: "Services",
+  attack: "Attack",
+  plan: "Plan",
   topology: "Topology",
   sessions: "Sessions",
   timeline: "Timeline",
-  report: "Report",
-  // Historical action-plan view (was "exploit" before Phase C). Kept for
-  // testers who use the archetype-driven attack-plan tree; the primary
-  // "what should I run next" surface moved to the Exploit tab below.
-  plan: "Plan",
-  // Phase C — proven-exploitable findings + tester "next move" surface.
-  // Default-visible: this IS the tab a pentester should land on for
-  // "what should I do next given what recce has found". Was called
-  // "Surface" during Phase C; renamed to Exploit in P0-4.
-  exploit: "Exploit",
-  // Suggest — WebUI twin of the `recce suggest` CLI digest. Same three
-  // sections (metrics / fired rules / proven-exploitable findings) so a
-  // GUI tester sees the same "what should I run next?" answer.
-  suggest: "Suggest",
-  // Phase D — end-to-end AD attack-chain walkthrough. Default-visible so
-  // a tester on an AD engagement lands one click from the whole story.
-  "ad-chain": "AD Chain",
-  // P1-5 / P1-6 — sibling chain walkthroughs. Both default-visible next
-  // to AD Chain so a tester lands one click from whichever compromise
-  // story matches the engagement.
-  "cloud-chain": "Cloud Chain",
-  "web-chain": "Web Chain",
   credentials: "Creds",
-  playbook: "Playbook",
-  // Power-user surface (Phase 7b): unions of everything recce learned across
-  // every enum path. Opt-in via the ⋮ menu; not in DEFAULT_VISIBLE.
-  assets: "Assets",
+  report: "Report",
 };
 
-// Default tab order follows the natural pen-test workflow, grouped into
-// three phases separated by visual dividers:
-//   PULSE   → dashboard
-//   RECON   → scan, findings, hosts, services   (surface + drill + pivot)
-//   ATTACK  → exploit, sessions, credentials    (plan + execute + loot)
-//   DELIVER → report                            (final artifact)
-//
-// Playbook + Timeline are secondary — they live in the ⋮ menu by default
-// and can be re-added. Testers who use them daily add them back once and
-// localStorage remembers.
-//
-// Testers can still drag-and-drop within the visible set to reorder.
-const ALL_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                           "exploit", "suggest", "ad-chain", "cloud-chain", "web-chain",
-                           "plan", "sessions", "credentials", "report",
-                           "playbook", "timeline", "assets"];
-// The DEFAULT visible set. Everything after "report" is optional.
-// `exploit` (Phase C — proven-exploitable + next-move surface) sits between
-// findings/hosts and the ATTACK group so a fresh tester lands one click
-// from "what should I do next".
-// `ad-chain` / `cloud-chain` / `web-chain` are the three sibling attack-chain
-// walkthroughs (Phase D + P1-5 + P1-6) — grouped together so a tester lands
-// one click from whichever compromise story matches the engagement.
-const DEFAULT_VISIBLE: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology",
-                                   "exploit", "suggest", "ad-chain", "cloud-chain", "web-chain",
-                                   "plan", "sessions", "credentials", "report"];
+// Sub-tab labels per parent tab. Order matters — this is display order.
+export const DATA_SUBS: { id: DataSub; label: string; blurb: string }[] = [
+  { id: "hosts",    label: "Hosts",    blurb: "one row per host, drilldown to per-service" },
+  { id: "services", label: "Services", blurb: "port × service pivot across the whole scope" },
+  { id: "assets",   label: "Assets",   blurb: "unions of every known thing recce learned" },
+];
+export const ATTACK_SUBS: { id: AttackSub; label: string; blurb: string }[] = [
+  { id: "surface",  label: "Surface",  blurb: "proven-exploitable findings — click to prove or shell" },
+  { id: "suggest",  label: "Suggest",  blurb: "ranked next moves + paste-ready commands" },
+  { id: "ad",       label: "AD",       blurb: "Active Directory attack chain (Kerberos → domain admin)" },
+  { id: "cloud",    label: "Cloud",    blurb: "cloud pivot chain (IMDS → cross-account → data exfil)" },
+  { id: "web",      label: "Web",      blurb: "web-only chain (RCE → foothold → cred replay)" },
+];
+export const PLAN_SUBS: { id: PlanSub; label: string; blurb: string }[] = [
+  { id: "actions",  label: "Actions",  blurb: "ranked action cards for what to run right now" },
+  { id: "phases",   label: "Phases",   blurb: "phase track (recon → enum → vuln → …) + narrative" },
+];
 
-// Visual group boundaries — a divider is inserted BEFORE these tab ids
-// when they appear in the visible set. Purely presentational — no
-// impact on ordering, drag, or state.
-const GROUP_BOUNDARIES: Set<TabId> = new Set(["scan", "exploit", "report"]);
+// Migration map: legacy tab ids -> (new parent tab, sub-tab). Used on
+// localStorage load AND when a shared URL uses an old ?tab= value.
+export const LEGACY_TO_NEW: Record<string, { tab: TabId; sub?: AnySub }> = {
+  // Data trio
+  hosts:    { tab: "data",   sub: "hosts" },
+  services: { tab: "data",   sub: "services" },
+  assets:   { tab: "data",   sub: "assets" },
+  // Attack quintet
+  exploit:      { tab: "attack", sub: "surface" },
+  suggest:      { tab: "attack", sub: "suggest" },
+  "ad-chain":   { tab: "attack", sub: "ad" },
+  "cloud-chain":{ tab: "attack", sub: "cloud" },
+  "web-chain":  { tab: "attack", sub: "web" },
+  // Plan pair
+  playbook: { tab: "plan",   sub: "phases" },
+  // "plan" mapped to the Actions sub-tab (was the old Exploitation view).
+  // The bare "plan" id also collides with the new top-tab id — the
+  // resolver below prefers the new id when input is exactly "plan".
+};
+
+const ALL_TABS: TabId[] = ["dashboard", "scan", "data", "findings", "attack", "plan",
+                           "topology", "sessions", "timeline", "credentials", "report"];
+
+// The DEFAULT visible set (all 11 in workflow order — the trim is
+// dramatic enough on its own that nothing further needs hiding by
+// default). Testers who want a tighter bar hide via the ⋮ menu.
+const DEFAULT_VISIBLE: TabId[] = ALL_TABS;
+
+// Visual group boundaries — a divider is inserted BEFORE these tab ids.
+const GROUP_BOUNDARIES: Set<TabId> = new Set(["scan", "attack", "report"]);
 
 interface TabBarProps {
   active: TabId;
   onSwitch: (tab: TabId) => void;
-  badges?: Record<TabId, number | undefined>;
+  badges?: Partial<Record<TabId, number | undefined>>;
 }
 
 export function TabBar({ active, onSwitch, badges }: TabBarProps) {
   const [tabs, setTabs] = useState<TabId[]>(() => {
     const saved = localStorage.getItem("recce.tabs");
     if (saved) {
-      // Migrate stored tab ids to current names. Two historical renames:
-      //   * "exploitation" (very old) -> "exploit"
-      //   * P0-4 swap: old "exploit" (attack-plan panel) -> "plan"
-      //                new "surface" (Exploit Surface) -> "exploit"
-      // The order matters — the swap must happen atomically so we don't
-      // land two "exploit" ids on the tab bar.
-      let parsed: TabId[] = JSON.parse(saved).map((t: string): TabId => {
-        if (t === "exploitation") return "plan";
-        if (t === "exploit") return "plan";      // old attack-plan panel
-        if (t === "surface")  return "exploit";  // new Exploit Surface
-        return t as TabId;
-      });
-      // Dedup after migration (in case both ids were present).
-      parsed = Array.from(new Set(parsed)) as TabId[];
-      // Filter out any obsolete ids we no longer support.
-      parsed = parsed.filter(t => ALL_TABS.includes(t));
-      return parsed.length > 0 ? parsed : DEFAULT_VISIBLE;
+      try {
+        // Migrate stored tab ids. Two eras of renames:
+        //   * old "exploitation" -> "plan" -> collapsed to "plan" tab
+        //   * P0-4 swap: old "exploit" (attack-plan) -> "plan"; new "surface" -> "exploit"
+        //   * 2026-09 IA restructure: hosts/services/assets -> data; exploit/
+        //     suggest/ad-chain/cloud-chain/web-chain -> attack; playbook -> plan
+        let parsed: string[] = JSON.parse(saved);
+        // Map every legacy id to its new parent tab.
+        const mapped = parsed.map((t): TabId => {
+          if ((ALL_TABS as string[]).includes(t)) return t as TabId;
+          const migration = LEGACY_TO_NEW[t];
+          if (migration) return migration.tab;
+          if (t === "exploitation" || t === "surface") return "attack";
+          return "dashboard";                       // fall back rather than drop
+        });
+        // Dedup after migration (multiple legacy ids may now map to the
+        // same parent — the tabbar can only show one instance).
+        const seen = new Set<TabId>();
+        const unique: TabId[] = [];
+        for (const t of mapped) {
+          if (!seen.has(t)) { seen.add(t); unique.push(t); }
+        }
+        return unique.length > 0 ? unique : DEFAULT_VISIBLE;
+      } catch {
+        return DEFAULT_VISIBLE;
+      }
     }
-    // First visit: show the workflow-natural default set. Playbook +
-    // Timeline live under ⋮ ("more") — testers can add them back.
     return DEFAULT_VISIBLE;
   });
   const [dragging, setDragging] = useState<TabId | null>(null);
@@ -121,14 +141,8 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
     return () => document.removeEventListener("mousedown", close);
   }, [menuOpen]);
 
-  function handleDragStart(tab: TabId) {
-    setDragging(tab);
-  }
-
-  function handleDragOver(e: React.DragEvent) {
-    e.preventDefault();
-  }
-
+  function handleDragStart(tab: TabId) { setDragging(tab); }
+  function handleDragOver(e: React.DragEvent) { e.preventDefault(); }
   function handleDrop(target: TabId) {
     if (dragging === null || dragging === target) return;
     const dragIdx = tabs.indexOf(dragging);
@@ -212,6 +226,38 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+
+// -----------------------------------------------------------------------
+// SubTabBar — a small pill row rendered inside a parent tab (Data / Attack /
+// Plan) when that tab has sub-tabs. Kept in-file so the tab-mechanics stay
+// together; styles reuse the existing .tabbar + .tab classes with a "sub"
+// modifier for the smaller visual weight.
+// -----------------------------------------------------------------------
+interface SubTabBarProps<T extends string> {
+  subs: { id: T; label: string; blurb?: string }[];
+  active: T;
+  onSwitch: (id: T) => void;
+}
+
+export function SubTabBar<T extends string>({ subs, active, onSwitch }: SubTabBarProps<T>) {
+  return (
+    <div className="subtabbar" role="tablist">
+      {subs.map((s) => (
+        <button
+          key={s.id}
+          role="tab"
+          aria-selected={s.id === active}
+          className={`subtab ${s.id === active ? "active" : ""}`}
+          onClick={() => onSwitch(s.id)}
+          title={s.blurb || s.label}
+        >
+          {s.label}
+        </button>
+      ))}
     </div>
   );
 }

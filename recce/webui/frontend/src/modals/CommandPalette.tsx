@@ -66,21 +66,30 @@ export function CommandPalette(p: CommandPaletteProps) {
     const out: Item[] = [];
     // Static actions first so they anchor the top of the list.
     const actions: [string, string, () => void][] = [
+      // Palette entries mirror the current 11-tab IA plus muscle-memory
+      // shortcuts for the legacy sub-tab names (Hosts / Services / Assets /
+      // Exploit / Suggest / AD Chain / Cloud Chain / Web Chain / Playbook)
+      // — App.tsx onGoto routes each legacy id to the right parent + sub.
       ["Go to Dashboard", "dashboard home overview", () => p.onGoto("dashboard")],
       ["Go to Scan", "scan run enum vulns", () => p.onGoto("scan")],
-      ["Go to Findings", "findings vulns cves", () => p.onGoto("findings")],
+      ["Go to Data", "data hosts services assets", () => p.onGoto("data")],
       ["Go to Hosts", "hosts targets", () => p.onGoto("hosts")],
       ["Go to Services", "services ports open protocols", () => p.onGoto("services")],
+      ["Go to Assets", "assets known-devices known-users domains", () => p.onGoto("assets")],
+      ["Go to Findings", "findings vulns cves", () => p.onGoto("findings")],
+      ["Go to Attack", "attack surface suggest chain ad cloud web", () => p.onGoto("attack")],
+      ["Go to Attack › Surface", "exploit surface findings next move", () => p.onGoto("exploit")],
+      ["Go to Attack › Suggest", "suggest digest ranked next-moves paste-ready", () => p.onGoto("suggest")],
+      ["Go to Attack › AD", "ad chain attack walkthrough kerberos dc", () => p.onGoto("ad-chain")],
+      ["Go to Attack › Cloud", "cloud chain imds iam sts s3 secrets pivot", () => p.onGoto("cloud-chain")],
+      ["Go to Attack › Web", "web chain n-day kev poc oob callback session", () => p.onGoto("web-chain")],
+      ["Go to Plan", "plan act attack archetype loot spray escalate", () => p.onGoto("plan")],
+      ["Go to Plan › Phases", "playbook phases where we are", () => p.onGoto("playbook")],
+      ["Go to Topology", "topology network map svg", () => p.onGoto("topology")],
       ["Go to Sessions", "sessions shells", () => p.onGoto("sessions")],
       ["Go to Timeline", "timeline events history", () => p.onGoto("timeline")],
-      ["Go to Report", "report studio export", () => p.onGoto("report")],
-      ["Go to Exploit", "exploit surface findings next move", () => p.onGoto("exploit")],
-      ["Go to AD Chain", "ad chain attack walkthrough kerberos dc", () => p.onGoto("ad-chain")],
-      ["Go to Cloud Chain", "cloud chain imds iam sts s3 secrets pivot", () => p.onGoto("cloud-chain")],
-      ["Go to Web Chain", "web chain n-day kev poc oob callback session", () => p.onGoto("web-chain")],
-      ["Go to Plan", "plan act attack archetype loot spray escalate", () => p.onGoto("plan")],
       ["Go to Creds", "credentials creds passwords", () => p.onGoto("credentials")],
-      ["Go to Playbook", "playbook phases", () => p.onGoto("playbook")],
+      ["Go to Report", "report studio export", () => p.onGoto("report")],
       ["Toggle theme", "dark light theme mode", p.onToggleTheme],
       ["Import tool output", "import nmap nessus", p.onToggleImport],
     ];

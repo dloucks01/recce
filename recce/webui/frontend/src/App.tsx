@@ -13,7 +13,8 @@ import { AttackChainCloud } from "./views/AttackChainCloud";
 import { AttackChainWeb } from "./views/AttackChainWeb";
 import { HostDrawer } from "./HostDrawer";
 import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
-import { TabBar, TabId } from "./TabBar";
+import { TabBar, TabId, SubTabBar, DataSub, AttackSub, PlanSub, AnySub,
+         DATA_SUBS, ATTACK_SUBS, PLAN_SUBS, LEGACY_TO_NEW } from "./TabBar";
 import { Skeleton } from "./ui";
 
 /** Placeholder shown while the initial engagement Overview is loading. Mirrors
@@ -97,16 +98,33 @@ function cycleDensity(cur: Density): Density {
 }
 
 // Main App
-const VALID_TABS: TabId[] = ["dashboard", "scan", "findings", "hosts", "services", "topology", "sessions", "timeline", "report", "plan", "exploit", "suggest", "ad-chain", "cloud-chain", "web-chain", "credentials", "playbook", "assets"];
+const VALID_TABS: TabId[] = ["dashboard", "scan", "data", "findings", "attack", "plan",
+                             "topology", "sessions", "timeline", "credentials", "report"];
 const isTab = (t: string): t is TabId => (VALID_TABS as string[]).includes(t);
 
 // Read the initial UI state from the URL once, so a shared link opens in
-// the state the sender left off — tab / drawer host / focused session / finding filters.
+// the state the sender left off — tab / drawer host / focused session /
+// finding filters. Legacy tab ids (hosts, services, assets, exploit,
+// suggest, ad-chain, cloud-chain, web-chain, playbook) resolve to their
+// new parent tab + sub-tab so old shared links keep working.
 function readUrlState() {
   const p = new URLSearchParams(window.location.search);
-  const tabParam = p.get("tab") || "";
+  const raw = p.get("tab") || "";
+  let tab: TabId = isTab(raw) ? raw : "dashboard";
+  let subOverride: { tab: TabId; sub: AnySub } | null = null;
+  if (!isTab(raw) && raw) {
+    const mig = LEGACY_TO_NEW[raw];
+    if (mig) {
+      tab = mig.tab;
+      if (mig.sub) subOverride = { tab: mig.tab, sub: mig.sub };
+    }
+  }
+  // Explicit ?sub= overrides legacy mapping (new shared URLs).
+  const subRaw = p.get("sub") || "";
+  if (subRaw && isTab(tab)) subOverride = { tab, sub: subRaw as AnySub };
   return {
-    tab: isTab(tabParam) ? tabParam : "dashboard" as TabId,
+    tab,
+    subOverride,
     host: p.get("host") || null,
     session: p.get("session") || null,
     sev: p.get("sev") || "all",
@@ -118,6 +136,27 @@ function readUrlState() {
 export default function App() {
   const initialUrl = useRef(readUrlState()).current;
   const [tab, setTab] = useState<TabId>(initialUrl.tab);
+
+  // Sub-tabs per parent tab. Only Data / Attack / Plan have them.
+  // Legacy URLs like ?tab=ad-chain arrive as tab=attack + a subOverride
+  // seed from readUrlState (see LEGACY_TO_NEW for the migration map).
+  const [dataSub, setDataSub] = useState<DataSub>(
+    (initialUrl.subOverride?.tab === "data" ? initialUrl.subOverride.sub as DataSub : null)
+    ?? "hosts");
+  const [attackSub, setAttackSub] = useState<AttackSub>(
+    (initialUrl.subOverride?.tab === "attack" ? initialUrl.subOverride.sub as AttackSub : null)
+    ?? "surface");
+  const [planSub, setPlanSub] = useState<PlanSub>(
+    (initialUrl.subOverride?.tab === "plan" ? initialUrl.subOverride.sub as PlanSub : null)
+    ?? "actions");
+
+  // Helper: current sub-tab id for the active parent (or null when the
+  // parent has no sub-tabs). Used only for URL sync.
+  const currentSub: AnySub | null =
+    tab === "data"   ? dataSub :
+    tab === "attack" ? attackSub :
+    tab === "plan"   ? planSub :
+    null;
 
   // cross-tab filter state
   const [ff, setFf] = useState<FindingFilters>({
@@ -150,6 +189,15 @@ export default function App() {
   useEffect(() => {
     const p = new URLSearchParams();
     if (tab !== "dashboard") p.set("tab", tab);
+    // Persist the current sub-tab only when it's not the parent's default
+    // (avoids ?sub=hosts / ?sub=surface / ?sub=actions cluttering every URL).
+    if (currentSub) {
+      const isDefault =
+        (tab === "data" && currentSub === "hosts") ||
+        (tab === "attack" && currentSub === "surface") ||
+        (tab === "plan" && currentSub === "actions");
+      if (!isDefault) p.set("sub", currentSub);
+    }
     if (drawerIp) p.set("host", drawerIp);
     if (sessionFocus) p.set("session", sessionFocus);
     if (tab === "findings") {
@@ -160,7 +208,7 @@ export default function App() {
     const q = p.toString();
     const url = q ? `?${q}` : window.location.pathname;
     window.history.replaceState(null, "", url);
-  }, [tab, drawerIp, sessionFocus, ff.sev, ff.host, ff.q]);
+  }, [tab, currentSub, drawerIp, sessionFocus, ff.sev, ff.host, ff.q]);
 
   // Preferences & identity
   const { theme, setTheme, density, setDensity } = usePreferences();
@@ -275,9 +323,11 @@ export default function App() {
       setHostQ(o?.q ?? "");
       setHostWho(o?.owner ?? "all");
       setHostCov("all");
-      setTab("hosts");
+      setDataSub("hosts");
+      setTab("data");
     },
-    toAct: () => setTab("plan"),
+    // Actions view = Exploitation cards, now the default sub of the Plan tab.
+    toAct: () => { setPlanSub("actions"); setTab("plan"); },
     openHost: (ip) => setDrawerIp(ip),
     toSessions: () => setTab("sessions"),
     toScan: (target) => { if (target) setScanPrefill(target); setTab("scan"); },
@@ -298,26 +348,12 @@ export default function App() {
     },
   };
 
-  // Badge counts
-  const badges: Record<TabId, number | undefined> = {
-    dashboard: undefined,
+  // Badge counts — 11 top tabs. The Data tab shows the sub-tab that has
+  // the most rows so the operator sees at-a-glance which pane will land.
+  const badges: Partial<Record<TabId, number | undefined>> = {
     scan: scanRunning ? 1 : undefined,
+    data: hosts.length || undefined,
     findings: findings.filter((f) => f.tier !== "lead").length || undefined,
-    hosts: hosts.length || undefined,
-    services: ov?.services || undefined,
-    topology: undefined,
-    sessions: undefined,
-    timeline: undefined,
-    report: undefined,
-    plan: undefined,
-    exploit: undefined,
-    suggest: undefined,
-    "ad-chain": undefined,
-    "cloud-chain": undefined,
-    "web-chain": undefined,
-    credentials: undefined,
-    playbook: undefined,
-    assets: undefined,
   };
 
   return (
@@ -381,7 +417,7 @@ export default function App() {
                   Renders nothing when no findings carry an exploit_note. */}
               <ExploitSurfaceCallout
                 onOpenHost={(ip) => setDrawerIp(ip)}
-                onJumpToSurface={() => setTab("exploit")}
+                onJumpToSurface={() => { setAttackSub("surface"); setTab("attack"); }}
               />
               {ov ? <Dashboard nav={nav} hosts={hosts} ov={ov} /> : <DashboardSkeleton />}
             </>
@@ -400,22 +436,22 @@ export default function App() {
               nav={nav}
             />
           )}
-          {tab === "hosts" && (ov ? (
-            <Hosts
-              hosts={hosts}
-              ov={ov}
-              q={hostQ}
-              setQ={setHostQ}
-              cov={hostCov}
-              setCov={setHostCov}
-              who={hostWho}
-              setWho={setHostWho}
-              onTick={onTick}
-              onNote={onNote}
-              nav={nav}
-            />
-          ) : <DashboardSkeleton />)}
-          {tab === "services" && <Services hosts={hosts} findings={findings} nav={nav} />}
+          {/* Data tab — hosts / services / assets grouped so the "what's out
+              there" trio shares one screen with a lightweight sub-tab row.  */}
+          {tab === "data" && (
+            <>
+              <SubTabBar subs={DATA_SUBS} active={dataSub} onSwitch={setDataSub} />
+              {dataSub === "hosts" && (ov ? (
+                <Hosts hosts={hosts} ov={ov}
+                  q={hostQ} setQ={setHostQ}
+                  cov={hostCov} setCov={setHostCov}
+                  who={hostWho} setWho={setHostWho}
+                  onTick={onTick} onNote={onNote} nav={nav} />
+              ) : <DashboardSkeleton />)}
+              {dataSub === "services" && <Services hosts={hosts} findings={findings} nav={nav} />}
+              {dataSub === "assets" && <KnownAssets />}
+            </>
+          )}
           {tab === "topology" && <Topology />}
           {tab === "timeline" && <Timeline nav={nav} />}
           {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus}
@@ -423,15 +459,28 @@ export default function App() {
             onScanHost={(ip) => { setScanPrefill(ip); setTab("scan"); }}
             onViewHost={(ip) => setDrawerIp(ip)} />}
           {tab === "report" && <ReportTab findings={findings} onRefresh={() => refresh().catch(() => {})} />}
-          {tab === "plan" && <Exploitation nav={nav} />}
-          {tab === "exploit" && <ExploitSurface onOpenHost={(ip) => setDrawerIp(ip)} />}
-          {tab === "suggest" && <SuggestDigest onOpenHost={(ip) => setDrawerIp(ip)} />}
-          {tab === "ad-chain" && <AttackChain onOpenHost={(ip) => setDrawerIp(ip)} />}
-          {tab === "cloud-chain" && <AttackChainCloud onOpenHost={(ip) => setDrawerIp(ip)} />}
-          {tab === "web-chain" && <AttackChainWeb onOpenHost={(ip) => setDrawerIp(ip)} />}
+          {/* Attack tab — Surface / Suggest / AD / Cloud / Web all live here as
+              sub-tabs. Surface is the default landing per Phase C. */}
+          {tab === "attack" && (
+            <>
+              <SubTabBar subs={ATTACK_SUBS} active={attackSub} onSwitch={setAttackSub} />
+              {attackSub === "surface" && <ExploitSurface onOpenHost={(ip) => setDrawerIp(ip)} />}
+              {attackSub === "suggest" && <SuggestDigest onOpenHost={(ip) => setDrawerIp(ip)} />}
+              {attackSub === "ad"      && <AttackChain onOpenHost={(ip) => setDrawerIp(ip)} />}
+              {attackSub === "cloud"   && <AttackChainCloud onOpenHost={(ip) => setDrawerIp(ip)} />}
+              {attackSub === "web"     && <AttackChainWeb onOpenHost={(ip) => setDrawerIp(ip)} />}
+            </>
+          )}
           {tab === "credentials" && <Credentials nav={nav} />}
-          {tab === "playbook" && <Playbook pb={pb} nav={nav} />}
-          {tab === "assets" && <KnownAssets />}
+          {/* Plan tab — Actions (ranked action cards from Exploitation) +
+              Phases (the phase-track Playbook narrative). */}
+          {tab === "plan" && (
+            <>
+              <SubTabBar subs={PLAN_SUBS} active={planSub} onSwitch={setPlanSub} />
+              {planSub === "actions" && <Exploitation nav={nav} />}
+              {planSub === "phases"  && <Playbook pb={pb} nav={nav} />}
+            </>
+          )}
         </div>
 
         {/* Right sidebar: collab */}
@@ -478,7 +527,21 @@ export default function App() {
           onOpenHost={(ip) => { setDrawerIp(ip); }}
           onOpenFinding={(ip, _key) => { nav.toFindings({ host: ip }); }}
           onOpenSession={(id) => { setSessionFocus(id); setTab("sessions"); }}
-          onGoto={(t) => setTab(t as TabId)}
+          onGoto={(t) => {
+            // Route legacy tab ids ("hosts", "ad-chain", "playbook", …) into
+            // their new parent tab + sub-tab so old palette entries still
+            // work by muscle memory.
+            if ((VALID_TABS as string[]).includes(t)) {
+              setTab(t as TabId);
+              return;
+            }
+            const mig = LEGACY_TO_NEW[t];
+            if (!mig) return;
+            setTab(mig.tab);
+            if (mig.tab === "data" && mig.sub)   setDataSub(mig.sub as DataSub);
+            if (mig.tab === "attack" && mig.sub) setAttackSub(mig.sub as AttackSub);
+            if (mig.tab === "plan" && mig.sub)   setPlanSub(mig.sub as PlanSub);
+          }}
           onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
           onToggleImport={() => setShowImport((v) => !v)}
         />
