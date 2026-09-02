@@ -3157,3 +3157,209 @@ def dac_exposed_finding(target: dict, probe: dict) -> dict | None:
             "event. Detection is: printf '\\x0f\\x01\\x00' | nc -u -w2 <ip> "
             "1434 — response begins 0x05 03 00 01 <port_lo> <port_hi>."),
         depth_tier="t1")
+
+
+# --- replication / Agent stored-secret disclosure (SAFE metadata-only) ----------
+#
+# SQL Server stores credentials for outbound integrations in three places a
+# sysadmin can enumerate as metadata: sys.credentials (server-scoped CREDENTIAL
+# objects — Windows/domain identities that jobs, linked servers, external
+# access and change-data-capture use to reach the outside), msdb.dbo.sysproxies
+# (SQL Agent proxy accounts, each one built on a CREDENTIAL, letting Agent job
+# steps run as a non-service-account identity), and msdb.dbo.syscachedcredentials
+# (the Agent's cached-credential table for replication distributor / merge
+# subscribers). The encrypted secret bytes live in the same tables — we
+# NEVER touch those columns (no CONVERT of credential_identity_secret, no
+# DecryptByKey, no LSA hop). Reading just the NAMES is a T1 disclosure: the
+# operator learns which privileged identities the instance holds, which drives
+# the T2/T3 recovery step (PowerUpSQL Get-SQLServerCredential /
+# Get-SQLAgentJob) explicitly.
+#
+# Requires sysadmin (sys.credentials returns empty to non-sysadmins by design),
+# so the batch carries an IS_SRVROLEMEMBER('sysadmin') marker and the finding
+# builder gates on it — same shape as the sp_execute_external_script probe
+# from commit 15b97fb.
+
+_REPL_SECRETS_KIND = "mssql_replication_secrets"
+
+_NARRATIVE[_REPL_SECRETS_KIND] = (
+    "SQL Server keeps privileged Windows / domain credentials on the instance "
+    "for outbound integrations in three places: server-scoped CREDENTIAL "
+    "objects (sys.credentials — used by linked servers, external access, CDC "
+    "and jobs), SQL Agent proxy accounts (msdb.dbo.sysproxies — each built on "
+    "a CREDENTIAL so job steps can run as a non-service identity), and the "
+    "Agent's cached replication credentials (msdb.dbo.syscachedcredentials — "
+    "distributor / merge subscriber logins). The identity columns disclose "
+    "which accounts are on file (backup / SSIS / replication / domain "
+    "service accounts, frequently high-privilege in AD); the paired secret "
+    "columns are encrypted with the Service Master Key and are recoverable "
+    "to cleartext by any sysadmin with PowerUpSQL's Get-SQLServerCredential "
+    "/ Get-SQLAgentJob (which invoke DecryptByKey against the SMK). recce "
+    "reads only the NAMES — never the encrypted bytes and never DecryptByKey "
+    "— so this finding disclosures the target set without moving the "
+    "instance's state. Every name here is a candidate for reusable domain "
+    "credentials that typically work well beyond SQL Server itself.")
+
+_REPL_SECRETS_QUERY = (
+    "SELECT '@@B:replsec_admin'\n"
+    "SELECT CAST(IS_SRVROLEMEMBER('sysadmin') AS varchar(4))\n"
+    "SELECT '@@E:replsec_admin'\n"
+    "SELECT '@@B:replsec_creds'\n"
+    "SELECT name FROM sys.credentials\n"
+    "SELECT '@@E:replsec_creds'\n"
+    "SELECT '@@B:replsec_proxies'\n"
+    "SELECT CAST(proxy_id AS varchar(8))+'|'+name FROM msdb.dbo.sysproxies\n"
+    "SELECT '@@E:replsec_proxies'\n"
+    "SELECT '@@B:replsec_cached'\n"
+    "SELECT CAST(COUNT(*) AS varchar(8)) FROM msdb.dbo.syscachedcredentials\n"
+    "SELECT '@@E:replsec_cached'\n"
+    "exit\n"
+)
+
+
+def _replsec_section(output: str, name: str) -> list[str]:
+    """Pull the sentinel-wrapped section body's data lines, stripped of the
+    impacket tabular chrome (column header, '----' separator, echoed SQL>
+    prompt, and the sentinel echoes themselves). Also drops any residue of
+    the outer SELECT statement's literal quote — impacket echoes
+    `SQL> SELECT '@@B:name'` verbatim, so the closing `'` can spill into
+    the section on the following line."""
+    import re
+    m = re.search(rf"@@B:{name}\b(.*?)@@E:{name}\b", output, re.S)
+    if not m:
+        return []
+    rows: list[str] = []
+    for line in m.group(1).splitlines():
+        line = line.strip()
+        if not line \
+                or "----" in line \
+                or line.startswith("@@") \
+                or line.startswith("SQL>") \
+                or line == "'":
+            continue
+        rows.append(line)
+    return rows
+
+
+def parse_replication_secrets(output: str) -> dict:
+    """Parse the sentinel-wrapped replication/Agent secret listing.
+    Returns {ok, is_sysadmin, credentials:[name,...], proxies:[{proxy_id,name}],
+    cached_count:int}. ok=False when the admin sentinel is missing (login
+    failed / wrong tool)."""
+    admin = _replsec_section(output, "replsec_admin")
+    if not admin:
+        return {"ok": False}
+    # The section carries a column header (arbitrary alias) plus the single
+    # data row '0' or '1'. Sysadmin membership is 'is any row exactly "1"';
+    # a non-sysadmin returns '0', an anonymised column can be filtered out.
+    is_sa = "1" in admin
+    creds: list[str] = []
+    seen_creds_header = False
+    for row in _replsec_section(output, "replsec_creds"):
+        # sys.credentials.name is a sysname (nvarchar(128)); NEVER read
+        # credential_identity_secret. Skip the tabular column header (the
+        # first non-empty line, echoing the column's alias 'name').
+        if not seen_creds_header:
+            seen_creds_header = True
+            if row.lower() == "name":
+                continue
+        creds.append(row)
+    proxies: list[dict] = []
+    for row in _replsec_section(output, "replsec_proxies"):
+        if "|" not in row:
+            continue
+        pid, _, pname = row.partition("|")
+        pid, pname = pid.strip(), pname.strip()
+        if not (pid.isdigit() and pname):
+            continue
+        proxies.append({"proxy_id": int(pid), "name": pname})
+    cached = 0
+    for row in _replsec_section(output, "replsec_cached"):
+        if row.isdigit():
+            cached = int(row)
+            break
+    return {"ok": True, "is_sysadmin": is_sa, "credentials": creds,
+            "proxies": proxies, "cached_count": cached}
+
+
+def probe_replication_secrets(ip: str, creds: dict, port: int = _DEFAULT_PORT,
+                              windows_auth: bool = True) -> dict:
+    """SAFE metadata-only enumeration of stored replication / Agent secrets.
+    Reads NAMES from sys.credentials, msdb.dbo.sysproxies, and a COUNT(*) from
+    msdb.dbo.syscachedcredentials via the existing impacket-mssqlclient
+    runner. Never reads the encrypted secret bytes; never calls DecryptByKey.
+    Requires sysadmin (sys.credentials returns empty to non-sysadmins).
+    Returns {ok, is_sysadmin, credentials, proxies, cached_count, error}."""
+    from ...core import proxy
+    cmd = _mssqlclient_cmd(ip, creds, port, windows_auth)
+    if cmd is None:
+        return {"ok": False, "error": "impacket-mssqlclient not installed"}
+    timeout = max(2, int(proxy.scaled(6)))
+    out, err = _run_stdin(cmd, _REPL_SECRETS_QUERY, timeout=timeout,
+                          password=creds.get("secret", ""))
+    if err:
+        return {"ok": False, "error": err}
+    parsed = parse_replication_secrets(out)
+    if not parsed.get("ok"):
+        return {"ok": False, "error": "no result / login failed"}
+    return parsed
+
+
+def replication_secrets_finding(target: dict, probe: dict,
+                                creds: dict | None) -> dict | None:
+    """Emit `mssql_replication_secrets` (high, t1, CWE-522 + CWE-257) when
+    the current login is sysadmin AND at least one server CREDENTIAL, Agent
+    proxy, or cached replication credential exists on the instance. Returns
+    None when the login is not sysadmin (no visibility) or nothing is on
+    file. Lists NAMES only — never the encrypted secret bytes."""
+    if not (probe and probe.get("ok") and probe.get("is_sysadmin")):
+        return None
+    creds_list = list(probe.get("credentials") or [])
+    proxies = list(probe.get("proxies") or [])
+    cached = int(probe.get("cached_count") or 0)
+    if not creds_list and not proxies and not cached:
+        return None
+    tgt = f"{target['ip']}:{target.get('port', _DEFAULT_PORT)}"
+    ctx = _ctx(target, creds)
+    bits: list[str] = []
+    if creds_list:
+        preview = ", ".join(creds_list[:5])
+        more = f" (+{len(creds_list) - 5} more)" if len(creds_list) > 5 else ""
+        bits.append(f"{len(creds_list)} server CREDENTIAL object(s): {preview}{more}")
+    if proxies:
+        preview = ", ".join(f"{p['name']}(id={p['proxy_id']})" for p in proxies[:5])
+        more = f" (+{len(proxies) - 5} more)" if len(proxies) > 5 else ""
+        bits.append(f"{len(proxies)} SQL Agent proxy account(s): {preview}{more}")
+    if cached:
+        bits.append(f"{cached} cached replication credential(s) in "
+                    "msdb.dbo.syscachedcredentials")
+    detail = ("Stored Windows/domain credentials on the instance (names only; "
+              "encrypted secret bytes NOT read): " + "; ".join(bits) + ". A "
+              "sysadmin can decrypt each with the Service Master Key "
+              "(PowerUpSQL Get-SQLServerCredential / Get-SQLAgentJob) to "
+              "recover the cleartext passwords — recce does not.")
+    return _finding(
+        "high",
+        "MSSQL stored replication / Agent credential disclosure (names)",
+        tgt,
+        detail,
+        "impacket-mssqlclient",
+        _fill("impacket-mssqlclient <user>@<ip> -p <port>   # then "
+              "SELECT name FROM sys.credentials; "
+              "SELECT proxy_id, name FROM msdb.dbo.sysproxies; "
+              "SELECT COUNT(*) FROM msdb.dbo.syscachedcredentials;", ctx),
+        "Rotate every disclosed credential and review its scope (least "
+        "privilege — a replication or SSIS account rarely needs Domain "
+        "Admin); drop unused CREDENTIAL objects and Agent proxies; audit "
+        "who holds sysadmin, since sysadmin is functionally 'read every "
+        "stored secret'.",
+        ["CWE-522", "CWE-257"], kind=_REPL_SECRETS_KIND,
+        exploit_note=(
+            "Names only were read here. To recover cleartext (sysadmin "
+            "required, uses DecryptByKey against the Service Master Key): "
+            "PowerUpSQL Get-SQLServerCredential -Instance <ip>,<port>  and "
+            "Get-SQLAgentJob -Instance <ip>,<port>. Each recovered "
+            "credential is a candidate for reuse across the estate — try "
+            "it against Windows, other SQL Servers, and any service the "
+            "identity is named for (backup, SSIS, replication)."),
+        depth_tier="t1")

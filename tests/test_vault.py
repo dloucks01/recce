@@ -807,6 +807,231 @@ class PickHostTest(unittest.TestCase):
         self.assertEqual(vault._pick_host(""), "")
 
 
+# ------------------------------------------------------------------
+# T1 SAFE PROOF: /v1/sys/mounts readable without a token.
+#
+# Vault's default ACL requires an X-Vault-Token to list mounts. A 200 to
+# an unauthenticated GET is a policy misconfiguration (root/default
+# granted `read` on sys/mounts) or a debug listener exposed on the
+# network - either way the full secret-engine layout is leaked.
+#
+# Fixture body is the exact shape /v1/sys/mounts returns (Vault OpenAPI
+# `sys-mounts-list` schema): a top-level `data` map keyed by mount path
+# with `type` / `description` per entry.
+# ------------------------------------------------------------------
+
+_UNAUTH_MOUNTS_BODY = {
+    "data": {
+        "secret/":   {"type": "kv",       "description": "generic KV",
+                      "options": {"version": "2"}},
+        "pki/":      {"type": "pki",      "description": "internal CA"},
+        "aws/":      {"type": "aws",      "description": "prod AWS creds"},
+        "transit/":  {"type": "transit",  "description": ""},
+        "database/": {"type": "database", "description": ""},
+    }
+}
+
+
+class UnauthMountListLeakTest(unittest.TestCase):
+    """vault_mount_list_open: SAFE detection of sys/mounts read-without-token."""
+
+    def _serve(self, mounts_status, mounts_body=None,
+               require_no_token=True):
+        """Return a fake vault where /v1/sys/mounts unauth response is
+        controlled. When require_no_token=True the handler ONLY returns
+        200 if the request carried no X-Vault-Token header, ensuring the
+        probe's unauth check is what triggered the leak (not any authed
+        walk added later)."""
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/sys/seal-status":
+                    self._json(200, _SEAL_STATUS_DEV)
+                elif self.path.startswith("/v1/sys/health"):
+                    self._json(200, _HEALTH_ACTIVE)
+                elif self.path == "/v1/sys/init":
+                    self._json(200, {"initialized": True})
+                elif self.path == "/v1/sys/leader":
+                    self._json(200, _LEADER)
+                elif self.path == "/v1/sys/mounts":
+                    tok = self.headers.get("X-Vault-Token") or ""
+                    if require_no_token and tok:
+                        self._empty(403)
+                        return
+                    if mounts_status == 200 and mounts_body is not None:
+                        self._json(200, mounts_body)
+                    else:
+                        self._empty(mounts_status)
+                elif self.path.startswith("/v1/sys/pprof"):
+                    self._empty(403)
+                elif self.path.startswith("/v1/sys/metrics"):
+                    self._empty(403)
+                else:
+                    self._empty(404)
+
+            def do_HEAD(self):
+                self._empty(404)
+
+        srv, _t = _serve(H)
+        return srv
+
+    def test_vulnerable_unauth_mounts_open_probe_and_finding(self):
+        """The misconfig case: /v1/sys/mounts answers 200 to a no-token
+        GET. Probe captures mount names + types; findings() emits one
+        high-severity vault_mount_list_open at depth_tier t1 with the
+        expected CWE and kind."""
+        srv = self._serve(200, _UNAUTH_MOUNTS_BODY)
+        try:
+            p = vault.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+
+        self.assertTrue(p["reachable"])
+        um = p["unauth_mounts"]
+        self.assertEqual(len(um), 5,
+                         "every fixture mount should be captured metadata")
+        by_path = {m["path"]: m["type"] for m in um}
+        self.assertEqual(by_path["secret"], "kv")
+        self.assertEqual(by_path["pki"], "pki")
+        self.assertEqual(by_path["aws"], "aws")
+        self.assertEqual(by_path["transit"], "transit")
+        self.assertEqual(by_path["database"], "database")
+        # Metadata only - the module must NEVER pull mount contents.
+        for m in um:
+            self.assertNotIn("data", m)
+            self.assertNotIn("secret", m)
+
+        fs = vault.findings(
+            [_mkhost("127.0.0.1", srv.server_address[1])],
+            probes={("127.0.0.1", srv.server_address[1]): p})
+        leak = [f for f in fs if f["kind"] == "vault_mount_list_open"]
+        self.assertEqual(len(leak), 1)
+        f = leak[0]
+        self.assertEqual(f["severity"], "high")
+        self.assertEqual(f["depth_tier"], "t1")
+        self.assertIn("CWE-306", f["cwes"])
+        self.assertIn("secret(kv)", f["detail"])
+        self.assertIn("pki(pki)", f["detail"])
+        self.assertTrue(f["exploit_note"])
+
+    def test_patched_mounts_requires_token_no_leak(self):
+        """The patched case: /v1/sys/mounts answers 403 unauth (default
+        ACL). Probe leaves unauth_mounts empty and NO leak finding."""
+        srv = self._serve(403)
+        try:
+            p = vault.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+
+        self.assertEqual(p["unauth_mounts"], [])
+        fs = vault.findings(
+            [_mkhost("127.0.0.1", srv.server_address[1])],
+            probes={("127.0.0.1", srv.server_address[1]): p})
+        kinds = {f["kind"] for f in fs}
+        self.assertNotIn("vault_mount_list_open", kinds)
+
+    def test_absent_mounts_endpoint_no_leak(self):
+        """Endpoint 404 - some proxies strip sys/mounts entirely. No
+        leak, no crash, no finding."""
+        srv = self._serve(404)
+        try:
+            p = vault.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+
+        self.assertEqual(p["unauth_mounts"], [])
+        fs = vault.findings(
+            [_mkhost("127.0.0.1", srv.server_address[1])],
+            probes={("127.0.0.1", srv.server_address[1]): p})
+        kinds = {f["kind"] for f in fs}
+        self.assertNotIn("vault_mount_list_open", kinds)
+
+    def test_malformed_body_no_crash(self):
+        """A 200 with a non-JSON body (broken reverse proxy) must not
+        raise; the probe leaves unauth_mounts empty and moves on."""
+        class H(_Base):
+            def do_GET(self):
+                if self.path == "/v1/sys/seal-status":
+                    self._json(200, _SEAL_STATUS_DEV)
+                elif self.path.startswith("/v1/sys/health"):
+                    self._json(200, _HEALTH_ACTIVE)
+                elif self.path == "/v1/sys/init":
+                    self._json(200, {"initialized": True})
+                elif self.path == "/v1/sys/leader":
+                    self._json(200, _LEADER)
+                elif self.path == "/v1/sys/mounts":
+                    self._empty(200)
+                    self.wfile.write(b"<html>not json</html>")
+                else:
+                    self._empty(404)
+
+            def do_HEAD(self):
+                self._empty(404)
+
+        srv, _t = _serve(H)
+        try:
+            p = vault.probe("127.0.0.1", srv.server_address[1], timeout=2)
+        finally:
+            srv.shutdown()
+
+        self.assertEqual(p["unauth_mounts"], [])
+
+    def test_probe_sends_no_x_vault_token_header(self):
+        """The unauth probe must never send X-Vault-Token, even when a
+        token was supplied for the authed walk. Records every request
+        headers dict and asserts the /v1/sys/mounts one had no token."""
+        seen: list[tuple[str, dict]] = []
+        outer = self
+
+        class H(_Base):
+            def do_GET(self):
+                seen.append((self.path, dict(self.headers)))
+                if self.path == "/v1/sys/seal-status":
+                    self._json(200, _SEAL_STATUS_DEV)
+                elif self.path.startswith("/v1/sys/health"):
+                    self._json(200, _HEALTH_ACTIVE)
+                elif self.path == "/v1/sys/init":
+                    self._json(200, {"initialized": True})
+                elif self.path == "/v1/sys/leader":
+                    self._json(200, _LEADER)
+                elif self.path == "/v1/sys/mounts":
+                    # answer 200 for BOTH unauth and authed paths so
+                    # both requests reach the recorder.
+                    outer.assertIsInstance(_UNAUTH_MOUNTS_BODY, dict)
+                    self._json(200, _UNAUTH_MOUNTS_BODY)
+                elif self.path == "/v1/sys/auth":
+                    self._json(200, {"data": {}})
+                elif self.path == "/v1/sys/storage/raft/configuration":
+                    self._empty(403)
+                else:
+                    self._empty(404)
+
+            def do_HEAD(self):
+                self._empty(404)
+
+        srv, _t = _serve(H)
+        try:
+            vault.probe("127.0.0.1", srv.server_address[1],
+                        timeout=2, token="s.SUPPLIEDtokenABC1234567")
+        finally:
+            srv.shutdown()
+
+        mount_hits = [h for path, h in seen if path == "/v1/sys/mounts"]
+        self.assertGreaterEqual(len(mount_hits), 1)
+        # At least ONE mount request must be tokenless (the unauth probe).
+        tokenless = [h for h in mount_hits
+                     if not (h.get("X-Vault-Token") or "")]
+        self.assertGreaterEqual(len(tokenless), 1,
+                                "unauth mount probe must send no token")
+
+    def test_pprof_leak_probe_helper_returns_empty_on_unreachable(self):
+        """Belt-and-braces: the helper itself, given a dead port, must
+        return without raising and leave the shared out dict clean."""
+        out = {"unauth_mounts": []}
+        vault._unauth_mount_probe("127.0.0.1", 1, timeout=0.2,
+                                  prefer=True, out=out)
+        self.assertEqual(out["unauth_mounts"], [])
+
+
 # Guard: base64 helper import kept because some fixtures use kvs with
 # base64-encoded keys in v3-style etcd payloads. Vault KV is not encoded
 # but the import keeps the fixture format future-safe.

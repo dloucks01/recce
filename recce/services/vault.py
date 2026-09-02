@@ -196,6 +196,7 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         "pprof_reachable": False, "metrics_reachable": False,
         "pprof_leak": {},
         "mounts": [], "auth_backends": [], "auth_used": False,
+        "unauth_mounts": [],
         "kv_secrets": [], "raft_peers": [], "raft_snapshot_bytes": 0,
         "cves": [],
         "facts": {"hostnames": [], "domains": [], "users": [],
@@ -312,6 +313,13 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
     if out["sealed"] is False and out["storage_type"] == "inmem":
         out["dev_mode"] = True
 
+    # SAFE metadata check: /v1/sys/mounts normally requires a token; a
+    # misconfigured ACL policy (root/default granting `read` on sys/mounts)
+    # or a debug listener can expose the full secret-engine layout to any
+    # unauthenticated caller. Read-only, single GET, no headers - never a
+    # secret read.
+    _unauth_mount_probe(ip, port, timeout, prefer, out)
+
     if token:
         _authed_walk(ip, port, token, timeout, prefer, out)
 
@@ -369,6 +377,43 @@ def _pprof_leak_probe(ip: str, port: int, timeout: float,
     if not evidence["matches"]:
         return {}
     return evidence
+
+
+def _unauth_mount_probe(ip: str, port: int, timeout: float,
+                        prefer: bool, out: dict) -> None:
+    """T1 SAFE PROOF: GET /v1/sys/mounts WITHOUT an X-Vault-Token header.
+
+    Vault's default ACL requires a token for this endpoint. A 200 with a
+    parseable body is a misconfiguration: the mount layout has been made
+    world-readable, exposing every secret-engine path (kv/aws/pki/transit/
+    database/...) to unauthenticated network callers who can then target
+    the highest-value engine.
+
+    Metadata only:
+      * single GET, no headers besides UA + Connection
+      * body clamped by _MAX_BODY inside _http_single
+      * bounded socket timeout (proxy.scaled applied via _http)
+      * NEVER reads any secret from any mount - names + types only.
+    """
+    r = _http(ip, port, "GET", "/v1/sys/mounts",
+              timeout=timeout, prefer_tls=prefer)
+    if r is None or r[0] != 200:
+        return
+    try:
+        j = json.loads(r[2].decode("utf-8", "replace"))
+    except (ValueError, UnicodeDecodeError):
+        return
+    mounts_dict = j.get("data") if isinstance(j, dict) \
+        and isinstance(j.get("data"), dict) else j
+    if not isinstance(mounts_dict, dict) or not mounts_dict:
+        return
+    for path, meta in mounts_dict.items():
+        if not isinstance(path, str) or not isinstance(meta, dict):
+            continue
+        out["unauth_mounts"].append({
+            "path": path.rstrip("/"),
+            "type": str(meta.get("type") or "")[:40],
+        })
 
 
 def _authed_walk(ip: str, port: int, token: str, timeout: float,
@@ -668,6 +713,43 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "grep -iE 'X-Vault-Token|s\\.[A-Za-z0-9]{24,}' — grab "
                         "any client token then curl https://<ip>:8200/v1/sys/"
                         "mounts -H 'X-Vault-Token: <captured>'."),
+                    depth_tier="t1"))
+
+            if pr.get("unauth_mounts"):
+                ums = pr["unauth_mounts"]
+                types = sorted({(m.get("type") or "?") for m in ums})
+                sample = ", ".join(sorted({
+                    f"{m['path']}({m.get('type') or '?'})" for m in ums
+                })[:12])
+                more = "" if len(ums) <= 12 else \
+                    f" (+{len(ums) - 12} more)"
+                out.append(_finding(
+                    "high",
+                    "Vault mount list readable unauthenticated (sys/mounts open)",
+                    tgt,
+                    f"Vault {ver} answered GET /v1/sys/mounts without an "
+                    f"X-Vault-Token header. This endpoint normally requires "
+                    f"an authenticated token; exposing it discloses the full "
+                    f"secret-engine layout - {len(ums)} mount(s) across "
+                    f"engine type(s) {', '.join(types) or '?'}. Sample paths: "
+                    f"{sample}{more}. Attackers use this to fingerprint the "
+                    f"KV / database / PKI / transit / AWS surfaces before "
+                    f"trying a single credential, and pick the highest-value "
+                    f"target for the next stage.",
+                    f"curl -sk https://{h.ip}:{p.portid}/v1/sys/mounts",
+                    "Restrict /v1/sys/mounts to authenticated principals. "
+                    "Audit the `default` and root ACL policies for any "
+                    "grant like `path \"sys/mounts\" { capabilities = "
+                    "[\"read\", \"list\"] }` left in from testing, and "
+                    "ensure `disable_mlock`/debug listeners are not exposed "
+                    "to untrusted networks.",
+                    ["CWE-306", "CWE-200"], kind="vault_mount_list_open",
+                    exploit_note=(
+                        "curl -sk https://<ip>:8200/v1/sys/mounts | jq "
+                        "'.data | keys'; for each kv mount attempt "
+                        "-H 'X-Vault-Token: <captured>' data reads; PKI "
+                        "mounts -> /v1/<mount>/ca_chain; database mounts "
+                        "-> /v1/<mount>/creds/<role> if role names leak."),
                     depth_tier="t1"))
 
             if pr.get("pprof_reachable") or pr.get("metrics_reachable"):

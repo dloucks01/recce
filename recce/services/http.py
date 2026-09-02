@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import http.client
+import json
 import re
 import ssl
 import time
@@ -1117,13 +1118,100 @@ _ACTUATOR_ENDPOINTS: list[tuple[str, str, str]] = [
 ]
 
 
+# Sensitive-name substrings on a Spring Boot /actuator/env response. Spring
+# Boot's default sanitizer masks the VALUES of properties whose name matches
+# password/secret/token/credentials/vcap_services — the NAMES still ship in
+# the response, and each name confirms the app is carrying that credential
+# in memory. Any endpoint that bypasses the sanitizer (/heapdump, /trace on
+# older Boot, POST /env override) recovers the cleartext for the same key.
+# Matched case-insensitively as substrings, so "spring.datasource.password",
+# "AWS_ACCESS_KEY_ID", "api.token", "MY_JWT_KEY" all hit.
+_ENV_SECRET_PATTERNS: tuple[str, ...] = (
+    "password", "secret", "token", "connectionstring",
+    "database_url", "aws_access_key_id",
+    # `key` is deliberately last and broadest — catches api_key,
+    # secret_key, private_key, aws_secret_access_key. Non-credential names
+    # like "spring.jackson.locale" or "server.port" don't contain "key".
+    "key",
+)
+
+# Cap on the number of names we surface per finding — a pathological /env
+# response could list thousands of properties; a dozen-ish is enough to prove
+# the exposure without turning the finding into a wall of text.
+_ENV_SECRET_NAME_CAP = 50
+
+
+def actuator_env_secret_names(body: bytes,
+                               cap: int = _ENV_SECRET_NAME_CAP) -> list[str]:
+    """Parse a Spring Boot /actuator/env JSON body and return the deduped
+    list of property NAMES matching `_ENV_SECRET_PATTERNS`.
+
+    Handles both Boot 2.x (`{propertySources: [{properties: {NAME: {value…}}}]}`)
+    and Boot 1.x (flat `{sourceName: {NAME: value}, …}`) shapes. Only names
+    are returned — values in a well-configured Actuator are already masked
+    to `******` by the server-side sanitizer, and we neither read nor emit
+    them either way. Returns [] on malformed JSON, empty body, or when no
+    property name matches. Bounded to `cap` names to keep finding output
+    stable and short."""
+    if not body:
+        return []
+    try:
+        data = json.loads(body[:_MAX_BODY])
+    except (ValueError, UnicodeDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _consider(name: object) -> bool:
+        if not isinstance(name, str) or name in seen:
+            return False
+        low = name.lower()
+        if any(pat in low for pat in _ENV_SECRET_PATTERNS):
+            seen.add(name)
+            names.append(name)
+            return len(names) >= cap
+        return False
+
+    # Boot 2.x layout: propertySources is a list of {name, properties}.
+    sources = data.get("propertySources")
+    if isinstance(sources, list):
+        for src in sources:
+            if not isinstance(src, dict):
+                continue
+            props = src.get("properties")
+            if isinstance(props, dict):
+                for k in props.keys():
+                    if _consider(k):
+                        return names
+    # Boot 1.x layout: dict-of-dicts at the top level. A value dict is only
+    # a property source if its own values are NOT the Boot-2.x {value,origin}
+    # envelope — that shape means we already walked it above.
+    for v in data.values():
+        if isinstance(v, dict):
+            first = next(iter(v.values()), None)
+            if isinstance(first, dict) and ("value" in first or "origin" in first):
+                continue
+            for k in v.keys():
+                if _consider(k):
+                    return names
+    return names
+
+
 def actuator_probe(ip: str, port: int, use_tls: bool) -> list[dict]:
     """Enumerate Spring Boot Actuator endpoints under both `/actuator/…` and
     `/…` (Boot 1.x). Returns [{path, endpoint, status, length, severity,
     description}, …] for each responsive endpoint. A 200 with a JSON-shaped
     body (or a large binary for heapdump) confirms exposure; a 401/403 is
     also worth flagging because the endpoint IS there and default creds
-    (admin/admin, actuator/actuator) commonly work."""
+    (admin/admin, actuator/actuator) commonly work.
+
+    For a 200 hit on `/env`, the returned dict ALSO carries
+    `sensitive_names` — the list of property names in the response body
+    that match `_ENV_SECRET_PATTERNS`. This is a no-extra-request enrichment
+    of the same GET; the caller uses it to emit the
+    `http_actuator_env_secrets` extension finding."""
     hits: list[dict] = []
     for base in ("/actuator", ""):
         for ep, sev, desc in _ACTUATOR_ENDPOINTS:
@@ -1147,8 +1235,15 @@ def actuator_probe(ip: str, port: int, use_tls: bool) -> list[dict]:
                 hit = True                                    # partial
             if not hit:
                 continue
-            hits.append({"path": path, "endpoint": ep, "status": status,
-                         "length": blen, "severity": sev, "description": desc})
+            entry: dict = {"path": path, "endpoint": ep, "status": status,
+                           "length": blen, "severity": sev, "description": desc}
+            # Enrichment: on a confirmed /env body, extract sensitive
+            # property names from the same response — no follow-up request.
+            if ep == "env" and status == 200 and blen > 0:
+                names = actuator_env_secret_names(body)
+                if names:
+                    entry["sensitive_names"] = names
+            hits.append(entry)
     return hits
 
 
@@ -1738,6 +1833,46 @@ def enum_findings(host_ip: str, port: Port,
                 "heap.hprof | grep -Ei 'password|secret|jdbc:|Bearer ' | "
                 "sort -u | head -80"),
             depth_tier="t2"))
+
+        # Extension: /env with a body that already contains sensitive
+        # property NAMES is a distinct, critical finding — the sanitizer
+        # masked the values to `******` but the presence of the names
+        # confirms the app carries those credentials in memory, and any
+        # sanitizer-bypass endpoint (/heapdump, /trace on old Boot,
+        # POST /env override) recovers the cleartext for the same keys.
+        # Same GET response as the parent hit; no follow-up request.
+        if h["endpoint"] == "env" and h.get("sensitive_names"):
+            names = h["sensitive_names"]
+            preview = ", ".join(names[:12]) + ("…" if len(names) > 12 else "")
+            out.append(_mk(
+                host_ip, port, "http_actuator_env_secrets", "critical",
+                f"Actuator /env lists {len(names)} sensitive property names",
+                ["CWE-798", "CWE-522"],
+                f"{h['path']} response body contains {len(names)} property "
+                "names matching credential patterns "
+                "(password / secret / token / key / connectionString / "
+                "database_url / aws_access_key_id). Names present: "
+                f"{preview}. Actuator's default sanitizer masks the values "
+                "as `******` in this response, but the names themselves "
+                "prove the app carries those credentials at runtime — any "
+                "sanitizer-bypass endpoint on the same host "
+                "(/actuator/heapdump, POST /actuator/env override, "
+                "/actuator/configprops on affected Boot versions) recovers "
+                "the cleartext for the same keys.",
+                "Remove /actuator/env from "
+                "`management.endpoints.web.exposure.include` (or add to "
+                "`.exclude`) and require authentication for /actuator/**. "
+                "If exposure is intentional for observability, pin Boot to "
+                "a version whose sanitizer also masks /configprops and "
+                "/heapdump for the same patterns, and disable POST /env.",
+                exploit_note=(
+                    "curl -sSk http://IP:PORT/actuator/env | jq "
+                    "'.propertySources[].properties|to_entries[]"
+                    "|select(.key|test(\"pass|secret|token|key\";\"i\"))' ; "
+                    "curl -sSk -o heap.hprof "
+                    "http://IP:PORT/actuator/heapdump && strings heap.hprof "
+                    "| grep -Ei 'password|secret|jdbc:|Bearer ' | sort -u"),
+                depth_tier="t2"))
 
     # Nginx alias-traversal probe (CVE-2018-16843 pattern). One-shot, safe.
     alias = nginx_alias_traversal_probe(host_ip, port.portid, use_tls)

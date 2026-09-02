@@ -15,6 +15,7 @@ All servers live in-process on 127.0.0.1:$random and are torn down per test.
 """
 from __future__ import annotations
 
+import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -429,6 +430,155 @@ class CrlfInjectionTest(unittest.TestCase):
         finally:
             srv.shutdown()
         self.assertIsNone(hit)
+
+
+class ActuatorEnvSecretsTest(unittest.TestCase):
+    """Deep-leak enrichment on /actuator/env. Fixtures are the exact JSON
+    shapes Spring Boot Actuator emits — 2.x nested (`propertySources`) and
+    1.x flat (`sourceName: {key: value}`), with the sanitizer having
+    already masked values to `******`. The extractor works off names only,
+    which is the whole point of the extension finding."""
+
+    def test_boot2_shape_extracts_sensitive_names(self):
+        body = json.dumps({
+            "activeProfiles": [],
+            "propertySources": [
+                {"name": "systemEnvironment",
+                 "properties": {
+                    "PATH": {"value": "/usr/bin"},
+                    "SPRING_DATASOURCE_PASSWORD": {"value": "******"},
+                    "AWS_ACCESS_KEY_ID": {"value": "******"},
+                    "DATABASE_URL": {"value": "******"},
+                    "api.token": {"value": "******"},
+                    "JAVA_HOME": {"value": "/opt/jdk"},
+                 }},
+                {"name": "applicationConfig",
+                 "properties": {
+                    "spring.jackson.locale": {"value": "en_US"},
+                    "my.private.key": {"value": "******"},
+                 }},
+            ],
+        }).encode()
+        names = svc_http.actuator_env_secret_names(body)
+        self.assertIn("SPRING_DATASOURCE_PASSWORD", names)
+        self.assertIn("AWS_ACCESS_KEY_ID", names)
+        self.assertIn("DATABASE_URL", names)
+        self.assertIn("api.token", names)
+        self.assertIn("my.private.key", names)
+        # Non-credential names must not be picked up.
+        self.assertNotIn("PATH", names)
+        self.assertNotIn("JAVA_HOME", names)
+        self.assertNotIn("spring.jackson.locale", names)
+
+    def test_boot1_flat_shape_extracts_sensitive_names(self):
+        body = json.dumps({
+            "profiles": [],
+            "systemProperties": {"java.runtime.name": "OpenJDK"},
+            "systemEnvironment": {"PATH": "/usr/bin",
+                                    "MY_SECRET_TOKEN": "******"},
+            "applicationConfig: [classpath:/application.properties]": {
+                "spring.datasource.password": "******",
+                "connectionString": "******",
+                "server.port": "8080",
+            },
+        }).encode()
+        names = svc_http.actuator_env_secret_names(body)
+        self.assertIn("MY_SECRET_TOKEN", names)
+        self.assertIn("spring.datasource.password", names)
+        self.assertIn("connectionString", names)
+        self.assertNotIn("server.port", names)
+        self.assertNotIn("java.runtime.name", names)
+        self.assertNotIn("PATH", names)
+
+    def test_absent_or_patched_returns_empty(self):
+        # Patched Actuator (no exposure): 401/403 → probe passes empty body
+        # to us. Malformed JSON, unrelated JSON, and env with only benign
+        # keys all return [] — nothing to enrich, no finding fires.
+        self.assertEqual(svc_http.actuator_env_secret_names(b""), [])
+        self.assertEqual(svc_http.actuator_env_secret_names(b"not json"), [])
+        self.assertEqual(svc_http.actuator_env_secret_names(b"[1, 2, 3]"), [])
+        empty = json.dumps({"propertySources": [
+            {"name": "systemEnvironment",
+             "properties": {"PATH": {"value": "/usr/bin"},
+                             "JAVA_HOME": {"value": "/opt/jdk"}}}]}).encode()
+        self.assertEqual(svc_http.actuator_env_secret_names(empty), [])
+
+    def test_dedupe_and_cap(self):
+        # Same name in two property sources → surfaced once.
+        # More than cap sensitive names → truncated to cap.
+        props_a = {"api_key": {"value": "******"}}
+        props_b = {"api_key": {"value": "******"},
+                    **{f"token_{i}": {"value": "******"} for i in range(80)}}
+        body = json.dumps({"propertySources": [
+            {"name": "a", "properties": props_a},
+            {"name": "b", "properties": props_b},
+        ]}).encode()
+        names = svc_http.actuator_env_secret_names(body, cap=10)
+        self.assertLessEqual(len(names), 10)
+        # Dedupe: api_key appears once even though present in both sources.
+        self.assertEqual(names.count("api_key"), 1)
+
+    def test_actuator_probe_attaches_names_on_env(self):
+        """actuator_probe returns hit dicts that also carry
+        `sensitive_names` when /env exposed a body with credential names.
+        We monkeypatch `_get` to serve canned RFC-shape responses so the
+        test never touches the network."""
+        env_body = json.dumps({"propertySources": [
+            {"name": "systemEnvironment",
+             "properties": {
+                "SPRING_DATASOURCE_PASSWORD": {"value": "******"},
+                "PATH": {"value": "/usr/bin"},
+             }},
+        ]}).encode()
+
+        def fake_get(ip, port, use_tls, path, timeout=2.0, method="GET",
+                     extra_headers=None, read_body=False):
+            if path == "/actuator/env":
+                return {"status": 200, "headers": {}, "body": env_body}
+            if path == "/env":
+                # Boot 1.x path, patched: 404
+                return {"status": 404, "headers": {}, "body": b""}
+            # All other endpoints → not exposed
+            return {"status": 404, "headers": {}, "body": b""}
+
+        orig = svc_http._get
+        svc_http._get = fake_get
+        try:
+            hits = svc_http.actuator_probe("127.0.0.1", 8080, False)
+        finally:
+            svc_http._get = orig
+        env_hits = [h for h in hits if h["path"] == "/actuator/env"]
+        self.assertEqual(len(env_hits), 1)
+        self.assertIn("sensitive_names", env_hits[0])
+        self.assertIn("SPRING_DATASOURCE_PASSWORD",
+                      env_hits[0]["sensitive_names"])
+
+    def test_actuator_probe_no_names_when_env_absent_or_patched(self):
+        """When /env is 401/403/404 or a 200 with no sensitive names, the
+        hit dict must NOT carry `sensitive_names` — the extension finding
+        keys off that field, and a stray key would fire a false positive."""
+        clean = json.dumps({"propertySources": [
+            {"name": "systemEnvironment",
+             "properties": {"PATH": {"value": "/usr/bin"}}}
+        ]}).encode()
+
+        def fake_get(ip, port, use_tls, path, timeout=2.0, method="GET",
+                     extra_headers=None, read_body=False):
+            if path == "/actuator/env":
+                return {"status": 200, "headers": {}, "body": clean}
+            if path == "/actuator":                       # index — 401 partial
+                return {"status": 401, "headers": {}, "body": b""}
+            return {"status": 404, "headers": {}, "body": b""}
+
+        orig = svc_http._get
+        svc_http._get = fake_get
+        try:
+            hits = svc_http.actuator_probe("127.0.0.1", 8080, False)
+        finally:
+            svc_http._get = orig
+        for h in hits:
+            self.assertNotIn("sensitive_names", h,
+                              f"unexpected sensitive_names on {h['path']}")
 
 
 if __name__ == "__main__":

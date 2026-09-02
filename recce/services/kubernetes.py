@@ -225,6 +225,7 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
             # hostPID containers. Each is a straight route to node compromise
             # from inside the pod, so we surface the count separately.
             pods = _get(ip, port, "/api/v1/pods", tls=tls, timeout=timeout)
+            pods_anon_ok = bool(pods and pods[0] == 200)
             if pods and pods[0] == 200 and isinstance(pods[1], dict):
                 privileged = host_mounts = host_pid = host_net = 0
                 items = pods[1].get("items") or []
@@ -242,6 +243,17 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
                 out["escape_pod_counts"] = {
                     "privileged": privileged, "hostPath": host_mounts,
                     "hostPID": host_pid, "hostNetwork": host_net}
+            # Admission-webhook configuration disclosure. If anon LIST reached
+            # /api/v1/pods, the cluster-wide admission webhook configurations
+            # are usually also anon-readable. Reading them (SAFE, GET-only)
+            # maps the policy layer of the cluster: which controllers gate
+            # pod creation, and whether any mutating webhook is set to
+            # failurePolicy=Ignore — a bypass primitive when the webhook
+            # backend is unreachable. We never invoke a webhook or modify
+            # any configuration; the list is the finding.
+            if pods_anon_ok:
+                out["anon_webhooks"] = _probe_admission_webhooks(
+                    ip, port, tls, timeout=min(timeout, 5.0))
             # T2 SAFE proof-of-exploit: only fires when we've established that
             # anon LIST works (the /api/v1/namespaces 200 above). Single
             # controlled bounded read of /api/v1/pods?limit=10 — server-side
@@ -348,6 +360,67 @@ def _probe_pods_canary(ip: str, port: int, tls: bool,
             "endpoint": "/api/v1/pods?limit=10"}
 
 
+_WEBHOOK_PATHS = (
+    ("mutating",
+     "/apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations"),
+    ("validating",
+     "/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations"),
+)
+
+
+def _probe_admission_webhooks(ip: str, port: int, tls: bool,
+                              timeout: float = 5.0) -> list[dict]:
+    """SAFE GET-only probe of admission webhook configurations.
+
+    Reads mutating + validating webhook configuration lists. Each 200 with a
+    parseable items[] is unfolded into per-webhook entries recording:
+      - kind:            "mutating" | "validating"
+      - config:          the WebhookConfiguration name
+      - name:            the individual webhook name (webhooks[].name)
+      - failure_policy:  "Ignore" | "Fail" | "" (unset = server default = Fail)
+      - timeout_seconds: int | None (unset = server default 10s in v1)
+
+    A failurePolicy of "Ignore" on a MutatingWebhookConfiguration is a bypass
+    primitive: if the webhook backend is unreachable, the admission decision
+    is silently skipped — an attacker who can DoS or MITM the backend
+    (network segment, hijacked Service, expired TLS) sidesteps that policy
+    gate. Recorded but never exercised.
+
+    Bounded: one GET per resource kind, per-webhook cap (25), capped strings.
+    Non-destructive: no writes, no auth attempts, no invocation of any
+    webhook. Returns [] if neither endpoint answered with a webhook list.
+    """
+    out: list[dict] = []
+    for kind, path in _WEBHOOK_PATHS:
+        r = _get(ip, port, path, tls=tls, timeout=timeout)
+        if r is None:
+            continue
+        status, body = r
+        if status != 200 or not isinstance(body, dict):
+            continue
+        items = body.get("items")
+        if not isinstance(items, list) or not items:
+            continue
+        for cfg in items[:25]:
+            if not isinstance(cfg, dict):
+                continue
+            md = cfg.get("metadata") or {}
+            cfg_name = str(md.get("name", ""))[:120]
+            for wh in (cfg.get("webhooks") or [])[:25]:
+                if not isinstance(wh, dict):
+                    continue
+                fp = wh.get("failurePolicy")
+                ts = wh.get("timeoutSeconds")
+                out.append({
+                    "kind": kind,
+                    "config": cfg_name,
+                    "name": str(wh.get("name", ""))[:120],
+                    "failure_policy": str(fp)[:16] if isinstance(fp, str) else "",
+                    "timeout_seconds": ts if isinstance(ts, int) else None,
+                })
+    return out
+
+
 def _is_podlist(body) -> bool:
     if isinstance(body, dict):
         return body.get("kind") == "PodList" or isinstance(body.get("items"), list)
@@ -448,6 +521,18 @@ _NARRATIVE = {
         "that plain LIST enumeration misses (create pods, exec, impersonate, "
         "approve CSRs). If a mutating or impersonate verb appears, the anonymous "
         "user can persist inside the cluster or become another identity."),
+    "k8s_webhook_disclosure": (
+        "Admission webhook configurations are the cluster's policy layer — "
+        "which controllers must approve or mutate every create/update, and "
+        "what they enforce (Pod Security, image signing, sidecar injection, "
+        "network policy). An anonymous reader learns the exact policy topology, "
+        "the webhook backends' Service/URL targets (next-hop lateral pivot), "
+        "and — critically — every MutatingWebhookConfiguration whose "
+        "failurePolicy is Ignore: if the backend is unreachable (DoS, blocked "
+        "egress, expired TLS, hijacked Service), the admission gate is "
+        "silently skipped, and the mutation an attacker wanted is applied "
+        "unmodified. Read-only reconnaissance, but it enumerates the exact "
+        "controls to bypass."),
     "etcd_open": (
         "etcd is the cluster's backing store and it answered unauthenticated. Every "
         "Kubernetes object lives here in the clear, including all Secrets - every "
@@ -686,6 +771,59 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                                 "name)\"'; then via kubelet exec: nsenter -t 1 -m -u "
                                 "-i -n -p sh."),
                             depth_tier="t1"))
+                # Admission webhook configuration disclosure. Additions-only:
+                # only fires when the anonymous read returned webhooks; never
+                # invokes a webhook, never modifies configuration.
+                webhooks = pr.get("anon_webhooks") or []
+                if webhooks:
+                    ignore_hits = [w for w in webhooks
+                                   if w.get("kind") == "mutating"
+                                   and (w.get("failure_policy") or "") == "Ignore"]
+                    bits: list[str] = []
+                    for w in webhooks[:8]:
+                        fp = w.get("failure_policy") or "unset"
+                        ts = w.get("timeout_seconds")
+                        ts_s = f"{ts}s" if isinstance(ts, int) else "?"
+                        bits.append(f"{w.get('kind','?')[:1]}:{w.get('name','?')}"
+                                    f" [fp={fp}, to={ts_s}]")
+                    tail = "…" if len(webhooks) > 8 else ""
+                    ignore_note = (
+                        f"  {len(ignore_hits)} mutating webhook(s) with "
+                        f"failurePolicy=Ignore — a bypass primitive if the "
+                        f"backend is unreachable." if ignore_hits else "")
+                    out.append(_finding(
+                        "medium",
+                        "Kubernetes admission webhook configurations "
+                        "disclosed anonymously",
+                        tgt,
+                        f"Anonymous GET returned {len(webhooks)} admission "
+                        f"webhook(s) across mutating + validating "
+                        f"configurations: " + "; ".join(bits) + tail + "."
+                        + ignore_note,
+                        "kubectl",
+                        "kubectl --server https://<ip>:<port> "
+                        "--insecure-skip-tls-verify get "
+                        "mutatingwebhookconfigurations,"
+                        "validatingwebhookconfigurations -o yaml",
+                        "Remove any RBAC bindings for system:anonymous / "
+                        "system:unauthenticated that grant get/list on "
+                        "admissionregistration.k8s.io resources; set "
+                        "--anonymous-auth=false on the apiserver. Audit any "
+                        "MutatingWebhookConfiguration with failurePolicy=Ignore "
+                        "and switch to Fail unless the webhook is genuinely "
+                        "optional.",
+                        ["CWE-200"], kind="k8s_webhook_disclosure",
+                        exploit_note=(
+                            "kubectl --server https://<ip>:<port> "
+                            "--insecure-skip-tls-verify get "
+                            "mutatingwebhookconfigurations -o json | jq -r "
+                            "'.items[].webhooks[] | select(.failurePolicy==\""
+                            "Ignore\") | \"\\(.name)  ->  \\(.clientConfig."
+                            "service // .clientConfig.url)\"' — targets whose "
+                            "backend, when unreachable, silently skips the "
+                            "policy gate."),
+                        depth_tier="t1"))
+
                 # NOTE: this used to be `elif`, chained to a `r == "kubelet"` test
                 # that sat inside this `elif r == "apiserver"` branch and could
                 # therefore never be true. The dead test is gone (moved to the
@@ -824,7 +962,7 @@ def analyze(hosts: list[Host], active: bool = True,
                 for k in ("anon_pods", "anon_list", "anon_secrets", "v2_readable",
                           "v3_readable", "version", "etcd_version", "pod_count",
                           "anon_status", "anon_logs_dir", "anon_ssrr_rules",
-                          "anon_ssrr_verbs", "pods_evidence"):
+                          "anon_ssrr_verbs", "pods_evidence", "anon_webhooks"):
                     if k in pr:
                         t[k] = pr[k]
     fs = findings(hosts, probes)

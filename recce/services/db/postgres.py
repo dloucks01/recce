@@ -325,6 +325,116 @@ def probe_replication(ip: str, port: int, timeout: float = _TIMEOUT,
             pass
 
 
+# Substrings that specifically indicate the REPLICATION PATH is referenced
+# in an ErrorResponse — as opposed to the word "replication" appearing
+# incidentally in a role name ("role \"replication\" does not exist" is a
+# normal auth-failure, not disclosure). These phrasings come from the
+# server-side text in PostgreSQL source (backend/libpq/auth.c and
+# replication/walsender.c) and are stable across supported versions.
+_REPL_PATH_MARKERS = (
+    "for replication",       # "no pg_hba.conf entry for replication ..."
+    "replication connection",
+    "replication role",       # "must be superuser or replication role ..."
+    "walsender",
+    "start_replication",
+    "start replication",
+)
+
+
+def _mentions_replication_path(msg: str) -> bool:
+    m = (msg or "").lower()
+    return any(marker in m for marker in _REPL_PATH_MARKERS)
+
+
+# AuthenticationRequest sub-codes we recognise for the endpoint probe. Anything
+# outside this table is reported by numeric code so an unknown method still
+# reads as "a challenge was issued". Names match the PG v3 protocol §55.7.
+_AUTH_METHOD_NAMES: dict[int, str] = {
+    0: "trust",
+    2: "kerberos-v5",
+    3: "cleartext-password",
+    5: "md5",
+    6: "scm-credential",
+    7: "gss",
+    8: "gss-continue",
+    9: "sspi",
+    10: "sasl",
+    11: "sasl-continue",
+    12: "sasl-final",
+}
+
+
+def probe_replication_endpoint(ip: str, port: int, timeout: float = _TIMEOUT,
+                                users: tuple[str, ...] = ("replication",
+                                                          "postgres")) -> dict:
+    """SAFE reachability probe of the replication startup path — detects
+    whether the pg_hba `host replication ...` surface is exposed AT ALL,
+    even when strong auth guards it. Distinct from ``probe_replication``:
+    that one only flags the trust case (AuthenticationOk with no password);
+    this one flags every reachable endpoint, because the existence of the
+    replication path itself is CWE-306 attack-surface disclosure.
+
+    For each candidate user we send exactly one v3 StartupMessage carrying
+    ``replication=true``, read exactly one server message, then CLOSE the
+    socket — we NEVER respond to the AuthenticationRequest. No password,
+    SASL first message, or GSS token ever leaves the client, so this cannot
+    trip lockouts, cannot accrue failed-auth log entries beyond the
+    connection open, and cannot be miscategorised as a brute-force attempt.
+
+    Returns:
+      {"reachable": bool, "endpoint_open": bool,
+       "auth_method": str,                 # 'md5', 'sasl', 'cleartext-password', …
+       "auth_code": int,                   # numeric R sub-code, -1 if none
+       "error": str,                       # server ErrorResponse message text
+       "error_mentions_replication": bool, # ErrorResponse names the replication path
+       "user_tried": str}                  # candidate that produced the signal
+
+    endpoint_open=True means either the server issued an AuthenticationRequest
+    (any type) OR sent an ErrorResponse mentioning the replication path —
+    either signal proves the endpoint exists behind whatever auth guards it.
+    """
+    res: dict = {"reachable": False, "endpoint_open": False, "auth_method": "",
+                 "auth_code": -1, "error": "",
+                 "error_mentions_replication": False, "user_tried": ""}
+    for user in users:
+        try:
+            sock = socket.create_connection((ip, port), timeout=timeout)
+            sock.settimeout(timeout)
+        except OSError as e:
+            res["error"] = res["error"] or str(e)
+            continue
+        try:
+            sock.sendall(_startup_replication(user, "postgres"))
+            res["reachable"] = True
+            typ, body = _read_message(sock)
+            if typ == b"R" and len(body) >= 4:
+                code = struct.unpack("!I", body[:4])[0]
+                res["auth_code"] = code
+                res["auth_method"] = _AUTH_METHOD_NAMES.get(code, f"code{code}")
+                res["endpoint_open"] = True
+                res["user_tried"] = user
+                # SAFETY: intentionally do NOT respond to the challenge —
+                # closing the socket now guarantees zero auth material sent.
+                break
+            if typ == b"E":
+                msg = _pg_error(body)
+                res["error"] = msg
+                if _mentions_replication_path(msg):
+                    res["error_mentions_replication"] = True
+                    res["endpoint_open"] = True
+                    res["user_tried"] = user
+                    break
+            # Neither R nor E-with-replication: try the next candidate user.
+        except (OSError, struct.error, ValueError) as e:
+            res["error"] = res["error"] or str(e)
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    return res
+
+
 def _read_until_ready(sock: socket.socket) -> None:
     """After AuthenticationOk, drain ParameterStatus/BackendKeyData up to ReadyForQuery."""
     for _ in range(100):
@@ -677,6 +787,9 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
             # server; replication-trust is its own pg_hba path entirely.
             _ssl_finding(out, tgt, h.ip, p.portid, pr.get("ssl"))
             _replication_finding(out, tgt, h.ip, p.portid, pr.get("replication"))
+            _replication_endpoint_finding(
+                out, tgt, h.ip, p.portid,
+                pr.get("replication_endpoint"), pr.get("replication"))
             if pr.get("unauth"):
                 lt = pr.get("loot") or {}
                 out.append(_finding(
@@ -847,6 +960,87 @@ def _replication_finding(out: list, tgt: str, ip: str, port: int,
             "then extract global/pg_authid, crack hashes offline "
             "(hashcat -m 5433/28600)."),
         depth_tier="t2"))
+
+
+def _replication_endpoint_finding(out: list, tgt: str, ip: str, port: int,
+                                    ep: dict | None,
+                                    rep: dict | None = None) -> None:
+    """Emit ``postgres_replication_endpoint`` — the streaming-replication
+    sub-protocol is reachable from the scanner, even though credentials are
+    required to actually pg_basebackup. Fires when either signal is present:
+
+      (a) server answered our replication StartupMessage with an
+          AuthenticationRequest of any type (md5 / cleartext / SCRAM / GSS /
+          SSPI). The challenge itself proves a ``host replication ...``
+          rule in pg_hba admits this network for the tried user, and it
+          discloses which auth method is on that path (priority spray
+          intel: SCRAM/md5 hashes crack differently, GSS wants a keytab).
+      (b) server closed with an ErrorResponse whose text names replication
+          (e.g. "no pg_hba.conf entry for replication ..."), which
+          discloses that the replication path is configured but this
+          candidate user isn't admitted.
+
+    Suppressed when the trust variant already fired for this port — the
+    critical ``pg_replication_trust`` finding subsumes this one. Suppressed
+    when the reachability signal is absent, so a network hiccup can't
+    invent a finding.
+    """
+    if not ep or not ep.get("endpoint_open"):
+        return
+    if rep and rep.get("unauth"):
+        return  # covered by the critical pg_replication_trust finding
+    auth_method = ep.get("auth_method") or ""
+    err = (ep.get("error") or "").strip()
+    user_tried = ep.get("user_tried") or "?"
+    if auth_method and auth_method != "trust":
+        detail = (
+            f"Server issued an AuthenticationRequest ({auth_method}) in reply "
+            f"to a v3 StartupMessage carrying `replication=true` for user "
+            f"'{user_tried}'. The streaming-replication sub-protocol (§55.4) "
+            "is REACHABLE from this network — pg_hba.conf has a `host "
+            "replication ...` rule that admits this scanner. recce closed the "
+            "socket without responding to the challenge; no auth material was "
+            "sent. The endpoint's existence is disclosure in its own right: a "
+            "separate credential surface from the SQL port, often forgotten "
+            "when the SQL surface is hardened.")
+    elif ep.get("error_mentions_replication"):
+        detail = (
+            f"Server closed the connection with an ErrorResponse in reply to "
+            f"a v3 StartupMessage carrying `replication=true` for user "
+            f"'{user_tried}': \"{err[:200]}\". The message names the "
+            "replication path — that alone discloses that the pg_hba.conf "
+            "surface for streaming replication is configured on this port, "
+            "and which auth backends govern it, without recce ever sending "
+            "credentials.")
+    else:
+        # Endpoint marked open by some other code path — describe generically
+        # so the finding stays truthful even for auth codes we don't name.
+        detail = (
+            f"Replication sub-protocol reachable at this port (user "
+            f"'{user_tried}'). recce never responded to the server's first "
+            "message.")
+    detail += (
+        " Any role carrying the REPLICATION attribute with a weak or reused "
+        "password lets an attacker pg_basebackup the ENTIRE cluster: physical "
+        "copy of every database, every pg_shadow hash (for offline cracking), "
+        "every extension, every WAL segment — no SQL statements executed, no "
+        "query log entries.")
+    out.append(_finding(
+        "medium",
+        "PostgreSQL replication endpoint reachable (auth required)", tgt,
+        detail,
+        f"pg_basebackup -h {ip} -p {port} -U <replication-role> -D /tmp/copy -X none",
+        "Restrict the `host replication ...` rule in pg_hba.conf to specific "
+        "trusted CIDRs or a dedicated replication interface; require "
+        "scram-sha-256 with a strong unique password on every role carrying "
+        "the REPLICATION attribute; bind streaming replication to a private "
+        "network via `listen_addresses`.",
+        ["CWE-306", "CWE-284"], kind="pg_replication_endpoint",
+        exploit_note=(
+            f"pg_basebackup -h {ip} -p {port} -U <role> -D /tmp/copy -X none "
+            "— iterate replication-attribute roles with looted / weak / "
+            "default passwords; any hit yields a full-cluster physical dump."),
+        depth_tier="t1"))
 
 
 def _public_schema_finding(out: list, tgt: str, ip: str, port: int,
@@ -1200,6 +1394,14 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
                     pr["replication"] = probe_replication(t["ip"], t["port"])
                 except Exception:                       # noqa: BLE001 — never break enum
                     pr["replication"] = None
+                # SAFE endpoint reachability probe — never authenticates, only
+                # observes the FIRST server message (AuthenticationRequest OR
+                # ErrorResponse) then closes the socket.
+                try:
+                    pr["replication_endpoint"] = probe_replication_endpoint(
+                        t["ip"], t["port"])
+                except Exception:                       # noqa: BLE001 — never break enum
+                    pr["replication_endpoint"] = None
                 lt = None
                 acc_user, acc_pw = "postgres", None
                 if pr.get("unauth"):
