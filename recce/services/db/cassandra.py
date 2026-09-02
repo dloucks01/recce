@@ -119,6 +119,62 @@ def _parse_error(body: bytes) -> str:
     return msg
 
 
+# Built-in / virtual keyspaces to exclude when reporting user data exposure.
+# These are always present and readable on an AllowAll node - what matters for a
+# T2 finding is whether *application* keyspaces are also readable.
+_SYS_KEYSPACES = frozenset({
+    "system", "system_schema", "system_auth", "system_traces",
+    "system_distributed", "system_virtual_schema", "system_views",
+})
+
+
+def _parse_keyspaces(body: bytes) -> list[str]:
+    """Best-effort parse of a Rows RESULT for
+    SELECT keyspace_name FROM system_schema.keyspaces. Returns the first column
+    of every row in order. Tolerates malformed frames (returns what it could
+    read).
+    """
+    names: list[str] = []
+    try:
+        (kind,) = struct.unpack_from(">I", body, 0)
+        if kind != 0x0002:                      # not Rows
+            return names
+        i = 4
+        (flags,) = struct.unpack_from(">I", body, i); i += 4
+        (col_count,) = struct.unpack_from(">I", body, i); i += 4
+        has_global = bool(flags & 0x0001)
+        no_metadata = bool(flags & 0x0004)
+        if no_metadata or col_count < 1:
+            return names
+        if has_global:
+            _ks, i = _read_cql_string(body, i)
+            _tb, i = _read_cql_string(body, i)
+        for _ in range(col_count):
+            if not has_global:
+                _ks, i = _read_cql_string(body, i)
+                _tb, i = _read_cql_string(body, i)
+            _name, i = _read_cql_string(body, i)
+            (opt_id,) = struct.unpack_from(">H", body, i); i += 2
+            if opt_id == 0x0000:
+                _cn, i = _read_cql_string(body, i)
+        (row_count,) = struct.unpack_from(">I", body, i); i += 4
+        for _r in range(row_count):
+            for c in range(col_count):
+                if i + 4 > len(body):
+                    return names
+                (vlen,) = struct.unpack_from(">i", body, i); i += 4
+                if vlen < 0:
+                    continue                    # NULL cell
+                if i + vlen > len(body):
+                    return names
+                if c == 0:
+                    names.append(body[i:i + vlen].decode("utf-8", "replace"))
+                i += vlen
+    except (struct.error, IndexError, UnicodeDecodeError):
+        pass
+    return names
+
+
 def _parse_system_local(body: bytes) -> dict:
     """Best-effort parse of a Rows RESULT for SELECT release_version,cluster_name,
     data_center,partitioner FROM system.local. Returns the first row's values keyed by
@@ -176,7 +232,8 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
     partitioner, error}."""
     res: dict = {"reachable": False, "is_cassandra": False, "no_auth": False,
                  "authenticator": "", "version": "", "cluster": "", "datacenter": "",
-                 "partitioner": "", "error": ""}
+                 "partitioner": "", "keyspaces": [], "user_keyspaces": [],
+                 "error": ""}
     try:
         with socket.create_connection((ip, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
@@ -216,6 +273,17 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
                 res["cluster"] = row.get("cluster_name", "")
                 res["datacenter"] = row.get("data_center", "")
                 res["partitioner"] = row.get("partitioner", "")
+            # T2 extension: enumerate keyspaces on the same unauth session. One safe
+            # SELECT against system_schema.keyspaces (world-readable on every version);
+            # confirms application data is exposed, not just system metadata.
+            query2 = "SELECT keyspace_name FROM system_schema.keyspaces"
+            qbody2 = _long_string(query2) + struct.pack(">HB", 0x0001, 0x00)
+            sock.sendall(_frame(_OP_QUERY, qbody2, stream=3))
+            opcode, body = _read_frame(sock)
+            if opcode is not None and (opcode & 0x7F) == _OP_RESULT:
+                ks = _parse_keyspaces(body)
+                res["keyspaces"] = ks
+                res["user_keyspaces"] = [n for n in ks if n and n not in _SYS_KEYSPACES]
     except (OSError, socket.timeout, struct.error, ValueError) as e:
         res["error"] = res["error"] or str(e)
     return res
@@ -236,6 +304,11 @@ _NARRATIVE = {
         "The Cassandra build may be affected by the UDF sandbox-escape RCE "
         "(CVE-2021-44521) and other fixed issues - confirm the release_version and "
         "upgrade / restrict FUNCTION permissions."),
+    "cassandra_user_keyspaces": (
+        "recce enumerated non-system keyspaces on the unauthenticated Cassandra node "
+        "- real application data is now readable and writable to anyone who can reach "
+        "9042. Turn on authentication, firewall the CQL / gossip / JMX ports, and "
+        "restrict per-keyspace SELECT/MODIFY before dumping proceeds."),
 }
 
 TESTING_NARRATIVE = [
@@ -295,6 +368,29 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "system_schema.keyspaces' ; cqlsh <ip> <port> -e 'SELECT "
                         "role,salted_hash,is_superuser FROM system_auth.roles' - "
                         "the bcrypt hashes feed hashcat -m 3200."),
+                    depth_tier="t2"))
+            uks = pr.get("user_keyspaces") or []
+            if pr.get("no_auth") and uks:
+                shown = ", ".join(uks[:5]) + (f", +{len(uks) - 5} more"
+                                              if len(uks) > 5 else "")
+                out.append(_finding(
+                    "medium",
+                    "Apache Cassandra - application keyspaces readable (unauth)", tgt,
+                    f"recce enumerated {len(uks)} non-system keyspace(s) on the "
+                    f"unauthenticated CQL endpoint: {shown}. Every listed keyspace "
+                    "can be dumped or tampered with no credential.",
+                    "cqlsh",
+                    f"cqlsh {h.ip} {p.portid} -e 'DESCRIBE KEYSPACE {uks[0]}' ; "
+                    f"cqlsh {h.ip} {p.portid} -e 'SELECT * FROM {uks[0]}.<table> "
+                    "LIMIT 20'",
+                    "Enable PasswordAuthenticator + CassandraAuthorizer; grant "
+                    "per-keyspace SELECT/MODIFY only to the app roles that need it.",
+                    ["CWE-200", "CWE-284"], kind="cassandra_user_keyspaces",
+                    exploit_note=(
+                        "cqlsh <ip> <port> -e 'SELECT * FROM system_schema.keyspaces' "
+                        "; cqlsh <ip> <port> -e 'SELECT role,salted_hash,is_superuser "
+                        "FROM system_auth.roles' - the bcrypt hashes feed hashcat "
+                        "-m 3200."),
                     depth_tier="t2"))
             if ver and _old_version(ver):
                 out.append(_finding(
