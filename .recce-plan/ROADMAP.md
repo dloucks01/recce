@@ -7,6 +7,43 @@ tool.
 
 ## Session-recovery context (read this first)
 
+**Since this roadmap was authored, the following also shipped** (chronological, HEAD-first):
+- **P3-1 (fb3364e):** 12 cross-service chain-correlation rules in
+  `/api/scan/suggestions` — AD-Kerberos, cloud IMDS pivot, container
+  escape, HashiCorp stack, NTLM harvest, unauth datastore data-mine,
+  MSSQL linked-privesc, coerce+relay, printer→domain-creds, OT
+  process-impact (safety-first), ESXi/vCenter takeover, +1. Each fires
+  on 2+ Vuln.script_id triggers with paste-ready command strings.
+- **P2-1 batches 1-3 (6ab76a5, fe43684):** medium-severity gap-fill
+  across mongodb/smtp/dns/kerberos/snmp/cassandra. Every other module
+  audited (ldap/smb/ntp/ftp/imap/webdav/coap/pop3/elasticsearch/
+  prometheus/rtsp/opcua) came back saturated — medium tier of Phase 5a
+  audit is now closed for all high-gap services.
+- **P2-2 batch 2 (df889e1):** 6 deferred capabilities — mssql
+  replication_and_agent_secrets_disclosure, postgres
+  replication_startup_leak, k8s admission_webhook_disclosure, vault
+  mount_list_leak, redis cluster_topology_disclosure, http
+  actuator_env_deep_leak.
+- **P0-1 batches 4-5 (7c9dc1a, prior):** additional SAFE T1→T2
+  promotions across rdp/winrm/msrpc/oracle/influxdb/docker_registry/
+  sip/bgp/stun_turn/minecraft/ipmi/nbd_ndmp and earlier batches.
+- **P2-2 batch 1 (15b97fb):** mssql sp_execute_external_script +
+  contained_db + DAC 1434, mysql X Protocol, ssh hostkey_reuse.
+- **P2-3 / P2-4 / P2-5 / P2-6 (1bbc4cf, 633ce86, 9bb16d4, 74e8828):**
+  all shipped (bloodhound push, `recce suggest`, prove uplift,
+  shared-surface consumers).
+
+**Still open / externally blocked:**
+- P1-1 compose OT profile — Docker Hub unreachable from build box.
+- P1-2 Vagrant plane — needs user real-time (~4GB VM downloads).
+- P2-2 remainder — Log4Shell OOB, HTTP request smuggling active PoC,
+  HTTP/2 rapid-reset, Spring4Shell — all require OOB callback
+  infrastructure recce doesn't have.
+- P0-1 long tail — ~120+ candidates remain in the audit, but batches
+  2-6 confirm the highest-value ones already shipped.
+
+---
+
 **What just shipped (last major block):**
 - Phase A: 77 services × 667 finding kinds scored against T0-T4
   rubric. Data at `.recce-plan/depth-audit/<slug>.json`.
