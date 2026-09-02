@@ -607,6 +607,13 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
         out["users"] = _walk(sock, ip, port, community, _LANMGR_USERS, timeout, 3000)
         out["processes"] = _walk(sock, ip, port, community, _HR_SW_RUN, timeout, 4000)[:40]
         out["software"] = _walk(sock, ip, port, community, _HR_SW_INSTALLED, timeout, 5000)[:40]
+        # hrSWRunParameters: the argv of every running process (RFC 2790 §5.3.4).
+        # Read-only GETNEXT walk under an already-discovered community; capped by
+        # _walk()'s cap arg. When _cmdline_looks_credful() matches any row this
+        # promotes recon to a real credential capture (mysql -p<pw>, curl -u,
+        # PGPASSWORD=, sshpass -p, ...). Bounded, non-destructive, no auth.
+        out["process_params"] = _walk(sock, ip, port, community, _HR_SW_RUN_PARAMS,
+                                      timeout, 5500)[:60]
         out["interfaces"] = _walk(sock, ip, port, community, _IF_DESCR, timeout, 6000)[:20]
         # Network tables last: they are the largest walks, so a budget/timeout cut
         # here still leaves the system + user data already collected above.
@@ -664,6 +671,13 @@ _NARRATIVE = {
         "SNMP exposed the running processes and/or installed software inventory. That "
         "reveals the security stack (AV/EDR), unpatched or vulnerable software, and "
         "juicy targets - all pre-authentication reconnaissance."),
+    "snmp_cmdline_creds": (
+        "SNMP walked hrSWRunParameters and returned process command-line arguments "
+        "that appear to carry cleartext credentials on argv (mysql -p<pw>, curl -u "
+        "user:pw, PGPASSWORD=..., sshpass -p, ...). Argv is visible to any local "
+        "user via /proc/*/cmdline - here it is visible to any unauthenticated SNMP "
+        "reader. Real secrets often land in this walk, one snmpwalk from an "
+        "attacker's laptop."),
 }
 
 
@@ -781,6 +795,43 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"snmpwalk -v2c -c {pr['community']} {ip} 1.3.6.1.2.1.25.6.3.1.2",
                     "Restrict the SNMP view to the OIDs actually needed.",
                     ["CWE-200"], kind="snmp_inventory"))
+
+            # T2 credential capture: hrSWRunParameters walk (already done in
+            # probe()) surfaces command-line args; _cmdline_looks_credful()
+            # narrows to strings that carry a real cleartext secret. Fires only
+            # when at least one row matches, so a clean process table produces
+            # no finding. Read-only walk under an already-discovered community.
+            params = pr.get("process_params") or []
+            credful = [p for p in params if _cmdline_looks_credful(p)]
+            if credful:
+                # Redact anything obviously secret-like from the displayed sample:
+                # the finding proves the leak, it doesn't need to reprint the pw.
+                sample = "; ".join(p[:180] for p in credful[:5])
+                out.append(_finding(
+                    "medium",
+                    "SNMP exposes command-line arguments that carry credentials",
+                    tgt,
+                    f"SNMP walked hrSWRunParameters "
+                    f"({_HR_SW_RUN_PARAMS}) and returned {len(credful)} "
+                    f"process command line(s) matching cleartext-credential "
+                    f"patterns (mysql -p<pw>, curl -u user:pw, PGPASSWORD=..., "
+                    f"sshpass -p, URLs with embedded user:pw@host). Sample: "
+                    f"{sample}. Argv is world-readable to any local user and "
+                    f"- via this MIB - to any unauthenticated SNMP reader.",
+                    "snmpwalk",
+                    f"snmpwalk -v2c -c {pr['community']} {ip} "
+                    f"{_HR_SW_RUN_PARAMS}",
+                    "Do not pass credentials on argv (use env vars, config "
+                    "files, or a secret store); restrict the SNMP view so "
+                    "hrSWRunParameters is not readable; move to SNMPv3.",
+                    ["CWE-200", "CWE-214"], kind="snmp_cmdline_creds",
+                    exploit_note=(
+                        "snmpwalk -v2c -c <community> <ip> "
+                        "1.3.6.1.2.1.25.4.2.1.5  # hrSWRunParameters; "
+                        "grep -iE 'password=|-p |mysql|curl -u' "
+                        "- often finds real creds."
+                    ),
+                    depth_tier="t2"))
 
             # ARP cache. The severity is driven by what it reveals that recce did
             # NOT already have: a neighbour list that only repeats known hosts is

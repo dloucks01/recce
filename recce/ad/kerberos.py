@@ -857,6 +857,18 @@ _NARRATIVE = {
         "(the default Kerberos skew tolerance). Kerberos AS/TGS exchanges will fail with "
         "KRB_AP_ERR_SKEW; a DC drifting off NTP is also an attacker-controlled DHCP/NTP "
         "opportunity. Verify the DC's NTP source and monitor time-service events."),
+    "kpasswd_exposed": (
+        "TCP/464 (kpasswd, RFC 3244) is reachable on the DC. The Microsoft set-password "
+        "variant needs ONLY a valid TGT and the target principal - no old password - so "
+        "any cracked AS-REP hash, sprayed credential, or forged ticket can rewrite an "
+        "account's password. Restrict kpasswd to management networks and audit set-password "
+        "events (4724 on AD DCs) alongside logon events."),
+    "kerberos_udp_fallback": (
+        "The KDC answered a pre-auth-less AS-REQ over UDP/88 (RFC 4120 sec 7.2.1). Firewalls that "
+        "permit UDP/88 but drop TCP/88 currently read as 'no KDC' to TCP-only clients, "
+        "and KRB_ERR_RESPONSE_TOO_BIG (52) on UDP is a reliable AD-vs-MIT fingerprint. "
+        "Align UDP/88 and TCP/88 in the firewall policy so hardening a single transport "
+        "does not create a silent bypass."),
 }
 
 
@@ -1142,3 +1154,156 @@ def kdc_probe_findings(dc_ip: str, probe: dict,
                 "impacket call: faketime '<kdc-stime>' impacket-getTGT ..."),
             depth_tier="t1"))
     return out
+
+
+# --- kpasswd exposure probe (TCP/464, RFC 3244) ---------------------------------
+# The Kerberos password-change protocol on port 464 is often stood up alongside
+# the KDC on 88. Its Microsoft set-password variant (impacket's changepasswd.py
+# after AS-REP roast / noPac) needs ONLY a valid TGT and the target principal
+# to rewrite an account's password — no old password. Operators need to know
+# when 464 is exposed so they can plan for that pivot. The probe is a bare
+# TCP connect: no bytes are sent, no state is changed, no auth is attempted.
+# A completed handshake proves the port speaks on this DC.
+
+_KPASSWD_PORT = 464
+
+
+def _kpasswd_reachable(dc_ip: str, timeout: float) -> bool:
+    """Return True if a TCP connect to `dc_ip:464` completes within `timeout`.
+    Isolated so tests monkeypatch this without opening real sockets."""
+    from ..core import proxy
+    try:
+        sock = socket.create_connection((dc_ip, _KPASSWD_PORT),
+                                        timeout=proxy.scaled(timeout))
+    except OSError:
+        return False
+    try:
+        return True
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def kpasswd_probe(dc_ip: str, timeout: float = _TIMEOUT) -> dict:
+    """One TCP connect to port 464. Returns {reachable: bool}. No bytes are
+    sent — a completed connect is proof enough that the KDC exposes the
+    kpasswd service."""
+    return {"reachable": _kpasswd_reachable(dc_ip, timeout)}
+
+
+def kpasswd_findings(dc_ip: str, probe: dict) -> list[dict]:
+    """Emit a medium finding when kpasswd is reachable on the DC — RFC 3244
+    set-password is the standard post-crack pivot (impacket changepasswd)."""
+    if not probe.get("reachable"):
+        return []
+    tgt = f"{dc_ip}:{_KPASSWD_PORT}"
+    return [_finding(
+        "medium",
+        "Kerberos kpasswd service exposed (port 464)",
+        tgt,
+        "TCP 464 (kpasswd) is reachable on the DC. RFC 3244 defines a "
+        "Microsoft set-password variant that needs ONLY a valid TGT and the "
+        "target principal (no old password) — the exact primitive impacket's "
+        "changepasswd.py uses after AS-REP-roasting or noPac. Any cracked, "
+        "sprayed, or forged TGT can rewrite the account's password.",
+        "impacket-changepasswd",
+        f"impacket-changepasswd '<realm>/<user>@{dc_ip}' -newpass 'NewPass1!' "
+        "-reset",
+        "Restrict kpasswd exposure to management networks; audit set-password "
+        "events (4724 on AD DCs); tighten delegation on service accounts so a "
+        "captured TGT cannot rotate their passwords silently.",
+        ["CWE-306"], kind="kpasswd_exposed",
+        exploit_note=(
+            "Roast or spray a TGT for a service account, then "
+            "impacket-changepasswd '<realm>/<user>@<dc>' -newpass 'X!' -reset "
+            "against port 464 to rewrite the account password without knowing "
+            "the current one."),
+        depth_tier="t1")]
+
+
+# --- UDP transport probe (RFC 4120 sec 7.2.1) ---------------------------------------
+# _send_recv is TCP-only. A firewall that permits UDP/88 but drops TCP/88
+# currently reads as 'no KDC' to recce. Sending the same pre-auth-less AS-REQ
+# over UDP is the transport-fallback check; a KDC that answers over UDP is
+# reachable and the KRB-ERROR reply is mineable. If the KDC returns
+# KRB_ERR_RESPONSE_TOO_BIG (52) that is a well-known AD-vs-MIT fingerprint
+# (RFC 4120 sec 7.2.1 requires the client retry over TCP for oversized replies).
+
+KRB_ERR_RESPONSE_TOO_BIG = 52
+
+
+def _send_recv_udp(dc_ip: str, payload: bytes, timeout: float) -> bytes | None:
+    """Kerberos over UDP: raw datagram, no 4-byte length prefix (RFC 4120 sec 7.2.1).
+    Isolated for tests: fixtures monkeypatch this without touching a real socket."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return None
+    try:
+        sock.settimeout(timeout)
+        sock.sendto(payload, (dc_ip, _PORT))
+        data, _addr = sock.recvfrom(65535)
+        return data
+    except OSError:
+        return None
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def udp_transport_probe(dc_ip: str, realm: str, user: str = "krbtgt",
+                        timeout: float = _TIMEOUT) -> dict:
+    """One pre-auth-less AS-REQ over UDP/88. Returns
+    {reachable, code?, too_big}. `too_big` is KRB_ERR_RESPONSE_TOO_BIG (52) —
+    the AD-vs-MIT fingerprint. No auth is attempted; the primitive is the same
+    AS-REQ user_enum already sends over TCP, just via UDP."""
+    from ..core import proxy
+    out: dict = {"reachable": False, "code": None, "too_big": False}
+    payload = build_as_req(user, realm.upper())
+    reply = _send_recv_udp(dc_ip, payload, proxy.scaled(timeout))
+    if not reply:
+        return out
+    out["reachable"] = True
+    code = _kdc_error_code(reply)
+    if code is not None:
+        out["code"] = code
+        out["too_big"] = code == KRB_ERR_RESPONSE_TOO_BIG
+    return out
+
+
+def udp_transport_findings(dc_ip: str, probe: dict) -> list[dict]:
+    """Emit a medium finding when the KDC answers over UDP/88 — transport
+    fallback that TCP-only tools miss, and the too-big oracle is an AD-vs-MIT
+    fingerprint."""
+    if not probe.get("reachable"):
+        return []
+    tgt = f"{dc_ip}:88"
+    detail = ("The KDC answered a pre-auth-less AS-REQ over UDP/88 "
+              "(RFC 4120 sec 7.2.1). Firewalls that permit UDP/88 but drop TCP/88 "
+              "read as 'no KDC' to TCP-only clients (recce's default path), so "
+              "a UDP-reachable KDC is a silent bypass of a TCP-only firewall "
+              "policy.")
+    if probe.get("too_big"):
+        detail += (" The KDC returned KRB_ERR_RESPONSE_TOO_BIG (52) — a "
+                   "well-known AD-vs-MIT fingerprint; RFC 4120 sec 7.2.1 requires "
+                   "the client to retry over TCP for oversized replies.")
+    return [_finding(
+        "medium",
+        "Kerberos KDC reachable over UDP/88 (transport fallback)",
+        tgt,
+        detail,
+        "nmap",
+        f"nmap -sU -p 88 --script krb5-enum-users {dc_ip}",
+        "Align UDP/88 and TCP/88 in the firewall policy; if TCP-only is "
+        "intended, block UDP/88 so hardening one transport does not leave "
+        "the other open.",
+        ["CWE-693"], kind="kerberos_udp_fallback",
+        exploit_note=(
+            "When TCP/88 is filtered, retry Kerberos enumeration via UDP: "
+            "nmap -sU -p 88 --script krb5-enum-users <dc>, or force impacket "
+            "onto UDP transport, to reach a DC that TCP-only tools miss."),
+        depth_tier="t1")]

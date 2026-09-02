@@ -326,6 +326,168 @@ class MongoStartupWarnings(unittest.TestCase):
         self.assertIn("CWE-532", wf[0]["cwes"])
 
 
+class MongoStartupWarningsSubFindings(unittest.TestCase):
+    """Startup warnings are classified into typed sub-findings (auth-off,
+    bind-all, THP) so the tester tracks each misconfig individually. Pure
+    parsing over the already-captured `startup_warnings` list — no new
+    network — and the generic mongo_startup_warnings finding is preserved."""
+
+    def setUp(self):
+        # Wire-realistic real-mongod startup lines. All three categories
+        # (auth-off, all-interfaces bind, THP) are present so each sub-
+        # finding must fire exactly once. RFC/wire fixtures: these strings
+        # come straight from the mongod source's warning generators.
+        log_array = (b"\x04" + M._cstr("log")
+                     + M.bson_doc(
+                         M._e_str("0",
+                                  "** WARNING: Access control is not enabled "
+                                  "for the database. Read and write access to "
+                                  "data and configuration is unrestricted."),
+                         M._e_str("1",
+                                  "** WARNING: This server is bound to "
+                                  "0.0.0.0. Remote systems will be able to "
+                                  "connect to this server."),
+                         M._e_str("2",
+                                  "** WARNING: /sys/kernel/mm/transparent_"
+                                  "hugepage/enabled is 'always'. We suggest "
+                                  "setting it to 'never'."),
+                         M._e_str("3",
+                                  "** WARNING: soft rlimits too low."),
+                     ))
+        replies = _base_replies()
+        replies["getLog"] = M.bson_doc(
+            M._e_int32("totalLinesWritten", 4),
+            _e_double("ok", 1.0),
+            log_array,
+        )
+        self.port = _serve(replies)
+
+    def test_all_three_categories_emit(self):
+        pr = M.probe("127.0.0.1", self.port)
+        fs = M.findings([_host(self.port)], {("127.0.0.1", self.port): pr})
+        kinds = [f["kind"] for f in fs]
+        # Generic finding is preserved (additive contract).
+        self.assertIn("mongo_startup_warnings", kinds)
+        # Each specific category fires exactly once.
+        for expect in ("mongo_misconfig_auth_off",
+                       "mongo_misconfig_bind_all",
+                       "mongo_misconfig_thp"):
+            self.assertEqual(kinds.count(expect), 1,
+                             f"expected exactly one {expect} finding")
+        # Every sub-finding is medium, T1, tagged with expected CWEs, and
+        # carries an exploit_note (tester_next_step) plus the matched line.
+        by_kind = {f["kind"]: f for f in fs}
+        auth = by_kind["mongo_misconfig_auth_off"]
+        self.assertEqual(auth["severity"], "medium")
+        self.assertEqual(auth["depth_tier"], "t1")
+        self.assertIn("CWE-306", auth["cwes"])
+        self.assertTrue(auth.get("exploit_note"))
+        self.assertIn("Access control is not enabled", auth["detail"])
+        bind = by_kind["mongo_misconfig_bind_all"]
+        self.assertEqual(bind["severity"], "medium")
+        self.assertIn("CWE-668", bind["cwes"])
+        self.assertIn("0.0.0.0", bind["detail"])
+        thp = by_kind["mongo_misconfig_thp"]
+        self.assertEqual(thp["severity"], "medium")
+        self.assertIn("CWE-1188", thp["cwes"])
+        self.assertIn("transparent_hugepage", thp["detail"])
+
+
+class MongoStartupWarningsNoSubFindingsWhenBenign(unittest.TestCase):
+    """When the startup log carries only benign / unrecognised lines (server
+    patched / hardened), the generic finding still emits from the warnings
+    list but NO typed sub-findings appear — the classifier must not
+    fabricate misconfigs it didn't see."""
+
+    def setUp(self):
+        log_array = (b"\x04" + M._cstr("log")
+                     + M.bson_doc(
+                         M._e_str("0",
+                                  "** WARNING: soft rlimits too low. "
+                                  "rlimits set to 1024 processes, 64000 files."),
+                     ))
+        replies = _base_replies()
+        replies["getLog"] = M.bson_doc(
+            M._e_int32("totalLinesWritten", 1),
+            _e_double("ok", 1.0),
+            log_array,
+        )
+        self.port = _serve(replies)
+
+    def test_only_generic_finding_emits(self):
+        pr = M.probe("127.0.0.1", self.port)
+        fs = M.findings([_host(self.port)], {("127.0.0.1", self.port): pr})
+        kinds = {f["kind"] for f in fs}
+        self.assertIn("mongo_startup_warnings", kinds)
+        for absent in ("mongo_misconfig_auth_off",
+                       "mongo_misconfig_bind_all",
+                       "mongo_misconfig_thp"):
+            self.assertNotIn(absent, kinds,
+                             f"{absent} must not fabricate when line absent")
+
+
+class MongoStartupWarningsSubFindingsDedupe(unittest.TestCase):
+    """A real mongod restart log often repeats the same warning verbatim (or
+    with a fresh timestamp) across several lines. Each recognised category
+    must fire at MOST once — duplicate lines are collapsed."""
+
+    def setUp(self):
+        log_array = (b"\x04" + M._cstr("log")
+                     + M.bson_doc(
+                         M._e_str("0",
+                                  "** WARNING: Access control is not enabled "
+                                  "for the database."),
+                         M._e_str("1",
+                                  "** WARNING: Access control is not enabled "
+                                  "for the database."),
+                         M._e_str("2",
+                                  "** WARNING: Access control is not enabled "
+                                  "for the database."),
+                     ))
+        replies = _base_replies()
+        replies["getLog"] = M.bson_doc(
+            M._e_int32("totalLinesWritten", 3),
+            _e_double("ok", 1.0),
+            log_array,
+        )
+        self.port = _serve(replies)
+
+    def test_single_finding_per_category(self):
+        pr = M.probe("127.0.0.1", self.port)
+        fs = M.findings([_host(self.port)], {("127.0.0.1", self.port): pr})
+        auth_hits = [f for f in fs if f["kind"] == "mongo_misconfig_auth_off"]
+        self.assertEqual(len(auth_hits), 1,
+                         "duplicated warning lines must collapse to one finding")
+
+
+class MongoStartupWarningsClassifierUnit(unittest.TestCase):
+    """Pure-function unit test of the classifier — no sockets, no wire — to
+    pin the regex behaviour independently of the probe path."""
+
+    def test_recognises_expected_categories(self):
+        lines = [
+            "** WARNING: Access control is not enabled for the database.",
+            "** WARNING: bindIpAll is true; listening on all interfaces.",
+            "** WARNING: /sys/kernel/mm/transparent_hugepage/enabled is 'always'.",
+        ]
+        got = {t[0] for t in M._classify_startup_warnings(lines)}
+        self.assertEqual(got, {"mongo_misconfig_auth_off",
+                               "mongo_misconfig_bind_all",
+                               "mongo_misconfig_thp"})
+
+    def test_empty_and_non_list_input_safe(self):
+        self.assertEqual(M._classify_startup_warnings([]), [])
+        self.assertEqual(M._classify_startup_warnings(None), [])  # type: ignore[arg-type]
+        # Non-string entries must be ignored, not raise.
+        self.assertEqual(M._classify_startup_warnings([123, None, {}]), [])
+
+    def test_unrecognised_lines_produce_nothing(self):
+        lines = ["** WARNING: soft rlimits too low.",
+                 "** WARNING: mongod is running as root.",
+                 "info line, not a warning"]
+        self.assertEqual(M._classify_startup_warnings(lines), [])
+
+
 class MongoClusterKeyfileExtraction(unittest.TestCase):
     """local.system.keys read -> __system credential harvested + critical finding."""
 

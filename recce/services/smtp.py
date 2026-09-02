@@ -10,9 +10,11 @@ Findings fold into the severity totals / Vulnerabilities sheet (source="smtp").
 """
 from __future__ import annotations
 
+import base64
 import re
 import smtplib
 import socket
+import struct
 
 from ..core.models import Host, Port
 
@@ -64,6 +66,14 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
             srv.docmd("RSET")
         except smtplib.SMTPException:
             pass
+        # NTLM Type-2 AV_PAIR harvest (T2 evidence for smtp_auth_ntlm_leak):
+        # only fires when the server actually advertised NTLM in AUTH. Sends
+        # AUTH NTLM + a stock Type-1 blob and reads the returned Type-2 for
+        # NetBIOS/DNS computer + domain + forest names. Aborts SASL with `*`
+        # before completing — no credential submitted, no auth attempt logged
+        # on the server as a login. Same primitive pop3.py / mssql already use.
+        if "NTLM" in _split_auth_mechs(res.get("auth", "")):
+            res["ntlm_info"] = _ntlm_type2_smtp(srv, timeout)
         try:
             srv.quit()
         except smtplib.SMTPException:
@@ -327,13 +337,39 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     depth_tier="t0"))
             leaky = [m for m in mechs if m in _LEAKY_AUTH_MECHS]
             if leaky:
-                out.append(_finding(
-                    "medium", "SMTP AUTH advertises NTLM/GSSAPI (info-disclosure primitive)",
-                    tgt,
+                # T2 upgrade: recce's own AUTH NTLM + Type-1 exchange captured
+                # the server's Type-2 CHALLENGE_MESSAGE and parsed real AV_PAIR
+                # values (NetBIOS/DNS computer + domain + forest). A bare mech
+                # advertisement stays T0 — only harvested AV_PAIRs prove the
+                # info-disclosure primitive is live.
+                ntlm_info = pr.get("ntlm_info") or {}
+                harvested = {k: v for k, v in ntlm_info.items() if v}
+                ntlm_tier = "t2" if harvested else "t0"
+                ntlm_sev = "high" if harvested else "medium"
+                ntlm_output = ""
+                if harvested:
+                    fields = ", ".join(f"{k}={v}" for k, v in harvested.items())
+                    ntlm_output = (
+                        "SMTP AUTH NTLM Type-2 CHALLENGE_MESSAGE AV_PAIRs "
+                        "(MS-NLMP §2.2.2.10). Every value is server-side "
+                        "evidence of the AD anchor; each seeds "
+                        "known_hostnames / known_domains across the "
+                        f"engagement.\n{fields}")
+                detail = (
                     f"AUTH {', '.join(leaky)} is advertised. Sending an NTLM "
                     f"Type-1 unsolicited returns a Type-2 CHALLENGE_MESSAGE whose "
                     f"AV pairs leak NetBIOS computer/domain, DNS computer/domain, "
-                    f"forest, and OS build with no authentication required.",
+                    f"forest, and OS build with no authentication required.")
+                if harvested:
+                    detail += (
+                        f" CHAINED: recce's Type-1/Type-2 exchange harvested "
+                        f"{len(harvested)} AV_PAIR value(s): "
+                        + ", ".join(f"{k}={v}" for k, v in harvested.items())
+                        + ". Feeds known_hostnames / known_domains.")
+                out.append(_finding(
+                    ntlm_sev,
+                    "SMTP AUTH advertises NTLM/GSSAPI (info-disclosure primitive)",
+                    tgt, detail,
                     f"nmap -p{p.portid} --script smtp-ntlm-info {h.ip}",
                     "Restrict AUTH NTLM to internal network segments; prefer AUTH "
                     "PLAIN/EXTERNAL over TLS.",
@@ -342,7 +378,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "nmap -p25,587 --script smtp-ntlm-info IP ; the "
                         "script's Target_Name and NetBIOS_Domain_Name are "
                         "the AD-anchor for further pivot."),
-                    depth_tier="t0"))
+                    depth_tier=ntlm_tier, output=ntlm_output))
             # Banner fingerprint -> product + version-gated CVEs.
             fp = pr.get("fingerprint") or {}
             for c in (fp.get("cves") or []):
@@ -414,6 +450,85 @@ _EXPN_ADDR = re.compile(r"([A-Za-z0-9._%+\-]+(?:@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})?
 _WEAK_AUTH_MECHS = ("CRAM-MD5", "DIGEST-MD5", "LOGIN", "PLAIN")
 # Mechs whose challenge alone leaks NetBIOS/DNS/OS info (MS-NLMP §2.2.1.2).
 _LEAKY_AUTH_MECHS = ("NTLM", "GSSAPI")
+
+
+# NTLM Type-2 AV_PAIR types we harvest for the AD anchor (MS-NLMP §2.2.2.10).
+# Anything past 0x0005 (dns_tree/forest) is either a signature/timestamp or
+# a channel-binding value — none of it feeds known_hostnames / known_domains,
+# so we do not surface it.
+_AV_TYPES = {0x0001: "nb_computer", 0x0002: "nb_domain", 0x0003: "dns_computer",
+             0x0004: "dns_domain", 0x0005: "dns_tree"}
+
+
+def _parse_av_pairs(target_info: bytes) -> dict:
+    """Extract the AV_PAIR fields we care about from a Type-2 TargetInfo blob.
+
+    MS-NLMP §2.2.2.1: AV_PAIR is `<AvId:uint16><AvLen:uint16><Value:bytes>`
+    concatenated; a terminator record `0x0000 0x0000` ends the list. Values
+    are UTF-16-LE strings for name-shaped fields (per §2.2.2.10). We only
+    surface AvIds in `_AV_TYPES`; anything else is skipped."""
+    out: dict = {}
+    i = 0
+    n = len(target_info)
+    while i + 4 <= n:
+        av_id, av_len = struct.unpack_from("<HH", target_info, i)
+        i += 4
+        if av_id == 0x0000:
+            break
+        if i + av_len > n:
+            break
+        if av_id in _AV_TYPES:
+            out[_AV_TYPES[av_id]] = target_info[i:i + av_len].decode(
+                "utf-16-le", "replace")
+        i += av_len
+    return out
+
+
+def _ntlm_type2_smtp(srv, timeout: float) -> dict:
+    """AUTH NTLM + stock Type-1 blob over an already-open SMTP session; parse
+    the returned Type-2 CHALLENGE_MESSAGE for AV_PAIRs.
+
+    Returns {} if the exchange failed at any step or the server declined the
+    mech (any non-334 response). The SASL exchange is ALWAYS aborted with a
+    single `*` line before completing — nothing is submitted as a Type-3
+    authenticate, so no credential attempt is registered on the server.
+
+    Uses the caller-provided smtplib session (`srv`) so no new socket / no
+    unbounded timeout: every docmd inherits the connection's own timeout,
+    which is scaled by proxy.scaled() at the probe entry point."""
+    from ..ad import ntlm
+    try:
+        code, _ = srv.docmd("AUTH", "NTLM")
+        if code != 334:
+            return {}
+        b64_t1 = base64.b64encode(ntlm.type1()).decode("ascii")
+        code, msg = srv.docmd(b64_t1)
+    except (smtplib.SMTPException, OSError, socket.timeout):
+        return {}
+    if code != 334:
+        # Server rejected the Type-1 mid-exchange — abort SASL politely.
+        try:
+            srv.docmd("*")
+        except (smtplib.SMTPException, OSError, socket.timeout):
+            pass
+        return {}
+    text = msg.decode("ascii", "replace") if isinstance(msg, bytes) else str(msg)
+    try:
+        raw = base64.b64decode(text.strip(), validate=False)
+    except (ValueError, TypeError):
+        raw = b""
+    # Abort SASL BEFORE we do any parsing — the abort is what keeps the probe
+    # non-destructive (no Type-3 sent, no auth attempt logged).
+    try:
+        srv.docmd("*")
+    except (smtplib.SMTPException, OSError, socket.timeout):
+        pass
+    if not raw:
+        return {}
+    t2 = ntlm.parse_type2(raw)
+    if not t2:
+        return {}
+    return _parse_av_pairs(t2.get("target_info", b""))
 
 
 def _split_auth_mechs(auth_str: str) -> list[str]:

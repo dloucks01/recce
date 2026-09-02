@@ -669,6 +669,26 @@ _NARRATIVE = {
         "getLog:'startupWarnings' - auth-off, all-interfaces bind, weak TLS, "
         "deprecated storage engines, and similar. Treat every listed line as an "
         "explicit misconfiguration finding to remediate."),
+    "mongo_misconfig_auth_off": (
+        "The startup log confirms `security.authorization` is not enabled - "
+        "the server accepts any command with no credential. This is the same "
+        "class of exposure as mongo_unauth but sourced from the server's own "
+        "self-report; it's a positive server-declared verification that auth "
+        "is off, independent of whether a listDatabases probe happened to "
+        "return data on this run."),
+    "mongo_misconfig_bind_all": (
+        "The startup log reports the mongod listener is bound to every "
+        "interface (0.0.0.0 / ::). Combined with any auth weakness this is a "
+        "direct exposure to any network reachable by the host; the fix is "
+        "`net.bindIp` set to a trusted interface / localhost, or firewall the "
+        "port at the host / network layer."),
+    "mongo_misconfig_thp": (
+        "The startup log flags Transparent Huge Pages (THP) as enabled - "
+        "MongoDB's own operational guidance calls this a supportability risk "
+        "(latency spikes, memory-fragmentation-driven stalls). Not a direct "
+        "code-exec primitive, but an operator-visible misconfiguration that "
+        "typically clusters with other tuning/hardening gaps on the same "
+        "host, so it's surfaced as its own line so the fix can be tracked."),
     "mongo_cluster_keyfile": (
         "The instance exposed local.system.keys - the cluster-internal HMAC "
         "keys used by every mongod/mongos node to authenticate to each other "
@@ -704,6 +724,71 @@ TESTING_NARRATIVE = [
 
 
 _finding = finding_builder("mongodb", _NARRATIVE)
+
+
+# Startup-warning categoriser. Pure text classifier over the lines already
+# captured in pr["startup_warnings"] - no network, no state change, no new
+# probe. Each recognised category becomes its own typed sub-finding so the
+# tester tracks the specific misconfig, not a monolithic warnings blob. Only
+# recognised categories fire; unrecognised lines stay bundled in the generic
+# mongo_startup_warnings finding.
+_STARTUP_WARNING_CLASSES: tuple[tuple[str, str, str, str, str, str, tuple[str, ...]], ...] = (
+    # (regex, kind, severity, title, remediation, exploit_note, cwes)
+    (r"access\s+control\s+is\s+not\s+enabled",
+     "mongo_misconfig_auth_off", "medium",
+     "MongoDB startup log: access control is not enabled",
+     "Set security.authorization: enabled in mongod.conf and restart; create "
+     "an admin user via the localhost-exception before enabling if the "
+     "instance has no accounts yet.",
+     ("mongosh mongodb://<ip>:<port>/ --eval "
+      "'db.adminCommand({getCmdLineOpts:1}).parsed.security' # confirm "
+      "security.authorization is absent, then run listDatabases with no "
+      "credential to prove full read/write."),
+     ("CWE-306", "CWE-284")),
+    (r"(bound\s+to\s+0\.0\.0\.0|listening\s+on\s+all\s+interfaces|"
+     r"bindIpAll|bind_ip[_-]?all)",
+     "mongo_misconfig_bind_all", "medium",
+     "MongoDB startup log: listener bound to all interfaces",
+     "Set net.bindIp to a trusted interface (e.g. 127.0.0.1 or the internal "
+     "management NIC) in mongod.conf, or firewall the port at the host "
+     "and/or network layer.",
+     ("mongosh mongodb://<ip>:<port>/ --eval "
+      "'db.adminCommand({getCmdLineOpts:1}).parsed.net' # confirm bindIp is "
+      "0.0.0.0 / bindIpAll:true, then reach the port from an untrusted "
+      "subnet to prove exposure."),
+     ("CWE-668", "CWE-1327")),
+    (r"(transparent[\s_-]?huge[\s_-]?page|/sys/kernel/mm/transparent_hugepage|\bTHP\b)",
+     "mongo_misconfig_thp", "medium",
+     "MongoDB startup log: Transparent Huge Pages enabled",
+     "Disable THP for mongod per MongoDB's Production Notes: set "
+     "/sys/kernel/mm/transparent_hugepage/enabled and .../defrag to `never` "
+     "via tuned or a systemd unit, and reboot / restart mongod.",
+     ("cat /sys/kernel/mm/transparent_hugepage/enabled # on the mongod host - "
+      "expect '[never]'; anything else confirms the warning."),
+     ("CWE-1188",)),
+)
+
+
+def _classify_startup_warnings(lines: list) -> list:
+    """Classify each startup-warning line into (kind, severity, title,
+    remediation, exploit_note, cwes, matched_line). Each recognised category
+    fires at most once — MongoDB often repeats the same warning as separate
+    lines and duplicating findings is noise. Pure text classifier; no I/O."""
+    if not isinstance(lines, list):
+        return []
+    seen: set = set()
+    out: list = []
+    for ln in lines:
+        if not isinstance(ln, str):
+            continue
+        for pattern, kind, sev, title, rem, ex_note, cwes in _STARTUP_WARNING_CLASSES:
+            if kind in seen:
+                continue
+            if re.search(pattern, ln, re.IGNORECASE):
+                seen.add(kind)
+                out.append((kind, sev, title, rem, ex_note, list(cwes), ln))
+                break
+    return out
 
 
 def _old_version(ver: str) -> bool:
@@ -979,6 +1064,26 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "'db.adminCommand({getLog:\"startupWarnings\"})"
                         ".log.forEach(printjson)'"),
                     depth_tier="t1"))
+                # Per-category sub-findings so the tester tracks specific
+                # misconfigs (auth-off / bind-all / THP) individually.
+                # Additive — the generic finding above still surfaces the
+                # full list; these are the typed pointers into it. T1 with
+                # a positive server-declared verification (the server's own
+                # startup log — one-shot read, already captured).
+                for (skind, ssev, stitle, srem, sex_note,
+                     scwes, sline) in _classify_startup_warnings(short):
+                    out.append(_finding(
+                        ssev, stitle, tgt,
+                        "MongoDB's own startup log surfaces this specific "
+                        "misconfiguration line:\n\n  - " + sline
+                        + "\n\nSee the parent mongo_startup_warnings "
+                        "finding for the full server-declared list.",
+                        "mongosh",
+                        f"mongosh mongodb://{h.ip}:{p.portid}/ --eval "
+                        "'db.adminCommand({getLog:\"startupWarnings\"})"
+                        ".log.forEach(printjson)'",
+                        srem, scwes, kind=skind,
+                        exploit_note=sex_note, depth_tier="t1"))
             cks = pr.get("cluster_keys") or []
             if cks:
                 sample = cks[0]

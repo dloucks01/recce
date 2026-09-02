@@ -273,6 +273,34 @@ def _rr_query(ip: str, port: int, name: str, qtype: int,
     return rrs
 
 
+def open_recursion(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
+    """Detect an open recursive resolver — a server that accepts recursive
+    queries from unauthorized clients (the primitive abused for DNS
+    amplification / reflected DDoS).
+
+    Sends ONE recursive A-query for a name under the RFC 6761 .invalid TLD.
+    A locked-down authoritative server refuses cleanly (rcode REFUSED / NOTIMP)
+    or drops the query; an open resolver echoes RA=1 and returns a non-refused
+    rcode (NOERROR / NXDOMAIN / SERVFAIL — the server took the query even if
+    upstream resolution failed).
+
+    Returns {ok, ra, rcode}. ok=True is the "open resolver" signal
+    (RA=1 AND rcode not in {NOTIMP=4, REFUSED=5}). Read-only, no writes,
+    no state change — same probe shape as version.bind."""
+    probe_name = "recursion-test.recce.invalid"
+    resp = _tcp_dns(ip, port, _query(probe_name, _QTYPE_A, rd=True), timeout)
+    if not resp or len(resp) < 12:
+        return {"ok": False, "ra": False, "rcode": None}
+    _id, flags, _qd, _an, _ns, _ar = struct.unpack("!HHHHHH", resp[:12])
+    ra = bool(flags & 0x0080)
+    rcode = flags & 0x000F
+    # RA=1 alone is not enough (some auth servers echo the bit); pair with a
+    # non-refused rcode so we only fire when the server actually processed
+    # the recursive query.
+    ok = ra and rcode not in (4, 5)
+    return {"ok": ok, "ra": ra, "rcode": rcode}
+
+
 def _bucket_rrs(rrs: list[dict]) -> dict:
     """Group parsed RRs into a shape convenient for probe blob + findings.
 
@@ -769,6 +797,35 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "<zone> then hashcat -m 8300 nsec3.hashes "
                         "rockyou.txt to recover the hashed labels."),
                     depth_tier="t1"))
+            # Open recursive resolver — server processes recursive queries from
+            # unauthorized clients (the DNS-amplification primitive: small query
+            # → large answer reflected at a spoofed victim IP).
+            oreq = pr.get("open_recursion") or {}
+            if oreq.get("ok"):
+                out.append(_finding(
+                    "medium",
+                    "DNS server is an open recursive resolver",
+                    tgt,
+                    f"Server answered a recursive query for a name outside its "
+                    f"authoritative zones with RA=1 and rcode="
+                    f"{oreq.get('rcode')} (not REFUSED/NOTIMP) — it accepts "
+                    "recursion from arbitrary clients. Open resolvers are "
+                    "the classic building block for DNS amplification / "
+                    "reflected DDoS attacks (small spoofed request, large "
+                    "response reflected at the victim).",
+                    f"dig +recurse A recursion-test.recce.invalid @{h.ip}",
+                    "Restrict recursion to authorized clients "
+                    "(allow-recursion / allow-query-cache ACLs); "
+                    "auth-only servers should disable recursion entirely "
+                    "(options { recursion no; };).",
+                    ["CWE-406"], kind="dns_open_recursion",
+                    exploit_note=(
+                        "dig ANY isc.org @<ip> +bufsize=4096; measure the "
+                        "response/request byte ratio — a ratio >>1 with the "
+                        "server willing to recurse for unauthorized clients "
+                        "is the DNS amplification primitive. Report to "
+                        "openresolverproject.org or equivalent."),
+                    depth_tier="t1"))
             if pr.get("version") and "bind" in (pr.get("version") or "").lower():
                 out.append(_finding(
                     "low", "DNS server version disclosed (version.bind)", tgt,
@@ -905,9 +962,14 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             data = srv_mx_ns(t["ip"], t["port"], z)
             if data["srv"] or data["mx"] or data["ns"]:
                 service_records[z] = data
+        # Open-resolver detection: one recursive query for a name outside any
+        # of the target's likely zones (RFC 6761 .invalid). Read-only single
+        # query — matches the version.bind probe shape.
+        oreq = open_recursion(t["ip"], t["port"])
         return {"reachable": True, "version": ver, "axfr_zones": axfr_zones,
                 "records": rec, "email_sec": email_sec, "nsec": nsec,
-                "axfr_data": axfr_data, "service_records": service_records}
+                "axfr_data": axfr_data, "service_records": service_records,
+                "open_recursion": oreq}
 
     if active:
         for t, pr in svcprobe.iter_probe(targets, _probe, budget=budget,

@@ -2,7 +2,9 @@
 protocol to exercise the real smtplib-based probe (open relay / VRFY / STARTTLS)."""
 from __future__ import annotations
 
+import base64
 import socketserver
+import struct
 import threading
 
 from recce.services import smtp
@@ -353,6 +355,170 @@ def test_findings_smtp_vrfy_stays_t1_without_evidence():
     assert row["depth_tier"] == "t1"
     assert "output" not in row
     assert "CHAINED" not in row["detail"]
+
+
+# --- T2 promotion: NTLM Type-2 AV_PAIR harvest -------------------------------
+#
+# Fixtures are wire-derived: the Type-2 CHALLENGE_MESSAGE is built per
+# MS-NLMP §2.2.1.2 with an AV_PAIR TargetInfo block per §2.2.2.1. We do NOT
+# route the blob through any recce encoder to build it — only recce's
+# parser is under test.
+
+
+def _av(av_id: int, value: bytes) -> bytes:
+    return struct.pack("<HH", av_id, len(value)) + value
+
+
+def _build_type2(av_pairs: bytes) -> bytes:
+    """Minimal NTLMSSP CHALLENGE_MESSAGE (Type 2) with the caller's AV_PAIR
+    TargetInfo. Layout mirrors MS-NLMP §2.2.1.2 (48-byte header, no Version
+    field), which recce/ad/ntlm.parse_type2 is documented to handle."""
+    ti_off = 48
+    return (b"NTLMSSP\x00" + struct.pack("<I", 2)
+            + struct.pack("<HHI", 0, 0, 0)          # TargetNameFields (empty)
+            + struct.pack("<I", 0x02028215)         # NegotiateFlags
+            + b"\x01" * 8                           # ServerChallenge
+            + b"\x00" * 8                           # Reserved
+            + struct.pack("<HHI", len(av_pairs), len(av_pairs), ti_off)
+            + av_pairs)
+
+
+def _ntlm_server(cmd: str) -> str:
+    """Fake SMTP server that walks a full AUTH NTLM handshake to Type-2."""
+    up = cmd.upper()
+    if up.startswith("EHLO"):
+        return "250-mail.contoso.local\r\n250-AUTH NTLM PLAIN\r\n250 STARTTLS"
+    if up == "AUTH NTLM":
+        return "334 "                                # empty challenge continuation
+    if cmd.startswith("TlRMTVNTUAABAAAA"):           # b64 of NTLMSSP Type-1 header
+        av = (_av(0x0002, "CONTOSO".encode("utf-16-le"))
+              + _av(0x0001, "MAIL01".encode("utf-16-le"))
+              + _av(0x0004, "contoso.local".encode("utf-16-le"))
+              + _av(0x0003, "mail01.contoso.local".encode("utf-16-le"))
+              + _av(0x0005, "contoso.local".encode("utf-16-le"))
+              + _av(0x0000, b""))                    # AV terminator
+        t2 = _build_type2(av)
+        return "334 " + base64.b64encode(t2).decode("ascii")
+    if cmd == "*":
+        return "501 auth aborted"
+    if up.startswith("QUIT"):
+        return "221 bye"
+    return "250 OK"
+
+
+def _ntlm_reject_server(cmd: str) -> str:
+    """Advertises NTLM but rejects it once actually requested — this is the
+    'patched / absent' case where the T2 harvest must produce no evidence."""
+    up = cmd.upper()
+    if up.startswith("EHLO"):
+        return "250-mail.locked\r\n250-AUTH NTLM PLAIN\r\n250 STARTTLS"
+    if up == "AUTH NTLM":
+        return "504 mechanism not supported"
+    if up.startswith("QUIT"):
+        return "221 bye"
+    return "250 OK"
+
+
+def test_parse_av_pairs_extracts_netbios_and_dns_names():
+    av = (_av(0x0002, "CONTOSO".encode("utf-16-le"))
+          + _av(0x0001, "MAIL01".encode("utf-16-le"))
+          + _av(0x0004, "contoso.local".encode("utf-16-le"))
+          + _av(0x0003, "mail01.contoso.local".encode("utf-16-le"))
+          + _av(0x0000, b""))
+    got = smtp._parse_av_pairs(av)
+    assert got["nb_domain"] == "CONTOSO"
+    assert got["nb_computer"] == "MAIL01"
+    assert got["dns_domain"] == "contoso.local"
+    assert got["dns_computer"] == "mail01.contoso.local"
+
+
+def test_parse_av_pairs_stops_at_terminator_and_ignores_unknown():
+    # An unknown AvId (0x000a = MSVSuppliedTargetName) is skipped; terminator
+    # stops parsing so trailing junk cannot inject a false field.
+    av = (_av(0x000a, b"junk-utf16-le")
+          + _av(0x0001, "SRV".encode("utf-16-le"))
+          + _av(0x0000, b"")
+          + _av(0x0002, "SHOULD-NOT-APPEAR".encode("utf-16-le")))
+    got = smtp._parse_av_pairs(av)
+    assert got == {"nb_computer": "SRV"}
+
+
+def test_probe_captures_ntlm_type2_av_pairs():
+    port, srv = _serve(_ntlm_server)
+    try:
+        pr = smtp.probe("127.0.0.1", port, timeout=4)
+    finally:
+        srv.shutdown()
+    assert pr["reachable"]
+    assert "NTLM" in pr["auth"]
+    info = pr.get("ntlm_info") or {}
+    assert info.get("nb_domain") == "CONTOSO"
+    assert info.get("nb_computer") == "MAIL01"
+    assert info.get("dns_domain") == "contoso.local"
+    assert info.get("dns_computer") == "mail01.contoso.local"
+
+
+def test_probe_ntlm_rejected_yields_no_evidence():
+    port, srv = _serve(_ntlm_reject_server)
+    try:
+        pr = smtp.probe("127.0.0.1", port, timeout=4)
+    finally:
+        srv.shutdown()
+    # The bare mech advertisement stays a fingerprint (T0). No AV_PAIRs
+    # harvested because the server refused AUTH NTLM outright.
+    assert "NTLM" in pr["auth"]
+    assert pr.get("ntlm_info", {}) == {}
+
+
+def test_probe_no_ntlm_advertised_skips_the_harvest():
+    # No NTLM in EHLO -> probe MUST NOT even attempt the exchange (would
+    # burn commands on a server that doesn't offer the mech).
+    port, srv = _serve(_open_relay_server)         # advertises no AUTH
+    try:
+        pr = smtp.probe("127.0.0.1", port, timeout=4)
+    finally:
+        srv.shutdown()
+    assert "ntlm_info" not in pr
+
+
+def test_findings_smtp_ntlm_leak_promotes_to_t2_with_av_pairs():
+    h = Host(ip="10.0.0.5", ports=[Port(portid=25, service="smtp", state="open")])
+    probes = {("10.0.0.5", 25): {
+        "starttls": True, "auth": "PLAIN NTLM",
+        "ntlm_info": {"nb_domain": "CONTOSO", "nb_computer": "MAIL01",
+                      "dns_domain": "contoso.local",
+                      "dns_computer": "mail01.contoso.local"}}}
+    row = next(f for f in smtp.findings([h], probes)
+               if f["kind"] == "smtp_auth_ntlm_leak")
+    assert row["depth_tier"] == "t2"
+    assert row["severity"] == "high"                  # promoted from medium
+    assert row.get("output"), "T2 must attach harvested AV_PAIRs to output"
+    assert "nb_domain=CONTOSO" in row["output"]
+    assert "dns_computer=mail01.contoso.local" in row["output"]
+    assert "CHAINED" in row["detail"]
+    assert "known_hostnames" in row["detail"]
+
+
+def test_findings_smtp_ntlm_leak_stays_t0_without_av_pairs():
+    h = Host(ip="10.0.0.5", ports=[Port(portid=25, service="smtp", state="open")])
+    probes = {("10.0.0.5", 25): {"starttls": True, "auth": "PLAIN NTLM"}}
+    row = next(f for f in smtp.findings([h], probes)
+               if f["kind"] == "smtp_auth_ntlm_leak")
+    assert row["depth_tier"] == "t0"
+    assert row["severity"] == "medium"
+    assert "output" not in row
+    assert "CHAINED" not in row["detail"]
+
+
+def test_findings_smtp_ntlm_leak_stays_t0_when_av_pairs_are_empty():
+    # Probe fired but the Type-2 carried an empty TargetInfo -> no evidence.
+    h = Host(ip="10.0.0.5", ports=[Port(portid=25, service="smtp", state="open")])
+    probes = {("10.0.0.5", 25): {"starttls": True, "auth": "PLAIN NTLM",
+                                 "ntlm_info": {}}}
+    row = next(f for f in smtp.findings([h], probes)
+               if f["kind"] == "smtp_auth_ntlm_leak")
+    assert row["depth_tier"] == "t0"
+    assert "output" not in row
 
 
 def test_findings_smtp_vrfy_stays_t1_when_evidence_has_no_resolved():

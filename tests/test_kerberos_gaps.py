@@ -323,5 +323,109 @@ class KerberosKdcProbeTest(unittest.TestCase):
                                               {"reachable": False}), [])
 
 
+# --- kpasswd exposure probe (TCP/464, RFC 3244) ------------------------------
+
+class KerberosKpasswdProbeTest(unittest.TestCase):
+    """Bare TCP connect to 464. `_kpasswd_reachable` is the isolated seam so
+    tests never open a real socket."""
+
+    def _patch_reach(self, value):
+        orig = K._kpasswd_reachable
+        K._kpasswd_reachable = lambda *a, **kw: value
+        self.addCleanup(lambda: setattr(K, "_kpasswd_reachable", orig))
+
+    def test_reachable_port_reports_reachable_true(self):
+        self._patch_reach(True)
+        r = K.kpasswd_probe("127.0.0.1")
+        self.assertTrue(r["reachable"])
+
+    def test_filtered_port_reports_reachable_false(self):
+        self._patch_reach(False)
+        r = K.kpasswd_probe("127.0.0.1")
+        self.assertFalse(r["reachable"])
+
+    def test_finding_emitted_when_reachable(self):
+        fs = K.kpasswd_findings("10.0.0.1", {"reachable": True})
+        self.assertEqual(len(fs), 1)
+        self.assertEqual(fs[0]["kind"], "kpasswd_exposed")
+        self.assertEqual(fs[0]["severity"], "medium")
+        self.assertEqual(fs[0]["depth_tier"], "t1")
+        self.assertEqual(fs[0]["target"], "10.0.0.1:464")
+        self.assertTrue(fs[0]["exploit_note"])
+        self.assertTrue(fs[0]["narrative"])                # narrative wired
+        self.assertIn("CWE-306", fs[0]["cwes"])
+
+    def test_no_finding_when_port_filtered(self):
+        self.assertEqual(K.kpasswd_findings("10.0.0.1",
+                                            {"reachable": False}), [])
+
+    def test_no_finding_on_empty_probe(self):
+        self.assertEqual(K.kpasswd_findings("10.0.0.1", {}), [])
+
+
+# --- UDP transport probe (RFC 4120 sec 7.2.1) ------------------------------------
+
+class KerberosUdpTransportTest(unittest.TestCase):
+    """AS-REQ over UDP/88. `_send_recv_udp` is monkeypatched at the module
+    boundary so the tests never touch a real UDP socket."""
+
+    def _patch_udp(self, payload):
+        orig = K._send_recv_udp
+        K._send_recv_udp = lambda *a, **kw: payload
+        self.addCleanup(lambda: setattr(K, "_send_recv_udp", orig))
+
+    def test_krb_error_over_udp_reports_reachable(self):
+        # A pre-auth-required reply for krbtgt is what an AD DC returns to a
+        # pre-auth-less AS-REQ — reachable, not too-big.
+        self._patch_udp(_krb_error(K.KDC_ERR_PREAUTH_REQUIRED,
+                                   crealm="CORP.LOCAL"))
+        r = K.udp_transport_probe("127.0.0.1", "CORP.LOCAL")
+        self.assertTrue(r["reachable"])
+        self.assertEqual(r["code"], K.KDC_ERR_PREAUTH_REQUIRED)
+        self.assertFalse(r["too_big"])
+
+    def test_response_too_big_flag_from_kdc(self):
+        # KRB_ERR_RESPONSE_TOO_BIG (52) is the AD-vs-MIT fingerprint on UDP.
+        self._patch_udp(_krb_error(K.KRB_ERR_RESPONSE_TOO_BIG))
+        r = K.udp_transport_probe("127.0.0.1", "CORP.LOCAL")
+        self.assertTrue(r["reachable"])
+        self.assertTrue(r["too_big"])
+        self.assertEqual(r["code"], K.KRB_ERR_RESPONSE_TOO_BIG)
+
+    def test_no_reply_reports_unreachable(self):
+        # Patched / dropped UDP: no datagram back.
+        self._patch_udp(None)
+        r = K.udp_transport_probe("127.0.0.1", "CORP.LOCAL")
+        self.assertFalse(r["reachable"])
+        self.assertFalse(r["too_big"])
+        self.assertIsNone(r["code"])
+
+    def test_finding_emitted_when_udp_reachable(self):
+        fs = K.udp_transport_findings("10.0.0.1",
+                                      {"reachable": True, "too_big": False,
+                                       "code": K.KDC_ERR_PREAUTH_REQUIRED})
+        self.assertEqual(len(fs), 1)
+        self.assertEqual(fs[0]["kind"], "kerberos_udp_fallback")
+        self.assertEqual(fs[0]["severity"], "medium")
+        self.assertEqual(fs[0]["depth_tier"], "t1")
+        self.assertEqual(fs[0]["target"], "10.0.0.1:88")
+        self.assertTrue(fs[0]["narrative"])
+        self.assertTrue(fs[0]["exploit_note"])
+        # No too-big flag -> detail should NOT carry the fingerprint sentence.
+        self.assertNotIn("RESPONSE_TOO_BIG", fs[0]["detail"])
+
+    def test_finding_notes_too_big_fingerprint(self):
+        fs = K.udp_transport_findings("10.0.0.1",
+                                      {"reachable": True, "too_big": True,
+                                       "code": K.KRB_ERR_RESPONSE_TOO_BIG})
+        self.assertEqual(len(fs), 1)
+        self.assertIn("RESPONSE_TOO_BIG", fs[0]["detail"])
+        self.assertIn("AD-vs-MIT", fs[0]["detail"])
+
+    def test_no_finding_when_udp_unreachable(self):
+        self.assertEqual(K.udp_transport_findings("10.0.0.1",
+                                                  {"reachable": False}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

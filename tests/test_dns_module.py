@@ -378,6 +378,144 @@ def test_axfr_probe_times_out_cleanly_when_target_unreachable():
                          "ns": [], "ptr": [], "mx": [], "srv": []}
 
 
+# --------------------------------------------------------------------------- #
+# Open-recursion detection: single recursive query for a name outside any
+# authoritative zone. Open resolver = RA=1 AND rcode not in {REFUSED, NOTIMP}.
+# --------------------------------------------------------------------------- #
+def _serve_recursion(ra: bool, rcode: int):
+    """Fake DNS-over-TCP server that always returns a canned header:
+    QR=1, RA per parameter, given rcode, no answers/authority/additional."""
+    ra_bit = 0x0080 if ra else 0x0000
+    flags = 0x8000 | ra_bit | (rcode & 0x0F)
+
+    class H(socketserver.BaseRequestHandler):
+        def handle(self):
+            data = self.request.recv(4096)
+            if not data:
+                return
+            hdr = struct.pack("!HHHHHH", 0x1337, flags, 1, 0, 0, 0)
+            self.request.sendall(struct.pack("!H", len(hdr)) + hdr)
+
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv.server_address[1], srv
+
+
+def test_open_recursion_detects_open_resolver():
+    """RA=1 and rcode=NOERROR (0) → open resolver (server processed the
+    recursive query even though .invalid has no upstream answer)."""
+    port, srv = _serve_recursion(ra=True, rcode=0)
+    try:
+        r = dns.open_recursion("127.0.0.1", port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert r["ok"] is True
+    assert r["ra"] is True
+    assert r["rcode"] == 0
+
+
+def test_open_recursion_servfail_still_counts_as_open():
+    """SERVFAIL (rcode=2) with RA=1 = server accepted the recursion but
+    upstream failed — still an open resolver (the exposed primitive is the
+    willingness to recurse, not the outcome)."""
+    port, srv = _serve_recursion(ra=True, rcode=2)
+    try:
+        r = dns.open_recursion("127.0.0.1", port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert r["ok"] is True
+
+
+def test_open_recursion_refused_is_locked_down():
+    """REFUSED (rcode=5) = server rejected the recursive query cleanly →
+    NOT an open resolver, no finding."""
+    port, srv = _serve_recursion(ra=True, rcode=5)
+    try:
+        r = dns.open_recursion("127.0.0.1", port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert r["ok"] is False
+    assert r["rcode"] == 5
+
+
+def test_open_recursion_notimp_is_locked_down():
+    """NOTIMP (rcode=4) = server does not implement recursion → not open."""
+    port, srv = _serve_recursion(ra=True, rcode=4)
+    try:
+        r = dns.open_recursion("127.0.0.1", port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert r["ok"] is False
+
+
+def test_open_recursion_ra_zero_is_not_open():
+    """RA=0 alone is enough to say 'not an open resolver' — an auth-only
+    server that answers NXDOMAIN with RA=0 is fine."""
+    port, srv = _serve_recursion(ra=False, rcode=0)
+    try:
+        r = dns.open_recursion("127.0.0.1", port, timeout=3)
+    finally:
+        srv.shutdown()
+    assert r["ok"] is False
+    assert r["ra"] is False
+
+
+def test_open_recursion_unreachable_returns_none_rcode():
+    """Unreachable target: probe returns {ok:False, ra:False, rcode:None}
+    without raising. Ensures the T1 base findings still fire when the
+    open-recursion probe cannot connect."""
+    # RFC 5737 TEST-NET-1 — routable-format, non-responsive.
+    r = dns.open_recursion("192.0.2.1", 53, timeout=0.5)
+    assert r["ok"] is False
+    assert r["rcode"] is None
+
+
+def test_open_recursion_finding_emitted_when_probe_ok():
+    """Probe result ok=True → medium-severity dns_open_recursion finding
+    with CWE-406 and depth_tier=t1."""
+    h = Host(ip="10.0.0.9", ports=[Port(portid=53, service="domain", state="open")])
+    probes = {("10.0.0.9", 53): {
+        "axfr_zones": [], "records": {}, "version": "",
+        "open_recursion": {"ok": True, "ra": True, "rcode": 0},
+    }}
+    fs = dns.findings([h], probes)
+    fr = [f for f in fs if f.get("kind") == "dns_open_recursion"]
+    assert fr, "open-recursion finding must fire"
+    f = fr[0]
+    assert f["severity"] == "medium"
+    assert f["depth_tier"] == "t1"
+    assert "CWE-406" in f["cwes"]
+    assert f["exploit_note"]                            # non-empty
+    assert "recursive" in f["detail"].lower()
+    assert "amplification" in f["detail"].lower()
+
+
+def test_open_recursion_no_finding_when_probe_says_locked():
+    """Probe result ok=False → no dns_open_recursion finding. Absence is the
+    'patched/absent' case."""
+    h = Host(ip="10.0.0.9", ports=[Port(portid=53, service="domain", state="open")])
+    probes = {("10.0.0.9", 53): {
+        "axfr_zones": [], "records": {}, "version": "",
+        "open_recursion": {"ok": False, "ra": True, "rcode": 5},
+    }}
+    fs = dns.findings([h], probes)
+    fr = [f for f in fs if f.get("kind") == "dns_open_recursion"]
+    assert fr == []
+
+
+def test_open_recursion_no_finding_when_probe_missing():
+    """Legacy probe dicts without an open_recursion key: no finding,
+    no KeyError — backward compatible with old scan reports."""
+    h = Host(ip="10.0.0.9", ports=[Port(portid=53, service="domain", state="open")])
+    probes = {("10.0.0.9", 53): {
+        "axfr_zones": [], "records": {}, "version": "",
+    }}
+    fs = dns.findings([h], probes)
+    fr = [f for f in fs if f.get("kind") == "dns_open_recursion"]
+    assert fr == []
+
+
 def test_srv_mx_ns_empty_on_refused():
     """Server that REFUSES every query returns empty srv/mx/ns dicts, and does
     not raise."""
