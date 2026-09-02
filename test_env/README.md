@@ -31,11 +31,22 @@ laptop bring-up stays fast:
     docker compose --profile databases up --wait     # +memcached
     docker compose --profile media up --wait         # +rtsp
     docker compose --profile ot up --wait            # +bacnet dnp3 enip iec104 s7 opcua sims (Phase 9b)
+    docker compose --profile modern up --wait        # +grafana minio ollama jupyter (P6)
+    docker compose --profile heavy up --wait         # +gitlab (multi-GB, ~5 min first boot)
 
 `--profile ot` brings up the OT/ICS batch (`.60`–`.65`). First bring-up
 of `ot` is slow — five simulator images build from source, and the S7
 simulator additionally compiles libsnap7 from the upstream Sourceforge
 tarball (needs network at build time). Subsequent starts are fast.
+
+`--profile modern` brings up the P6 arc (`.70`–`.73`) — the four modern
+2024-2025 services (grafana, minio, ollama, jupyter) that recce added
+dedicated probes for. All four are small (<200MB) and boot in seconds.
+
+`--profile heavy` brings up GitLab CE (`.80`) — deliberately isolated
+from `core` because the image is ~3 GB and the first boot spends
+several minutes running database migrations. `curl` and a few minutes
+of patience beat baking it into every laptop bring-up.
 
 The `--wait` flag blocks until each service's healthcheck reports
 healthy — deterministic for CI. Multiple profiles compose:
@@ -96,9 +107,14 @@ detail.
 | **.63** | iec104-sim | IEC-104 :2404/tcp | *T5, profile `ot`.* Hand-rolled APCI + STARTDT + General Interrogation for recce `iec104` probe. |
 | **.64** | s7-sim | Siemens S7 :102/tcp | *T5, profile `ot`.* `python-snap7` server (COTP + S7COMM SetupCommunication + SZL) for recce `s7` probe. |
 | **.65** | opcua-sim | OPC UA :4840/tcp | *T5, profile `ot, core`.* Microsoft `mcr.microsoft.com/iotedge/opc-plc` — anonymous SecurityPolicy=None for recce `opcua` probe. |
+| **.70** | grafana | HTTP :3000 | *P6, profile `modern, core`.* `admin:admin` left in place for recce `grafana` — `default_creds_admin` (critical), `version`, `plugin_list`, CVE-2021-43798 / CVE-2024-9264 markers. |
+| **.71** | minio | :9000 API · :9001 console | *P6, profile `modern, core`.* `minioadmin:minioadmin` left in place for recce `minio` — `default_creds_admin` (critical), `anonymous_root`, CVE-2023-28432 marker. |
+| **.72** | ollama | :11434 | *P6, profile `modern, core`.* Unauth Ollama daemon (no models pulled). recce `ollama` — `reachable` (high), `models_disclosed`, `generate_open` (t2/high via sentinel model name), CVE-2024-37032 marker. |
+| **.73** | jupyter | :8888 | *P6, profile `modern, core`.* Jupyter Server 2.x with all auth disabled. recce `jupyterhub` — `no_auth_kernel_spawn` (critical RCE primitive, GET-only proof), `contents_listable`, `version`. |
+| **.80** | gitlab | HTTP :80 | *P6-heavy, profile `heavy`.* GitLab CE with signup + public projects on. recce `gitlab` — `signin_present`, `public_projects`, `broadcast_messages`, `health_endpoint`, CVE-2021-22205 / CVE-2023-2825 markers. |
 
-**Bold rows** are the T1/T2/T3/T5 expansions I added; the un-bolded rows are the base test env.
-**Italic notes** in the T5 rows call out which compose profile each service belongs to.
+**Bold rows** are the T1/T2/T3/T5/P6 expansions I added; the un-bolded rows are the base test env.
+**Italic notes** in the T5/P6 rows call out which compose profile each service belongs to.
 
 ## Sample importer files
 

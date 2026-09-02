@@ -774,10 +774,11 @@ services:
 
   # ══════════════════════════════════════════════════════════════════════════
   # P6 horizontal expansion — 4 modern services recce didn't cover until this
-  # arc. GitLab CE is intentionally omitted (heavy install; the module is
-  # still there for real-target engagements). Everything else is small
-  # (<200MB) and boots in seconds.
+  # arc. All small (<200MB) and boot in seconds.
   # Bring up with `docker compose --profile modern up -d` or add to `core`.
+  # GitLab CE lives further down under the `heavy` profile (multi-GB image,
+  # several-minute boot); recce.services.gitlab still targets the same
+  # /users/sign_in fingerprint on both.
   # ══════════════════════════════════════════════════════════════════════════
 
   grafana:
@@ -828,8 +829,11 @@ services:
     # NO models pulled — recce probes /api/version + /api/tags, which
     # both succeed with an empty model set. Loading a real model doubles
     # the image size and isn't needed for the probe surface.
+    # Healthcheck uses `ollama list` (the client CLI): it's the only
+    # binary the image ships (no wget/curl/nc), and returns 0 when the
+    # local daemon answers — proving the API is up.
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:11434/api/version || exit 1"]
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 20
@@ -857,6 +861,61 @@ services:
       timeout: 3s
       retries: 30
     profiles: [modern, core]
+    restart: unless-stopped
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # `heavy` profile — targets recce covers but that are too large to bring
+  # up by default (multi-GB image or multi-minute first boot). None land in
+  # `core` — bring up explicitly with `docker compose --profile heavy up -d`.
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # GitLab CE — recce.services.gitlab probes 80/443/8080/8443 for the
+  # sign-in body / _gitlab_session cookie fingerprint, then walks
+  # /api/v4/version, /-/health|readiness|liveness, /api/v4/projects
+  # ?visibility=public, /api/v4/broadcast_messages, and the version-gated
+  # CVE-2021-22205 / CVE-2023-2825 markers.
+  #
+  # This canary is deliberately unhardened:
+  #   * external_url points at the container hostname, so the sign-in
+  #     page renders and fingerprints on the intended URL
+  #   * signup_enabled = true → public sign-up form is discoverable
+  #   * default_projects_visibility=public + a seeded public project so
+  #     /api/v4/projects?visibility=public returns >0 rows
+  #   * a broadcast message is created so
+  #     /api/v4/broadcast_messages returns a row
+  #
+  # Weight warning: image is ~3 GB, initial boot runs migrations and takes
+  # 3-6 minutes (health = starting during that window). Needs ~4 GB RAM.
+  # Not a `core` service — opt-in only.
+  gitlab:
+    image: gitlab/gitlab-ce:latest
+    hostname: gitlab
+    networks:
+      recce-testnet:
+        ipv4_address: 172.20.0.80
+    # 80 is the recce.services.gitlab default port; the module also
+    # probes 443/8080/8443, so a single 80 mapping is enough.
+    environment:
+      # Keep the URL on the container hostname so links render cleanly.
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab'
+        gitlab_rails['initial_root_password'] = 'recce-lab-only-do-not-reuse'
+        gitlab_rails['gitlab_signup_enabled'] = true
+        gitlab_rails['gitlab_default_projects_features_visibility_level'] = 20
+        gitlab_rails['gitlab_default_projects_visibility'] = 'public'
+        # Force the health-check surface to answer without an allow-list
+        # (the probe expects 200 on /-/health, /-/readiness, /-/liveness).
+        gitlab_rails['monitoring_whitelist'] = ['0.0.0.0/0']
+    shm_size: 256m
+    healthcheck:
+      # Wait for the sign-in page — /-/health flips green earlier than the
+      # web is really ready, and the probe fingerprint keys on the body.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/users/sign_in >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+    profiles: [heavy]
     restart: unless-stopped
 
 volumes:
