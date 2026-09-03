@@ -802,7 +802,15 @@ def findings(hosts: list[Host], probes: dict | None = None,
                 f"# also: ffprobe -rtsp_transport tcp rtsp://{h.ip}:{p.portid}/",
                 "Strip the Server header at the reverse proxy or in the RTSP "
                 "server config; restrict RTSP to the camera VLAN.",
-                ["CWE-200"], kind="rtsp_fingerprint"))
+                ["CWE-200"], kind="rtsp_fingerprint",
+                exploit_note=(
+                    "openRTSP -O rtsp://<ip>:<port>/  — the returned SDP "
+                    "carries codec + resolution and, on ANNOUNCE/RECORD-"
+                    "enabled devices, lists writable stream paths. Combine "
+                    "with the vendor default-cred list (admin/12345 for "
+                    "Hikvision, root/pass for Axis) to try a default-cred "
+                    "login before moving to per-vendor CVE lookups."),
+                depth_tier="t0"))
 
             if pr.get("liveness"):
                 out.append(_finding(
@@ -812,7 +820,13 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "openRTSP",
                     f"openRTSP -O rtsp://{h.ip}:{p.portid}/",
                     "None required (informational).",
-                    [], kind="rtsp_liveness"))
+                    [], kind="rtsp_liveness",
+                    exploit_note=(
+                        "openRTSP -O rtsp://<ip>:<port>/  — confirms a "
+                        "streaming session survives past OPTIONS, which "
+                        "distinguishes a real RTSP device from a "
+                        "port-forwarded honeypot / stray SYN-ACK."),
+                    depth_tier="t0"))
 
             auth = pr.get("auth") or {}
             if auth.get("basic") and auth.get("digest"):
@@ -827,7 +841,13 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "# capture and decode 'Authorization: Basic <b64>'",
                     "Disable Basic authentication in the RTSP server config; "
                     "require Digest (or, better, TLS-wrap the transport).",
-                    ["CWE-319", "CWE-522"], kind="rtsp_auth_disclosure"))
+                    ["CWE-319", "CWE-522"], kind="rtsp_auth_disclosure",
+                    exploit_note=(
+                        "tcpdump -i <iface> -A 'tcp port 554' | grep -i "
+                        "'Authorization: Basic'  — capture the base64 "
+                        "credential from any client that picks Basic over "
+                        "the offered Digest (a client-side downgrade)."),
+                    depth_tier="t0"))
             elif auth.get("basic"):
                 out.append(_finding(
                     "medium", "RTSP requires Basic authentication (cleartext creds)",
@@ -837,7 +857,13 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "wireshark / tcpdump",
                     f"tcpdump -i <iface> 'tcp port {p.portid}'",
                     "Disable Basic; require Digest or TLS.",
-                    ["CWE-319", "CWE-522"], kind="rtsp_auth_disclosure"))
+                    ["CWE-319", "CWE-522"], kind="rtsp_auth_disclosure",
+                    exploit_note=(
+                        "tcpdump -i <iface> -A 'tcp port 554' | grep -i "
+                        "'Authorization: Basic'  — the server allows only "
+                        "Basic, so every valid login lands the credential "
+                        "on the wire in base64."),
+                    depth_tier="t0"))
             elif auth.get("digest") and auth.get("realm"):
                 out.append(_finding(
                     "medium", "RTSP Digest realm discloses camera identity",
@@ -849,7 +875,14 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     f"openRTSP -O rtsp://{h.ip}:{p.portid}/",
                     "Set a generic realm; better still, restrict RTSP to trusted "
                     "networks.",
-                    ["CWE-200"], kind="rtsp_auth_disclosure"))
+                    ["CWE-200"], kind="rtsp_auth_disclosure",
+                    exploit_note=(
+                        "Realm string identifies the vendor (HikvisionDS, "
+                        "IPCam, AXIS_<serial>) — pivot to the vendor's "
+                        "default-cred list and per-vendor CVE catalog "
+                        "(HikvisionCVE-2017-7921 for older HW, "
+                        "AxisCVE-2018-10660 for older firmware)."),
+                    depth_tier="t0"))
 
             if pr.get("digest_capture"):
                 out.append(_finding(

@@ -191,18 +191,30 @@ immediately. Same mechanic that shipped 15 already in Phase B2.
 Split into ~4 workflows (12 services each) if the concurrent-agent
 cap holds.
 
-### P0-2 — Attach exploit_notes to medium/low severity findings
-**Effort:** M (2 fan-out workflows, ~half day each)
-**Blocks:** Nothing.
-**Why:** Phase B1 stopped at critical/high (330 attachments). The audit
-has ~337 more findings at medium/low/info that would light up in the
-Surface tab if attached.
+### P0-2 — Attach exploit_notes to medium/low severity findings ✅ (2026-09-03, `<pending>`)
+Roadmap estimated ~337 attachments; the actual scanner-driven survey
+(scratchpad/p0_2_scanner.py) found:
+  * 302 audit candidates at medium/low/info severity
+  * 271 (89.7%) already had exploit_note + depth_tier attached
+    — earlier passes (Phase B1 continuations) had gotten to them
+  * **6 real missing attachments** across 3 files:
+    - `ldap/ldap_rootdse` (info, t1)
+    - `nrpe/nrpe_hostname_extracted` (info, t0)
+    - `nrpe/nrpe_os_fingerprint` (info, t0)
+    - `rtsp/rtsp_fingerprint` (medium, t0)
+    - `rtsp/rtsp_liveness` (low, t0)
+    - `rtsp/rtsp_auth_disclosure` (medium, t0) — 3 branches, all annotated
 
-**Build plan:**
-1. Same fan-out mechanic as Phase B1 (12 tranches of 5-6 services).
-2. Prompt agents to attach `exploit_note` + `depth_tier` to
-   medium/low/info findings this time.
-3. Per-agent verify pytest + ruff.
+Shipped in one commit; touched only ldap.py / nrpe.py / rtsp.py.
+`pytest -k "ldap or nrpe or rtsp"` → 116 pass, 1 skipped.
+`ruff check` on all three: clean.
+
+**Follow-up (P2-1 territory, NOT this pass):** 30 audit kinds at
+medium/low/info reference capabilities the module never emits. Not
+annotation work — each is a distinct probe that has to be designed +
+implemented. Written to `.recce-plan/audit/p0_2_missing_capabilities.md`
+with a prioritized cherry-pick order (top: `http-method-trace`,
+`web-security-headers`, `api-openapi-spec-exposed`).
 
 ### P0-3 — Fix the bmc Vagrant canary (UDP)
 **Effort:** XS (10 lines)

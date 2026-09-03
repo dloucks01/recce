@@ -1206,7 +1206,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "-s base -b '' '(objectClass=*)' '*' +",
                     "Expected for a DC; ensure a low functional level isn't flagging a "
                     "legacy/unsupported controller.",
-                    ["CWE-200"], kind="ldap_rootdse"))
+                    ["CWE-200"], kind="ldap_rootdse",
+                    exploit_note=(
+                        "ldapsearch -x -H ldap://<ip> -s base -b '' "
+                        "'(objectClass=*)' '*' +. Parse defaultNamingContext "
+                        "to derive the base DN, then bind-and-enumerate "
+                        "users/groups; feed defaultNamingContext to kerbrute "
+                        "for realm inference."),
+                    depth_tier="t1"))
     return out
 
 

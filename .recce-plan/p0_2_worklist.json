@@ -1,0 +1,628 @@
+{
+  "generated_at": 1788408370.9124272,
+  "totals": {
+    "candidates": 302,
+    "already_attached": 271,
+    "missing": 0,
+    "not_in_module": 30
+  },
+  "per_service": [
+    {
+      "service": "api",
+      "module": "recce/services/api.py",
+      "candidates": 7,
+      "already": 0,
+      "missing": 0,
+      "not_in_module": 7
+    },
+    {
+      "service": "bacnet",
+      "module": "recce/services/bacnet.py",
+      "candidates": 7,
+      "already": 7,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "bgp",
+      "module": "recce/services/bgp.py",
+      "candidates": 9,
+      "already": 9,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "cassandra",
+      "module": "recce/services/db/cassandra.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "cloud_metadata",
+      "module": "recce/services/cloud_metadata.py",
+      "candidates": 4,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 1
+    },
+    {
+      "service": "coap",
+      "module": "recce/services/coap.py",
+      "candidates": 7,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 1
+    },
+    {
+      "service": "consul",
+      "module": "recce/services/consul.py",
+      "candidates": 2,
+      "already": 2,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "couchdb",
+      "module": "recce/services/db/couchdb.py",
+      "candidates": 0,
+      "already": 0,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "cups_lpd",
+      "module": "recce/services/cups_lpd.py",
+      "candidates": 6,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "dnp3",
+      "module": "recce/services/dnp3.py",
+      "candidates": 7,
+      "already": 7,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "dns",
+      "module": "recce/services/dns.py",
+      "candidates": 7,
+      "already": 7,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "docker",
+      "module": "recce/services/docker.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "docker_registry",
+      "module": "recce/services/docker_registry.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "elasticsearch",
+      "module": "recce/services/db/elasticsearch.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "enip",
+      "module": "recce/services/enip.py",
+      "candidates": 5,
+      "already": 5,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "etcd",
+      "module": "recce/services/etcd.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "ftp",
+      "module": "recce/services/ftp.py",
+      "candidates": 4,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 1
+    },
+    {
+      "service": "gitdump",
+      "module": "recce/services/gitdump.py",
+      "candidates": 0,
+      "already": 0,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "guacamole",
+      "module": "recce/services/guacamole.py",
+      "candidates": 2,
+      "already": 2,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "http",
+      "module": "recce/services/http.py",
+      "candidates": 10,
+      "already": 0,
+      "missing": 0,
+      "not_in_module": 10
+    },
+    {
+      "service": "iec104",
+      "module": "recce/services/iec104.py",
+      "candidates": 6,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "imap",
+      "module": "recce/services/imap.py",
+      "candidates": 4,
+      "already": 4,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "influxdb",
+      "module": "recce/services/db/influxdb.py",
+      "candidates": 1,
+      "already": 0,
+      "missing": 0,
+      "not_in_module": 1
+    },
+    {
+      "service": "ipmi",
+      "module": "recce/services/ipmi.py",
+      "candidates": 5,
+      "already": 5,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "ipp",
+      "module": "recce/services/ipp.py",
+      "candidates": 2,
+      "already": 2,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "iscsi",
+      "module": "recce/services/iscsi.py",
+      "candidates": 6,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "jenkins_jnlp",
+      "module": "recce/services/jenkins_jnlp.py",
+      "candidates": 3,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "kafka",
+      "module": "recce/services/kafka.py",
+      "candidates": 3,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "kerberos",
+      "module": "recce/ad/kerberos.py",
+      "candidates": 3,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "kubernetes",
+      "module": "recce/services/kubernetes.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "ldap",
+      "module": "recce/services/ldap.py",
+      "candidates": 7,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "memcached",
+      "module": "recce/services/db/memcached.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "minecraft",
+      "module": "recce/services/minecraft.py",
+      "candidates": 6,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "modbus",
+      "module": "recce/services/modbus.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "mongodb",
+      "module": "recce/services/db/mongodb.py",
+      "candidates": 5,
+      "already": 5,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "mqtt",
+      "module": "recce/services/mqtt.py",
+      "candidates": 3,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "msrpc",
+      "module": "recce/services/msrpc.py",
+      "candidates": 4,
+      "already": 4,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "mssql",
+      "module": "recce/services/db/mssql.py",
+      "candidates": 9,
+      "already": 9,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "mysql",
+      "module": "recce/services/db/mysql.py",
+      "candidates": 4,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 1
+    },
+    {
+      "service": "nbd_ndmp",
+      "module": "recce/services/nbd_ndmp.py",
+      "candidates": 2,
+      "already": 2,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "netbios",
+      "module": "recce/services/netbios.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "nfs",
+      "module": "recce/services/nfs.py",
+      "candidates": 3,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "nis_yp",
+      "module": "recce/services/nisyp.py",
+      "candidates": 6,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "nomad",
+      "module": "recce/services/nomad.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "nrpe",
+      "module": "recce/services/nrpe.py",
+      "candidates": 10,
+      "already": 10,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "ntp",
+      "module": "recce/services/ntp.py",
+      "candidates": 3,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "opcua",
+      "module": "recce/services/opcua.py",
+      "candidates": 7,
+      "already": 7,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "oracle",
+      "module": "recce/services/db/oracle.py",
+      "candidates": 2,
+      "already": 2,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "pop3",
+      "module": "recce/services/pop3.py",
+      "candidates": 4,
+      "already": 4,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "postgres",
+      "module": "recce/services/db/postgres.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "prometheus",
+      "module": "recce/services/prometheus.py",
+      "candidates": 2,
+      "already": 2,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "rdp",
+      "module": "recce/services/rdp.py",
+      "candidates": 3,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "redis",
+      "module": "recce/services/db/redis.py",
+      "candidates": 2,
+      "already": 2,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "rservices",
+      "module": "recce/services/rservices.py",
+      "candidates": 0,
+      "already": 0,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "rsync",
+      "module": "recce/services/rsync.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "rtsp",
+      "module": "recce/services/rtsp.py",
+      "candidates": 6,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "s7",
+      "module": "recce/services/s7.py",
+      "candidates": 6,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "sip",
+      "module": "recce/services/sip.py",
+      "candidates": 4,
+      "already": 4,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "slp",
+      "module": "recce/services/slp.py",
+      "candidates": 9,
+      "already": 9,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "smb",
+      "module": "recce/services/smb.py",
+      "candidates": 4,
+      "already": 4,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "smtp",
+      "module": "recce/services/smtp.py",
+      "candidates": 7,
+      "already": 7,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "snmp",
+      "module": "recce/services/snmp.py",
+      "candidates": 3,
+      "already": 2,
+      "missing": 0,
+      "not_in_module": 1
+    },
+    {
+      "service": "sqli",
+      "module": "recce/services/sqli.py",
+      "candidates": 0,
+      "already": 0,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "ssh",
+      "module": "recce/services/ssh.py",
+      "candidates": 6,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "stun_turn",
+      "module": "recce/services/stun_turn.py",
+      "candidates": 8,
+      "already": 8,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "telnet",
+      "module": "recce/services/telnet.py",
+      "candidates": 5,
+      "already": 5,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "tftp",
+      "module": "recce/services/tftp.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "vault",
+      "module": "recce/services/vault.py",
+      "candidates": 3,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "vcenter",
+      "module": "recce/services/vsphere.py",
+      "candidates": 3,
+      "already": 3,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "vnc",
+      "module": "recce/services/vnc.py",
+      "candidates": 2,
+      "already": 2,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "web",
+      "module": "recce/services/web/__init__.py (+8)",
+      "candidates": 6,
+      "already": 0,
+      "missing": 0,
+      "not_in_module": 6
+    },
+    {
+      "service": "webdav",
+      "module": "recce/services/webdav.py",
+      "candidates": 6,
+      "already": 6,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "winrm",
+      "module": "recce/services/winrm.py",
+      "candidates": 4,
+      "already": 4,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "x11",
+      "module": "recce/services/x11.py",
+      "candidates": 1,
+      "already": 1,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "xmpp",
+      "module": "recce/services/xmpp.py",
+      "candidates": 8,
+      "already": 7,
+      "missing": 0,
+      "not_in_module": 1
+    },
+    {
+      "service": "zabbix",
+      "module": "recce/services/zabbix.py",
+      "candidates": 4,
+      "already": 4,
+      "missing": 0,
+      "not_in_module": 0
+    },
+    {
+      "service": "zookeeper",
+      "module": "recce/services/zookeeper.py",
+      "candidates": 2,
+      "already": 2,
+      "missing": 0,
+      "not_in_module": 0
+    }
+  ],
+  "worklist": []
+}

@@ -689,7 +689,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"cross-check across other services.",
                     f"check_nrpe -H {h.ip} -p {p.portid} -c check_hostname",
                     "Informational.",
-                    [], kind="nrpe_hostname_extracted"))
+                    [], kind="nrpe_hostname_extracted",
+                    exploit_note=(
+                        "check_nrpe -H <ip> -p 5666 -c check_hostname — "
+                        "feed the returned FQDN to Kerberos-realm inference "
+                        "(kerbrute -d <realm>) and TLS-SAN validation on "
+                        "other services on this host."),
+                    depth_tier="t0"))
 
             if pr.get("os_hint"):
                 out.append(_finding(
@@ -701,7 +707,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"and package-version heuristics.",
                     f"check_nrpe -H {h.ip} -p {p.portid} -c __recce_nonexistent",
                     "Informational.",
-                    [], kind="nrpe_os_fingerprint"))
+                    [], kind="nrpe_os_fingerprint",
+                    exploit_note=(
+                        "check_nrpe -H <ip> -p 5666 -c __recce_nonexistent — "
+                        "the plugin path returned in the error localizes the "
+                        "distro (e.g. /usr/lib64/nagios/plugins on RHEL vs "
+                        "/usr/lib/nagios/plugins on Debian)."),
+                    depth_tier="t0"))
 
             if pr.get("cve_2020_6581_applies"):
                 out.append(_finding(
