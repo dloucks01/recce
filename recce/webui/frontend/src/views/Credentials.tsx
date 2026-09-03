@@ -113,6 +113,8 @@ export function Credentials({ nav }: { nav?: Nav }) {
     return <div className="empty">No credentials collected yet. They appear here once the credential-bearing modules run — web <code>.git</code>/<code>.env</code>, database trust / empty-password, SMB shares, Kerberoasting, GPP.</div>;
   const bySource: Record<string, number> = {};
   creds.forEach((c) => { bySource[c.source] = (bySource[c.source] || 0) + 1; });
+  const byDomain: Record<string, number> = {};
+  creds.forEach((c) => { if (c.domain) byDomain[c.domain] = (byDomain[c.domain] || 0) + 1; });
   const toggle = (i: number) => setReveal((s) => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n; });
 
   function copyCred(c: Credential) {
@@ -126,6 +128,12 @@ export function Credentials({ nav }: { nav?: Nav }) {
         <Stat k="sources" v={String(Object.keys(bySource).length)} />
         <Stat k="plaintext" v={String(creds.filter((c) => c.kind === "password").length)} />
         <Stat k="hashes" v={String(creds.filter((c) => c.kind === "nthash" || c.kind === "hash").length)} />
+        <Stat k="local"
+              v={String(creds.filter((c) => !c.domain).length)} />
+        <Stat k={`domains · ${Object.keys(byDomain).length}`}
+              v={String(creds.filter((c) => c.domain).length)}
+              title={Object.entries(byDomain).sort((a, b) => b[1] - a[1])
+                .map(([d, n]) => `${d} — ${n}`).join("\n")} />
       </section>
       <section className="panel spraybar">
         <div className="panel-h"><h3>Spray these credentials</h3>
@@ -166,11 +174,23 @@ export function Credentials({ nav }: { nav?: Nav }) {
           <span className="muted">what recce collected / captured — or <code>recce creds --run</code> to spray</span></div>
         <div className="tablewrap">
           <table className="loottable">
-            <thead><tr><th>Account</th><th>Secret</th><th>Kind</th><th>Source</th><th>From</th><th>Notes</th><th className="creds-act-col">Actions</th></tr></thead>
+            <thead><tr><th>Account</th><th>Scope</th><th>Secret</th><th>Kind</th><th>Source</th><th>From</th><th>Notes</th><th className="creds-act-col">Actions</th></tr></thead>
             <tbody>
               {creds.map((c, i) => (
                 <tr key={i}>
-                  <td className="mono">{c.label}</td>
+                  <td className="mono">{c.username || c.label}</td>
+                  <td>
+                    {c.domain ? (
+                      <span className="scope-tag scope-domain"
+                            title={`domain account · ${c.domain}`}>
+                        🌐 <span className="mono">{c.domain}</span>
+                      </span>
+                    ) : (
+                      <span className="scope-tag scope-local" title="local account">
+                        🏠 local
+                      </span>
+                    )}
+                  </td>
                   <td className="mono secret">
                     <span className="secretval" onClick={() => toggle(i)} title="click to reveal / hide">
                       {reveal.has(i) ? (c.secret || "—") : "•".repeat(Math.min(12, (c.secret || "").length || 4))}</span>
