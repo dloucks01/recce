@@ -295,7 +295,7 @@ each for BMC + kernelnet)
 4. Optional: seed one integration test that hits `svc_backup`'s SPN
    with kerberoast to prove the full chain works.
 
-### P1-3 — Scan-tab intelligence: exploit_note-aware rules
+### P1-3 — Scan-tab intelligence: exploit_note-aware rules ✅ (shipped as `_rule_t3_capable_findings` in `recce/webui/routes/scan.py`; T3 findings + high/critical T2 surfaced with external_cmd = exploit_note)
 **Effort:** M (extend Phase 8's 9 rules)
 **Blocks:** Nothing.
 **Why:** Phase 8's `/api/scan/suggestions` recommends next commands
@@ -312,7 +312,7 @@ the "you should look at this now" surface.
 3. Extend `tests/test_webui_suggestions.py` with a seed that produces
    a t3 finding and asserts the suggestion appears.
 
-### P1-4 — Correlate the AD chain to shared surfaces continuously
+### P1-4 — Correlate the AD chain to shared surfaces continuously ✅ (shipped; `contributing_hosts` per step in `_assemble_chain` + rendered inline in `AttackChain.tsx`)
 **Effort:** M (extend `/api/attack-chain/ad`)
 **Blocks:** Nothing.
 **Why:** The chain reads finding kinds AT REQUEST TIME but doesn't
@@ -327,7 +327,7 @@ invisible to a step that could be satisfied by host B's data.
 3. Test with a seeded engagement where different steps prove against
    different hosts.
 
-### P1-5 — Second attack-chain: Cloud pivot
+### P1-5 — Second attack-chain: Cloud pivot ✅ (shipped; `/api/attack-chain/cloud` + `views/AttackChainCloud.tsx`)
 **Effort:** L
 **Blocks:** Nothing.
 **Why:** Phase D shipped one chain (AD). Cloud is the second-most-
@@ -345,7 +345,7 @@ findings by "Cloud + container" so the readers exist.
    take a chain-config prop and render any 10-step chain).
 5. Add `"cloud-chain"` tab.
 
-### P1-6 — Third attack-chain: Web n-day
+### P1-6 — Third attack-chain: Web n-day ✅ (shipped; `/api/attack-chain/web` + `views/AttackChainWeb.tsx`)
 **Effort:** M
 **Blocks:** Nothing.
 **Why:** Third narrative most testers care about.
@@ -357,23 +357,46 @@ findings by "Cloud + container" so the readers exist.
 - Data sources: web crawl findings, KEV list already annotated on
   Vuln.kev, exploit_note fields for OOB callback commands.
 
-### P1-7 — ADCS ESC1 auto-request (T3 gated)
-**Effort:** M
-**Why:** `ad/adcs.py` detects vulnerable templates. The natural next
-move — request a cert as `alice` for target `Administrator` — is a
-T3 primitive that requires cred_acquired anyway.
+### P1-7 — ADCS ESC1 auto-request (T3 gated) ✅ (2026-09-03, `<pending>`)
+Shipped as `recce/ad/adcs_exploit.py` (subprocess wrapper around
+`certipy req`) + `recce/webui/routes/adcs_esc1.py` (WebGUI endpoint
+with strict gating). Instead of the audit's `--exploit` CLI flag
+(recce doesn't have a global exploit flag today), the intrusive action
+is gated at the API layer:
 
-**Build plan:**
-1. New module `recce/ad/adcs_exploit.py` with an `attempt_esc1(...)`
-   helper that wraps certipy.
-2. Gated behind `--exploit` CLI flag AND requires a Credential of
-   any user for the target domain (checked via known_users).
-3. The AD Chain view's `adcs_esc` step gains an "Attempt request as
-   alice" button when the step is proven AND cred_acquired is proven.
-4. On success, the returned cert lands as a new Credential
-   (kind="cert") — that in turn advances `da_path`.
+  1. **`confirm_sentinel`** — POST body must carry the exact string
+     `"yes-run-certipy"` (not a boolean). A JS-side `confirm: true`
+     replay is refused. The sentinel is discoverable via
+     GET `/api/adcs/esc1/available`.
+  2. **Store-lookup credentials** — the endpoint does NOT accept a
+     password / hash in the request body. The WebGUI names the AD
+     principal (username + domain) and recce looks up the matching
+     Credential in its own store — the tester cannot spray arbitrary
+     creds through this path.
+  3. **Missing tool clean-fails** — no certipy on PATH returns
+     200 + `{ok:false, error:"certipy not installed — install with
+     pip install certipy-ad"}` rather than a 500, so the UI can
+     render the install hint inline.
 
-### P1-8 — Auto-crack loop
+On success:
+  * PFX bytes are written to `<eng>/session-loot/adcs/esc1_<upn>_<ts>.pfx`
+  * A new `Credential(kind="cert", secret=<pfx-path>, source="adcs-
+    esc1(<template>)", notes=…)` folds into the recce store — the
+    AD attack chain's `da_path` step naturally advances the next time
+    the chain is re-derived
+  * Collab activity feed records who requested it, via which CA +
+    template, as which UPN
+
+WebGUI button on the AD chain's `adcs_esc` step is a follow-up
+(the backend + gate are the load-bearing part; the button is a small
+frontend addition that can ship whenever we next touch AttackChain.tsx).
+
+Tests: 16 in `tests/test_adcs_exploit.py` (unit — every branch of
+attempt_esc1 covered with a shell-fixture certipy) + 8 in
+`tests/test_webui_adcs_esc1.py` (API — every gating layer + happy
+path). 24 total.
+
+### P1-8 — Auto-crack loop ✅ (shipped; `recce/creds/crack_watcher.py` polls potfiles, promotes cracks to Credential(kind="password"); `AutocrackStatus` header widget + `/api/autocrack/status`)
 **Effort:** M
 **Why:** Kerberoast/AS-REP/SCRAM hashes recce captures could feed a
 scheduled hashcat runbook + watcher that auto-updates the

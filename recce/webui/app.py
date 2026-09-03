@@ -43,6 +43,10 @@ from .routes import (
 # rather than re-exported through routes/__init__.py — additions-only
 # for this feature keeps the route index untouched.
 from .routes.prove_endpoint import register_prove_endpoint_routes
+# P1-7 ADCS ESC1 auto-request. Same additions-only pattern as
+# prove_endpoint — a distinctly intrusive T3 action gated by its own
+# confirm_sentinel; kept out of the main routes index deliberately.
+from .routes.adcs_esc1 import register_adcs_esc1_routes
 
 
 def create_app(eng_dir: str) -> FastAPI:
@@ -151,6 +155,7 @@ def create_app(eng_dir: str) -> FastAPI:
     register_suggest_digest_routes(app, ctx)
     register_autocrack_status_routes(app, ctx)
     register_prove_endpoint_routes(app, ctx)
+    register_adcs_esc1_routes(app, ctx)
 
     @app.get("/api/events")
     async def events():
