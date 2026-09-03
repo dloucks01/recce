@@ -1131,7 +1131,11 @@ def findings(hosts: list[Host], probe_map: dict | None = None) -> list[dict]:
                         "curl -sSk http://IP:PORT/.env ; curl -sSk "
                         "http://IP:PORT/backup/dump.sql ; curl -sSk "
                         "http://IP:PORT/.ssh/id_rsa"),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — PROPFIND enumeration returned
+                    # concrete sensitive href strings (.env, backup dumps,
+                    # .ssh/id_rsa, wp-config) extracted from the DAV
+                    # response body — server-side content.
+                    depth_tier="t2"))
 
             # Creator-displayname users.
             if pr.get("users"):

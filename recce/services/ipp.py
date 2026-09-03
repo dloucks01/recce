@@ -363,7 +363,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     exploit_note=(
                         f"ipptool -tv ipp://{h.ip}:{p.portid}/printers/ "
                         "CUPS-Get-Printers.test"),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — CUPS-Get-Printers returned
+                    # concrete printer objects (name / URI / attributes)
+                    # extracted from the target's IPP reply.
+                    depth_tier="t2"))
 
             if pr.get("is_cups"):
                 version = pr.get("cups_version") or "unknown"

@@ -1712,7 +1712,10 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             exploit_note=(
                 "In mssqlclient: EXECUTE AS LOGIN='sa'; SELECT "
                 "IS_SRVROLEMEMBER('sysadmin'); then EXEC xp_cmdshell 'whoami'; REVERT."),
-            depth_tier="t1"))
+            # P0-1: T2 promotion — the impersonation table returned a
+            # concrete sysadmin login name that this account can EXECUTE
+            # AS. The name (`who`) is real server-side content.
+            depth_tier="t2"))
 
     trust = [r for r in enum.get("databases", []) if len(r) > 2 and r[1] == "1"]
     trust_sa = trustworthy_sysadmin_dbs(enum)
@@ -2484,7 +2487,10 @@ def permmine_findings(target: dict, perms: dict, creds: dict | None):
             exploit_note=(
                 "USE [<db>]; EXECUTE AS USER='guest'; SELECT * FROM "
                 "INFORMATION_SCHEMA.TABLES; sample any sensitive table listed."),
-            depth_tier="t1"))
+            # P0-1: T2 promotion — guest_dbs is the enumerated list of DBs
+            # where the server confirmed the guest user is enabled. Real
+            # server-side query result.
+            depth_tier="t2"))
     # Notable public/guest object grants (write/execute or broad read).
     strong = {"INSERT", "UPDATE", "DELETE", "EXECUTE", "CONTROL", "ALTER",
               "TAKE OWNERSHIP", "SELECT"}

@@ -766,7 +766,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "SELECT ... INTO DUMPFILE '<plugin_dir>/l.so', "
                         "CREATE FUNCTION sys_exec RETURNS INT SONAME 'l.so'; "
                         "SELECT sys_exec('id')."),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — mysql.user + secure_file_priv
+                    # queries returned a concrete account name that holds
+                    # the FILE privilege AND (in the exploit_note above)
+                    # the current secure_file_priv value read from the
+                    # server. Live server-side evidence.
+                    depth_tier="t2"))
             # Exfil: sensitive columns + redacted samples + harvested connection strings.
             dm = pr.get("datamine")
             if dm and dm.get("secret_columns"):

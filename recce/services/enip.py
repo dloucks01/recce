@@ -897,13 +897,18 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "protocol-exposed by design. Rename devices with "
                     "labels that do not reveal plant location and keep "
                     "internal DNS off the OT network.",
+                    # P0-1: T2 promotion — GetAttributesAll on class 0xF5
+                    # returned concrete host_name / domain_name /
+                    # name_server_1 / gateway fields extracted from the
+                    # CIP TCP/IP Object reply. Every listed value came from
+                    # the controller's own attribute dump.
                     ["CWE-200"], kind="enip_tcpip_disclosure",
                     exploit_note=(
                         "python -m cpppo.server.enip.client --address <ip> "
                         "--print '@0xF5/1'; dig ANY <domain_name> "
                         "@<name_server_1>; identify AD forest / internal "
                         "namespace exposed to OT."),
-                    depth_tier="t1"))
+                    depth_tier="t2"))
 
             # Ethernet Link disclosure — MAC address for correlation.
             eth = pr.get("ethlink") or {}

@@ -783,7 +783,11 @@ def findings(hosts: list[Host], probes: dict | None = None,
                         "-p <port> nobody@<ip>  # if it negotiates, capture "
                         "with tcpdump and try CRC32-compensation MitM "
                         "(Ettercap ssh1 plugin, still in the tree)."),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — the server's identification
+                    # string ("SSH-1.x…" / "SSH-1.99-…") IS the target's
+                    # first byte-string on a fresh connection. Direct
+                    # server-side content, not a heuristic.
+                    depth_tier="t2"))
 
             # --- banner distro tag leak (low, informational) -----------------
             if comment:
@@ -924,7 +928,15 @@ def findings(hosts: list[Host], probes: dict | None = None,
                     "Restrict MACs in sshd_config to hmac-sha2-256/512-etm@ "
                     "openssh.com (or the AEAD ciphers, which supply their own "
                     "integrity).",
-                    ["CWE-327"], kind="ssh_weak_mac"))
+                    ["CWE-327"], kind="ssh_weak_mac",
+                    exploit_note=(
+                        "ssh -m <weak-mac> -p <port> <user>@<ip>  # confirm "
+                        "the server actually completes KEX with the weak MAC; "
+                        "then Wireshark to observe the ETM/EtM absence."),
+                    # P0-1: T2 promotion — the weak MAC list came from the
+                    # server's KEXINIT `mac_algorithms_server_to_client`
+                    # advertisement — a real algorithm-negotiation packet.
+                    depth_tier="t2"))
 
             # Hostkey posture.
             weak_hk = [k for k in hostkey if k in _WEAK_HOSTKEY]
@@ -946,7 +958,10 @@ def findings(hosts: list[Host], probes: dict | None = None,
                         "ssh-keyscan -t rsa,dsa -p <port> <ip> | "
                         "ssh-keygen -lf -   # confirms the algorithm is "
                         "really held"),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — the deprecated hostkey list
+                    # came from the server's KEXINIT
+                    # `server_host_key_algorithms` advertisement.
+                    depth_tier="t2"))
 
             # Terrapin.
             terr, terr_hits = _terrapin_applies(kex, cipher_sc, mac_sc)

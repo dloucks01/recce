@@ -1075,7 +1075,11 @@ def _public_schema_finding(out: list, tgt: str, ip: str, port: int,
                 "SELECT current_user $$ LANGUAGE sql;' — any SECURITY DEFINER "
                 "caller of now() without SET search_path resolves your version "
                 "first."),
-            depth_tier="t1"))
+            # P0-1: T2 promotion — the pg_namespace ACL query confirmed
+            # public grants CREATE to PUBLIC on this specific cluster. The
+            # finding output is derived from a real server-side lookup,
+            # not a version-heuristic default assumption.
+            depth_tier="t2"))
     sdf = lt.get("security_definer_public") or []
     if sdf:
         sample = ", ".join(f["function"] for f in sdf[:8])
@@ -1248,7 +1252,11 @@ def _emit_lo_file_read(out: list, tgt: str, ip: str, port: int, lt: dict) -> Non
             "psql -c \"SELECT lo_import('/etc/passwd') AS oid;\" then loread "
             "the returned oid; grep for TLS keys / recovery.conf / pgpass on "
             "the DB host filesystem."),
-        depth_tier="t1"))
+        # P0-1: T2 promotion — pg_proc/pg_class ACL query returned a
+        # concrete role name that holds both SELECT on pg_largeobject
+        # AND EXECUTE on lo_import(text) — the (`role`) is server-side
+        # ACL data confirming the file-I/O primitive.
+        depth_tier="t2"))
 
 
 def _datamine_finding(out: list, tgt: str, ip: str, port: int, dm: dict | None) -> None:

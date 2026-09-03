@@ -1101,7 +1101,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     exploit_note=(
                         f"ipmitool -I lan -H {h.ip} -A NONE sensor list ; "
                         f"ipmitool -I lan -H {h.ip} -A NONE sel list"),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — Auth Status byte (bit 3) came
+                    # from a parsed Get Channel Auth Capabilities reply.
+                    # The BMC's own capability advertisement confirms
+                    # user-level auth is disabled.
+                    depth_tier="t2"))
             # Bit 5: KG (BMC key) set or NOT set. When not set, K_uid
             # collapses to HMAC(password) so any captured RAKP2 (see the
             # ipmi_rakp_hash finding above) is straight-line crackable.

@@ -819,7 +819,10 @@ def _emit_auth_none_discovery(out, pr, tgt, h, p):
         exploit_note=(
             f"iscsiadm -m discovery -t sendtargets -p {h.ip}:{p.portid}  "
             "# captures every TargetName/TargetAddress"),
-        depth_tier="t1"))
+        # P0-1: T2 promotion — the target portal completed a Discovery
+        # Login with AuthMethod=None and accepted the session. That's a
+        # protocol-level acceptance from the target, not an inference.
+        depth_tier="t2"))
 
 
 def _emit_sendtargets(out, pr, tgt, h, p):

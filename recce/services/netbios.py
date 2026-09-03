@@ -196,7 +196,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "nbtscan -v <ip>; then use disclosed hostname: "
                     "rpcclient -U '' -N <ip>; if suffix 0x1C present: "
                     "kerbrute userenum -d <domain> --dc <ip> users.txt."),
-                depth_tier="t1"))
+                # P0-1: T2 promotion — NBNS node-status reply returned
+                # concrete names + suffixes + role + MAC — every field in
+                # the finding output came from a single target-issued
+                # UDP packet.
+                depth_tier="t2"))
     return out
 
 

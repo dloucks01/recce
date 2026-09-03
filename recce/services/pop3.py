@@ -903,7 +903,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "nc IP 110 ; note @hostname in first line ; add to "
                         "/etc/hosts or feed the AD reader for cross-service "
                         "correlation"),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — the APOP timestamp value itself
+                    # (with its <pid.time@host> shape) came from the
+                    # target's greeting line; the @host portion is the
+                    # server disclosing its internal FQDN.
+                    depth_tier="t2"))
                 out.append(_finding(
                     "high",
                     "POP3 APOP transcripts are offline-crackable (md5(challenge||pass))",

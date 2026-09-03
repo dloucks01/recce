@@ -753,7 +753,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                 exploit_note=(
                     "ypcat -d <domain> -h <ip> -x; then per-map: ypcat -d "
                     "<domain> -h <ip> <map>."),
-                depth_tier="t1"))
+                # P0-1: T2 promotion — YPPROC_MAPLIST returned the actual
+                # enumerated map name list. Every name in the finding
+                # output came from the target's own reply. Also gates the
+                # T3 credential-map dump below, so treating this as a
+                # deterministic-plus-evidence T2 primitive is correct.
+                depth_tier="t2"))
 
         # Critical: passwd hashes.
         if hashes:
@@ -827,7 +832,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "'^(wheel|sudo|adm|root):'; then hashcat prioritized on "
                     "those users' hashes."
                 ) if priv_groups else "",
-                depth_tier="t1" if priv_groups else ""))
+                # P0-1: T2 promotion — group.byname returned real group
+                # membership records with named privileged groups (wheel /
+                # sudo / adm / root / bin) extracted from the target's
+                # reply. Empty tier when no priv_groups is preserved.
+                depth_tier="t2" if priv_groups else ""))
 
         netgroup_recs = (pr.get("records") or {}).get("netgroup", [])
         trust_hits = [(k, v) for k, v in netgroup_recs
@@ -877,7 +886,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "ypcat -d <domain> -h <ip> ypservers; then re-run "
                     "nisyp probe against each slave server — may bypass "
                     "securenets ACL of the master."),
-                depth_tier="t1"))
+                # P0-1: T2 promotion — the finding reports real
+                # hosts.byname + ypservers record COUNTS extracted from
+                # the target's map dumps. Each dumped topology map is
+                # server-side content.
+                depth_tier="t2"))
 
         # securenets partial hardening.
         if pr.get("securenets"):
@@ -900,7 +913,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "After foothold on any in-range client: ssh <client> "
                     "'ypcat -d <domain> passwd'  # may succeed where "
                     "direct scan failed."),
-                depth_tier="t1"))
+                # P0-1: T2 promotion — ypserv positively acknowledged the
+                # NIS domain via YPPROC_DOMAIN. That reply IS the target
+                # naming its own NIS domain to us pre-foothold — server-
+                # side content, not a heuristic.
+                depth_tier="t2"))
     return out
 
 

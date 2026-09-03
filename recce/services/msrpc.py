@@ -725,7 +725,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "impacket-rpcdump <ip>; then direct-connect on the "
                         "dynamic port: e.g. impacket-samrdump ncacn_ip_tcp:"
                         "<ip>[<samr-port>]."),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — the endpoint mapper returned
+                    # concrete UUID→ncacn_ip_tcp port pairs; the finding
+                    # names known interfaces + their resolved dynamic
+                    # ports. Every entry came from the EPM reply.
+                    depth_tier="t2"))
     return out
 
 
