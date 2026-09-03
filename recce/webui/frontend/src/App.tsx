@@ -12,7 +12,7 @@ import { AttackChain } from "./views/AttackChain";
 import { AttackChainCloud } from "./views/AttackChainCloud";
 import { AttackChainWeb } from "./views/AttackChainWeb";
 import { HostDrawer } from "./HostDrawer";
-import { PresenceBar, ActivityButton, ChatButton, AddMenu, useCollab } from "./collab";
+import { PresenceBar, AddMenu, useCollab } from "./collab";
 import { TabBar, TabId, SubTabBar, DataSub, AttackSub, PlanSub, AnySub,
          DATA_SUBS, ATTACK_SUBS, PLAN_SUBS, LEGACY_TO_NEW } from "./TabBar";
 import { Skeleton } from "./ui";
@@ -365,7 +365,6 @@ export default function App() {
       <div className="app-header">
         <div className="header-left">
           <h1>recce</h1>
-          <TabBar active={tab} onSwitch={setTab} badges={badges} />
         </div>
         <div className="header-right">
           <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
@@ -383,8 +382,11 @@ export default function App() {
               onDoctor={() => setShowDoctor(true)}
               onScope={() => setShowScope(true)}
             />
-            <ActivityButton />
-            <ChatButton />
+            {/* ActivityButton + ChatButton removed — they opened drawers that
+                duplicated the sidebar's Activity + Chat tabs. Users clicking
+                either header button and then noticing the same content on the
+                right rail was the source of "why are there two of these?"
+                confusion. Autocrack/Proxy stay: not sidebar-covered. */}
             <AutocrackStatus />
             <ProxyBadge />
           </div>
@@ -412,6 +414,12 @@ export default function App() {
             </form>
           )}
         </div>
+      </div>
+
+      {/* Tab row — lives below the header so tabs wrap freely on narrow
+          viewports instead of getting clipped inside the fixed-height header. */}
+      <div className="app-tabrow">
+        <TabBar active={tab} onSwitch={setTab} badges={badges} />
       </div>
 
       {/* Main content */}
