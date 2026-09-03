@@ -127,10 +127,46 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
   const [dragging, setDragging] = useState<TabId | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Tracks whether the tab-scroll strip has more content off-screen. Drives
+  // the has-overflow-left / -right CSS fades so users can *see* there's
+  // more, plus makes the ⋮ menu badge count out-of-view tabs.
+  const [overflow, setOverflow] = useState({ left: false, right: false });
 
   useEffect(() => {
     localStorage.setItem("recce.tabs", JSON.stringify(tabs));
   }, [tabs]);
+
+  // Overflow-awareness: recompute whenever tabs, size, or scroll position
+  // change. ResizeObserver handles container/viewport width; the scroll
+  // listener handles the user scrolling within the strip.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const compute = () => {
+      const overflowsRight =
+        el.scrollWidth - el.scrollLeft - el.clientWidth > 2;
+      const overflowsLeft = el.scrollLeft > 2;
+      setOverflow((prev) =>
+        (prev.left === overflowsLeft && prev.right === overflowsRight)
+          ? prev : { left: overflowsLeft, right: overflowsRight });
+    };
+    compute();
+    el.addEventListener("scroll", compute, { passive: true });
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => { el.removeEventListener("scroll", compute); ro.disconnect(); };
+  }, [tabs]);
+
+  // Ensure the currently active tab is always visible in the strip (when the
+  // active tab was set from a keyboard shortcut / palette while the scroll
+  // was elsewhere, auto-scroll it into view).
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const target = el.querySelector(`[data-tab-id="${active}"]`) as HTMLElement | null;
+    if (target) target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+  }, [active]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -167,15 +203,19 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
 
   const hiddenTabs = ALL_TABS.filter((t) => !tabs.includes(t));
 
+  const tabbarCls = "tabbar"
+    + (overflow.left ? " has-overflow-left" : "")
+    + (overflow.right ? " has-overflow-right" : "");
   return (
-    <div className="tabbar">
-      <div className="tabs-scroll">
+    <div className={tabbarCls}>
+      <div className="tabs-scroll" ref={scrollRef}>
         {tabs.map((tab, i) => (
           <Fragment key={tab}>
             {i > 0 && GROUP_BOUNDARIES.has(tab) &&
               <span className="tab-group-divider" aria-hidden="true" />
             }
             <button
+              data-tab-id={tab}
               className={`tab ${tab === active ? "active" : ""} ${dragging === tab ? "dragging" : ""}`}
               onClick={() => onSwitch(tab)}
               draggable
@@ -194,8 +234,10 @@ export function TabBar({ active, onSwitch, badges }: TabBarProps) {
       </div>
       <div className="tab-menu" ref={menuRef}>
         <button
-          className="tab-toggle"
-          title="Show/hide tabs"
+          className={"tab-toggle" + (overflow.left || overflow.right ? " has-overflow" : "")}
+          title={overflow.left || overflow.right
+            ? "Some tabs are off-screen — click to jump / show / hide"
+            : "Show/hide tabs"}
           aria-label="tab options"
           onClick={() => setMenuOpen(!menuOpen)}
         >

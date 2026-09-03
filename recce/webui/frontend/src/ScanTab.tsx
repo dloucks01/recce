@@ -179,6 +179,15 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
   const [chainRunning, setChainRunning] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const suggestRef = useRef<HTMLDivElement>(null);
+  // Chain-cancel plumbing. runPreset / runQueue iterate a list of commands
+  // in series — the user needs one Stop button that both:
+  //   * cancels the currently-running job via /api/jobs/{id}/cancel, AND
+  //   * breaks out of the outer for-loop so the next command isn't fired.
+  // A ref (not state) keeps the loop reading a fresh value each iteration.
+  const chainCancelledRef = useRef(false);
+  const chainCurrentJobRef = useRef<string | null>(null);
+  const chainCurrentEsRef = useRef<EventSource | null>(null);
+  const [chainStopping, setChainStopping] = useState(false);
 
   useEffect(() => {
     getJSON<{hosts: number; commands: Record<string, {count: number; sample: string[]; hint?: string}>}>(
@@ -291,10 +300,28 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
       setShowLog(true);
       return;
     }
+    // Two-step confirm — a preset chains several real scans back-to-back
+    // against the target list. One accidental click used to fire them all.
+    const cmdList = preset.cmds
+      .map((c) => `  • ${catalog[c.command]?.label || c.command}`)
+      .join("\n");
+    const targetSummary = t || "(engagement default)";
+    if (!window.confirm(
+      `Run the "${preset.label}" preset?\n\n` +
+      `${preset.cmds.length} scan(s) will run in sequence against: ${targetSummary}\n\n` +
+      cmdList +
+      `\n\nThe scans run one after another. Click Stop chain in the console\n` +
+      `at any time to cancel the in-flight scan and skip the rest.`
+    )) return;
+    chainCancelledRef.current = false;
     setChainRunning(true);
     setShowLog(true);
     setLog([`▶ Running preset: ${preset.label} (${preset.cmds.length} scans)`]);
     for (const c of preset.cmds) {
+      if (chainCancelledRef.current) {
+        setLog((l) => [...l, `\n⛔ Chain cancelled — remaining ${preset.cmds.length - preset.cmds.indexOf(c)} scan(s) skipped`]);
+        break;
+      }
       const s = catalog[c.command];
       if (!s) continue;
       try {
@@ -303,8 +330,10 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
           command: c.command, targets: t, profile,
           flags: c.flags || [],
         });
+        chainCurrentJobRef.current = id;
         await new Promise<void>((resolve) => {
           const es = new EventSource(`/api/jobs/${id}/events`);
+          chainCurrentEsRef.current = es;
           es.onmessage = (m) => {
             try {
               const d = JSON.parse(m.data);
@@ -314,12 +343,38 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
           };
           es.onerror = () => { es.close(); resolve(); };
         });
+        chainCurrentJobRef.current = null;
+        chainCurrentEsRef.current = null;
       } catch (e) {
         setLog((l) => [...l, `error: ${e}`]);
       }
     }
-    setLog((l) => [...l, `\n✓ Preset "${preset.label}" complete`]);
+    if (!chainCancelledRef.current)
+      setLog((l) => [...l, `\n✓ Preset "${preset.label}" complete`]);
     setChainRunning(false);
+    setChainStopping(false);
+  }
+
+  // Stop the current chain (preset or queue). Cancels the in-flight job
+  // server-side and flips the ref so the outer loop breaks. Individual
+  // job-row cancel buttons keep working for one-off cancels.
+  async function stopChain() {
+    if (!chainRunning) return;
+    if (!window.confirm(
+      "Stop the running scan chain?\n\n" +
+      "The current scan will be cancelled and any remaining\n" +
+      "scans in the chain will be skipped."
+    )) return;
+    setChainStopping(true);
+    chainCancelledRef.current = true;
+    const jid = chainCurrentJobRef.current;
+    if (jid) {
+      try { await fetch(`/api/jobs/${jid}/cancel`, { method: "POST" }); }
+      catch { /* server may already have finished the job */ }
+    }
+    // Close the SSE eagerly so the awaited Promise in run{Preset,Queue}
+    // resolves immediately instead of waiting for the server to hang up.
+    try { chainCurrentEsRef.current?.close(); } catch { /* noop */ }
   }
 
   function addToQueue() {
@@ -337,12 +392,26 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
 
   async function runQueue() {
     if (running || chainRunning || queue.length === 0) return;
+    // Same confirm as presets — a queue chain runs multiple commands
+    // back-to-back and there's no way to interrupt except through this
+    // Stop chain button.
+    const listing = queue.map((item) => `  • ${item.label}`).join("\n");
+    if (!window.confirm(
+      `Run the queued scan chain?\n\n` +
+      `${queue.length} scan(s) will run in sequence:\n\n${listing}\n\n` +
+      `Click Stop chain in the console at any time to cancel.`
+    )) return;
+    chainCancelledRef.current = false;
     setChainRunning(true);
     setShowLog(true);
     setLog([`▶ Running scan chain (${queue.length} commands)`]);
     const items = [...queue];
     setQueue([]);
     for (const item of items) {
+      if (chainCancelledRef.current) {
+        setLog((l) => [...l, `\n⛔ Chain cancelled — remaining ${items.length - items.indexOf(item)} scan(s) skipped`]);
+        break;
+      }
       try {
         setLog((l) => [...l, `\n━━━ ${item.label} ━━━`]);
         const { id } = await postCommand({
@@ -351,8 +420,10 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
           profile,
           flags: item.flags,
         });
+        chainCurrentJobRef.current = id;
         await new Promise<void>((resolve) => {
           const es = new EventSource(`/api/jobs/${id}/events`);
+          chainCurrentEsRef.current = es;
           es.onmessage = (m) => {
             try {
               const d = JSON.parse(m.data);
@@ -362,12 +433,16 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
           };
           es.onerror = () => { es.close(); resolve(); };
         });
+        chainCurrentJobRef.current = null;
+        chainCurrentEsRef.current = null;
       } catch (e) {
         setLog((l) => [...l, `error: ${e}`]);
       }
     }
-    setLog((l) => [...l, `\n✓ Scan chain complete`]);
+    if (!chainCancelledRef.current)
+      setLog((l) => [...l, `\n✓ Scan chain complete`]);
     setChainRunning(false);
+    setChainStopping(false);
   }
 
   // Group active (non-dismissed) suggestions by target command so multiple
@@ -880,6 +955,8 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
           log={log}
           running={running}
           chainRunning={chainRunning}
+          chainStopping={chainStopping}
+          onStopChain={stopChain}
           logRef={logRef}
           onClose={() => setShowLog(false)}
         />

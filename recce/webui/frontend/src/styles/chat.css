@@ -93,9 +93,38 @@
 .sidebar-resize:hover::after, .sidebar-resize:active::after { background: var(--accent); height: 64px; }
 
 /* ---- TabBar (draggable tab reordering) ---- */
-.tabbar { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
-.tabs-scroll { display: flex; align-items: center; gap: 2px; overflow-x: auto; padding-right: 8px; flex: 1; scrollbar-width: none; }
-.tabs-scroll::-webkit-scrollbar { display: none; }
+.tabbar { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0;
+  position: relative; }
+/* Horizontal-scroll behavior: keep the scroll (so no tab is ever unreachable
+   at narrow widths) but make the scrollbar visible + thin so users can see
+   there's more content to the right. Was `scrollbar-width: none` which
+   hid the scrollbar and made overflowing tabs look "disappeared." */
+.tabs-scroll { display: flex; align-items: center; gap: 2px; overflow-x: auto;
+  padding: 0 6px 4px; flex: 1; scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 40%, transparent) transparent;
+  scroll-behavior: smooth; }
+.tabs-scroll::-webkit-scrollbar { height: 6px; }
+.tabs-scroll::-webkit-scrollbar-track { background: transparent; }
+.tabs-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 40%, transparent);
+  border-radius: 3px; }
+.tabs-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--muted) 70%, transparent); }
+/* Right-edge fade telling users there's more to scroll. Only visible when
+   the scroll actually has overflow (has-overflow class toggled by the JS
+   in TabBar.tsx via ResizeObserver / scroll listener). */
+.tabbar.has-overflow-right::after { content: ""; position: absolute; right: 32px;
+  top: 0; bottom: 6px; width: 24px; pointer-events: none;
+  background: linear-gradient(to right,
+    color-mix(in srgb, var(--surface) 0%, transparent),
+    color-mix(in srgb, var(--surface) 88%, transparent) 60%,
+    var(--surface)); z-index: 1; }
+.tabbar.has-overflow-left::before { content: ""; position: absolute; left: 0;
+  top: 0; bottom: 6px; width: 20px; pointer-events: none;
+  background: linear-gradient(to left,
+    color-mix(in srgb, var(--surface) 0%, transparent),
+    color-mix(in srgb, var(--surface) 88%, transparent) 60%,
+    var(--surface)); z-index: 1; }
 /* Group dividers between workflow phases (RECON / ATTACK / DELIVER). */
 .tab-group-divider { display: inline-block; width: 1px; height: 20px;
   background: var(--line); margin: 0 8px; flex-shrink: 0; }
@@ -691,3 +720,22 @@
 
 /* CredentialsPanel — inline delete button on each row footer. */
 .cred-delete { margin-left: auto; }
+
+/* Overflow indicator on the ⋮ menu — a tiny amber dot appears when the
+   tab strip has content off-screen, so users notice the ⋮ has escape-
+   hatch value beyond hide/show. */
+.tab-toggle.has-overflow { position: relative; color: var(--accent); }
+.tab-toggle.has-overflow::after { content: ""; position: absolute; top: 6px;
+  right: 6px; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 0 2px var(--surface); }
+
+/* Scan console — action group (Stop chain + Close). Stop chain is
+   deliberately red-tinted so it's unmissable in the console header. */
+.scan-console-actions { display: flex; align-items: center; gap: 8px; }
+.scan-console-stop { background: color-mix(in srgb, var(--crit) 18%, transparent);
+  color: var(--crit); border: 1px solid color-mix(in srgb, var(--crit) 50%, transparent);
+  font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 5px;
+  cursor: pointer; transition: all .12s; }
+.scan-console-stop:hover:not(:disabled) { background: color-mix(in srgb, var(--crit) 30%, transparent);
+  filter: brightness(1.15); }
+.scan-console-stop:disabled { opacity: 0.55; cursor: not-allowed; }
