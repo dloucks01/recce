@@ -533,7 +533,7 @@ current one highlighted. Switch reloads the SPA with `?eng=<slug>`.
 Backend gains `/api/engagements` (list) and `/api/engagement/switch`
 (POST) endpoints.
 
-#### P7-B5 — Canonicalise `Vuln.key` shape ✅ (2026-09-03, `<pending>`)
+#### P7-B5 — Canonicalise `Vuln.key` shape ✅ (2026-09-03, `3873294`)
 Unified `Vuln.key` and `tracking.vuln_row_key(v)` — both now return the
 same `"vuln:{ip}:{port}:{script}:{title[:60]}"` string (plus `":<proto>"`
 for non-tcp). `tracking.vuln_row_key` becomes a thin alias
