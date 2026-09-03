@@ -217,6 +217,7 @@ top-level key you actually read:
 | `GET /api/jobs` | `[{id, cmd, status, lines, started, progress?}, …]` (top-level array) |
 | `GET /api/jobs/{jid}` | `{id, cmd, status, started, ended, returncode, lines, progress, result}` |
 | `GET /api/engagements` | `{current, parent, engagements: [{path, engagement, current, mtime}, …]}` |
+| `GET /api/teardown` | `{generated_at, total, sessions, listeners, persistence, uploads, tunnels, portfwds}` (all live artefacts the engagement dropped) |
 | `GET /api/overview` | `{hosts_total, hosts_up, services, findings_by_severity, by_severity, top_hosts, kev_total, kev_findings, ...}` |
 | `GET /api/scope` | in-scope subnets list |
 | `GET /api/writeups` | writeup metadata list |

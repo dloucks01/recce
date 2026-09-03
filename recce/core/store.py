@@ -139,6 +139,16 @@ class Store:
             backfill = str(_time.time() - 3600)
             cur.execute("UPDATE hosts SET updated=? WHERE updated='' OR updated IS NULL",
                         (backfill,))
+            # One-time purge of stale scan_issue rows from before the
+            # dogfood-item-3 fix (commit ec3e856): `udp-basic: skipped
+            # (needs root/CAP_NET_RAW ...)` was recorded per-host as a
+            # ScanIssue on every unprivileged enum, inflating the
+            # `[!] N scan issue(s) logged (0 error, N incomplete)`
+            # footer. The condition is a config state, not a scan
+            # failure — never should have been persisted. Distinctive
+            # message string; false positives impossible.
+            cur.execute("DELETE FROM issues WHERE message LIKE "
+                        "'udp-basic: skipped (needs root%'")
         self.conn.commit()
 
     def close(self) -> None:
