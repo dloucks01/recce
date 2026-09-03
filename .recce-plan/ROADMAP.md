@@ -191,7 +191,7 @@ immediately. Same mechanic that shipped 15 already in Phase B2.
 Split into ~4 workflows (12 services each) if the concurrent-agent
 cap holds.
 
-### P0-2 — Attach exploit_notes to medium/low severity findings ✅ (2026-09-03, `<pending>`)
+### P0-2 — Attach exploit_notes to medium/low severity findings ✅ (2026-09-03, `7a10c97`)
 Roadmap estimated ~337 attachments; the actual scanner-driven survey
 (scratchpad/p0_2_scanner.py) found:
   * 302 audit candidates at medium/low/info severity
