@@ -578,7 +578,7 @@ show console" — no need to open Sessions to see what's running.
 
 ### Batch D — Test coverage
 
-#### P7-D1 — Commit WebGUI E2E smoke as CI tests ✅ (2026-09-02, `<pending-hash>`)
+#### P7-D1 — Commit WebGUI E2E smoke as CI tests ✅ (2026-09-02, `908bb2c`)
 Promoted `scratchpad/api_sweep.py` + `scratchpad/scan_smoke.py` (both
 built during the P7 audit) to real tests under `tests/test_webui_smoke.py`.
 Uses the same `TestClient` + `mock_engagement.build` fixtures as
