@@ -4,6 +4,30 @@ All notable changes to recce are documented here. This project follows
 [semver](https://semver.org): major bumps break API/CLI shape, minor bumps
 ship additive capabilities, patches fix regressions without adding surface.
 
+## [0.7.1] — 2026-09-03
+
+Docs-only patch on top of 0.7.0. No code changes.
+
+- **Docs sync to 0.7.0** — a tester opening the repo would have missed
+  every headline 0.7.0 addition (web workbench, attack chains, sessions
+  with tunnels/port-forwards, ADCS ESC1 auto-request, cross-service
+  chain rules, auto-crack loop, OT protocols, BloodHound push). Fixed.
+- New user doc `docs/reference/webui.md` (~200 lines) — full tour of the
+  web workbench: 11 tabs, sidebar strip, header widgets, attack chains,
+  ESC1 flow, every per-session capability, scan-tab suggestions,
+  in-browser report generation.
+- Refreshed `README.md`, `QUICKSTART.md`, `docs/reference/commands.md`,
+  `docs/reference/services.md`, `docs/reference/active-directory.md`,
+  `docs/reference/reporting.md`, `docs/reference/privesc.md` to reflect
+  0.7.0 features (Act phase, prove engine, suggest digest, OT modules
+  s7/bacnet/dnp3/enip/iec104/opcua/modbus, ADCS ESC1 auto-request,
+  auto-crack loop, in-browser reporting).
+- Moved 6 internal design ADRs `docs/design/*` → `.recce-plan/design/*`
+  (they document decisions for shipped subsystems — not user-facing).
+- Deleted stale `test_env/TEST_PLAN.md` (297 lines predating the live
+  test env; used old flag names). `test_env/README.md` is the single
+  source of truth for the lab.
+
 ## [0.7.0] — 2026-09-03
 
 The **audit-and-close** release. The 0.6.x cycle shipped a lot of code
