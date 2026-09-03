@@ -27,6 +27,7 @@ from ...core.store import Store
 
 def register_prove_endpoint_routes(app: FastAPI, ctx) -> None:
     db_path = ctx.db_path
+    broker = ctx.broker
 
     @app.get("/api/prove/available")
     def prove_available():
@@ -55,4 +56,11 @@ def register_prove_endpoint_routes(app: FastAPI, ctx) -> None:
         result = prove_dispatch.prove_finding_key(hosts, finding_key)
         if result is None:
             raise HTTPException(404, f"no finding matches key {finding_key!r}")
+        # P7-C3: broadcast the verdict so every open tab surfaces a toast.
+        # A `prove` returns one of {proven, refuted, inconclusive, error} —
+        # the frontend picks a toast icon + colour off `verdict` and
+        # includes the finding key so the operator can click through.
+        broker.publish({"type": "prove_verdict",
+                        "finding_key": finding_key,
+                        "verdict": (result or {}).get("verdict", "inconclusive")})
         return result

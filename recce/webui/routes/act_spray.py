@@ -1,7 +1,7 @@
 """The Act phase (ranked action plan), auto-run, and credential spray."""
 from __future__ import annotations
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 
 
 def register_act_spray_routes(app: FastAPI, ctx) -> None:
@@ -129,6 +129,15 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
                             notes=f"validated over {h['proto']}"
                                   + (" (local admin)" if h["admin"] else ""))):
                         new += 1
+                        # P7-C3: per-hit event so every open tab surfaces a
+                        # toast for each fresh credential (`cred_captured`
+                        # is the general term; `spray_hit` gives the spray
+                        # source so a toast can say "spray hit on host X"
+                        # rather than the generic add path).
+                        broker.publish({"type": "spray_hit",
+                                        "user": h["user"], "ip": h["ip"],
+                                        "proto": h["proto"],
+                                        "admin": bool(h["admin"])})
             broker.publish({"type": "spray", "hits": len(res.get("hits", []))})
             return {"ok": res.get("ok", False), "error": res.get("error", ""),
                     "hits": res.get("hits", []), "new": new}
@@ -185,7 +194,7 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
         }
 
     @app.post("/api/act/run/async")
-    def act_run_async():
+    def act_run_async(x_tester: str = Header(default="someone")):
         """P7-C1: non-blocking act/run. Returns {id, cmd, status}; caller
         polls /api/jobs/{jid} to get the same shape /api/act/run returns
         synchronously, once status flips to `done`."""
@@ -195,7 +204,7 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
         except TooManyJobs as e:
             raise HTTPException(429, str(e))
         broker.publish({"type": "job_started", "kind": "act_run",
-                        "job_id": job.id})
+                        "job_id": job.id, "tester": x_tester})
         return {"id": job.id, "status": job.status, "cmd": job.cmd}
 
     def _do_spray(tokens: list[str], safe: bool, all_hosts: bool):
@@ -219,12 +228,22 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
                             notes=f"validated over {h['proto']}"
                                   + (" (local admin)" if h["admin"] else ""))):
                         new += 1
+                        # P7-C3: per-hit event so every open tab surfaces a
+                        # toast for each fresh credential (`cred_captured`
+                        # is the general term; `spray_hit` gives the spray
+                        # source so a toast can say "spray hit on host X"
+                        # rather than the generic add path).
+                        broker.publish({"type": "spray_hit",
+                                        "user": h["user"], "ip": h["ip"],
+                                        "proto": h["proto"],
+                                        "admin": bool(h["admin"])})
             broker.publish({"type": "spray", "hits": len(res.get("hits", []))})
             return {"ok": res.get("ok", False), "error": res.get("error", ""),
                     "hits": res.get("hits", []), "new": new}
 
     @app.post("/api/spray/async")
-    def spray_async(body: dict = Body(default=None)):
+    def spray_async(body: dict = Body(default=None),
+                    x_tester: str = Header(default="someone")):
         """P7-C1: non-blocking spray. Same target-parse + `--all` sentinel
         rules as /api/spray. Returns {id, cmd, status}; caller polls
         /api/jobs/{jid} for the full result."""
@@ -249,5 +268,5 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
         except TooManyJobs as e:
             raise HTTPException(429, str(e))
         broker.publish({"type": "job_started", "kind": "spray",
-                        "job_id": job.id})
+                        "job_id": job.id, "tester": x_tester})
         return {"id": job.id, "status": job.status, "cmd": job.cmd}

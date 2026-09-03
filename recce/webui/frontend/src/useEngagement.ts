@@ -70,6 +70,49 @@ export function useEngagement(tester: string, note: (msg: string) => void, colla
         collab.pushChat(d.msg);
         if (d.msg.tester !== tester) note(`💬 ${d.msg.tester}: ${d.msg.text || "sent an image"}`.slice(0, 80));
       }
+      // P7-C3: fine-grained action events, surfaced as toasts. Every event
+      // below already fires today (broker-side) but was silent on the
+      // client. Kept intentionally short — a toast is 3-6s of screen
+      // real estate — with the full detail sitting on the Findings /
+      // Sessions / Credentials tab.
+      else if (d.type === "spray_hit") {
+        // Fresh cred captured mid-spray. Refresh() lands the row in the
+        // Credentials tab; the toast tells the operator to look.
+        refresh().catch(() => {});
+        note(`🔑 spray hit · ${d.user}@${d.ip}${d.admin ? " (admin)" : ""}`);
+      } else if (d.type === "spray") {
+        // End-of-spray summary — only nudge when nothing was already
+        // announced per-hit (else the operator has already seen N toasts).
+        if (d.hits > 0) note(`Spray done · ${d.hits} hit(s)`);
+        else note("Spray done · no hits");
+      } else if (d.type === "act_run") {
+        note(`Act/run done · ${d.looted} looted`);
+        refresh().catch(() => {});
+      } else if (d.type === "job_started") {
+        // Only announce jobs OTHER testers started — you launched your own
+        // and already saw the response.
+        if (d.tester && d.tester !== tester) note(`${d.tester} started ${d.kind}`);
+      } else if (d.type === "session" && d.event === "caught") {
+        note(`⌨ shell caught from ${d.ip}`);
+        refresh().catch(() => {});
+      } else if (d.type === "session" && d.event === "lost") {
+        note(`⚠️ session lost · ${d.id}`);
+      } else if (d.type === "prove_verdict") {
+        const icon = d.verdict === "proven" ? "✅"
+                   : d.verdict === "refuted" ? "❌"
+                   : d.verdict === "error" ? "⚠️" : "🤷";
+        note(`${icon} prove · ${d.verdict}`);
+        refresh().catch(() => {});
+      } else if (d.type === "evidence") {
+        // Someone dropped a file onto a host row (screenshot, output).
+        if (d.by && d.by !== tester) note(`📎 ${d.by} attached evidence to ${d.ip}`);
+      } else if (d.type === "delete") {
+        // Only announce deletions OTHER testers did — mine surface via the
+        // component that initiated them.
+        if (d.by && d.by !== tester) note(`${d.by} deleted a ${d.what}`);
+      } else if (d.type === "bulk_review" && d.by && d.by !== tester) {
+        note(`${d.by} ${d.reviewed ? "checked off" : "reopened"} ${d.count} finding(s)`);
+      }
     };
     return () => es.close();
   }, [tester, note, refresh, collab]);

@@ -333,6 +333,36 @@ class ApiShape(unittest.TestCase):
                     f"expected 400 for empty-target body {body!r}, got {r.status_code}")
                 self.assertIn("targets required", r.json()["detail"])
 
+    def test_prove_endpoint_publishes_verdict_event(self):
+        """P7-C3: /api/prove emits a `prove_verdict` broker event so every
+        open tab surfaces the outcome as a toast. Must carry `finding_key`
+        (for a click-through) and `verdict` (for the icon)."""
+        # Wrap the _Broker.publish class method so both this test and the
+        # route handlers use the same interception point — the ctx.broker
+        # instance is baked into route closures at register time and
+        # can't be swapped mid-flight.
+        from recce.webui import _common as broker_mod
+        events: list = []
+        orig_publish = broker_mod._Broker.publish
+        def _wrap(self, evt):
+            events.append(dict(evt))
+            return orig_publish(self, evt)
+        broker_mod._Broker.publish = _wrap
+        try:
+            with _client(self.eng) as c:
+                keys = c.get("/api/prove/available").json().get("keys") or []
+                if not keys:
+                    self.skipTest("mock engagement has no provable findings")
+                r = c.post(f"/api/prove/{keys[0]}")
+                self.assertEqual(r.status_code, 200, r.text[:200])
+        finally:
+            broker_mod._Broker.publish = orig_publish
+        prove_events = [e for e in events if e.get("type") == "prove_verdict"]
+        self.assertTrue(prove_events,
+            f"no prove_verdict event emitted; got {[e.get('type') for e in events]}")
+        self.assertIn("verdict", prove_events[0])
+        self.assertIn("finding_key", prove_events[0])
+
     def test_jobs_endpoint_carries_progress_field(self):
         """P7-C5: /api/jobs rows include a `progress` key (null for
         callable / short jobs; a {done, total, phase} dict once the
