@@ -841,6 +841,13 @@ def ndmp_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
+# Canonical alias for /api/scan/context's `<cmd>_targets` lookup — this
+# module covers TWO protocols (NBD and NDMP), so the alias returns the
+# union so `recce nbd_ndmp` sees hosts running either.
+def nbd_ndmp_targets(hosts: list[Host]) -> list[dict]:
+    return nbd_targets(hosts) + ndmp_targets(hosts)
+
+
 # --- findings ---------------------------------------------------------------
 
 _NARRATIVE = {

@@ -305,10 +305,14 @@ class ApiShape(unittest.TestCase):
                 self.assertEqual(launch.status_code, 200)
                 handle = launch.json()
                 self.assertIn("id", handle)
-                self.assertEqual(handle["status"], "running")
+                # The empty-engagement act/run resolves in milliseconds,
+                # so under load the callable thread may have already
+                # completed before the launch response was serialized.
+                # Accept either transitional state.
+                self.assertIn(handle["status"], ("running", "done"))
                 jid = handle["id"]
-                # Poll — the empty-engagement path resolves in milliseconds.
-                deadline = time.time() + 5
+                # Poll — deadline bumped so a busy CI runner has room.
+                deadline = time.time() + 15
                 while time.time() < deadline:
                     row = c.get(f"/api/jobs/{jid}").json()
                     if row["status"] != "running":

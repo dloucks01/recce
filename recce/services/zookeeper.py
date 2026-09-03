@@ -247,6 +247,11 @@ def zk_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
+# Canonical alias so /api/scan/context's `<cmd>_targets` lookup finds
+# it without the fragile "any *_targets in the module" fallback.
+zookeeper_targets = zk_targets
+
+
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
              exploit_note="", depth_tier=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,

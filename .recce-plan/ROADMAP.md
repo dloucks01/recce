@@ -650,23 +650,36 @@ ModuleNotFoundError + `Vuln.cve` AttributeError ship before we noticed.
 
 ---
 
-## Backlog (small fixes, not big enough for their own priority)
+## Backlog (small fixes, not big enough for their own priority) ✅ (all resolved 2026-09-03)
 
-- Phase C `ExploitSurfaceCallout` self-hide race (P0-5 above).
-- `test_scan_context_reports_qualifying_hosts_per_command` fix filtered
-  underscore-prefixed private helpers, but a class-scoped inner class
-  named `<Foo>_targets` inside a module could still shadow the module's
-  own `<slug>_targets`. Brittle — better to require an
-  `is_targets: bool = True` marker on the actual _targets function
-  and filter by that.
-- test_env compose file still has `version: "3.8"` which docker compose
-  v2 warns is obsolete. Remove the line.
-- `.recce-plan/tier{1,2,3}/*.json` and `.recce-plan/audit/*.json` are
-  untracked. Decide whether to commit them or gitignore.
-- Phase B1 skipped some finding kinds in the `attack:*` workflow with
-  `reason` strings — worth reviewing whether any of them were skipped
-  because the audit was slightly wrong.
-- Phase C's `"surface"` tab id vs old `"exploit"` tab (see P0-4).
+- ~~Phase C `ExploitSurfaceCallout` self-hide race~~ ✅ resolved via
+  P0-5's `loaded` state guard in `ExploitSurface.tsx`.
+- ~~`test_scan_context_reports_qualifying_hosts_per_command` brittle
+  fallback~~ ✅ resolved (2026-09-03) — deleted the "walk `dir(mod)`
+  for any `*_targets`" fallback + its `_module_scoped_check` helper.
+  /api/scan/context now requires the canonical `<cmd>_targets`
+  attribute (or a same-named alias); a class-nested `._targets` can't
+  shadow under any circumstance. The 7 short-form modules
+  (elasticsearch → es_targets, zookeeper → zk_targets, jenkins-jnlp →
+  jnlp_targets, cups_lpd → lpd_targets, guacamole → guacd_targets,
+  nisyp → nis_targets, plus nbd_ndmp's union) each carry a canonical
+  alias in their own module. Contract locked by
+  `test_scan_context_requires_canonical_target_name_no_shadow`.
+- ~~test_env compose `version: "3.8"` line~~ ✅ resolved (already
+  removed; grep confirms no top-level `version:` in the compose file).
+- ~~`.recce-plan/tier{1,2,3}/*.json` + `audit/*.json` commit vs
+  gitignore decision~~ ✅ resolved — all committed (36 audit + 78
+  depth-audit + 30 tier1/2/3 files tracked). `.recce-plan/hooks/` +
+  `phase9/plan_raw.jsonl` explicitly gitignored.
+- ~~Phase B1 skipped finding kinds in `attack:*` workflow with reason
+  strings~~ ✅ resolved via P0-2's scanner run — the audit-vs-module
+  gap list at `.recce-plan/audit/p0_2_missing_capabilities.md` names
+  every kind the audit expected but the module never emits. That's
+  the "audit slightly wrong" review the backlog item asked for.
+- ~~Phase C's `"surface"` tab id vs old `"exploit"` tab~~ ✅ resolved
+  via P0-4 (IA restructure: `LEGACY_TO_NEW["exploit"] → attack/surface`;
+  old Exploitation view lives at `plan/actions`; no user-visible
+  confusion between "Attack > Surface" and "Plan > Actions").
 
 ---
 

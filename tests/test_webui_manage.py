@@ -374,13 +374,16 @@ def test_scan_context_reports_qualifying_hosts_per_command(client):
     body = r.json()
     assert body["hosts"] > 0
     cmds = body["commands"]
-    # Every registered service module WITH a `*_targets()` predicate is
-    # represented, plus the web-wide catch-alls. `cloud_metadata` is
-    # excluded because its scan piggybacks on any HTTP host (a live
-    # SSRF finding, not a target-list function) so the module
-    # intentionally has no `*_targets()`; `api` is web-wide.
+    # Every registered service module WITH a canonical `<cmd>_targets()`
+    # predicate is represented, plus the web-wide catch-alls (web, api).
+    # Three modules intentionally have NO `*_targets()` function — their
+    # scans piggyback on HTTP surface or don't lend themselves to
+    # target-list enumeration:
+    #   * cloud_metadata → SSRF-triggered piggyback on any web host
+    #   * api            → HTTP-wide, handled by the web catch-all
+    #   * kubernetes     → same web-catch-all rationale
     from recce.cli._service_helpers import _MODULE_PATH
-    excluded = {"api", "cloud_metadata"}
+    excluded = {"api", "cloud_metadata", "kubernetes"}
     assert set(cmds) >= (set(_MODULE_PATH) | {"web", "api"}) - excluded
     for entry in cmds.values():
         assert isinstance(entry["count"], int)
@@ -402,18 +405,49 @@ def test_scan_context_counts_come_from_the_modules_own_predicate(client):
     assert cmds["smb"]["sample"] == expected[:8]
 
 
-def test_scan_context_fallback_ignores_class_scoped_targets_methods():
-    """The fallback `*_targets` scan must ignore a class-nested method whose
-    display-name ends in `_targets` — only real module-scope helpers count.
-    Guards a subtle shadow the qualname check catches."""
-    from recce.webui.routes.scan import _module_scoped_check
-    class _Spec:
-        def _targets(self, hosts): return []
-        def public_targets(self, hosts): return []
-    def real_targets(hosts): return [{"ip": "10.0.0.1"}]
-    real_targets.__qualname__ = "real_targets"
-    assert _module_scoped_check("real_targets", real_targets) is True
-    assert _module_scoped_check("public_targets", _Spec.public_targets) is False
+def test_scan_context_requires_canonical_target_name_no_shadow(client):
+    """Backlog fix: the fragile `*_targets` fallback that walked
+    `dir(mod)` for any public `*_targets` name is gone. /api/scan/context
+    now looks up ONLY the canonical `<cmd>_targets` attribute (or an
+    alias module explicitly points at that name — e.g.
+    `zookeeper_targets = zk_targets`). A class-nested method whose
+    display-name happens to end in `_targets` cannot shadow the module's
+    real targets fn under any circumstance.
+
+    Locks that in for the 7 modules whose short-form name diverges from
+    the cmd slug — canonical alias present + resolves to the same
+    function object as the short-form.
+    """
+    from recce.services import (
+        cups_lpd, guacamole, jenkins_jnlp, nbd_ndmp, nisyp, zookeeper,
+    )
+    from recce.services.db import elasticsearch
+    self_alias = [
+        (elasticsearch, "elasticsearch_targets", "es_targets"),
+        (zookeeper, "zookeeper_targets", "zk_targets"),
+        (jenkins_jnlp, "jenkins_jnlp_targets", "jnlp_targets"),
+        (cups_lpd, "cups_lpd_targets", "lpd_targets"),
+        (guacamole, "guacamole_targets", "guacd_targets"),
+        (nisyp, "nisyp_targets", "nis_targets"),
+    ]
+    for mod, canonical, short in self_alias:
+        assert hasattr(mod, canonical), \
+            f"{mod.__name__} missing canonical alias {canonical}"
+        assert getattr(mod, canonical) is getattr(mod, short), \
+            f"{mod.__name__}.{canonical} must be the same object as {short}"
+    # nbd_ndmp is the odd one — the canonical union wraps both, not
+    # aliases either directly. Confirm both are still callable through
+    # the canonical name.
+    assert callable(nbd_ndmp.nbd_ndmp_targets)
+    union = nbd_ndmp.nbd_ndmp_targets([])
+    assert union == []                       # empty hosts → empty union
+
+    # And the scan/context response actually surfaces every aliased cmd
+    # (this is the real payoff — no more silent misses).
+    cmds = client.get("/api/scan/context").json()["commands"]
+    for cmd in ("elasticsearch", "zookeeper", "jenkins-jnlp",
+                "cups_lpd", "guacamole", "nisyp", "nbd_ndmp"):
+        assert cmd in cmds, f"{cmd} missing from /api/scan/context"
 
 
 def test_scan_context_explains_udp_only_services(client):

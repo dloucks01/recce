@@ -703,6 +703,10 @@ def lpd_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
+# Canonical alias for /api/scan/context's `<cmd>_targets` lookup.
+cups_lpd_targets = lpd_targets
+
+
 def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind="",
              exploit_note="", depth_tier="", output=""):
     return {"severity": sev, "title": title, "target": target, "detail": detail,

@@ -49,16 +49,16 @@ _OT_SWEEP_MAP = {
 }
 
 
-def _module_scoped_check(name: str, obj) -> bool:
-    """The `_targets(hosts)` fallback lookup for /api/scan/context must
-    accept module-scope helpers only. A class-nested method whose
-    display-name ends in `_targets` — for example `SomeSpec._targets` —
-    otherwise looks identical from `dir(mod)`, and would silently shadow
-    the module's real targets fn. The qualname dot-check excludes it.
-    """
-    return (name.endswith("_targets") and not name.startswith("_")
-            and callable(obj)
-            and "." not in getattr(obj, "__qualname__", name))
+# Backlog fix: the /api/scan/context lookup used to walk `dir(mod)` for
+# any public `*_targets` name as a fallback when the canonical
+# `<cmd>_targets` wasn't present. That fallback was fragile — a
+# class-nested helper named `SomeSpec._targets` inside a module could
+# silently shadow the module's real targets fn, and the qualname
+# dot-check was the only guard. Every service module now either
+# defines the canonical `<cmd>_targets` directly or aliases its
+# short-form name to the canonical (see e.g. `zookeeper_targets =
+# zk_targets` in zookeeper.py). The fallback + its `_module_scoped_check`
+# helper are gone.
 
 
 def _rule_domain(hosts, creds, loot_dir):          # noqa: ARG001
@@ -394,22 +394,19 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
                 mod = importlib.import_module(path)
             except ImportError:
                 continue
-            # Prefer the canonical `<slug>_targets(hosts)` naming (e.g.
-            # `ldap_targets` for cmd "ldap") so a helper named the same
-            # way — even a class-scoped one — never shadows the module's
-            # own targets fn. Fall back to any public `*_targets` for
-            # services whose slug and function name genuinely diverge.
-            # `_module_scoped_check` filters out class-nested methods.
+            # Require the canonical `<slug>_targets(hosts)` (e.g.
+            # `ldap_targets` for cmd "ldap") — modules whose short-form
+            # name differs (elasticsearch → es_targets, zookeeper →
+            # zk_targets, jenkins-jnlp → jnlp_targets, cups_lpd →
+            # lpd_targets, nbd_ndmp → nbd_ndmp_targets union,
+            # guacamole → guacd_targets, nisyp → nis_targets) alias
+            # the canonical name in their own module. Modules with
+            # NO targets predicate (kubernetes, api, cloud_metadata)
+            # fall through this loop and are handled specially below.
             canonical = cmd.replace("-", "_") + "_targets"
-            fn = None
-            if hasattr(mod, canonical) and callable(getattr(mod, canonical)):
-                fn = getattr(mod, canonical)
-            else:
-                fn = next((getattr(mod, n) for n in dir(mod)
-                           if _module_scoped_check(n, getattr(mod, n, None))),
-                          None)
-            if fn is None:
-                continue                     # web/api are HTTP-wide; handled below
+            fn = getattr(mod, canonical, None)
+            if not callable(fn):
+                continue
             try:
                 ips = sorted({t["ip"] for t in fn(hosts) if t.get("ip")})
             except Exception:                # noqa: BLE001 - a hint must never 500 the tab

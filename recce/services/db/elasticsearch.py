@@ -303,6 +303,12 @@ def es_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
+# Canonical alias so /api/scan/context's `<cmd>_targets` lookup finds it
+# without the fragile "any *_targets in the module" fallback (backlog
+# item: drop that fallback so a class-nested `._targets` can't shadow).
+elasticsearch_targets = es_targets
+
+
 # --- narratives + findings ------------------------------------------------------
 
 _NARRATIVE = {

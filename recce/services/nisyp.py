@@ -562,6 +562,11 @@ def nis_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
+# Canonical alias for /api/scan/context's `<cmd>_targets` lookup —
+# `recce nisyp` becomes `nisyp_targets` after slug normalise.
+nisyp_targets = nis_targets
+
+
 _NARRATIVE = {
     "nis_passwd_hashes": (
         "NIS passwd/shadow maps returned hashed passwords to an unauthenticated "

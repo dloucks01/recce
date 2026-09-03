@@ -422,6 +422,11 @@ def jnlp_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
+# Canonical alias for /api/scan/context's `<cmd>_targets` lookup —
+# `recce jenkins-jnlp` becomes `jenkins_jnlp_targets` after slug normalise.
+jenkins_jnlp_targets = jnlp_targets
+
+
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT,
           host: Host | None = None) -> dict:
     """Full JNLP probe: disambiguate → negotiate protocols → optional HTTP

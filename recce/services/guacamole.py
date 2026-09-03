@@ -255,6 +255,10 @@ def guacd_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
+# Canonical alias for /api/scan/context's `<cmd>_targets` lookup.
+guacamole_targets = guacd_targets
+
+
 def _finding(sev, title, target, detail, cmd, rem, cwes, kind="",
              exploit_note="", depth_tier="", output=""):
     f = {"severity": sev, "title": title, "target": target, "detail": detail,
