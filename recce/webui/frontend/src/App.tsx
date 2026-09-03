@@ -44,6 +44,7 @@ import { ReportTab } from "./ReportTab";
 import { CollabSidebar } from "./CollabSidebar";
 import { AutocrackStatus } from "./components/AutocrackStatus";
 import { ProxyBadge } from "./components/ProxyBadge";
+import { EngagementBadge } from "./components/EngagementBadge";
 import { toast, Toast } from "./toast";
 
 // Tester identity (localStorage-persisted)
@@ -333,6 +334,7 @@ export default function App() {
     toAct: () => { setPlanSub("actions"); setTab("plan"); },
     openHost: (ip) => setDrawerIp(ip),
     toSessions: () => setTab("sessions"),
+    toCreds: () => setTab("credentials"),
     toScan: (target) => { if (target) setScanPrefill(target); setTab("scan"); },
     toExploitShell: async (intent) => {
       // Auto-start a listener if none is open — the tester clicked "🎯 shell"
@@ -365,6 +367,7 @@ export default function App() {
       <div className="app-header">
         <div className="header-left">
           <h1>recce</h1>
+          <EngagementBadge />
         </div>
         <div className="header-right">
           <PresenceBar onPick={(name) => nav.toHosts({ owner: name })} />
@@ -466,7 +469,7 @@ export default function App() {
               {dataSub === "assets" && <KnownAssets />}
             </>
           )}
-          {tab === "topology" && <Topology />}
+          {tab === "topology" && <Topology nav={nav} onImport={() => setShowImport(true)} />}
           {tab === "timeline" && <Timeline nav={nav} />}
           {tab === "sessions" && <Sessions tester={tester} focus={sessionFocus}
             exploitIntent={exploitIntent} onExploitConsumed={() => setExploitIntent(null)}

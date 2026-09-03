@@ -900,3 +900,91 @@
 .sv3-chip-x { background: none; border: none; color: var(--muted); cursor: pointer;
   padding: 0; margin-left: 2px; font-size: 14px; line-height: 1; }
 .sv3-chip-x:hover { color: var(--crit); }
+
+/* P7-B1: Compact CredsSummary — replaces the full CredentialsPanel embed
+   in the sidebar's 🔑 tab. Quick-glance only; the mutation surface stays
+   in the top-level Credentials tab. */
+.creds-summary { padding: 12px 14px; }
+.creds-summary.err { color: var(--crit); }
+.creds-summary.empty { color: var(--muted); }
+.creds-summary-h { display: flex; justify-content: space-between;
+  align-items: center; font-weight: 700; margin-bottom: 6px;
+  color: var(--text); }
+.creds-summary-count { font-family: var(--mono); font-size: 12px;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+  padding: 2px 8px; border-radius: 999px; }
+.creds-summary-latest { font-size: 12px; margin-bottom: 8px; color: var(--text); }
+.creds-summary-sources { display: flex; flex-wrap: wrap; gap: 4px;
+  margin-bottom: 10px; }
+.creds-summary-chip { padding: 2px 8px; background: var(--surface2);
+  border: 1px solid var(--line); border-radius: 999px; font-size: 11px;
+  color: var(--text); font-family: var(--mono); }
+.creds-summary-open { font-size: 12px; font-weight: 600; color: var(--accent);
+  cursor: pointer; background: none; border: none; padding: 4px 0;
+  text-decoration: underline; }
+.creds-summary-open:hover { filter: brightness(1.15); }
+
+/* P7-B2: ScanConsole as a floating drawer — pinned to the viewport
+   bottom so a live scan doesn't push the workbench off-screen. */
+.scan-console-drawer { position: fixed; left: 24px; right: 24px; bottom: 20px;
+  max-height: 45vh; display: flex; flex-direction: column;
+  background: #0a0f18; border: 1px solid var(--line); border-radius: 10px;
+  overflow: hidden; box-shadow: var(--shadow-lg, 0 8px 32px rgba(0,0,0,0.35));
+  z-index: 50; }
+.scan-console-drawer .scan-console-body { flex: 1; overflow-y: auto; }
+/* Minimize / close pair — match the Stop-chain button height */
+.scan-console-min { background: none; border: 1px solid var(--line);
+  color: var(--muted); font-size: 12px; font-weight: 700; padding: 3px 10px;
+  border-radius: 5px; cursor: pointer; transition: all .12s; }
+.scan-console-min:hover { color: var(--text); border-color: var(--accent); }
+
+/* Compact pill — bottom-right corner when the drawer is minimized */
+.scan-console-pill { position: fixed; right: 24px; bottom: 20px;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px; background: #0a0f18; color: #b9c6da;
+  border: 1px solid var(--line); border-radius: 999px;
+  box-shadow: var(--shadow-md, 0 4px 16px rgba(0,0,0,0.3));
+  cursor: pointer; font-size: 12px; font-weight: 600;
+  z-index: 50; transition: transform .12s, border-color .12s; }
+.scan-console-pill:hover { transform: translateY(-1px); border-color: var(--accent); }
+.scan-console-pill-label { display: inline-flex; gap: 4px; }
+.scan-console-pill-icon { color: var(--accent); font-size: 10px; }
+
+/* P7-B3: Topology empty-state — inline hint + launch buttons */
+.topo-empty { display: flex; flex-direction: column; gap: 12px;
+  padding: 30px 24px; align-items: flex-start; }
+.topo-empty > div:first-child { font-size: 14px; font-weight: 700; color: var(--text); }
+.topo-empty-body { display: flex; align-items: center; flex-wrap: wrap;
+  gap: 6px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+
+/* P7-B4: EngagementBadge — header pill that shows the current
+   engagement name; opens a dropdown when peer engagements exist. */
+.engagement-badge { display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 12px; border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent); font-size: 12px; font-weight: 700;
+  font-family: var(--mono); }
+.engagement-badge-btn { cursor: pointer; }
+.engagement-badge-btn:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.engagement-caret { font-size: 10px; opacity: .7; }
+.engagement-menu { position: relative; }
+.engagement-popup { position: absolute; top: 100%; left: 0; margin-top: 6px;
+  min-width: 360px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 10px; padding: 6px; box-shadow: var(--shadow-pop, 0 4px 24px rgba(0,0,0,0.25));
+  z-index: 40; display: flex; flex-direction: column; gap: 2px; }
+.engagement-popup-h { padding: 8px 12px; }
+.engagement-popup-foot { padding: 8px 12px; border-top: 1px solid var(--line);
+  margin-top: 4px; }
+.engagement-divider { height: 1px; background: var(--line); margin: 4px 8px; }
+.engagement-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-radius: 6px; }
+.engagement-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.engagement-row-current { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.engagement-row-mark { color: var(--accent); font-size: 10px; }
+.engagement-row-name { font-weight: 600; color: var(--text); flex: 1; }
+.engagement-row-body { flex: 1; }
+.engagement-row-copy { border: 1px solid var(--line); background: var(--surface2);
+  color: var(--muted); font-size: 11px; padding: 2px 8px; border-radius: 5px;
+  cursor: pointer; }
+.engagement-row-copy:hover { color: var(--text); border-color: var(--accent); }

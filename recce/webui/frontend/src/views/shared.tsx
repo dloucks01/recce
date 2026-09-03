@@ -15,6 +15,7 @@ export type Nav = {
   openHost: (ip: string) => void;
   toSessions?: () => void;
   toScan?: (target?: string) => void;
+  toCreds?: () => void;                // P7-B1: jump to the top-level Creds tab
   toExploitShell?: (intent: ExploitIntent) => void;
 };
 

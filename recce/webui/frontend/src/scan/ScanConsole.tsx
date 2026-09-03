@@ -1,19 +1,22 @@
-import { RefObject } from "react";
+import { RefObject, useState } from "react";
 
 /**
- * Live console strip that ScanTab hangs off its own log state. Extracted from
- * ScanTab so the primary control-flow code is easier to read; behavior is
- * identical apart from the Stop-chain button (see props).
+ * Live scan console. **P7-B2** rework: was rendered below the Scan-tab
+ * workbench body, which pushed the target field + Launch button
+ * off-screen during a live scan. Now a floating drawer pinned to the
+ * viewport bottom — you can keep working while a scan runs.
  *
- * Props:
- *   log            — array of stdout/stderr lines already collected
- *   running        — the primary scan is still emitting lines
- *   chainRunning   — a chained follow-up scan is still emitting
- *   chainStopping  — Stop button was clicked; disable it until the loop exits
- *   onStopChain    — signal from the parent to cancel the running chain
- *                    (cancels the in-flight job + breaks the outer loop)
- *   logRef         — ref for auto-scrolling the console body to the bottom
- *   onClose        — dismiss the console (parent controls visibility)
+ * Three states:
+ *   * closed        — parent's `showLog` is false, nothing renders
+ *   * minimized     — a compact pill at bottom-right showing "▲ Scan
+ *                     running · N lines"; click to expand
+ *   * expanded      — the drawer opens, showing the output body + a
+ *                     Stop-chain button (when a chain is running) + a
+ *                     minimize + close pair
+ *
+ * Behavior parity with the older embed: SSE-fed log lines, stop-chain
+ * routes through the same `onStopChain` callback, close hides via
+ * `onClose` (parent's `showLog` state).
  */
 export function ScanConsole(
   { log, running, chainRunning, chainStopping, onStopChain, logRef, onClose }:
@@ -27,9 +30,26 @@ export function ScanConsole(
     onClose: () => void;
   }
 ) {
+  const [minimized, setMinimized] = useState(false);
   const active = running || chainRunning;
+
+  if (minimized) {
+    return (
+      <button className="scan-console-pill"
+              onClick={() => setMinimized(false)}
+              title="expand the scan console">
+        {active && <span className="scan-pulse-sm" />}
+        <span className="scan-console-pill-label">
+          {active ? "Scan running" : "Scan output"}
+          <span className="muted"> · {log.length} lines</span>
+        </span>
+        <span className="scan-console-pill-icon">▲</span>
+      </button>
+    );
+  }
+
   return (
-    <div className="scan-console">
+    <div className="scan-console-drawer">
       <div className="scan-console-bar">
         <span className="scan-console-title">
           {active && <span className="scan-pulse-sm" />}
@@ -44,6 +64,11 @@ export function ScanConsole(
               {chainStopping ? "Stopping…" : "⏹ Stop chain"}
             </button>
           )}
+          <button className="scan-console-min"
+                  onClick={() => setMinimized(true)}
+                  title="Minimize — scans keep running in the background">
+            ▽
+          </button>
           <button className="scan-console-close" onClick={onClose}
                   title="Hide the console (scans keep running in the background)">
             ×

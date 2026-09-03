@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useCollab } from "./collab";
 import { ChatPanel } from "./ChatPanel";
 import { AssignmentsPanel } from "./AssignmentsPanel";
-import { CredentialsPanel } from "./CredentialsPanel";
+import { CredsSummary } from "./components/CredsSummary";
 import { Host, postJobCancel } from "./api";
 import { toast } from "./toast";
 import { Nav } from "./views";
@@ -254,10 +254,12 @@ export function CollabSidebar({ hosts, nav }: { hosts: Host[]; nav?: Nav }) {
         </div>
       )}
 
-      {/* Credentials Tab */}
+      {/* Credentials Tab — compact summary strip (P7-B1). The full
+          Credentials view lives on the top-level Credentials tab; the
+          sidebar is quick-glance only + a jump link. */}
       {tab === "creds" && (
         <div className="sidebar-content">
-          <CredentialsPanel />
+          <CredsSummary nav={nav} />
         </div>
       )}
 

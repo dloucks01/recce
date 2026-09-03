@@ -518,3 +518,49 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
                          if active else
                          "start with `recce serve --proxy socks5h://host:port` "
                          "to route scans through a pivot")}
+
+    @app.get("/api/engagements")
+    def engagements_list():
+        """P7-B4 (read-only): discover sibling engagement directories on
+        the same parent as the currently-served -o path. A future arc
+        can layer in an in-place switch endpoint on top of this; for now
+        the UI just SURFACES what's available so the operator can restart
+        `recce serve` on the right dir without a shell hunt.
+
+        A directory is considered an engagement if it contains
+        `results.sqlite` (recce's datastore); anything else is skipped.
+        """
+        import os
+        current = os.path.abspath(eng_dir)
+        parent = os.path.dirname(current) or "."
+        out = []
+        try:
+            entries = sorted(os.listdir(parent))
+        except OSError:
+            entries = []
+        for name in entries:
+            path = os.path.join(parent, name)
+            if not os.path.isdir(path):
+                continue
+            db = os.path.join(path, "results.sqlite")
+            if not os.path.exists(db):
+                continue
+            # Best-effort engagement-name lookup: read the `engagement`
+            # meta key so a renamed dir still shows its human title.
+            eng_name = name
+            try:
+                from ...core.store import Store
+                with Store(db) as st:
+                    stored = st.get_meta("engagement")
+                    if stored:
+                        eng_name = str(stored)
+            except (OSError, RuntimeError):
+                pass
+            out.append({
+                "path": path,
+                "dir_name": name,
+                "engagement": eng_name,
+                "current": path == current,
+                "mtime": os.path.getmtime(db),
+            })
+        return {"current": current, "parent": parent, "engagements": out}

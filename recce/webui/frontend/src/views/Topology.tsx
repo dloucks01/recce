@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getJSON } from "../api";
+import { Nav } from "./shared";
 
 // The maps the report writes as .svg files, served live instead. Same generators
 // (recce/report/netmap.py), so what you see here is what lands in the deliverable.
@@ -25,7 +26,7 @@ const ATTACKPATH: MapView = {
 
 const ZOOM_MIN = 0.25, ZOOM_MAX = 6, ZOOM_STEP = 1.15;
 
-export function Topology() {
+export function Topology({ nav, onImport }: { nav?: Nav; onImport?: () => void } = {}) {
   const [views, setViews] = useState<MapView[] | null>(null);
   const [hosts, setHosts] = useState(0);
   const [view, setView] = useState("architecture");
@@ -121,11 +122,52 @@ export function Topology() {
         {err && <div className="err">{err}</div>}
         {loading && <div className="loading">Rendering…</div>}
         {!loading && isEmpty && (
-          <div className="empty">
-            Nothing to draw for this view yet.
-            {view === "ad" && " Import BloodHound data (recce ad) to populate the AD tier-0 map."}
-            {view === "reachability" && " Reachability needs hosts with overlapping segments or routes."}
-            {view === "attackpath" && " No attack path projected yet — findings and access are what build it."}
+          <div className="empty topo-empty">
+            <div>Nothing to draw for this view yet.</div>
+            {view === "ad" && (
+              <div className="topo-empty-body">
+                Import BloodHound data (<span className="mono">recce ad &lt;zip&gt;</span>)
+                or run <span className="mono">recce ldap</span> against a DC to populate the AD tier-0 map.
+                {onImport && (
+                  <button className="btn primary" style={{marginLeft: 12}}
+                          onClick={onImport}>
+                    📥 Open Import…
+                  </button>
+                )}
+                {nav?.toScan && (
+                  <button className="btn" style={{marginLeft: 8}}
+                          onClick={() => nav.toScan!("")}
+                          title="Jump to the Scan tab — pick ldap from the sidebar">
+                    ▶ Go to Scan → ldap
+                  </button>
+                )}
+              </div>
+            )}
+            {view === "reachability" && (
+              <div className="topo-empty-body">
+                Reachability needs hosts with overlapping segments or routes.
+                Run <span className="mono">recce enum --all-ports</span> across
+                multiple subnets so the map has edges to draw.
+                {nav?.toScan && (
+                  <button className="btn" style={{marginLeft: 12}}
+                          onClick={() => nav.toScan!("")}
+                          title="Jump to the Scan tab — pick enum from the sidebar">
+                    ▶ Go to Scan → enum
+                  </button>
+                )}
+              </div>
+            )}
+            {view === "attackpath" && (
+              <div className="topo-empty-body">
+                No attack path projected yet — findings and access are what build it.
+                {nav?.toAct && (
+                  <button className="btn" style={{marginLeft: 12}}
+                          onClick={() => nav.toAct()}>
+                    ▶ Go to Plan → Actions
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
         {!loading && !isEmpty && svg && (
