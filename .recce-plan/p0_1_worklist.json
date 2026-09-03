@@ -1,0 +1,244 @@
+{
+  "safe_open": 17,
+  "low_open": 22,
+  "total_open": 39,
+  "by_service": {
+    "bgp": [
+      {
+        "kind": "bgp_notification_leak",
+        "risk": "none",
+        "promotion_notes": "Already tightly coupled to bgp_expected_as_disclosed; keep as separate high-signal enum. Consume disclosed values into scan targets."
+      }
+    ],
+    "dns": [
+      {
+        "kind": "dns_nsec_walk",
+        "risk": "none",
+        "promotion_notes": "Fold NSEC-derived names into the shared hostname surface same as AXFR; add NSEC3 walker (hashcat -m 8300) as tester_next_step so hashed zones can also be cracked offline."
+      },
+      {
+        "kind": "dns_missing_spf",
+        "risk": "low",
+        "promotion_notes": "Add active spoof-test probe: attempt SMTP MAIL FROM: <spoofed@zone> to a discovered MX and record whether the MTA accepts \u2014 proves exploitability. Gated behind --safe-off since it "
+      },
+      {
+        "kind": "dns_weak_spf",
+        "risk": "low",
+        "promotion_notes": "Same as dns_missing_spf: add live spoof-delivery test through the discovered MX."
+      },
+      {
+        "kind": "dns_missing_dmarc",
+        "risk": "low",
+        "promotion_notes": "Chain with SPF spoof test for full DMARC-bypass proof; add DKIM missing-selector detection to raise severity."
+      },
+      {
+        "kind": "dns_dmarc_monitor",
+        "risk": "low",
+        "promotion_notes": "Same spoof-delivery probe as SPF/DMARC-missing."
+      }
+    ],
+    "enip": [
+      {
+        "kind": "enip_io_traffic_exposed",
+        "risk": "low",
+        "promotion_notes": "Passive capture: tcpdump on 2222/udp for N seconds; parse assemblies to prove sensor values are readable/forgeable \u2192 T2 evidence of the exposure."
+      },
+      {
+        "kind": "enip_tcpip_disclosure",
+        "risk": "low",
+        "promotion_notes": "Feed hostname/domain into AD/DNS correlation; internal DNS reachability is a segmentation finding \u2014 probe listed DNS servers with dig ANY from same segment."
+      }
+    ],
+    "ipmi": [
+      {
+        "kind": "ipmi_userlevel_auth_disabled",
+        "risk": "low",
+        "promotion_notes": "Actively send a sensor-read at USER priv with auth-type NONE and record the returned SDR/SEL \u2014 proves the leak."
+      }
+    ],
+    "ipp": [
+      {
+        "kind": "ipp_printers",
+        "risk": "low",
+        "promotion_notes": "Cross to Get-Jobs (which the cups_lpd module does) for job/user/host/filename harvest."
+      }
+    ],
+    "iscsi": [
+      {
+        "kind": "iscsi_auth_none_discovery",
+        "risk": "low",
+        "promotion_notes": "Already promoted via _emit_auth_none_normal + INQUIRY/READ CAPACITY, but this specific finding stops at T1."
+      }
+    ],
+    "mongodb": [
+      {
+        "kind": "mongo_shard_topology",
+        "risk": "none",
+        "promotion_notes": "Auto-probe each shard host with the same probe() to prove the same exposure applies cluster-wide (target inventory -> confirmed exposures). Wire shard_hosts into svcprobe like repl"
+      },
+      {
+        "kind": "mongo_collection_inventory",
+        "risk": "none",
+        "promotion_notes": "datamine() already reads documents; this kind stays as the inventory pointer while mongo_datamine carries the T2 document-read evidence."
+      }
+    ],
+    "msrpc": [
+      {
+        "kind": "msrpc_ioxid",
+        "risk": "low",
+        "promotion_notes": "Add downstream pivot: for each leaked internal address, port-scan from this host via a downstream RPC-over-TCP probe (need session). Or auto-add to scope for follow-on modules."
+      },
+      {
+        "kind": "msrpc_dynport_map",
+        "risk": "low",
+        "promotion_notes": "Auto-add these dynamic ports to a follow-on scan queue so downstream modules (samr on 49155, drsuapi on 49158, etc) can direct-connect without a second EPM round-trip. Effectively "
+      }
+    ],
+    "mssql": [
+      {
+        "kind": "impersonation",
+        "risk": "low",
+        "promotion_notes": "Execute EXECUTE AS LOGIN='<sa>'; SELECT SYSTEM_USER, IS_SRVROLEMEMBER('sysadmin'); REVERT and attach the observed context switch as evidence."
+      },
+      {
+        "kind": "guest_enabled",
+        "risk": "low",
+        "promotion_notes": "EXECUTE AS USER='guest'; enumerate tables and permissions accessible under guest \u2014 proves the boundary is actually gone rather than merely configured that way."
+      }
+    ],
+    "mysql": [
+      {
+        "kind": "mysql_file_priv",
+        "risk": "low",
+        "promotion_notes": "Actually execute SELECT LOAD_FILE('/etc/hosts') (universally-present canary) and attach first 64 bytes as proof \u2014 mirrors mssql_openrowset_read pattern already in the mssql module."
+      }
+    ],
+    "netbios": [
+      {
+        "kind": "netbios_disclosure",
+        "risk": "none",
+        "promotion_notes": "Split into 3 kinds: netbios_dc_discovery (is_dc=true, medium severity \u2014 high-value recon), netbios_mac_oui (add OUI vendor lookup \u2014 device-type identification), and the base disclo"
+      }
+    ],
+    "nis_yp": [
+      {
+        "kind": "nis_maplist",
+        "risk": "none",
+        "promotion_notes": "Already gates the T3 credential dump below. Enrich with cross-service domain-hint feeds (LDAP baseDN / Kerberos realm / SMB workgroup)."
+      },
+      {
+        "kind": "nis_group_hashes",
+        "risk": "none",
+        "promotion_notes": "Auto-tag every user in wheel/sudo/adm as high-value in the crack queue and prioritize their hashes."
+      },
+      {
+        "kind": "nis_topology_leak",
+        "risk": "none",
+        "promotion_notes": "Auto-ingest hosts.byname into known_hosts + queue each ypservers entry as an alternate map source (bypasses securenets from a different source IP)."
+      },
+      {
+        "kind": "nis_domain_leak",
+        "risk": "none",
+        "promotion_notes": "Chain: after foothold on any host with SNMP/SSH creds, auto-retry NIS dump from that source IP."
+      }
+    ],
+    "nrpe": [
+      {
+        "kind": "nrpe_implied_local_services",
+        "risk": "low",
+        "promotion_notes": "T2 = invoke the check_ command to actually confirm the local service state (check_mysql returns 'Connection refused' vs 'Access denied for user') \u2014 turns inference into confirmatio"
+      }
+    ],
+    "ntp": [
+      {
+        "kind": "ntp_peers",
+        "risk": "none",
+        "promotion_notes": "Auto-ingest peer IPs into the known_gateways/known_hosts shared surface \u2014 an upstream NTP peer on corp LAN is almost always a DC or appliance."
+      },
+      {
+        "kind": "ntp_skew",
+        "risk": "none",
+        "promotion_notes": "Auto-adjust the scanner's own local clock (via faketime wrapper or ntpdate-under-container) before running kerbrute/GetNPUsers so Kerberos operations don't fail from skew after thi"
+      }
+    ],
+    "opcua": [
+      {
+        "kind": "opcua_find_servers",
+        "risk": "low",
+        "promotion_notes": "Follow each discoveryUrl and re-probe \u2014 each is a new OT target to enumerate."
+      },
+      {
+        "kind": "opcua_lds_me_inventory",
+        "risk": "none",
+        "promotion_notes": "Use each discovery URL as a new target; use serverCapabilityFilter to narrow to LDS/DA servers."
+      }
+    ],
+    "pop3": [
+      {
+        "kind": "pop3_apop_timestamp",
+        "risk": "none",
+        "promotion_notes": "Wire into known_hostnames + known_domains so downstream DNS/AD/web tools consume it."
+      }
+    ],
+    "postgres": [
+      {
+        "kind": "pg_lo_file_read",
+        "risk": "low",
+        "promotion_notes": "Actually SELECT lo_import('/etc/hosts') then loread the resulting oid and return first 64 bytes as proof, mirroring the mssql OPENROWSET pattern."
+      },
+      {
+        "kind": "pg_public_create",
+        "risk": "low",
+        "promotion_notes": "CREATE FUNCTION public.<canary>() RETURNS text AS $$ SELECT current_user $$ LANGUAGE sql; call from a fresh role and prove search_path resolution \u2014 reversible T2."
+      }
+    ],
+    "s7": [
+      {
+        "kind": "s7_firmware_cve",
+        "risk": "none",
+        "promotion_notes": "Add firmware-band verification via SZL 0x0011 ausbg2 major/minor comparison against the CVE's patched-in-firmware release; only emit CVE tag when band matches, else CWE-1395 generi"
+      }
+    ],
+    "slp": [
+      {
+        "kind": "slp_service_catalogue",
+        "risk": "none",
+        "promotion_notes": "Auto-feed enumerated service types + URLs into cross-service scanners (HTTP/IPP/SMB/NFS/LDAP/wbem/cimom) as new scan targets \u2014 turns the catalogue into free discovery."
+      },
+      {
+        "kind": "slp_url_disclosure",
+        "risk": "none",
+        "promotion_notes": "Same as slp_service_catalogue \u2014 auto-target the URLs downstream."
+      },
+      {
+        "kind": "slp_attribute_disclosure",
+        "risk": "none",
+        "promotion_notes": "Grep attribute values for cleartext secrets (managementserver credentials, uuid tokens); feed product/version into os_fingerprints shared surface for exploit selection."
+      }
+    ],
+    "ssh": [
+      {
+        "kind": "ssh_legacy_proto",
+        "risk": "low",
+        "promotion_notes": "Complete an actual SSH-1 handshake and echo one packet - proves v1 transport is really live (some 1.99 servers refuse v1 at KEX). Use ssh -1 -oProtocol=1 with -vv and parse for suc"
+      },
+      {
+        "kind": "ssh_weak_mac",
+        "risk": "low",
+        "promotion_notes": "Complete KEX with the specific MAC forced (ssh -m) and send a KEEPALIVE; confirms the MAC actually negotiates."
+      },
+      {
+        "kind": "ssh_hostkey_posture",
+        "risk": "low",
+        "promotion_notes": "Force -oHostKeyAlgorithms=ssh-rsa and read the served K_S back - proves the server actually holds and will present the weak-signature key (already partly done by _capture_hostkey w"
+      }
+    ],
+    "webdav": [
+      {
+        "kind": "webdav_href_leak",
+        "risk": "low",
+        "promotion_notes": "GET each classified sensitive href unauth; captured content \u2192 T2."
+      }
+    ]
+  }
+}

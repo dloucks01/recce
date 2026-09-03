@@ -950,7 +950,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     exploit_note=(
                         "for h in <shard_hosts>; do mongosh mongodb://$h/ --eval "
                         "'db.adminCommand({listDatabases:1})'; done"),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — getShardMap succeeded and returned
+                    # concrete mongos + config-server addresses. Each entry in
+                    # `shards` came from the target's own admin reply.
+                    depth_tier="t2"))
             inv = pr.get("collection_inventory") or {}
             if inv:
                 sample = []

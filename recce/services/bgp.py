@@ -857,7 +857,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     exploit_note=(
                         "Parse leaked value from finding; use in "
                         "bgp_expected_as_disclosed follow-up."),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — the NOTIFICATION reply carries a
+                    # parsed code/subcode/disclosed payload extracted from
+                    # the target's own protocol message (RFC 4271 §6.2). The
+                    # `disclosed` value IS the server-side evidence.
+                    depth_tier="t2"))
 
             # bgp_expected_as_disclosed — peer's configured neighbor AS.
             if pr.get("expected_as"):

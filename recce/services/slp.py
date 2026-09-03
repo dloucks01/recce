@@ -553,7 +553,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "-u <ip> findsrvs <type>; feed URLs into nmap -sV -Pn "
                         "<extracted_urls>."
                     ),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — the SrvTypeRqst reply itself is the
+                    # server-side evidence (concrete enumerated service-type
+                    # list, not a heuristic port-open guess). Every type name
+                    # in the finding output came from the target's own reply.
+                    depth_tier="t2"))
 
             urls = pr.get("urls") or []
             if urls:
@@ -573,7 +577,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "slptool -u <ip> findsrvs service:service-agent; "
                         "parse each URL and enqueue for the matching "
                         "service module (HTTP/CIFS/NFS/etc.)."),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — SrvRqst replies contain concrete
+                    # service:URL strings extracted from the target's own
+                    # advertisement, not inferred from port state.
+                    depth_tier="t2"))
 
             attrs = pr.get("attrs") or {}
             if attrs:
@@ -599,7 +606,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "slptool -u <ip> findattrs "
                         "service:VMwareInfrastructure  # look for uuid, "
                         "managementserver, product, version, build."),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — AttrRqst returned parsed
+                    # attribute tuples with real key/value pairs (uuid,
+                    # managementserver, product, ...) — server-side content.
+                    depth_tier="t2"))
 
             # UDP amplifier — RFC 2608 §5 UDP replies with no source
             # validation. Any 427/udp responder qualifies.
