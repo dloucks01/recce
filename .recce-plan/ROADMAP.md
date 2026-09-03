@@ -533,48 +533,59 @@ the fallback branch from `remove_finding`.
 
 ### Batch C — Large infrastructure
 
-#### P7-C1 — Async `/api/spray` + `/api/act/run`
-Both currently block the HTTP request for the full duration. Fold
-both through the existing `webui.jobs` spawner so they return
-`{id: <jobid>}` immediately and stream progress via
-`/api/jobs/{id}/events` — same shape as `/api/scan` uses. The Cancel
-button in CollabSidebar's jobs list would then apply.
+#### P7-C1 — Async `/api/spray` + `/api/act/run` ✅ (2026-09-02, `c15f7ae`)
+Both used to block the HTTP request for the full duration. Now
+folded through the `webui.jobs` spawner via a new
+`JobManager.start_callable` path — daemon threads that capture the
+function's return value on `job.result`. New endpoints
+`POST /api/spray/async` and `POST /api/act/run/async` return
+`{id, cmd, status}` immediately; caller polls the new
+`GET /api/jobs/{jid}` for the same rich result shape the sync
+endpoints return inline. Sync endpoints kept for tests + tiny scopes.
 
-#### P7-C2 — Attack chain DAG visualization
-Chain views render steps as text lists. A dagre-style SVG with
-`blocked → pending → proven` colored nodes + `depends_on` edges makes
-the compromise story readable at a glance. Server side: extend each
-chain's `/api/attack-chain/{ad,cloud,web}` payload with an
-`edges[]` array (derived from step.depends_on). Client side: a shared
-`ChainGraph.tsx` component that consumes the same shape.
+#### P7-C2 — Attack chain DAG visualization ✅ (2026-09-02, `7361735`)
+`/api/attack-chain/{ad,cloud,web}` payloads now carry `edges[]`
+derived from each step's `depends_on` (dropped when target isn't in
+the chain so a malformed dep can't wedge the renderer). Frontend
+gets a new shared `components/ChainGraph.tsx` — pure SVG (no
+dagre / graphviz — airgap-safe), longest-path layer layout, cubic-
+bezier edges with arrow markers, colored circles keyed to status.
+Rendered as a collapsible "Chain map" section above the timeline;
+clicking a node scrolls the matching step card into view + flashes it.
 
-#### P7-C3 — Fine-grained live events → toasts
-`/api/events` SSE fires today for engagement mutations, and
-`useEngagement.ts` reacts by refetching. Extend the event stream with
-per-action events (spray hit, shell caught, chain rule fired, cred
-captured, prove verdict landed) that the client surfaces as toasts
-without a full refresh. New event kinds: `spray_hit`, `session_new`,
-`session_lost`, `chain_rule_fired`, `cred_captured`, `prove_verdict`.
+#### P7-C3 — Fine-grained live events → toasts ✅ (2026-09-02, `9dff809`)
+`/api/events` SSE now emits `spray_hit` (per fresh cred, both sync +
+async spray paths), `prove_verdict` (from /api/prove), and job_started
+carries `tester`. `useEngagement.ts` gained toast handlers for those
+plus the existing-but-silent `spray`, `act_run`, `session:caught`,
+`session:lost`, `evidence`, `delete`, `bulk_review`. `chain_rule_fired`
+NOT shipped — chain rules are derived state recomputed per
+`/api/scan/suggestions` call, not action state; would need a diff-based
+dedup layer to fire without spamming.
 
-#### P7-C4 — Delete-host cascade with impact preview
-`Store.delete_host` removes the host row but doesn't advertise what
-goes with it (findings, credentials sourced from the host, tracking
-rows, chain-rule facts). Add an `impact_preview(ip) -> {findings, creds,
-issues, chain_facts}` method + a WebGUI confirm modal that surfaces
-the counts before deletion.
+#### P7-C4 — Delete-host cascade with impact preview ✅ (2026-09-02, `5f07b9c`)
+Shipped as part of Batch C partial. Backend gained
+`GET /api/host/{ip}/impact` returning findings.total + 6-item sample,
+open_ports, issues, credentials_sourced_here (with will_remain: true —
+creds don't cascade). Frontend HostDrawer gained a "Danger zone"
+section with type-to-confirm.
 
-#### P7-C5 — Long-scan progress bar
-Nuclei / snmp / sweep / vulns can run 5-45min. Console shows stdout
-lines but no "N/M hosts done" progress. Parse the existing
-`report refreshed (X host(s) so far)` line already emitted by
-`recce enum`, expose it as a `progress: {done, total}` field on
-`/api/jobs/{id}` and render a bar next to the running-job chip in
-CollabSidebar.
+#### P7-C5 — Long-scan progress bar ✅ (2026-09-02, `c15f7ae`)
+`JobManager` now parses three throttled lines the enum phase emits
+(`masscan found N host(s) with open ports; enumerating all M
+authoritative target(s)` → total; `~ report refreshed (X host(s) so
+far)` → done) into `Job.progress = {done, total, phase}`. Exposed on
+`/api/jobs` rows + a new `progress` event on the SSE stream. Frontend:
+mini progress bar in CollabSidebar's per-job "Scanning now" card;
+aggregate bar in the header JobsPill. Falls back to "N done" chip
+when total is unknown (single-target scan).
 
-#### P7-C6 — Top-bar jobs pill
-AutocrackStatus already sits in the header (self-refreshing widget).
-Add a similar `JobsPill` component that shows "N jobs · click to
-show console" — no need to open Sessions to see what's running.
+#### P7-C6 — Top-bar jobs pill ✅ (2026-09-02, `5f07b9c`)
+Shipped as part of Batch C partial. `components/JobsPill.tsx` in
+the header actions group. Only renders when jobs are running;
+clicks scroll the ScanConsole drawer into view. Poll-based (3s to
+match the ScanTab + CollabSidebar cache window). Progress bar
+integration landed with P7-C5.
 
 ### Batch D — Test coverage
 
