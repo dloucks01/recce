@@ -203,10 +203,24 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
         })
         return base
 
+    # P7-A2: status query param — accepted since the finding-status shape
+    # was added, but was ignored server-side (the client had no local
+    # filter either, so a caller passing ?status=triaged got every row
+    # back). Now honored: unknown values 400 rather than pretend to work.
+    _VALID_STATUSES = frozenset({
+        "", "new", "triaged", "confirmed", "in-report",
+        "excluded", "retested-fixed", "retested-open",
+    })
+
     @app.get("/api/findings")
     def findings(limit: int = Query(default=0, ge=0),
-                 offset: int = Query(default=0, ge=0)):
+                 offset: int = Query(default=0, ge=0),
+                 status: str = Query(default="")):
         from ...core import tracking
+        if status and status not in _VALID_STATUSES:
+            raise HTTPException(
+                400, f"unknown status {status!r}; expected one of "
+                f"{sorted(_VALID_STATUSES)}")
         hs, _ = _hosts()
         tr = _tracking()
         statuses = _statuses()
@@ -216,8 +230,19 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
                 continue
             for v in h.vulns:
                 rev, notes = tr.get(tracking.vuln_row_key(v), (False, ""))
-                out.append(_finding_dict(v, bool(rev), notes,
-                                         status=statuses.get(tracking.vuln_row_key(v), "")))
+                item = _finding_dict(v, bool(rev), notes,
+                                     status=statuses.get(tracking.vuln_row_key(v), ""))
+                # Server-side filter — empty string means "no filter",
+                # any concrete value pins the result set. "new" matches
+                # untriaged rows (stored as empty string), so treat both
+                # as interchangeable to match the UI's "new" label.
+                if status:
+                    row_status = item.get("status") or ""
+                    if status == "new" and row_status not in ("", "new"):
+                        continue
+                    if status != "new" and row_status != status:
+                        continue
+                out.append(item)
         out.sort(key=lambda f: (not f["kev"], _SEV_ORDER.get(f["severity"], 9), -f["epss"]))
         total = len(out)
         if limit > 0:

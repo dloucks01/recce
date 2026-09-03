@@ -468,7 +468,18 @@ def _proof_shot(args, module: str, filename: str, command: str, output: str,
     from ..report import screenshot
     if not screenshot.available():
         return None
-    mod = import_module(_MODULE_PATH.get(module, f"recce.{module}"))
+    # P7-A3: require explicit `_MODULE_PATH` mapping. The old
+    # `recce.{module}` fallback was silent — a missing entry (as
+    # cloud_metadata was until 687b9f2) went unnoticed until a real
+    # user hit ModuleNotFoundError at runtime. Now fail fast with a
+    # message that names the map + the missing key.
+    if module not in _MODULE_PATH:
+        raise KeyError(
+            f"service module {module!r} has no entry in "
+            "recce.cli._service_helpers._MODULE_PATH — add the "
+            f"'{module}': 'recce.services.{module}' mapping "
+            "(or wherever the module actually lives)")
+    mod = import_module(_MODULE_PATH[module])
     png = screenshot.capture_html(mod.proof_html(command, output, **proof_kwargs))
     if not png:
         return None
@@ -610,7 +621,18 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
         print(f"[!] {label} is UDP-only and can't traverse the proxy ({proxy.describe()}) "
               f"- skipped. Run it from the pivot host directly, or without --proxy.")
         return 0
-    mod = import_module(_MODULE_PATH.get(module, f"recce.{module}"))
+    # P7-A3: require explicit `_MODULE_PATH` mapping. The old
+    # `recce.{module}` fallback was silent — a missing entry (as
+    # cloud_metadata was until 687b9f2) went unnoticed until a real
+    # user hit ModuleNotFoundError at runtime. Now fail fast with a
+    # message that names the map + the missing key.
+    if module not in _MODULE_PATH:
+        raise KeyError(
+            f"service module {module!r} has no entry in "
+            "recce.cli._service_helpers._MODULE_PATH — add the "
+            f"'{module}': 'recce.services.{module}' mapping "
+            "(or wherever the module actually lives)")
+    mod = import_module(_MODULE_PATH[module])
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")

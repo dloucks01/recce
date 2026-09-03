@@ -1,7 +1,7 @@
 """The Act phase (ranked action plan), auto-run, and credential spray."""
 from __future__ import annotations
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, HTTPException
 
 
 def register_act_spray_routes(app: FastAPI, ctx) -> None:
@@ -92,17 +92,29 @@ def register_act_spray_routes(app: FastAPI, ctx) -> None:
         from ...core.models import Credential
         from ...core.store import Store
         body = body or {}
+        # P7-A1: reject empty targets rather than silently spraying every
+        # host in scope. Historically a `{"targets": []}` (or missing
+        # field, or empty string) fell through the `if tokens:` guard
+        # below and applied no host filter — one typo away from a big
+        # accidental spray. The frontend always passes a real target; a
+        # caller who genuinely wants "everything" can pass an explicit
+        # `--all` sentinel (below).
+        raw = body.get("targets", "")
+        if isinstance(raw, list):
+            tokens = [str(t).strip() for t in raw if str(t).strip()]
+        else:
+            tokens = str(raw).split()
+        if not tokens:
+            raise HTTPException(
+                400, "targets required — pass a CIDR / range / IP / "
+                "hostname list. To spray every discovered host on purpose, "
+                "pass targets=['--all'] explicitly.")
+        # Sentinel: explicit opt-in for "every discovered host". Keeps the
+        # capability accessible without making it the default behavior.
+        all_hosts = tokens == ["--all"]
         with Store(db_path) as st:
             hosts = st.all_hosts()
-            # Accept either a whitespace-separated string ("10.0.0.1 10.0.0.2")
-            # or a list (["10.0.0.1", "10.0.0.2"]). Both are natural JSON shapes
-            # a caller might reach for; the frontend sends string, tests use list.
-            raw = body.get("targets") or ""
-            if isinstance(raw, list):
-                tokens = [str(t) for t in raw if t]
-            else:
-                tokens = str(raw).split()
-            if tokens:
+            if not all_hosts:
                 match = ip_matcher(tokens)
                 hosts = [h for h in hosts if match(h.ip)]
             creds = cr.stack(hosts, st.all_credentials())

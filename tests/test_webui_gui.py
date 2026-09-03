@@ -246,15 +246,31 @@ class ApiShape(unittest.TestCase):
         self.assertGreater(cov["technique_count"], 0)
         self.assertTrue(cov["tactics"] and cov["tactics"][0]["techniques"])
 
+    def test_spray_endpoint_rejects_empty_targets(self):
+        """P7-A1: an empty (or missing) targets field must 400, not silently
+        spray every host. Historically the empty-targets path fell through
+        to `hosts = st.all_hosts()` with no filter and started a full spray
+        of every stacked cred against every discovered IP — one typo away
+        from a big accidental engagement fire."""
+        with _client(self.eng) as c:
+            for body in ({}, {"targets": ""}, {"targets": []},
+                          {"targets": ["   "]}):
+                r = c.post("/api/spray", json=body)
+                self.assertEqual(r.status_code, 400,
+                    f"expected 400 for empty-target body {body!r}, got {r.status_code}")
+                self.assertIn("targets required", r.json()["detail"])
+
     def test_spray_endpoint_is_graceful_without_netexec(self):
-        # the Loot "Spray" button POSTs here; with no netexec it must report cleanly,
-        # not 500 (and not hang - no tool means no network attempts).
+        """the Loot 'Spray' button POSTs here; with no netexec it must report
+        cleanly, not 500 (and not hang - no tool means no network attempts).
+        Explicit `['--all']` sentinel opts into the every-host spray path
+        that used to be the empty-targets default before P7-A1."""
         from recce.creds import credenum
         orig = credenum.smb_tool
         credenum.smb_tool = lambda: None
         try:
             with _client(self.eng) as c:
-                r = c.post("/api/spray", json={})
+                r = c.post("/api/spray", json={"targets": ["--all"]})
                 self.assertEqual(r.status_code, 200)
                 self.assertFalse(r.json()["ok"])
                 self.assertIn("netexec", r.json()["error"])
@@ -294,9 +310,13 @@ class ShippedSpa(unittest.TestCase):
     def test_bundle_contains_the_act_and_loot_views(self):
         js = "".join(p.read_text(errors="replace")
                      for p in (_STATIC / "assets").glob("index-*.js"))
+        # "Team chat" used to live in the removed ChatButton header drawer
+        # (eadada1 removed it as a duplicate of the sidebar's chat tab);
+        # "team chat" (lowercase, on the sidebar chat-tab title) is what
+        # remains after that de-dup.
         for marker in ("Top priorities", "Collected credentials", "MITRE ATT",
                        "Spray these credentials", "Next moves", "Import tool output",
-                       "Team chat"):
+                       "team chat"):
             self.assertIn(marker, js, f"shipped SPA is missing {marker!r} - rebuild it")
 
 

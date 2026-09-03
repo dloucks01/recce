@@ -449,6 +449,145 @@ real hardware in specific engagements is a P2 item.
 
 ---
 
+## P7 — WebGUI audit close-out (Sept 2026)
+
+Surfaced by an end-to-end tab-by-tab walkthrough against the live
+compose test env (44 hosts, 876 findings, 53 credentials). Every item
+here was observed in-session; none was hypothetical. Grouped by size
+so a limited-token session can pick a self-contained batch.
+
+### Batch A — Quick wins (small, safe, no cross-tab ripple)
+
+#### P7-A1 — `/api/spray` reject empty targets
+`/api/spray` with `body.targets == []` currently falls through the
+`if tokens:` guard in `routes/act_spray.py`, applies no host filter,
+then sprays every stacked cred at every discovered host. One typo away
+from a big accidental spray. Should raise HTTPException(400,
+"targets required"). Frontend already passes a target — no UI-side
+breakage.
+
+#### P7-A2 — `/api/findings?status=X` honored or rejected
+Endpoint accepts the query param but ignores it server-side; client
+filters locally. Either implement server-side filter (drop the client
+`filter(x.status===…)` loop) or reject unknown params with 400. Pick
+one contract; document.
+
+#### P7-A3 — Kill the `_MODULE_PATH` silent fallback
+`_run_service_scan` in `cli/_service_helpers.py` falls back to
+`f"recce.{module}"` when a name isn't in the map. Silent
+ModuleNotFoundError at runtime is exactly the bug 687b9f2 fixed for
+`cloud_metadata`. Replace with a hard `KeyError` at CLI-parse time
+(fail-fast, not fail-at-import). The regression test added in that
+commit already asserts every referenced module resolves.
+
+#### P7-A4 — Field-name consistency: `stage` vs `name`
+`/api/attackpath.stages[].stage` uses the field name `stage`;
+`/api/attack.tactics[].name` uses `name`; frontend has to remember
+which is which per surface. Standardise on `name` across every
+serialisable "labeled group" shape. Change contained in
+`report/attackpath.py` and any test that pins the current key.
+
+### Batch B — Medium UX rework
+
+#### P7-B1 — CredentialsPanel sidebar → compact strip or drop
+Right sidebar's 🔑 Creds tab renders the full credential list; the
+top-level Credentials tab renders the same thing plus loot-extract +
+spray + delete. Same de-dup pattern as the ⚡ Activity + 💬 Chat
+buttons removed in eadada1. Either drop the sidebar tab or reduce it
+to a compact "N cred(s) captured — last: <username>" strip that
+links to the full tab.
+
+#### P7-B2 — ScanConsole → floating drawer
+Console currently renders BELOW the workbench body; on a live scan
+the Launch button + form scroll off-screen. Refactor into a floating
+drawer (bottom-slide, dismissable, minimise-to-pill) so the user can
+keep working while a scan runs. Behavior parity: SSE stream + Stop
+chain button stay in the drawer header.
+
+#### P7-B3 — Topology empty-state → inline launch hint + button
+Reachability (281B) and AD (62B) views currently render a bare
+"Nothing to draw" message. Attach a button per view that fires the
+scan that would populate it:
+  * AD → `recce ldap` + `recce ad` (import BloodHound) — button
+    opens the import modal pre-selected.
+  * Reachability → `recce enum --all-ports` with a hint about
+    routing / overlapping segments.
+
+#### P7-B4 — Engagement switcher header dropdown
+`recce serve -o <dir>` serves ONE engagement; switching needs a
+kill+relaunch. Add a header dropdown that lists sibling engagement
+dirs (peer directories of the currently-served `-o`) with the
+current one highlighted. Switch reloads the SPA with `?eng=<slug>`.
+Backend gains `/api/engagements` (list) and `/api/engagement/switch`
+(POST) endpoints.
+
+#### P7-B5 — Canonicalise `Vuln.key` shape
+Two shapes in use today:
+  * `models.Vuln.key` (bare `"{ip}:{port}:{script}:{title[:60]}"`)
+  * `tracking.vuln_row_key(v)` (`"vuln:…"` prefix)
+`store.remove_finding` was fixed in 867aa6b to accept both, but the
+dual-shape situation is likely to bite again elsewhere. Audit every
+caller, pick ONE shape (the tracking form has a namespace prefix so
+it's less collision-prone), migrate the store to write it, and drop
+the fallback branch from `remove_finding`.
+
+### Batch C — Large infrastructure
+
+#### P7-C1 — Async `/api/spray` + `/api/act/run`
+Both currently block the HTTP request for the full duration. Fold
+both through the existing `webui.jobs` spawner so they return
+`{id: <jobid>}` immediately and stream progress via
+`/api/jobs/{id}/events` — same shape as `/api/scan` uses. The Cancel
+button in CollabSidebar's jobs list would then apply.
+
+#### P7-C2 — Attack chain DAG visualization
+Chain views render steps as text lists. A dagre-style SVG with
+`blocked → pending → proven` colored nodes + `depends_on` edges makes
+the compromise story readable at a glance. Server side: extend each
+chain's `/api/attack-chain/{ad,cloud,web}` payload with an
+`edges[]` array (derived from step.depends_on). Client side: a shared
+`ChainGraph.tsx` component that consumes the same shape.
+
+#### P7-C3 — Fine-grained live events → toasts
+`/api/events` SSE fires today for engagement mutations, and
+`useEngagement.ts` reacts by refetching. Extend the event stream with
+per-action events (spray hit, shell caught, chain rule fired, cred
+captured, prove verdict landed) that the client surfaces as toasts
+without a full refresh. New event kinds: `spray_hit`, `session_new`,
+`session_lost`, `chain_rule_fired`, `cred_captured`, `prove_verdict`.
+
+#### P7-C4 — Delete-host cascade with impact preview
+`Store.delete_host` removes the host row but doesn't advertise what
+goes with it (findings, credentials sourced from the host, tracking
+rows, chain-rule facts). Add an `impact_preview(ip) -> {findings, creds,
+issues, chain_facts}` method + a WebGUI confirm modal that surfaces
+the counts before deletion.
+
+#### P7-C5 — Long-scan progress bar
+Nuclei / snmp / sweep / vulns can run 5-45min. Console shows stdout
+lines but no "N/M hosts done" progress. Parse the existing
+`report refreshed (X host(s) so far)` line already emitted by
+`recce enum`, expose it as a `progress: {done, total}` field on
+`/api/jobs/{id}` and render a bar next to the running-job chip in
+CollabSidebar.
+
+#### P7-C6 — Top-bar jobs pill
+AutocrackStatus already sits in the header (self-refreshing widget).
+Add a similar `JobsPill` component that shows "N jobs · click to
+show console" — no need to open Sessions to see what's running.
+
+### Batch D — Test coverage
+
+#### P7-D1 — Commit WebGUI E2E smoke as CI tests
+Promote `scratchpad/api_sweep.py` + `scratchpad/scan_smoke.py` (both
+built during the P7 audit) to real tests under `tests/test_webui_smoke.py`.
+They spin up `recce serve` against a fixture engagement dir, hit every
+GET + safe POST endpoint, and assert response shape. This is what
+would have caught the `delete-finding` key mismatch + `cloud_metadata`
+ModuleNotFoundError BEFORE ship.
+
+---
+
 ## Backlog (small fixes, not big enough for their own priority)
 
 - Phase C `ExploitSurfaceCallout` self-hide race (P0-5 above).

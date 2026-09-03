@@ -503,7 +503,13 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         by_stage: dict[str, list] = {}
         for s in steps:
             by_stage.setdefault(s["stage"], []).append(s)
-        stages = [{"stage": st, "steps": by_stage[st]}
+        # P7-A4: expose the stage label as `name` for consistency with
+        # every other "labeled group" shape in the API (mitre tactics,
+        # chain steps, etc.). Also keep the historical `stage` key so
+        # existing clients (Exploitation.tsx currently reads `sg.stage`)
+        # keep working during the deprecation window. Remove `stage`
+        # once the frontend switch lands.
+        stages = [{"name": st, "stage": st, "steps": by_stage[st]}
                   for st in attackpath.STAGE_ORDER if st in by_stage]
         return {"narrative": attackpath.narrative(up, steps),
                 "stages": stages, "step_count": len(steps)}
@@ -665,6 +671,12 @@ def register_data_exchange_routes(app: FastAPI, ctx) -> None:
         cov = attack.coverage(hs)
         return {"technique_count": cov["technique_count"],
                 "tactic_count": cov["tactic_count"],
-                "tactics": [{"tactic": t, "tactic_id": attack.TACTICS.get(t, ""),
+                # P7-A4: expose the tactic label under `name` too, matching
+                # the same alias added to attackpath.stages. A generic
+                # "labeled group" consumer can now read `.name` uniformly
+                # across MITRE tactics + attackpath stages + chain steps.
+                # The historical `tactic` key stays for existing callers.
+                "tactics": [{"name": t, "tactic": t,
+                             "tactic_id": attack.TACTICS.get(t, ""),
                              "techniques": techs}
                             for t, techs in cov["by_tactic"].items()]}
