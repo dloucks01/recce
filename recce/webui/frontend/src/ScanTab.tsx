@@ -137,17 +137,12 @@ type QueueItem = { command: string; targets: string; flags: string[]; label: str
 // rows render each job's own j.tester, not the current operator.
 export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
   const [catalog, setCatalog] = useState<CmdCatalog>({});
-  const [hosts, setHosts] = useState<Host[]>([]);
+  // Discovered-host list is fetched to keep parity with the older tab, even
+  // though the v3 layout surfaces host suggestions inline via scan/context.
+  const [, setHosts] = useState<Host[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [activeGroup, setActiveGroup] = useState<string | null>(null);
   const [command, setCommand] = useState<string | null>(null);
-  // Which discovered hosts qualify for each command, so the Target(s) field
-  // can say what belongs in it instead of leaving the tester to guess.
   const [scanCtx, setScanCtx] = useState<Record<string, {count: number; sample: string[]; hint?: string}>>({});
-  // "recce suggests…" — engagement-wide facts (learned realm, admincount user,
-  // relay-vulnerable SMB hosts, hashloot ready for hashcat, …) surfaced as
-  // one-click prefills above the command grid. Dismissed keys persist across
-  // reloads via localStorage so a card the operator has rejected stays gone.
   const [suggestions, setSuggestions] = useState<ScanSuggestion[]>([]);
   const [dismissedSuggestions, setDismissedSuggestions] = useState<Set<string>>(() => {
     try {
@@ -164,30 +159,37 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
   const [cDomain, setCDomain] = useState("");
   const [cLhost, setCLhost] = useState("");
   const [cFlags, setCFlags] = useState<Record<string, boolean>>({});
-  // Value-carrying flags (text/int/list). Kept separate from boolean cFlags
-  // so both can be sent to the backend independently.
   const [cFlagValues, setCFlagValues] = useState<Record<string, string>>({});
-  // Bundled wordlist catalog, fetched once. Kind → list of {name, blurb,
-  // line_count} entries. Feeds the dropdown next to every "wordlist"-kind
-  // flag input. Empty until the first successful fetch.
   const [wordlists, setWordlists] = useState<Record<string, Array<{name:string; blurb:string; line_count:number}>>>({});
   const [log, setLog] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [showLog, setShowLog] = useState(false);
-  const [showSuggest, setShowSuggest] = useState(false);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [chainRunning, setChainRunning] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
-  const suggestRef = useRef<HTMLDivElement>(null);
-  // Chain-cancel plumbing. runPreset / runQueue iterate a list of commands
-  // in series — the user needs one Stop button that both:
-  //   * cancels the currently-running job via /api/jobs/{id}/cancel, AND
-  //   * breaks out of the outer for-loop so the next command isn't fired.
-  // A ref (not state) keeps the loop reading a fresh value each iteration.
   const chainCancelledRef = useRef(false);
   const chainCurrentJobRef = useRef<string | null>(null);
   const chainCurrentEsRef = useRef<EventSource | null>(null);
   const [chainStopping, setChainStopping] = useState(false);
+
+  // Sidebar state (two-pane workbench)
+  const [treeSearch, setTreeSearch] = useState("");
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("recce.scan.expandedGroups") || "[]";
+      return new Set<string>(JSON.parse(raw));
+    } catch { return new Set(); }
+  });
+  const [presetOpen, setPresetOpen] = useState(false);
+  const presetRef = useRef<HTMLDivElement>(null);
+  // Persist which groups are expanded so operators don't re-open the same
+  // three groups every reload.
+  useEffect(() => {
+    try {
+      localStorage.setItem("recce.scan.expandedGroups",
+        JSON.stringify(Array.from(expandedGroups)));
+    } catch {}
+  }, [expandedGroups]);
 
   useEffect(() => {
     getJSON<{hosts: number; commands: Record<string, {count: number; sample: string[]; hint?: string}>}>(
@@ -196,12 +198,19 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
       "/api/scan/suggestions").then((r) => setSuggestions(r.suggestions || [])).catch(() => {});
     getCommands().then((c) => {
       setCatalog(c);
+      // Expand the two most-used groups by default so first-load isn't a
+      // wall of collapsed section headings.
       const groups = Object.keys(groupBy(c));
-      if (groups.length > 0) setActiveGroup(groups[0]);
+      setExpandedGroups((prev) => {
+        if (prev.size > 0) return prev;
+        const next = new Set(prev);
+        for (const preferred of ["scan", "services", "web", "databases"]) {
+          if (groups.includes(preferred)) next.add(preferred);
+        }
+        return next;
+      });
     }).catch(() => {});
     getJSON<{ items: Host[] }>("/api/hosts?limit=500").then((r) => setHosts(r.items || [])).catch(() => {});
-    // Bundled wordlists — one fetch, group by kind so each scan card's
-    // dropdown filters to the relevant family without re-hitting the API.
     getJSON<{wordlists: Array<{name:string; kind:string; blurb:string; line_count:number}>}>("/api/wordlists")
       .then((r) => {
         const by: Record<string, Array<{name:string; blurb:string; line_count:number}>> = {};
@@ -214,10 +223,6 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
   }, []);
 
   useEffect(() => {
-    // Auto-refresh of Dashboard/Findings on scan completion is already
-    // handled by useEngagement.ts subscribing to /api/events SSE and
-    // calling refresh() on `type=scan` events. This poller is just the
-    // Jobs list on the right rail — no cross-tab broadcast needed here.
     async function pollJobs() {
       try {
         const res = await fetch("/api/jobs");
@@ -236,13 +241,15 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
     logRef.current?.scrollTo(0, logRef.current.scrollHeight);
   }, [log, onLog]);
 
+  // Close preset dropdown on outside click.
   useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (suggestRef.current && !suggestRef.current.contains(e.target as Node)) setShowSuggest(false);
+    if (!presetOpen) return;
+    function close(e: MouseEvent) {
+      if (presetRef.current && !presetRef.current.contains(e.target as Node)) setPresetOpen(false);
     }
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, []);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [presetOpen]);
 
   const streamJob = useCallback((jobId: string) => {
     setLog([]);
@@ -265,8 +272,6 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
     if (!s) return;
     if (s.targets === "required" && !targets.trim()) return;
     const flags = Object.keys(cFlags).filter((k) => cFlags[k]);
-    // Only forward non-empty flag_values (empty inputs → drop from the wire so
-    // the backend's kind-specific validation doesn't need to see empty strings).
     const flag_values: Record<string, string> = {};
     for (const [k, v] of Object.entries(cFlagValues)) {
       if (v && v.trim()) flag_values[k] = v;
@@ -300,8 +305,6 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
       setShowLog(true);
       return;
     }
-    // Two-step confirm — a preset chains several real scans back-to-back
-    // against the target list. One accidental click used to fire them all.
     const cmdList = preset.cmds
       .map((c) => `  • ${catalog[c.command]?.label || c.command}`)
       .join("\n");
@@ -355,9 +358,6 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
     setChainStopping(false);
   }
 
-  // Stop the current chain (preset or queue). Cancels the in-flight job
-  // server-side and flips the ref so the outer loop breaks. Individual
-  // job-row cancel buttons keep working for one-off cancels.
   async function stopChain() {
     if (!chainRunning) return;
     if (!window.confirm(
@@ -372,8 +372,6 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
       try { await fetch(`/api/jobs/${jid}/cancel`, { method: "POST" }); }
       catch { /* server may already have finished the job */ }
     }
-    // Close the SSE eagerly so the awaited Promise in run{Preset,Queue}
-    // resolves immediately instead of waiting for the server to hang up.
     try { chainCurrentEsRef.current?.close(); } catch { /* noop */ }
   }
 
@@ -392,9 +390,6 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
 
   async function runQueue() {
     if (running || chainRunning || queue.length === 0) return;
-    // Same confirm as presets — a queue chain runs multiple commands
-    // back-to-back and there's no way to interrupt except through this
-    // Stop chain button.
     const listing = queue.map((item) => `  • ${item.label}`).join("\n");
     if (!window.confirm(
       `Run the queued scan chain?\n\n` +
@@ -446,39 +441,38 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
   }
 
   // Group active (non-dismissed) suggestions by target command so multiple
-  // hints for the same command render as one card. Info-only suggestions
-  // (command === "") land in a synthetic bucket keyed on the source module.
+  // hints for the same command render as one card.
   const visibleSuggestions = useMemo(
     () => suggestions.filter((s) => !dismissedSuggestions.has(s.key)),
     [suggestions, dismissedSuggestions]);
+  const rank = (s: ScanSuggestion) => {
+    const sev = s.severity || "";
+    if (sev === "critical") return 0;
+    if (sev === "high") return 1;
+    if (sev === "medium") return 2;
+    if (sev === "low") return 3;
+    if (s.confidence === "high") return 4;
+    if (s.confidence === "medium") return 5;
+    return 6;
+  };
   const groupedSuggestions = useMemo(() => {
-    // Sort within each bucket by severity, then order buckets by their
-    // hottest hint so critical chain-rules float to the top of the grid.
-    const rank = (s: ScanSuggestion) => {
-      const sev = s.severity || "";
-      if (sev === "critical") return 0;
-      if (sev === "high") return 1;
-      if (sev === "medium") return 2;
-      if (sev === "low") return 3;
-      // No severity (legacy suggestion) — fall back to confidence.
-      if (s.confidence === "high") return 4;
-      if (s.confidence === "medium") return 5;
-      return 6;
-    };
     const g: Record<string, ScanSuggestion[]> = {};
     for (const s of visibleSuggestions) {
       const bucket = s.command || `~${s.source}`;
       (g[bucket] ||= []).push(s);
     }
-    for (const bucket of Object.keys(g)) {
-      g[bucket].sort((a, b) => rank(a) - rank(b));
-    }
+    for (const bucket of Object.keys(g)) g[bucket].sort((a, b) => rank(a) - rank(b));
     const ordered: Record<string, ScanSuggestion[]> = {};
     Object.entries(g)
       .sort(([, a], [, b]) => rank(a[0]) - rank(b[0]))
       .forEach(([k, v]) => { ordered[k] = v; });
     return ordered;
   }, [visibleSuggestions]);
+  // Suggestions targeted at the current command — surfaced above the flag
+  // form so a Prefill click is right where the flag inputs are.
+  const currentSuggestions = useMemo(
+    () => (command ? (groupedSuggestions[command] || []) : []),
+    [command, groupedSuggestions]);
 
   function dismissSuggestion(key: string) {
     setDismissedSuggestions((prev) => {
@@ -492,19 +486,12 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
     });
   }
 
-  // Apply a suggestion: select its target command, then dispatch the value
-  // to the same form-state slot manual typing writes.  Field slots map 1:1
-  // to setTargets / setCUser / setCDomain — the three prefillable inputs
-  // the ScanTab renders today.
   function applySuggestion(s: ScanSuggestion) {
-    if (!s.command) return;                    // info-only card
+    if (!s.command) return;
     const spec = catalog[s.command];
     if (!spec) return;
-    // Selecting the command clears form state via the setCFlags reset in the
-    // command-picker onClick; do the same manually so a Prefill click also
-    // starts from a clean slate.
-    setActiveGroup(spec.group);
     setCommand(s.command);
+    setExpandedGroups((prev) => new Set(prev).add(spec.group || "other"));
     setCFlags({});
     setCFlagValues({});
     if (s.field === "targets")  setTargets(s.suggested_value);
@@ -514,442 +501,461 @@ export function ScanTab({ onRunning, onLog, prefillTarget }: ScanTabProps) {
 
   const grouped = useMemo(() => groupBy(catalog), [catalog]);
   const groups = Object.entries(grouped);
-  const currentCmds = activeGroup ? grouped[activeGroup] || [] : [];
   const spec = command ? catalog[command] : null;
   const runningJobs = jobs.filter((j) => j.status === "running");
-  const recentJobs = jobs.filter((j) => j.status !== "running").slice(0, 10);
-
-  const filteredHosts = useMemo(() => {
-    if (!targets.trim()) return hosts.slice(0, 10);
-    const q = targets.toLowerCase();
-    return hosts.filter((h) =>
-      h.ip.includes(q) || h.hostname?.toLowerCase().includes(q)
-    ).slice(0, 10);
-  }, [hosts, targets]);
-
   const isBusy = running || chainRunning;
 
-  return (
-    <div className="sv2">
-      {/* Quick-start presets */}
-      <div className="sv2-presets">
-        <div className="sv2-presets-h">
-          <span className="sv2-presets-label">Quick Start</span>
-          <span className="muted small">{Object.keys(catalog).length} commands available</span>
-        </div>
-        <div className="sv2-presets-grid">
-          {PRESETS.map((p) => (
-            <button
-              key={p.label}
-              className="sv2-preset"
-              onClick={() => runPreset(p)}
-              disabled={isBusy}
-              title={p.desc}
-            >
-              <span className="sv2-preset-icon">{p.icon}</span>
-              <span className="sv2-preset-body">
-                <span className="sv2-preset-name">{p.label}</span>
-                <span className="sv2-preset-desc">{p.desc}</span>
-              </span>
-              <span className="sv2-preset-ct">{p.cmds.length}</span>
-            </button>
-          ))}
-        </div>
-      </div>
+  // Search filter for the sidebar tree — match either command key or its label.
+  const searchQ = treeSearch.trim().toLowerCase();
+  const filteredGroups = useMemo(() => {
+    if (!searchQ) return groups;
+    const out: [string, { key: string; spec: CmdSpec }[]][] = [];
+    for (const [g, cmds] of groups) {
+      const hits = cmds.filter(({ key, spec: s }) =>
+        key.toLowerCase().includes(searchQ) ||
+        (s.label || "").toLowerCase().includes(searchQ));
+      if (hits.length) out.push([g, hits]);
+    }
+    return out;
+  }, [groups, searchQ]);
 
-      {/* Target bar */}
-      <div className="sv2-targetbar" ref={suggestRef}>
-        <label className="sv2-field sv2-target-field">
-          <span className="sv2-label">Target(s)</span>
+  // Live-target hint for the currently selected command.
+  const cmdCtx = command ? scanCtx[command] : null;
+
+  function toggleGroup(g: string) {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(g)) next.delete(g);
+      else next.add(g);
+      return next;
+    });
+  }
+  // A group is treated as expanded when it's in the set OR the search is
+  // active (search auto-expands every matching group so hits stay visible).
+  const isExpanded = (g: string) => !!searchQ || expandedGroups.has(g);
+
+  function selectCommand(key: string) {
+    setCommand(key);
+    setCFlags({});
+    setCFlagValues({});
+    const grp = catalog[key]?.group;
+    if (grp) setExpandedGroups((prev) => new Set(prev).add(grp));
+  }
+
+  return (
+    <div className="sv3">
+      {/* -- Sticky top bar: target + preset + launch ------------------- */}
+      <div className="sv3-topbar">
+        <div className="sv3-topbar-target">
+          <span className="sv3-tag">🎯 Target</span>
           <input
-            className="sv2-input"
+            className="sv3-target-input"
             value={targets}
             onChange={(e) => setTargets(e.target.value)}
-            onFocus={() => setShowSuggest(true)}
             placeholder="10.0.0.0/24, 10.0.0.5, hostname, or @targets.txt"
             disabled={isBusy}
           />
-        </label>
-        {command && scanCtx[command] && (
-          scanCtx[command].count > 0 ? (
-            <div className="sv2-target-hint">
-              <b>{scanCtx[command].count}</b> discovered host
-              {scanCtx[command].count === 1 ? "" : "s"} expose {command}:{" "}
-              <span className="mono">{scanCtx[command].sample.join(", ")}</span>
-              {scanCtx[command].count > scanCtx[command].sample.length && " …"}
-              <button
-                className="sv2-target-fill"
-                disabled={isBusy}
-                onClick={() => setTargets(scanCtx[command].sample.join(", "))}
-              >use these</button>
-            </div>
-          ) : (
-            <div className="sv2-target-hint warn">{scanCtx[command].hint}</div>
-          )
-        )}
-        {showSuggest && filteredHosts.length > 0 && (
-          <div className="sv2-suggest">
-            <div className="sv2-suggest-h">Discovered hosts</div>
-            {filteredHosts.map((h) => (
-              <button
-                key={h.ip}
-                className="sv2-suggest-item"
-                onClick={() => {
-                  setTargets((t) => t ? `${t.replace(/,\s*$/, "")}, ${h.ip}` : h.ip);
-                  setShowSuggest(false);
-                }}
-              >
-                <span className="sv2-suggest-ip">{h.ip}</span>
-                {h.hostname && <span className="sv2-suggest-name">{h.hostname}</span>}
-                {h.os && <span className="sv2-suggest-os">{h.os.slice(0, 30)}</span>}
-                <span className="sv2-suggest-ports">
-                  {h.ports?.slice(0, 5).map((p) => p.port).join(", ")}
-                  {(h.ports?.length || 0) > 5 && "…"}
-                </span>
-              </button>
-            ))}
+        </div>
+        <div className="sv3-topbar-actions">
+          <div className="sv3-preset-menu" ref={presetRef}>
+            <button className="sv3-btn sv3-btn-ghost"
+                    onClick={() => setPresetOpen((v) => !v)}
+                    disabled={isBusy}
+                    title="Run a bundled multi-command scan chain">
+              📋 Preset ▾
+            </button>
+            {presetOpen && (
+              <div className="sv3-preset-popup" role="menu">
+                {PRESETS.map((p) => (
+                  <button key={p.label} className="sv3-preset-item" role="menuitem"
+                          onClick={() => { setPresetOpen(false); runPreset(p); }}>
+                    <span className="sv3-preset-ico">{p.icon}</span>
+                    <span className="sv3-preset-body">
+                      <span className="sv3-preset-name">{p.label}</span>
+                      <span className="sv3-preset-desc">{p.desc}</span>
+                    </span>
+                    <span className="sv3-preset-ct">{p.cmds.length}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-        )}
+          <button className="sv3-btn sv3-btn-primary"
+                  onClick={runScan}
+                  disabled={!command || isBusy || (spec?.targets === "required" && !targets.trim())}
+                  title={command ? `Run ${catalog[command]?.label || command} now` : "Select a scan from the sidebar first"}>
+            {isBusy ? <><span className="sv3-spinner" /> Running…</> : <>▶ Launch scan</>}
+          </button>
+        </div>
       </div>
 
-      {/* "recce suggests…" — facts learned across the engagement, framed as
-          one-click prefills. Grouped by target command so multiple hints for
-          the same command render as one card; info-only suggestions (hashcat
-          handoff, ntlmrelayx handoff, SSH-key reuse cluster) sit under a
-          synthetic bucket keyed on the source reader. Dismissed keys persist
-          via localStorage so a card the operator rejected stays gone. */}
-      {visibleSuggestions.length > 0 && (
-        <div className="sv2-suggestions">
-          <div className="sv2-suggestions-h">
-            <span className="sv2-suggestions-label">recce suggests</span>
-            <span className="muted small">
-              {visibleSuggestions.length} hint{visibleSuggestions.length === 1 ? "" : "s"}
-              {" · "}based on what the engagement has already learned
-            </span>
-          </div>
-          <div className="sv2-suggestions-grid">
-            {Object.entries(groupedSuggestions).map(([bucket, items]) => {
-              const cmd = items[0].command;
-              const spec = cmd ? catalog[cmd] : null;
-              const title = spec ? spec.label : items[0].source.replace(/_/g, " ");
+      {/* -- Body: sidebar tree + form pane ---------------------------- */}
+      <div className="sv3-body">
+        {/* Left sidebar */}
+        <aside className="sv3-tree">
+          <input className="sv3-tree-search"
+                 placeholder="Search commands…"
+                 value={treeSearch}
+                 onChange={(e) => setTreeSearch(e.target.value)} />
+          <div className="sv3-tree-scroll">
+            {filteredGroups.length === 0 && (
+              <div className="sv3-tree-empty">No commands match "{searchQ}"</div>
+            )}
+            {filteredGroups.map(([g, cmds]) => {
+              const meta = GROUP_META[g.toLowerCase()] || { icon: "▸", desc: g };
+              const open = isExpanded(g);
               return (
-                <div key={bucket} className="sv2-suggest-card">
-                  <div className="sv2-suggest-card-h">
-                    <span className="sv2-suggest-card-title">{title}</span>
-                    {cmd && <span className="sv2-suggest-card-cmd mono">{cmd}</span>}
-                  </div>
-                  {items.map((s) => (
-                    <div key={s.key} className="sv2-suggest-row">
-                      <div className="sv2-suggest-reason">
-                        {s.severity ? (
-                          <SevTag severity={s.severity} />
-                        ) : (
-                          <span className={`sv2-conf-${s.confidence}`}>●</span>
-                        )}
-                        {" "}{s.reason}
-                        {s.suggested_value && s.field && (
-                          <div className="sv2-suggest-value">
-                            <span className="muted small">{s.field}:</span>{" "}
-                            <span className="mono">{s.suggested_value}</span>
-                          </div>
-                        )}
-                        {s.external_cmd && (
-                          <div className="sv2-suggest-value mono small">
-                            $ {s.external_cmd}
-                          </div>
-                        )}
-                      </div>
-                      <div className="sv2-suggest-actions">
-                        {s.command && s.field && (
-                          <button
-                            className="sv2-suggest-fill"
-                            onClick={() => applySuggestion(s)}
-                            disabled={isBusy}
-                            title={`Prefill ${s.command} → ${s.field}`}
-                          >Prefill</button>
-                        )}
-                        <button
-                          className="sv2-suggest-dismiss"
-                          onClick={() => dismissSuggestion(s.key)}
-                          title="Dismiss this suggestion"
-                        >×</button>
-                      </div>
+                <div key={g} className="sv3-tree-group">
+                  <button className="sv3-tree-group-h"
+                          onClick={() => toggleGroup(g)}
+                          title={meta.desc}>
+                    <span className="sv3-tree-chev">{open ? "▾" : "▸"}</span>
+                    <span className="sv3-tree-ico">{meta.icon}</span>
+                    <span className="sv3-tree-lbl">{g}</span>
+                    <span className="sv3-tree-ct">{cmds.length}</span>
+                  </button>
+                  {open && (
+                    <div className="sv3-tree-cmds">
+                      {cmds.map(({ key, spec: s }) => {
+                        const ctx = scanCtx[key];
+                        const active = command === key;
+                        return (
+                          <button key={key}
+                                  className={"sv3-tree-cmd" + (active ? " active" : "")}
+                                  onClick={() => selectCommand(key)}
+                                  disabled={isBusy}
+                                  title={ctx && ctx.count > 0
+                                    ? `${ctx.count} discovered host(s) expose ${key}`
+                                    : (s.label || key)}>
+                            <span className="sv3-tree-cmd-name">{s.label || key}</span>
+                            <span className="sv3-tree-cmd-tags">
+                              {ctx && ctx.count > 0 && (
+                                <span className="sv3-dot sv3-dot-ok" title={`${ctx.count} discovered host(s)`}>{ctx.count}</span>
+                              )}
+                              {s.creds && <span className="sv3-mini-tag" title="needs creds">🔑</span>}
+                              {s.targets === "required" && <span className="sv3-mini-tag" title="target required">◎</span>}
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
-                  ))}
+                  )}
                 </div>
               );
             })}
           </div>
+          <div className="sv3-tree-foot muted small">
+            {Object.keys(catalog).length} commands · {groups.length} groups
+          </div>
+        </aside>
+
+        {/* Right pane: selected-command form */}
+        <main className="sv3-form">
+          {!command && (
+            <div className="sv3-form-empty">
+              <div className="sv3-form-empty-inner">
+                <div className="sv3-form-empty-h">Pick a scan from the sidebar</div>
+                <p className="muted">
+                  Or run a bundled preset from the button in the top-right.
+                  Suggestions below are based on what the engagement has already learned.
+                </p>
+                {visibleSuggestions.length > 0 && (
+                  <div className="sv3-suggests sv3-suggests-empty">
+                    <div className="sv3-suggests-h">
+                      <span>💡 Recce suggests</span>
+                      <span className="muted small">{visibleSuggestions.length} hint(s)</span>
+                    </div>
+                    {Object.entries(groupedSuggestions).slice(0, 8).map(([bucket, items]) => {
+                      const cmd = items[0].command;
+                      const cs = cmd ? catalog[cmd] : null;
+                      const title = cs ? cs.label : items[0].source.replace(/_/g, " ");
+                      return (
+                        <div key={bucket} className="sv3-suggest-card">
+                          <div className="sv3-suggest-card-h">
+                            <span className="sv3-suggest-title">{title}</span>
+                            {cmd && <span className="mono small">{cmd}</span>}
+                          </div>
+                          {items.slice(0, 2).map((s) => (
+                            <div key={s.key} className="sv3-suggest-row">
+                              <div className="sv3-suggest-reason">
+                                {s.severity ? <SevTag severity={s.severity} />
+                                            : <span className={`sv3-conf-${s.confidence}`}>●</span>}
+                                {" "}{s.reason}
+                              </div>
+                              <div className="sv3-suggest-actions">
+                                {s.command && (
+                                  <button className="sv3-btn sv3-btn-mini"
+                                          onClick={() => applySuggestion(s)}
+                                          disabled={isBusy}>Prefill</button>
+                                )}
+                                <button className="sv3-btn sv3-btn-mini sv3-btn-ghost"
+                                        onClick={() => dismissSuggestion(s.key)}>×</button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {spec && command && (
+            <>
+              <header className="sv3-form-h">
+                <div>
+                  <h2 className="sv3-form-title">{spec.label}</h2>
+                  <div className="sv3-form-sub">
+                    <span className="mono small">recce {command}</span>
+                  </div>
+                </div>
+                <div className="sv3-form-btns">
+                  <button className="sv3-btn sv3-btn-ghost"
+                          onClick={addToQueue}
+                          disabled={isBusy}
+                          title="Add to scan chain — queue multiple commands to run in sequence">
+                    + Chain
+                  </button>
+                  <button className="sv3-btn sv3-btn-primary"
+                          onClick={runScan}
+                          disabled={isBusy || (spec.targets === "required" && !targets.trim())}>
+                    {isBusy ? <><span className="sv3-spinner" /> Running…</> : <>▶ Launch</>}
+                  </button>
+                </div>
+              </header>
+
+              {/* Live target-context hint for the picked command. */}
+              {cmdCtx && (
+                cmdCtx.count > 0 ? (
+                  <div className="sv3-ctx-hint">
+                    <b>{cmdCtx.count}</b> discovered host{cmdCtx.count === 1 ? "" : "s"} expose{" "}
+                    <span className="mono">{command}</span>:{" "}
+                    <span className="mono">{cmdCtx.sample.join(", ")}</span>
+                    {cmdCtx.count > cmdCtx.sample.length && " …"}
+                    <button className="sv3-btn sv3-btn-mini sv3-btn-ghost"
+                            style={{marginLeft:8}}
+                            disabled={isBusy}
+                            onClick={() => setTargets(cmdCtx.sample.join(", "))}>
+                      use these
+                    </button>
+                  </div>
+                ) : cmdCtx.hint ? (
+                  <div className="sv3-ctx-hint warn">{cmdCtx.hint}</div>
+                ) : null
+              )}
+
+              {/* Suggestions targeted at THIS command. */}
+              {currentSuggestions.length > 0 && (
+                <div className="sv3-suggests">
+                  <div className="sv3-suggests-h">
+                    <span>💡 Recce suggests for {command}</span>
+                    <span className="muted small">{currentSuggestions.length} hint(s)</span>
+                  </div>
+                  {currentSuggestions.map((s) => (
+                    <div key={s.key} className="sv3-suggest-row">
+                      <div className="sv3-suggest-reason">
+                        {s.severity ? <SevTag severity={s.severity} />
+                                    : <span className={`sv3-conf-${s.confidence}`}>●</span>}
+                        {" "}{s.reason}
+                        {s.suggested_value && s.field && (
+                          <div className="sv3-suggest-value">
+                            <span className="muted small">{s.field}:</span>{" "}
+                            <span className="mono">{s.suggested_value}</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="sv3-suggest-actions">
+                        {s.field && (
+                          <button className="sv3-btn sv3-btn-mini"
+                                  onClick={() => applySuggestion(s)}
+                                  disabled={isBusy}>Prefill</button>
+                        )}
+                        <button className="sv3-btn sv3-btn-mini sv3-btn-ghost"
+                                onClick={() => dismissSuggestion(s.key)}>×</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <section className="sv3-form-body">
+                {spec.profile && (
+                  <label className="sv3-field">
+                    <span className="sv3-field-lbl">Profile</span>
+                    <select className="sv3-input" value={profile}
+                            onChange={(e) => setProfile(e.target.value)} disabled={isBusy}
+                            title="Stealth: slower T2, congestion-adaptive from pass 1, top-1000 TCP.">
+                      <option value="quick">Quick</option>
+                      <option value="standard">Standard</option>
+                      <option value="thorough">Thorough</option>
+                      <option value="stealth">Stealth (slow, rate-limit-safe)</option>
+                    </select>
+                  </label>
+                )}
+
+                {spec.creds && (
+                  <div className="sv3-field-row">
+                    <label className="sv3-field">
+                      <span className="sv3-field-lbl">Username</span>
+                      <input className="sv3-input" value={cUser}
+                             onChange={(e) => setCUser(e.target.value)}
+                             placeholder="domain\user" disabled={isBusy} />
+                    </label>
+                    <label className="sv3-field">
+                      <span className="sv3-field-lbl">Password</span>
+                      <input className="sv3-input" type="password" value={cPass}
+                             onChange={(e) => setCPass(e.target.value)} disabled={isBusy} />
+                    </label>
+                    <label className="sv3-field">
+                      <span className="sv3-field-lbl">Domain</span>
+                      <input className="sv3-input" value={cDomain}
+                             onChange={(e) => setCDomain(e.target.value)}
+                             placeholder="CORP.LOCAL" disabled={isBusy} />
+                    </label>
+                  </div>
+                )}
+
+                {spec.lhost && (
+                  <label className="sv3-field">
+                    <span className="sv3-field-lbl">LHOST</span>
+                    <input className="sv3-input" value={cLhost}
+                           onChange={(e) => setCLhost(e.target.value)}
+                           placeholder="attacker.ip:port" disabled={isBusy} />
+                  </label>
+                )}
+
+                {spec.flags && spec.flags.length > 0 && (
+                  <div className="sv3-flags">
+                    <div className="sv3-field-lbl">Flags</div>
+                    <div className="sv3-flag-grid">
+                      {spec.flags.filter(f => (f.kind || "bool") === "bool").map((f) => (
+                        <label key={f.name} className={"sv3-flag" + (cFlags[f.name] ? " on" : "")}>
+                          <input type="checkbox" checked={cFlags[f.name] || false}
+                                 onChange={(e) => setCFlags({ ...cFlags, [f.name]: e.target.checked })}
+                                 disabled={isBusy} />
+                          <span>{f.label}</span>
+                          {f.active && <span className="sv3-tag-hot">active</span>}
+                        </label>
+                      ))}
+                    </div>
+                    {spec.flags.some(f => (f.kind || "bool") !== "bool") && (
+                      <div className="sv3-value-flags">
+                        {spec.flags.filter(f => (f.kind || "bool") !== "bool").map((f) => {
+                          if (f.kind === "wordlist") {
+                            const opts = (wordlists[(f as any).wordlist_kind || ""] || []);
+                            const cur = cFlagValues[f.name] || "";
+                            const selVal = cur.startsWith("bundled:") ? cur : "";
+                            return (
+                              <label key={f.name} className="sv3-field">
+                                <span className="sv3-field-lbl">
+                                  {f.label}
+                                  {f.active && <span className="sv3-tag-hot" style={{marginLeft:6}}>active</span>}
+                                </span>
+                                <div className="sv3-wordlist-row">
+                                  <select className="sv3-input" style={{flex: "0 0 220px"}}
+                                          value={selVal} disabled={isBusy || opts.length === 0}
+                                          title={opts.length === 0 ? "loading wordlists…" : "pick a bundled wordlist"}
+                                          onChange={(e) => setCFlagValues({ ...cFlagValues, [f.name]: e.target.value })}>
+                                    <option value="">{opts.length === 0 ? "loading…" : "— bundled list —"}</option>
+                                    {opts.map(o => (
+                                      <option key={o.name} value={`bundled:${o.name}`} title={o.blurb}>
+                                        {o.name} ({o.line_count})
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <input className="sv3-input" type="text"
+                                         value={cur}
+                                         placeholder={f.placeholder || "bundled:<name> or /path/to/file"}
+                                         disabled={isBusy}
+                                         onChange={(e) => setCFlagValues({ ...cFlagValues, [f.name]: e.target.value })} />
+                                </div>
+                                {selVal && opts.find(o => `bundled:${o.name}` === selVal) && (
+                                  <span className="muted small">
+                                    {opts.find(o => `bundled:${o.name}` === selVal)?.blurb}
+                                  </span>
+                                )}
+                              </label>
+                            );
+                          }
+                          return (
+                            <label key={f.name} className="sv3-field">
+                              <span className="sv3-field-lbl">
+                                {f.label}
+                                {f.active && <span className="sv3-tag-hot" style={{marginLeft:6}}>active</span>}
+                              </span>
+                              <input className="sv3-input"
+                                     type={f.kind === "int" ? "number" : "text"}
+                                     value={cFlagValues[f.name] || ""}
+                                     placeholder={f.placeholder || f.flag}
+                                     disabled={isBusy}
+                                     onChange={(e) => setCFlagValues({ ...cFlagValues, [f.name]: e.target.value })} />
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+        </main>
+      </div>
+
+      {/* -- Sticky bottom bar: queue + running-jobs summary ----------- */}
+      {(queue.length > 0 || runningJobs.length > 0) && (
+        <div className="sv3-bottom">
+          {queue.length > 0 && (
+            <div className="sv3-bottom-block">
+              <span className="sv3-bottom-lbl">Queue ({queue.length}):</span>
+              <span className="sv3-bottom-items">
+                {queue.slice(0, 5).map((q, i) => (
+                  <span key={i} className="sv3-chip">
+                    {q.label}
+                    <button className="sv3-chip-x"
+                            onClick={() => setQueue((qs) => qs.filter((_, j) => j !== i))}
+                            title="remove from queue">×</button>
+                  </span>
+                ))}
+                {queue.length > 5 && <span className="muted small">+{queue.length - 5} more</span>}
+              </span>
+              <button className="sv3-btn sv3-btn-primary sv3-btn-sm"
+                      onClick={runQueue} disabled={isBusy}>▶ Run chain</button>
+              <button className="sv3-btn sv3-btn-ghost sv3-btn-sm"
+                      onClick={() => setQueue([])}>Clear</button>
+            </div>
+          )}
+          {runningJobs.length > 0 && (
+            <div className="sv3-bottom-block">
+              <span className="sv3-bottom-lbl">Running ({runningJobs.length}):</span>
+              <span className="sv3-bottom-items">
+                {runningJobs.slice(0, 3).map((j) => (
+                  <span key={j.id} className="sv3-chip sv3-chip-live"
+                        title={`${j.cmd} · ${j.tester} · ${elapsed(j.started)}`}
+                        onClick={() => streamJob(j.id)}>
+                    <span className="sv3-dot sv3-dot-live" /> {j.cmd.split(" ")[1] || j.cmd.slice(0, 20)}
+                    <button className="sv3-chip-x"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!confirm(`Cancel this scan?\n\n${j.cmd}`)) return;
+                              fetch(`/api/jobs/${j.id}/cancel`, { method: "POST" });
+                            }}
+                            title="cancel this scan">×</button>
+                  </span>
+                ))}
+              </span>
+              {!showLog && (
+                <button className="sv3-btn sv3-btn-ghost sv3-btn-sm"
+                        onClick={() => setShowLog(true)}>Show console</button>
+              )}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Category tabs */}
-      <div className="sv2-tabs">
-        {groups.map(([g, cmds]) => {
-          const meta = GROUP_META[g.toLowerCase()] || { icon: "▸", desc: g };
-          return (
-            <button
-              key={g}
-              className={`sv2-tab ${activeGroup === g ? "active" : ""}`}
-              onClick={() => { setActiveGroup(g); setCommand(null); setCFlags({}); setCFlagValues({}); }}
-            >
-              <span className="sv2-tab-icon">{meta.icon}</span>
-              <span className="sv2-tab-name">{g}</span>
-              <span className="sv2-tab-ct">{cmds.length}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="sv2-body">
-        {/* Left: command list + config */}
-        <div className="sv2-main">
-          {activeGroup && (
-            <>
-              <div className="sv2-cmds">
-                {currentCmds.map(({ key, spec: s }) => (
-                  <button
-                    key={key}
-                    className={`sv2-cmd ${command === key ? "active" : ""}`}
-                    onClick={() => { setCommand(key); setCFlags({}); setCFlagValues({}); }}
-                    disabled={isBusy}
-                  >
-                    <span className="sv2-cmd-name">{s.label}</span>
-                    <span className="sv2-cmd-tags">
-                      {s.targets === "required" && <span className="sv2-tag need">target</span>}
-                      {s.creds && <span className="sv2-tag cred">creds</span>}
-                      {s.lhost && <span className="sv2-tag lhost">lhost</span>}
-                    </span>
-                  </button>
-                ))}
-              </div>
-
-              {spec && command && (
-                <div className="sv2-config">
-                  <div className="sv2-config-title">{spec.label}</div>
-
-                  {spec.profile && (
-                    <label className="sv2-field">
-                      <span className="sv2-label">Profile</span>
-                      <select className="sv2-input" value={profile} onChange={(e) => setProfile(e.target.value)} disabled={isBusy}
-                              title="Stealth: slower T2, congestion-adaptive from pass 1, top-1000 TCP. Use when the target's IDS/rate-limiter is the constraint.">
-                        <option value="quick">Quick</option>
-                        <option value="standard">Standard</option>
-                        <option value="thorough">Thorough</option>
-                        <option value="stealth">Stealth (slow, rate-limit-safe)</option>
-                      </select>
-                    </label>
-                  )}
-
-                  {spec.creds && (
-                    <div className="sv2-cred-grid">
-                      <label className="sv2-field">
-                        <span className="sv2-label">Username</span>
-                        <input className="sv2-input" value={cUser} onChange={(e) => setCUser(e.target.value)}
-                               placeholder="domain\user" disabled={isBusy} />
-                      </label>
-                      <label className="sv2-field">
-                        <span className="sv2-label">Password</span>
-                        <input className="sv2-input" type="password" value={cPass}
-                               onChange={(e) => setCPass(e.target.value)} disabled={isBusy} />
-                      </label>
-                      <label className="sv2-field">
-                        <span className="sv2-label">Domain</span>
-                        <input className="sv2-input" value={cDomain} onChange={(e) => setCDomain(e.target.value)}
-                               placeholder="CORP.LOCAL" disabled={isBusy} />
-                      </label>
-                    </div>
-                  )}
-
-                  {spec.lhost && (
-                    <label className="sv2-field">
-                      <span className="sv2-label">LHOST</span>
-                      <input className="sv2-input" value={cLhost} onChange={(e) => setCLhost(e.target.value)}
-                             placeholder="attacker.ip:port" disabled={isBusy} />
-                    </label>
-                  )}
-
-                  {spec.flags && spec.flags.length > 0 && (
-                    <div className="sv2-flags">
-                      <span className="sv2-label">Flags</span>
-                      <div className="sv2-flag-list">
-                        {spec.flags.filter(f => (f.kind || "bool") === "bool").map((f) => (
-                          <label key={f.name} className={`sv2-flag ${cFlags[f.name] ? "on" : ""}`}>
-                            <input type="checkbox" checked={cFlags[f.name] || false}
-                                   onChange={(e) => setCFlags({ ...cFlags, [f.name]: e.target.checked })}
-                                   disabled={isBusy} />
-                            <span>{f.label}</span>
-                            {f.active && <span className="sv2-flag-hot">active</span>}
-                          </label>
-                        ))}
-                      </div>
-                      {spec.flags.some(f => (f.kind || "bool") !== "bool") && (
-                        <div className="sv2-value-flags">
-                          {spec.flags.filter(f => (f.kind || "bool") !== "bool").map((f) => {
-                            // Wordlist flags: dropdown of bundled options
-                            // filtered by wordlist_kind + free-text
-                            // override. The dropdown seeds the input with
-                            // `bundled:<name>`; the input stays editable so
-                            // the operator can type a local file path.
-                            if (f.kind === "wordlist") {
-                              const opts = (wordlists[(f as any).wordlist_kind || ""] || []);
-                              const cur = cFlagValues[f.name] || "";
-                              // Sync dropdown selection to the current
-                              // value (so the operator sees which bundled
-                              // list is active even after page reload).
-                              const selVal = cur.startsWith("bundled:") ? cur : "";
-                              return (
-                                <label key={f.name} className="sv2-field sv2-value-flag">
-                                  <span className="sv2-label">
-                                    {f.label}
-                                    {f.active && <span className="sv2-flag-hot" style={{marginLeft:6}}>active</span>}
-                                  </span>
-                                  <div className="sv2-wordlist-row">
-                                    <select className="sv2-select sv2-wordlist-picker"
-                                            value={selVal}
-                                            disabled={isBusy || opts.length === 0}
-                                            title={opts.length === 0 ? "loading wordlists…" : "pick a bundled wordlist"}
-                                            onChange={(e) => {
-                                              const v = e.target.value;
-                                              setCFlagValues({ ...cFlagValues, [f.name]: v });
-                                            }}>
-                                      <option value="">{opts.length === 0 ? "loading…" : "— bundled list —"}</option>
-                                      {opts.map(o => (
-                                        <option key={o.name} value={`bundled:${o.name}`}
-                                                title={o.blurb}>
-                                          {o.name} ({o.line_count})
-                                        </option>
-                                      ))}
-                                    </select>
-                                    <input className="sv2-input sv2-wordlist-input"
-                                           type="text"
-                                           value={cur}
-                                           placeholder={f.placeholder || "bundled:<name> or /path/to/file"}
-                                           disabled={isBusy}
-                                           onChange={(e) => setCFlagValues({ ...cFlagValues, [f.name]: e.target.value })} />
-                                  </div>
-                                  {selVal && opts.find(o => `bundled:${o.name}` === selVal) && (
-                                    <span className="sv2-wordlist-blurb">
-                                      {opts.find(o => `bundled:${o.name}` === selVal)?.blurb}
-                                    </span>
-                                  )}
-                                </label>
-                              );
-                            }
-                            return (
-                              <label key={f.name} className="sv2-field sv2-value-flag">
-                                <span className="sv2-label">
-                                  {f.label}
-                                  {f.active && <span className="sv2-flag-hot" style={{marginLeft:6}}>active</span>}
-                                </span>
-                                <input className="sv2-input"
-                                       type={f.kind === "int" ? "number" : "text"}
-                                       value={cFlagValues[f.name] || ""}
-                                       placeholder={f.placeholder || f.flag}
-                                       disabled={isBusy}
-                                       onChange={(e) => setCFlagValues({ ...cFlagValues, [f.name]: e.target.value })} />
-                              </label>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="sv2-exec-row">
-                    <button
-                      className="sv2-exec"
-                      onClick={runScan}
-                      disabled={isBusy || (spec.targets === "required" && !targets.trim())}
-                    >
-                      {isBusy ? <><span className="sv2-spinner" /> Running&hellip;</> : <span>&#9654; Execute</span>}
-                    </button>
-                    <button
-                      className="sv2-queue-add"
-                      onClick={addToQueue}
-                      disabled={isBusy}
-                      title="Add to scan chain — queue multiple commands to run in sequence"
-                    >
-                      + Chain
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {!command && (
-                <div className="sv2-hint">Select a command above to configure and run it</div>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* Right: job queue + scan chain */}
-        <div className="sv2-jobs">
-          {/* Scan chain */}
-          {queue.length > 0 && (
-            <div className="sv2-chain">
-              <div className="sv2-chain-h">
-                <h4>Scan Chain</h4>
-                <span className="muted small">{queue.length} queued</span>
-              </div>
-              {queue.map((q, i) => (
-                <div key={i} className="sv2-chain-item">
-                  <span className="sv2-chain-num">{i + 1}</span>
-                  <span className="sv2-chain-label">{q.label}</span>
-                  {q.targets && <span className="sv2-chain-target">{q.targets}</span>}
-                  <button className="sv2-chain-rm" onClick={() => setQueue((qs) => qs.filter((_, j) => j !== i))}>×</button>
-                </div>
-              ))}
-              <div className="sv2-chain-actions">
-                <button className="sv2-exec sv2-chain-run" onClick={runQueue} disabled={isBusy}>
-                  ▶ Run Chain ({queue.length})
-                </button>
-                <button className="sv2-chain-clear" onClick={() => setQueue([])}>Clear</button>
-              </div>
-            </div>
-          )}
-
-          <div className="sv2-jobs-h">
-            <h3>Jobs</h3>
-            {runningJobs.length > 0 && <span className="sv2-live">{runningJobs.length} running</span>}
-          </div>
-
-          {runningJobs.map((j) => (
-            <div key={j.id} className="sv2-job live" onClick={() => streamJob(j.id)} title={j.cmd}>
-              <span className="sv2-job-dot" />
-              <div className="sv2-job-info">
-                <div className="sv2-job-cmd">{j.cmd}</div>
-                <div className="sv2-job-meta">{j.tester} &middot; {elapsed(j.started)}</div>
-              </div>
-              <button className="sv2-job-cancel" title="cancel this scan"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (!window.confirm(`Cancel this scan?\n\n${j.cmd}`)) return;
-                        fetch(`/api/jobs/${j.id}/cancel`, { method: "POST" });
-                      }}>✕</button>
-            </div>
-          ))}
-
-          {recentJobs.map((j) => (
-            <div key={j.id} className={`sv2-job ${j.status}`} title={j.cmd}>
-              <span className="sv2-job-icon">{j.status === "done" ? "✓" : "✗"}</span>
-              <div className="sv2-job-info">
-                <div className="sv2-job-cmd">{j.cmd}</div>
-                <div className="sv2-job-meta">
-                  {j.tester} &middot; {new Date(j.started * 1000).toLocaleTimeString()}
-                  {j.ended && <span> &middot; {elapsed(j.started, j.ended)}</span>}
-                </div>
-              </div>
-            </div>
-          ))}
-
-          {runningJobs.length === 0 && recentJobs.length === 0 && queue.length === 0 && (
-            <div className="sv2-jobs-empty">No jobs yet</div>
-          )}
-        </div>
-      </div>
-
-      {/* Console output */}
+      {/* -- Console overlay -------------------------------------------- */}
       {showLog && (
         <ScanConsole
           log={log}
