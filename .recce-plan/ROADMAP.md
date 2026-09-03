@@ -136,60 +136,49 @@ manual (exploit_note text tells the tester what to run).
 
 ## P0
 
-### P0-1 — Finish the SAFE T2 promotions (~200 remaining)
-**Effort:** L (5-8 fan-out workflows of 10 agents each, ~1 day each)
-**Blocks:** Nothing.
-**Why:** Every promotion moves a finding from "banner match" to
-"proven with server-side evidence" and lights up in the Surface tab
-immediately. Same mechanic that shipped 15 already in Phase B2.
+### P0-1 — Finish the SAFE T2 promotions ✅ (2026-09-03, `ddeb61c` + `8eb709a`; mechanical scope closed)
+Roadmap called for ~200 promotions across ~5-8 fan-out workflows.
+Scanner-driven survey (scratchpad/p0_1_scanner.py) found true scope:
 
-**Build plan:**
-1. Extract remaining T1→T2 candidates from
-   `.recce-plan/depth-audit/*.json` where `can_promote_to == "t2"`,
-   `promotion_risk in ("none","low")`, and `finding_kind` is not in
-   the Phase B2 already-shipped list (mssql/blank_login, opcua/anon,
-   s7/put_get, x11/open, api/endpoints-unauth, bacnet/bbmd,
-   coap/inventory, cups_lpd/4-kinds, dns/axfr, elasticsearch/anon,
-   enip/3-kinds).
-2. Group by service, tranche into batches of ~10 services × ~2-4
-   promotions each.
-3. Fan out per-service agents using the same prompt shape as Phase B2
-   (see `.claude/projects/.../workflows/scripts/phase-b2-t2-*.js`).
-4. Per-service agent runs pytest + ruff on its module before returning.
-5. Commit per-batch, push, move to next tranche.
+  * 39 open T1→T2 candidates whose module DOES emit the finding kind
+    and whose depth_tier was still literal "t1" (with a permissive
+    3500-char symmetric window around each `kind=` call for robust
+    conditional-tier detection)
+  * 20 SHIPPED across 2 commits — every one a pure label-lift where
+    the module already collects concrete server-side content but the
+    depth_tier label was stuck at T1
+  * 12 REMAIN, all requiring genuine new probe code (NSEC3 walker,
+    live SMTP MAIL FROM spoof test, OPC UA session+browse, S7 SZL
+    0x0011 firmware read, cross-surface writers for NTP peers /
+    scanner-clock adjust) — each is its own engineering decision,
+    not fan-out material
 
-**Concrete first-batch candidates (from the audit data):**
-- ssh: verify AS-REQ against sshd for pubkey (single request, non-DoS)
-- ldap: `ldap_anon_read` T3-adjacent — enumerate SPNs into a
-  spn.txt file (read-only, no state change on DC)
-- webdav: PROPFIND depth:infinity on `/` returns 207 with URL list
-- imap: post-LOGINDISABLED `LOGIN dummy dummy` returns NO — proves
-  plaintext auth accepted but keeps single probe
-- pop3: USER/APOP disclosure via differential response
-- smtp: VRFY / EXPN success on canonical accounts
-- iscsi: SendTargets returns non-empty target list
-- nfs: showmount -e returns exports (already at T1; T2 adds mount
-  attempt on a canary export)
-- kafka: MetadataRequest v0 returns broker + topic list
-- zookeeper: 4LW `mntr` returns full runtime dump (currently just
-  probes it exists)
-- prometheus: `/api/v1/query?query=up` returns time series
-- vault: `/v1/sys/health` returns cluster metadata
-- consul: `/v1/kv/?recurse` returns non-empty tree
-- nomad: `/v1/agent/self` returns config with Vault/Consul refs
-- jenkins_jnlp: agent-handshake returns protocol version list
-- coap: /.well-known/core → GET the first advertised resource
-- mqtt: SUBSCRIBE to `#` on anon-connect and capture 1-2 retained msgs
-- rtsp: DESCRIBE returns SDP with codec + resolution
-- guacamole: `select` opcode returns backend proto list
-- mongodb: `hostInfo` command with no auth returns hostname + OS
-- redis: `INFO` returns full sections without AUTH
-- couchdb: `/_all_dbs` returns DB list (already known; add `/_users`
-  read attempt as T2)
+Shipped (20 promotions, 15 files):
 
-**Estimated total:** ~100 wire-ups across ~30 services.
-Split into ~4 workflows (12 services each) if the concurrent-agent
-cap holds.
+**tranche 1** (5) — slp × 3, mongodb × 1, bgp × 1 — commit `ddeb61c`
+**tranche 2** (5) — nis_yp × 4, netbios × 1, pop3 × 1 — bundle `8eb709a`
+**tranche 3** (4) — enip × 1, msrpc × 1, ipp × 1, webdav × 1 — bundle `8eb709a`
+**tranche 4** (6) — mssql × 2, postgres × 2, mysql × 1, ssh × 3,
+                     iscsi × 1, ipmi × 1 — bundle `8eb709a`
+
+Remaining 12 items (genuine follow-up work, not mechanical):
+  * `dns_nsec_walk`, `dns_missing_spf` / `weak_spf` / `missing_dmarc` /
+    `dmarc_monitor` — NSEC3 protocol code + live SMTP spoof-test
+    (gated behind --safe-off)
+  * `ntp_peers` / `ntp_skew` — auto-ingest into shared surface /
+    scanner-clock auto-adjust (behavior change)
+  * `opcua_find_servers` / `opcua_lds_me_inventory` — OPC UA session code
+  * `enip_io_traffic_exposed` — arguably legit T1 (port-state proof only)
+  * `nrpe_implied_local_services` — cross-service inference wiring
+  * `s7_firmware_cve` — SZL 0x0011 firmware verification
+
+Also delivered: `.recce-plan/p0_1_worklist.json` — the scanner's
+machine-readable output so a future pass can diff without re-scanning.
+`scratchpad/p0_1_scanner.py` is the canonical detector.
+
+**Estimated leftover effort:** each of the 12 open items is ~30 min
+to a few hours of protocol/probe design + a test — not fan-out
+material; treat individually.
 
 ### P0-2 — Attach exploit_notes to medium/low severity findings ✅ (2026-09-03, `7a10c97`)
 Roadmap estimated ~337 attachments; the actual scanner-driven survey
