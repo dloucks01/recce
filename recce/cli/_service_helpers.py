@@ -75,6 +75,7 @@ _MODULE_PATH = {
     "nisyp": "recce.services.nisyp", "coap": "recce.services.coap",
     "ollama": "recce.services.ollama",
     "minio": "recce.services.minio",
+    "cloud_metadata": "recce.services.cloud_metadata",
 }
 
 def _match_one_host(hosts, selector):

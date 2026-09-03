@@ -111,5 +111,44 @@ class CredentialsServiceTest(_TmpDbMixin, unittest.TestCase):
         self.assertEqual(r["offset"], 1)
 
 
+class ServiceCliModuleWiringTest(unittest.TestCase):
+    """Every `recce <service>` CLI command that invokes `_run_service_scan`
+    passes a `module="<name>"` argument. That name must either:
+      * appear in `_MODULE_PATH` with a resolvable dotted import path, OR
+      * resolve via the `recce.<name>` fallback in `_run_service_scan`.
+
+    Regression: `cmd_cloud_metadata` used to pass `module="cloud_metadata"`
+    with no `_MODULE_PATH` entry, so the fallback tried to import
+    `recce.cloud_metadata` — which doesn't exist (the real module lives at
+    `recce.services.cloud_metadata`). Every `recce cloud_metadata` invocation
+    ModuleNotFoundError'd until this test was added. This guard makes sure
+    the wiring gap can't reopen for any service."""
+
+    def test_every_cli_module_reference_resolves(self):
+        import importlib, pathlib, re
+        from recce.cli._service_helpers import _MODULE_PATH
+
+        svc = pathlib.Path(__file__).parent.parent \
+            / "recce" / "cli" / "_services.py"
+        refs = set(re.findall(r'module=["\']([a-z_][a-z0-9_-]*)["\']',
+                              svc.read_text()))
+        self.assertTrue(refs, "expected _services.py to hold at least one "
+                              "module= call — this test rot-detects if the "
+                              "grep pattern goes stale")
+        failures: list[str] = []
+        for name in sorted(refs):
+            path = _MODULE_PATH.get(name, f"recce.{name}")
+            try:
+                importlib.import_module(path)
+            except ImportError as exc:
+                failures.append(f"  {name}  →  {path}  ({exc})")
+        if failures:
+            self.fail(
+                "The following CLI command references have no resolvable "
+                "module — running `recce <name>` would hit the "
+                "`_run_service_scan` import and ModuleNotFoundError:\n"
+                + "\n".join(failures))
+
+
 if __name__ == "__main__":
     unittest.main()
