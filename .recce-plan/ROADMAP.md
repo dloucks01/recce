@@ -136,7 +136,7 @@ manual (exploit_note text tells the tester what to run).
 
 ## P0
 
-### P0-1 — Finish the SAFE T2 promotions ✅ (2026-09-03, `ddeb61c` + `8eb709a`; mechanical scope closed)
+### P0-1 — Finish the SAFE T2 promotions ✅ (2026-09-03, `ddeb61c` + `8eb709a` + `05e6b28`; mechanical scope closed, 1 legit-T1 remaining)
 Roadmap called for ~200 promotions across ~5-8 fan-out workflows.
 Scanner-driven survey (scratchpad/p0_1_scanner.py) found true scope:
 
@@ -153,32 +153,43 @@ Scanner-driven survey (scratchpad/p0_1_scanner.py) found true scope:
     scanner-clock adjust) — each is its own engineering decision,
     not fan-out material
 
-Shipped (20 promotions, 15 files):
+Shipped (30 promotions across 5 tranches, ~18 files):
 
 **tranche 1** (5) — slp × 3, mongodb × 1, bgp × 1 — commit `ddeb61c`
 **tranche 2** (5) — nis_yp × 4, netbios × 1, pop3 × 1 — bundle `8eb709a`
 **tranche 3** (4) — enip × 1, msrpc × 1, ipp × 1, webdav × 1 — bundle `8eb709a`
 **tranche 4** (6) — mssql × 2, postgres × 2, mysql × 1, ssh × 3,
                      iscsi × 1, ipmi × 1 — bundle `8eb709a`
+**tranche 5** (10) — dns × 5, ntp × 2, opcua × 2, nrpe × 1 (also
+                     wired real T2 check-output evidence), s7 × 1
+                     (genuine fw-band verification via SZL 0x0011:
+                     CVE-2020-15782 verified when FW <V4.5). Commit
+                     `05e6b28`. Includes 5 new tests in
+                     `tests/test_s7.py::FirmwareBandVerificationTest`.
 
-Remaining 12 items (genuine follow-up work, not mechanical):
-  * `dns_nsec_walk`, `dns_missing_spf` / `weak_spf` / `missing_dmarc` /
-    `dmarc_monitor` — NSEC3 protocol code + live SMTP spoof-test
-    (gated behind --safe-off)
-  * `ntp_peers` / `ntp_skew` — auto-ingest into shared surface /
-    scanner-clock auto-adjust (behavior change)
-  * `opcua_find_servers` / `opcua_lds_me_inventory` — OPC UA session code
-  * `enip_io_traffic_exposed` — arguably legit T1 (port-state proof only)
-  * `nrpe_implied_local_services` — cross-service inference wiring
-  * `s7_firmware_cve` — SZL 0x0011 firmware verification
+**1 remaining item — intentionally legit T1:**
+  * `enip_io_traffic_exposed` — the audit's T2 path is passive
+    tcpdump on UDP:2222 (parse Class 1 CIP I/O assemblies), which
+    is out of scanner scope (recce doesn't pcap the wire). The
+    current T1 finding — UDP:2222 port state proved by the port
+    sweep — is honest per rubric.
+
+**Follow-up capability items (audit-noted future paths, NOT P0-1):**
+  * NSEC3 walker for DNS-hashed zones (hashcat -m 8300 feed) — new
+    protocol probe
+  * SMTP MAIL FROM live spoof-test as T3 path for the 4 SPF/DMARC
+    findings — needs a `--safe-off` gate + sink address config
+  * Scanner-clock auto-adjust when `ntp_skew` fires (audit's T3
+    path) — behavior change, likely a faketime wrapper
+  * S7-300/400/1500 fw-band tables — needs sourced per-model
+    Siemens ProductCERT SSA data
+  * NTP peer IPs auto-ingest into a shared known_gateways surface
+    (currently the peer IPs are surfaced in the finding detail
+    only; not fed cross-service)
 
 Also delivered: `.recce-plan/p0_1_worklist.json` — the scanner's
 machine-readable output so a future pass can diff without re-scanning.
 `scratchpad/p0_1_scanner.py` is the canonical detector.
-
-**Estimated leftover effort:** each of the 12 open items is ~30 min
-to a few hours of protocol/probe design + a test — not fan-out
-material; treat individually.
 
 ### P0-2 — Attach exploit_notes to medium/low severity findings ✅ (2026-09-03, `7a10c97`)
 Roadmap estimated ~337 attachments; the actual scanner-driven survey
