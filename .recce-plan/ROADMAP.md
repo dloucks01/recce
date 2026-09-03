@@ -458,7 +458,7 @@ so a limited-token session can pick a self-contained batch.
 
 ### Batch A — Quick wins (small, safe, no cross-tab ripple)
 
-#### P7-A1 — `/api/spray` reject empty targets
+#### P7-A1 — `/api/spray` reject empty targets ✅ (2026-09-02, `201becf`)
 `/api/spray` with `body.targets == []` currently falls through the
 `if tokens:` guard in `routes/act_spray.py`, applies no host filter,
 then sprays every stacked cred at every discovered host. One typo away
@@ -466,13 +466,13 @@ from a big accidental spray. Should raise HTTPException(400,
 "targets required"). Frontend already passes a target — no UI-side
 breakage.
 
-#### P7-A2 — `/api/findings?status=X` honored or rejected
+#### P7-A2 — `/api/findings?status=X` honored or rejected ✅ (2026-09-02, `201becf`)
 Endpoint accepts the query param but ignores it server-side; client
 filters locally. Either implement server-side filter (drop the client
 `filter(x.status===…)` loop) or reject unknown params with 400. Pick
 one contract; document.
 
-#### P7-A3 — Kill the `_MODULE_PATH` silent fallback
+#### P7-A3 — Kill the `_MODULE_PATH` silent fallback ✅ (2026-09-02, `201becf`)
 `_run_service_scan` in `cli/_service_helpers.py` falls back to
 `f"recce.{module}"` when a name isn't in the map. Silent
 ModuleNotFoundError at runtime is exactly the bug 687b9f2 fixed for
@@ -480,7 +480,7 @@ ModuleNotFoundError at runtime is exactly the bug 687b9f2 fixed for
 (fail-fast, not fail-at-import). The regression test added in that
 commit already asserts every referenced module resolves.
 
-#### P7-A4 — Field-name consistency: `stage` vs `name`
+#### P7-A4 — Field-name consistency: `stage` vs `name` ✅ (2026-09-02, `201becf`)
 `/api/attackpath.stages[].stage` uses the field name `stage`;
 `/api/attack.tactics[].name` uses `name`; frontend has to remember
 which is which per surface. Standardise on `name` across every
@@ -489,7 +489,7 @@ serialisable "labeled group" shape. Change contained in
 
 ### Batch B — Medium UX rework
 
-#### P7-B1 — CredentialsPanel sidebar → compact strip or drop
+#### P7-B1 — CredentialsPanel sidebar → compact strip or drop ✅ (2026-09-02, `b5d3f47`; enhanced `7f0aa64`)
 Right sidebar's 🔑 Creds tab renders the full credential list; the
 top-level Credentials tab renders the same thing plus loot-extract +
 spray + delete. Same de-dup pattern as the ⚡ Activity + 💬 Chat
@@ -497,14 +497,14 @@ buttons removed in eadada1. Either drop the sidebar tab or reduce it
 to a compact "N cred(s) captured — last: <username>" strip that
 links to the full tab.
 
-#### P7-B2 — ScanConsole → floating drawer
+#### P7-B2 — ScanConsole → floating drawer ✅ (2026-09-02, `b5d3f47`)
 Console currently renders BELOW the workbench body; on a live scan
 the Launch button + form scroll off-screen. Refactor into a floating
 drawer (bottom-slide, dismissable, minimise-to-pill) so the user can
 keep working while a scan runs. Behavior parity: SSE stream + Stop
 chain button stay in the drawer header.
 
-#### P7-B3 — Topology empty-state → inline launch hint + button
+#### P7-B3 — Topology empty-state → inline launch hint + button ✅ (2026-09-02, `b5d3f47`)
 Reachability (281B) and AD (62B) views currently render a bare
 "Nothing to draw" message. Attach a button per view that fires the
 scan that would populate it:
@@ -513,7 +513,7 @@ scan that would populate it:
   * Reachability → `recce enum --all-ports` with a hint about
     routing / overlapping segments.
 
-#### P7-B4 — Engagement switcher header dropdown
+#### P7-B4 — Engagement switcher header dropdown ✅ (2026-09-02, `b5d3f47`)
 `recce serve -o <dir>` serves ONE engagement; switching needs a
 kill+relaunch. Add a header dropdown that lists sibling engagement
 dirs (peer directories of the currently-served `-o`) with the
