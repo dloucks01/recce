@@ -201,10 +201,114 @@ export function HostDrawer(
                 </table>
               </Section>
             )}
+            {/* P7-C4: delete-host with impact preview. The zone lives at
+                the bottom so a scroll-through of the drawer doesn't land
+                a stray click on it. */}
+            <Section title="Danger zone">
+              <DeleteHostButton ip={ip} onClose={onClose} />
+            </Section>
           </>
         )}
       </aside>
     </>
+  );
+}
+
+/** P7-C4: dedicated delete-host UI. Fetches /api/host/{ip}/impact first,
+ * renders the counts + a per-finding sample, then requires the operator
+ * to type the IP as a confirmation before firing the DELETE. */
+function DeleteHostButton({ ip, onClose }: { ip: string; onClose: () => void }) {
+  const [impact, setImpact] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [typed, setTyped] = useState("");
+  const [opening, setOpening] = useState(false);
+
+  const load = async () => {
+    setOpening(true); setErr(null);
+    try {
+      const r = await fetch(`/api/host/${encodeURIComponent(ip)}/impact`);
+      if (!r.ok) throw new Error(await r.text());
+      setImpact(await r.json());
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setOpening(false);
+    }
+  };
+
+  const drop = async () => {
+    if (typed !== ip) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await fetch(`/api/host/${encodeURIComponent(ip)}`, { method: "DELETE" });
+      if (!r.ok) throw new Error(await r.text());
+      onClose();
+    } catch (e) {
+      setErr(String(e)); setBusy(false);
+    }
+  };
+
+  if (!impact) {
+    return (
+      <div>
+        <p className="muted small" style={{marginTop: 0}}>
+          Removes the host + findings + tracking + issue log. Credentials
+          sourced from this host stay in the credential store.
+        </p>
+        <button className="linkish danger" onClick={load} disabled={opening}>
+          {opening ? "Loading…" : "Show impact + delete…"}
+        </button>
+        {err && <div className="err small" style={{marginTop: 8}}>{err}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="delete-host-preview">
+      <div className="delete-host-h">
+        <strong>Delete {ip}</strong> {impact.hostname && <span className="muted">({impact.hostname})</span>}
+      </div>
+      <ul className="delete-host-counts">
+        <li><b>{impact.findings.total}</b> finding(s) — will be removed</li>
+        <li><b>{impact.open_ports.length}</b> open port(s) — will be removed</li>
+        <li><b>{impact.issues}</b> scan-issue log entr(y|ies) — will be removed</li>
+        <li>
+          <b>{impact.credentials_sourced_here.total}</b> credential(s) sourced from here —
+          <span className="muted"> will remain in the credential store</span>
+        </li>
+      </ul>
+      {impact.findings.sample?.length > 0 && (
+        <details className="delete-host-details">
+          <summary>First {impact.findings.sample.length} finding(s) that would go:</summary>
+          <ul className="delete-host-sample">
+            {impact.findings.sample.map((f: any, i: number) => (
+              <li key={i}>
+                <span className={`sev-tag sev-${f.severity}`}>{f.severity}</span>{" "}
+                {f.title} {f.cve && <span className="mono muted small">· {f.cve}</span>}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      <div className="delete-host-confirm">
+        <label className="small">
+          Type <span className="mono">{ip}</span> to confirm:
+          <input className="input" style={{marginLeft: 8, width: 160}}
+                 value={typed}
+                 onChange={(e) => setTyped(e.target.value)}
+                 disabled={busy} />
+        </label>
+        <button className="linkish danger" onClick={drop}
+                disabled={busy || typed !== ip}
+                style={{marginLeft: 12}}>
+          {busy ? "Deleting…" : "🗑 Delete host permanently"}
+        </button>
+        <button className="linkish" onClick={() => setImpact(null)} disabled={busy}
+                style={{marginLeft: 8}}>Cancel</button>
+      </div>
+      {err && <div className="err small" style={{marginTop: 8}}>{err}</div>}
+    </div>
   );
 }
 

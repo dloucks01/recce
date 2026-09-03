@@ -65,9 +65,57 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
 
     # --- delete operations ---------------------------------------------------
 
+    @app.get("/api/host/{ip}/impact")
+    def delete_host_impact(ip: str):
+        """P7-C4 preview endpoint: enumerate everything the store's
+        `delete_host(ip)` would cascade-remove so the WebGUI can show a
+        confirm modal with real numbers instead of a vague "are you sure?".
+
+        Returns per-category counts + a compact sample list so an
+        operator making a decision on 100 findings can eyeball what
+        they're about to lose."""
+        from ...core.store import Store
+        with Store(db_path) as st:
+            h = st.get_host(ip)
+            if h is None:
+                raise HTTPException(404, f"no host with IP {ip}")
+            findings_n = len(h.vulns or [])
+            findings_sample = [
+                {"title": (v.title or "")[:80], "severity": v.severity or "",
+                 "cve": (v.ids[0] if getattr(v, "ids", None) else "")}
+                for v in (h.vulns or [])[:6]
+            ]
+            open_ports = [p.portid for p in h.open_ports]
+            # Creds sourced from this host — inspection only; delete_host
+            # does not currently cascade-remove them, so surface as a
+            # separate "will remain" note rather than a "will delete" one.
+            creds_from_here = [c for c in st.all_credentials()
+                               if getattr(c, "origin_ip", "") == ip]
+            issues_here = [i for i in st.get_issues() if i.get("ip") == ip]
+        return {
+            "ip": ip,
+            "hostname": h.hostname or "",
+            "os": h.os_name or "",
+            "roles": h.roles or [],
+            "findings": {"total": findings_n, "sample": findings_sample},
+            "open_ports": open_ports,
+            "issues": len(issues_here),
+            "credentials_sourced_here": {
+                "total": len(creds_from_here),
+                "will_remain": True,  # not cascade-deleted by delete_host
+            },
+            "warning": ("Findings + tracking rows + open-port history "
+                        "will be removed. Credentials sourced from this "
+                        "host stay in the credential store."),
+        }
+
     @app.delete("/api/host/{ip}")
     def delete_host(ip: str, x_tester: str = Header(default="someone")):
-        """Remove a host and all its findings/tracking from the engagement."""
+        """Remove a host and all its findings/tracking from the engagement.
+        Frontend should GET /api/host/{ip}/impact first so the confirm
+        modal shows real counts. The DELETE itself stays a single-call
+        contract so keyboard-driven callers (curl, tests) don't need a
+        two-step handshake."""
         from ...core.store import Store
         from .. import collab
         with Store(db_path) as st:

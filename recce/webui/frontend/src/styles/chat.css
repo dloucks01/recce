@@ -988,3 +988,42 @@
   color: var(--muted); font-size: 11px; padding: 2px 8px; border-radius: 5px;
   cursor: pointer; }
 .engagement-row-copy:hover { color: var(--text); border-color: var(--accent); }
+
+/* P7-C6: JobsPill — header widget showing running-scan count. Renders
+   only when at least one job is running (clean idle header). */
+.jobs-pill { display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent); font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: transform .12s, filter .12s; }
+.jobs-pill:hover { filter: brightness(1.1); }
+.jobs-pill.pulse { animation: jobs-pulse .5s ease-out; }
+@keyframes jobs-pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.15); box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 20%, transparent); }
+  100% { transform: scale(1); }
+}
+.jobs-pill-dot { width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); animation: pulse 1.5s ease-in-out infinite; }
+.jobs-pill-count { font-family: var(--mono); font-size: 11px;
+  padding: 1px 6px; border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 25%, transparent); }
+.jobs-pill-label { font-size: 11px; }
+
+/* P7-C4: delete-host preview + type-to-confirm UI in HostDrawer */
+.delete-host-preview { padding: 4px 0; }
+.delete-host-h { font-size: 13px; margin-bottom: 8px; }
+.delete-host-counts { list-style: none; padding: 0; margin: 8px 0;
+  display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.delete-host-counts li { color: var(--text); }
+.delete-host-details { margin: 8px 0; font-size: 12px; }
+.delete-host-details summary { cursor: pointer; color: var(--muted);
+  padding: 4px 0; }
+.delete-host-sample { padding-left: 20px; margin: 4px 0; }
+.delete-host-sample li { padding: 2px 0; font-size: 11px; }
+.delete-host-confirm { margin-top: 10px; padding: 10px;
+  background: color-mix(in srgb, var(--crit) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--crit) 30%, transparent);
+  border-radius: 6px; display: flex; align-items: center; flex-wrap: wrap;
+  gap: 4px; }

@@ -45,6 +45,7 @@ import { CollabSidebar } from "./CollabSidebar";
 import { AutocrackStatus } from "./components/AutocrackStatus";
 import { ProxyBadge } from "./components/ProxyBadge";
 import { EngagementBadge } from "./components/EngagementBadge";
+import { JobsPill } from "./components/JobsPill";
 import { toast, Toast } from "./toast";
 
 // Tester identity (localStorage-persisted)
@@ -390,6 +391,7 @@ export default function App() {
                 either header button and then noticing the same content on the
                 right rail was the source of "why are there two of these?"
                 confusion. Autocrack/Proxy stay: not sidebar-covered. */}
+            <JobsPill />
             <AutocrackStatus />
             <ProxyBadge />
           </div>
