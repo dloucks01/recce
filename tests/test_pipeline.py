@@ -1045,14 +1045,17 @@ class AuditMediumLowRegressionTest(unittest.TestCase):
     """Regressions for the medium/low findings fixed after the full-codebase audit."""
 
     def test_vuln_key_distinguishes_udp_from_tcp(self):
-        # A udp finding must not collapse onto a distinct tcp finding on the same
-        # port/script/title; the tcp key stays byte-for-byte stable (backward compat).
+        # A udp finding must not collapse onto a distinct tcp finding on the
+        # same port/script/title. P7-B5 (3873294) unified Vuln.key with
+        # tracking.vuln_row_key — both now carry the "vuln:" namespace
+        # prefix; the tcp key stays byte-for-byte stable ex-prefix and the
+        # udp key still gets a ":udp" suffix.
         from recce.core.models import Vuln
         common = dict(ip="10.0.0.1", port=161, script_id="svc", title="Unencrypted service")
         tcp = Vuln(protocol="tcp", **common)
         udp = Vuln(protocol="udp", **common)
         self.assertNotEqual(tcp.key, udp.key)
-        self.assertEqual(tcp.key, "10.0.0.1:161:svc:Unencrypted service")   # unchanged
+        self.assertEqual(tcp.key, "vuln:10.0.0.1:161:svc:Unencrypted service")
         self.assertTrue(udp.key.endswith(":udp"))
 
     def test_from_json_tolerates_explicit_null_lists(self):

@@ -725,6 +725,15 @@ def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
     else:
         print(f"[!] Port scope: {scope_label} per host - PARTIAL, NOT a full scan. "
               "Pass --all-ports (or --profile standard) for all 65535 ports.")
+    # Announce unprivileged UDP-skip once here rather than 21 duplicates of
+    # "udp-basic: skipped (needs root...)" as each host runs. Same info,
+    # readable for large scopes. Only announce when udp-basic would run
+    # (per-host nmap path, not masscan) — matches the guard in _enum_worker.
+    if profile.udp_basic and port_map is None and not scanner._is_root():
+        print("[!] Running unprivileged — the enum-phase UDP sweep "
+              "(udp-basic) needs root/CAP_NET_RAW and will be skipped on "
+              "every host. Re-run with sudo for UDP coverage, or use "
+              "`vulns --udp-top N` later.")
     print(f"[*] Enumerating {len(live_ips)} host(s) with {workers} worker(s) "
           f"(ports + services) ...")
     completed = 0

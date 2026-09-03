@@ -11,6 +11,7 @@ without further wiring.
 from __future__ import annotations
 
 import os
+import socket
 
 from bacpypes.app import BIPSimpleApplication
 from bacpypes.core import run
@@ -20,7 +21,31 @@ from bacpypes.primitivedata import Real
 
 
 DEVICE_ID = int(os.environ.get("BACNET_DEVICE_ID", "1234"))
-BIND_ADDR = os.environ.get("BACNET_BIND", "0.0.0.0/24:47808")
+
+
+def _resolve_bind_addr() -> str:
+    """Compute a BACnet BIP bind address of the form `<own-ip>/24:47808`.
+
+    bacpypes needs a concrete IP + mask so it can derive the broadcast
+    address (BIP broadcasts I-Am on the /24's .255). Using
+    `0.0.0.0/24:47808` — the naive "listen on any interface" idiom —
+    tries to bind the broadcast to 0.0.0.255 and fails with Errno 99
+    inside a container. Prefer the operator's override, else look up
+    the container's own IP on the recce-testnet interface.
+    """
+    override = os.environ.get("BACNET_BIND")
+    if override:
+        return override
+    # Container's own IP — hostname resolves to the compose-assigned
+    # address (172.20.0.60 in the recce test env).
+    try:
+        own_ip = socket.gethostbyname(socket.gethostname())
+    except OSError:
+        own_ip = "0.0.0.0"
+    return f"{own_ip}/24:47808"
+
+
+BIND_ADDR = _resolve_bind_addr()
 
 
 def main() -> None:

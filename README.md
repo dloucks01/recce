@@ -42,10 +42,10 @@ The bundle freezes the Python runtime, dependencies, nmap, masscan, and ldapsear
 sudo ./bin/recce enum 10.0.10.0/24 -o eng    # discover hosts/ports/services
 sudo ./bin/recce vulns -o eng                 # vuln-scan open ports
 ./bin/recce sweep -o eng                      # deep pass — every applicable module
-./bin/recce serve -o eng --port 8443          # open the web workbench
+./bin/recce serve -o eng                      # open the web workbench (default :8008)
 ```
 
-Open `eng/enumeration.xlsx` or point a browser at `http://<box>:8443`. Full walkthrough in [QUICKSTART.md](QUICKSTART.md).
+Open `eng/enumeration.xlsx` or point a browser at `http://<box>:8008`. Full walkthrough in [QUICKSTART.md](QUICKSTART.md).
 
 ## Documentation
 

@@ -53,7 +53,7 @@ Or run individual services: `web`, `smb`, `ftp`, `ldap`, `snmp`, `mongodb`, `red
 ### 4. Open the web workbench
 
 ```bash
-./bin/recce serve -o eng --port 8443    # http://<box>:8443
+./bin/recce serve -o eng                # http://<box>:8008 (default port)
 ```
 
 Multiple testers open the same URL. The workbench has 11 top-level tabs — the ones you'll live in:
@@ -118,7 +118,7 @@ Every command takes `-o <dir>`. Full catalog: [docs/reference/commands.md](docs/
 | `writeups` | per-finding Word docs |
 | `bloodhound-push` | write BloodHound-compat JSON for overlay onto an existing BH instance |
 | `status` | what's left + next command |
-| `serve` | web workbench at `http://<box>:8443` |
+| `serve` | web workbench at `http://<box>:8008` (default; `--port N` to override) |
 | `doctor` | self-check |
 
 ## Targeting

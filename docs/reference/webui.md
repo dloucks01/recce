@@ -10,10 +10,12 @@ This doc walks the tabs a tester actually uses.
 ## Start it
 
 ```bash
-recce serve -o eng --port 8443
+recce serve -o eng                     # default port 8008
+recce serve -o eng --port 8443         # override
 ```
 
-Open `http://<box>:8443`. `--host 0.0.0.0` for team access.
+Open `http://<box>:8008` (or the port you passed). `--host 0.0.0.0`
+for team access.
 
 No auth by default — put a reverse proxy in front (nginx / caddy) if
 the engagement network isn't already trusted. TLS: use the reverse
@@ -192,6 +194,39 @@ The report includes only findings the operator has triaged into
 **in-report** status — the Findings tab's status dropdown drives what
 lands in the deliverable.
 
+## JSON API — response shapes
+
+The workbench is a FastAPI backend + a React frontend. Third-party
+scripts (or fieldkit) can hit the same JSON endpoints directly. The
+key holding the payload's list is intentionally **domain-specific
+per endpoint** — `items` isn't universal — so this table names the
+top-level key you actually read:
+
+| Endpoint | Response shape |
+|---|---|
+| `GET /api/hosts` | `{items: [Host, …]}` |
+| `GET /api/findings` | `{items: [Finding, …]}` |
+| `GET /api/credentials` | `{items: [Credential, …]}` |
+| `GET /api/scan/context` | `{hosts: N, commands: {cmd: {count, sample, hint?}}}` |
+| `GET /api/scan/suggestions` | `{suggestions: [Suggestion, …]}` |
+| `GET /api/act` | `{top: [Card, …], tiers: [{tier, label, cards}, …]}` |
+| `GET /api/attack-chain/{ad,cloud,web}` | `{steps: [Step, …], edges: [{from, to}, …], summary: {...}}` |
+| `GET /api/adcs/esc1/available` | `{tool_installed, tool_hint, matching_creds: [], confirm_sentinel}` |
+| `GET /api/prove/available` | `{keys: [FindingKey, …], total: N}` |
+| `POST /api/prove/{finding_key}` | verdict record — `{verdict, evidence, finish, ...}` |
+| `GET /api/jobs` | `[{id, cmd, status, lines, started, progress?}, …]` (top-level array) |
+| `GET /api/jobs/{jid}` | `{id, cmd, status, started, ended, returncode, lines, progress, result}` |
+| `GET /api/engagements` | `{current, parent, engagements: [{path, engagement, current, mtime}, …]}` |
+| `GET /api/overview` | `{hosts_total, hosts_up, services, findings_by_severity, by_severity, top_hosts, kev_total, kev_findings, ...}` |
+| `GET /api/scope` | in-scope subnets list |
+| `GET /api/writeups` | writeup metadata list |
+
+`Vuln.key` shape (P7-B5): `"vuln:{ip}:{port}:{script_id}:{title[:60]}"`
+plus `":<proto>"` when non-tcp. This is the string every endpoint that
+addresses a finding by key expects — same shape whether you're
+POSTing a note, ticking review, deleting, or looking up a prove
+result.
+
 ## Working airgap
 
 `recce serve` is stdlib + FastAPI + Uvicorn. All frontend assets are
@@ -199,7 +234,7 @@ built into `recce/webui/static/` — no CDN calls, no external fetches.
 On the operator's box just:
 
 ```bash
-python3 -m recce serve -o eng --port 8443
+python3 -m recce serve -o eng
 ```
 
 If FastAPI isn't installed, use the **airgap bundle** (see

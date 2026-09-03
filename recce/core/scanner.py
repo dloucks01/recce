@@ -979,11 +979,15 @@ _UDP_BASIC_PORTS = ("53,67,69,111,123,137,138,161,162,177,389,427,500,514,520,62
 def udp_basic_scan(ip: str, out_xml: str, profile: ScanProfile) -> tuple[str, ScanIssue | None]:
     """Enum-phase sweep of a curated set of high-value UDP ports with service detection
     and the cheap SNMP/DNS/NTP/NetBIOS/IKE scripts, so UDP services show up in the main
-    enumeration instead of only under `thorough`. Needs root (raw UDP)."""
+    enumeration instead of only under `thorough`. Needs root (raw UDP).
+
+    When we don't have root, return an empty XML AND no scan issue — unprivileged
+    is a config state, not a scan failure. The enum phase announces the skip once
+    at scan preamble (see `_phase_enum`), so per-host warnings aren't repeated
+    for every target. A ScanIssue is only for actual failed / incomplete work.
+    """
     if not _is_root():
-        return _empty_xml(out_xml), ScanIssue(
-            "warning", "udp-basic: skipped (needs root/CAP_NET_RAW for raw UDP); "
-            "run with sudo, or use --udp-top in the vulns phase")
+        return _empty_xml(out_xml), None
     to_args, kill = _timeout_args(profile)
     outcome = _run(["nmap", "-sU", "-sV", "-Pn", "-n", "-p", _UDP_BASIC_PORTS, "--open",
                     f"-T{profile.timing}",
