@@ -126,7 +126,8 @@ export function Esc1RequestModal(
       <div className="modal esc1-modal" onClick={(ev) => ev.stopPropagation()}>
         <div className="modal-header">
           <h3>ADCS ESC1 — request cert as arbitrary UPN</h3>
-          <button className="modal-close" onClick={onClose} title="close">✕</button>
+          <button className="modal-close" onClick={onClose}
+                  title="close" aria-label="close ESC1 request modal">✕</button>
         </div>
         <div className="modal-body">
           <div className="esc1-warn">

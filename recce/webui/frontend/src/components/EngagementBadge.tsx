@@ -87,7 +87,9 @@ export function EngagementBadge() {
               <button className="engagement-row-copy"
                       title="Copy the recce serve command for this engagement"
                       onClick={() => {
-                        const cmd = `recce serve -o ${s.path} --port 8443`;
+                        // No --port: uses the CLI default (8008). Matches
+                        // what QUICKSTART + docs/reference/webui.md show.
+                        const cmd = `recce serve -o ${s.path}`;
                         navigator.clipboard?.writeText(cmd);
                       }}>
                 📋 copy

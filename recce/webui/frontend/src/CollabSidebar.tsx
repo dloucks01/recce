@@ -90,38 +90,42 @@ export function CollabSidebar({ hosts, nav }: { hosts: Host[]; nav?: Nav }) {
       <div className="sidebar-header">
         <h3>Team</h3>
         <div className="sidebar-tabs">
+          {/* Emoji-only tabs: `title` gives a hover tooltip but doesn't
+              reach every screen reader — `aria-label` is the authoritative
+              accessible name. Keep both so mouse-hover users still get
+              the label, too. */}
           <button
             className={`tab-btn ${tab === "status" ? "active" : ""}`}
             onClick={() => setTab("status")}
-            title="scanning status"
+            title="scanning status" aria-label="scanning status"
           >
             ▌
           </button>
           <button
             className={`tab-btn ${tab === "assign" ? "active" : ""}`}
             onClick={() => setTab("assign")}
-            title="host assignments"
+            title="host assignments" aria-label="host assignments"
           >
             👤
           </button>
           <button
             className={`tab-btn ${tab === "activity" ? "active" : ""}`}
             onClick={() => setTab("activity")}
-            title="activity log"
+            title="activity log" aria-label="activity log"
           >
             ⚡
           </button>
           <button
             className={`tab-btn ${tab === "creds" ? "active" : ""}`}
             onClick={() => setTab("creds")}
-            title="shared credentials"
+            title="shared credentials" aria-label="shared credentials"
           >
             🔑
           </button>
           <button
             className={`tab-btn ${tab === "chat" ? "active" : ""}`}
             onClick={() => setTab("chat")}
-            title="team chat"
+            title="team chat" aria-label="team chat"
           >
             💬
           </button>

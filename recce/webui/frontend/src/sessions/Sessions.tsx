@@ -154,6 +154,17 @@ export function Sessions({ tester, focus, exploitIntent, onExploitConsumed, onSc
   useEffect(() => {
     if (showTeardown) getTeardown().then(setTinv).catch(() => setTinv(null));
   }, [showTeardown]);
+  // Escape closes the teardown modal — matches the click-outside behaviour
+  // wired on `.modal-backdrop` below. Bound only while the modal is open
+  // so we don't leak listeners for its whole session lifetime.
+  useEffect(() => {
+    if (!showTeardown) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setShowTeardown(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showTeardown]);
   async function clearUpload(id: string) {
     await clearTeardownUpload(id);
     getTeardown().then(setTinv);
