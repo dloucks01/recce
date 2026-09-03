@@ -883,6 +883,51 @@ export const getAttackChainCloud = () =>
 export const getAttackChainWeb = () =>
   getJSON<AttackChainResponse>("/api/attack-chain/web");
 
+// P1-7: ADCS ESC1 auto-request (frontend affordance for the AD chain's
+// adcs_esc step). See `recce/webui/routes/adcs_esc1.py` for the strict
+// gating design — the confirm_sentinel is the exact string the operator
+// must send back to fire, so we always fetch it fresh via /available.
+export type AdcsEsc1MatchingCred = {
+  username: string; domain: string; source: string; origin_ip: string;
+  has_password: boolean; has_hash: boolean; notes: string;
+};
+export type AdcsEsc1Available = {
+  tool_installed: boolean;
+  tool_hint: string;
+  matching_creds: AdcsEsc1MatchingCred[];
+  confirm_sentinel: string;
+};
+export type AdcsEsc1AttemptRequest = {
+  template: string; ca: string; dc_ip: string; domain: string;
+  username: string; upn_target: string; confirm: string;
+};
+export type AdcsEsc1AttemptResult = {
+  ok: boolean;
+  upn_requested: string; template: string; ca: string; dc_ip: string;
+  pfx_saved_at: string; pfx_size: number;
+  credential_added: boolean;
+  stdout_tail: string; error: string;
+  returncode: number | null; elapsed_s: number;
+  argv_redacted: string[];
+};
+export const getAdcsEsc1Available = () =>
+  getJSON<AdcsEsc1Available>("/api/adcs/esc1/available");
+export async function postAdcsEsc1Attempt(
+  body: AdcsEsc1AttemptRequest, tester?: string,
+): Promise<AdcsEsc1AttemptResult> {
+  const r = await fetch("/api/adcs/esc1/attempt", {
+    method: "POST",
+    headers: { ...jsonHeaders(), ...(tester ? { "X-Tester": tester } : {}) },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try { const j = await r.json(); if (j?.detail) msg = j.detail; } catch { /* keep */ }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
 
 // ---------------------------------------------------------------------------
 // IA-restructure follow-up: wrappers for the endpoints that were CLI-only

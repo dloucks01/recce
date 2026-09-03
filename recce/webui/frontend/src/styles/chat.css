@@ -1115,3 +1115,49 @@
 .scope-domain { color: color-mix(in srgb, var(--accent) 88%, var(--text));
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   border-color: color-mix(in srgb, var(--accent) 32%, var(--line)); }
+
+/* P1-7 ADCS ESC1 modal + button */
+.esc1-open-btn { display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;
+  color: var(--crit); cursor: pointer;
+  background: color-mix(in srgb, var(--crit) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--crit) 34%, var(--line)); }
+.esc1-open-btn:hover { background: color-mix(in srgb, var(--crit) 15%, transparent); }
+.esc1-modal { width: min(600px, 96vw); }
+.esc1-modal .modal-body { display: flex; flex-direction: column; gap: 12px;
+  font-size: 13px; }
+.esc1-warn { padding: 10px 12px; border-radius: 6px; font-size: 12px;
+  background: color-mix(in srgb, var(--crit) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--crit) 30%, transparent); }
+.esc1-err, .esc1-tool-missing, .esc1-nocreds {
+  padding: 10px; border-radius: 6px; font-size: 12px;
+  background: var(--surface2); border: 1px solid var(--line); }
+.esc1-err { color: var(--crit);
+  border-color: color-mix(in srgb, var(--crit) 40%, var(--line)); }
+.esc1-form { display: flex; flex-direction: column; gap: 8px; }
+.esc1-form label { display: flex; flex-direction: column; gap: 3px;
+  font-size: 11px; color: var(--muted); }
+.esc1-form input, .esc1-form select { padding: 6px 8px; font-size: 13px;
+  border-radius: 4px; border: 1px solid var(--line); background: var(--surface);
+  color: var(--text); font-family: var(--mono); }
+.esc1-form input:disabled, .esc1-form select:disabled { opacity: 0.6; }
+.esc1-actions { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.esc1-run { padding: 8px 14px; font-size: 13px; font-weight: 600;
+  color: #fff; background: var(--crit); border: none; border-radius: 6px;
+  cursor: pointer; }
+.esc1-run:disabled { opacity: 0.5; cursor: not-allowed; }
+.esc1-run:hover:not(:disabled) { filter: brightness(1.1); }
+.esc1-result { padding: 12px; border-radius: 6px; font-size: 12px; }
+.esc1-result.ok { background: color-mix(in srgb, #16a34a 10%, transparent);
+  border: 1px solid color-mix(in srgb, #16a34a 40%, var(--line)); }
+.esc1-result.err { background: color-mix(in srgb, var(--crit) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--crit) 40%, var(--line)); }
+.esc1-result-h { font-weight: 700; margin-bottom: 8px; }
+.esc1-result-facts { list-style: none; padding: 0; margin: 0;
+  display: flex; flex-direction: column; gap: 4px; }
+.esc1-result-facts li { padding: 2px 0; }
+.esc1-result .ok-tag { color: #16a34a; font-weight: 600; }
+.esc1-stdout pre, .esc1-argv pre { max-height: 200px; overflow: auto;
+  padding: 8px; margin: 6px 0 0; background: var(--surface2);
+  border: 1px solid var(--line); border-radius: 4px; font-size: 11px;
+  white-space: pre-wrap; word-break: break-all; }

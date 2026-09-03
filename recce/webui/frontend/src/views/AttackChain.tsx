@@ -16,6 +16,7 @@ import {
   AttackChainStepStatus,
 } from "../api";
 import { ChainGraph } from "../components/ChainGraph";
+import { Esc1RequestModal } from "../components/Esc1RequestModal";
 
 const STATUS_META: Record<AttackChainStepStatus, {
   icon: string; color: string; label: string; bg: string;
@@ -128,6 +129,24 @@ function StepCard({ step, n, onOpenHost, isLast }: StepCardProps) {
   // + blocked default-open so the tester sees the advisory without a click.
   const [open, setOpen] = useState(step.status !== "proven");
   const m = STATUS_META[step.status];
+
+  // P1-7 frontend: the AD chain's `adcs_esc` step, when proven, offers
+  // an "Attempt ESC1 request" button that opens `Esc1RequestModal` and
+  // POSTs the intrusive certipy req through /api/adcs/esc1/attempt.
+  // Only rendered here (not on cloud / web chains) — those chains have
+  // no ESC1 step. The button is gated on `step.status === "proven"`
+  // because ESC1 fires against a template recce already identified
+  // vulnerable; a pending step means we haven't even confirmed the
+  // template exists.
+  const [esc1Open, setEsc1Open] = useState(false);
+  const showEsc1Button = step.id === "adcs_esc" && step.status === "proven";
+  // Pre-fill hints from the step's evidence — the ADCS finding
+  // typically names the template in the finding_kind + evidence output.
+  const esc1TemplateHint = step.evidence
+    .find((e) => (e.finding_kind || "").toLowerCase().includes("esc"))
+    ?.output_excerpt?.match(/template[:\s'"]+([A-Za-z0-9_ .-]+)/i)?.[1]?.trim() || "";
+  const esc1DcIpHint = step.evidence
+    .find((e) => e.ip)?.ip || "";
   return (
     <div id={`chain-step-${step.id}`}
          data-chain-step={step.id}
@@ -247,9 +266,24 @@ function StepCard({ step, n, onOpenHost, isLast }: StepCardProps) {
                 <NextStepBlock text={step.next_step} />
               </div>
             )}
+            {showEsc1Button && (
+              <div style={{ marginTop: 12 }}>
+                <button className="esc1-open-btn"
+                        onClick={() => setEsc1Open(true)}
+                        title="Fire certipy against this ESC1 template — T3 intrusive">
+                  🎯 Attempt ESC1 request (intrusive — creates a cert on the CA)
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
+      {esc1Open && (
+        <Esc1RequestModal templateHint={esc1TemplateHint}
+                          dcIpHint={esc1DcIpHint}
+                          onClose={() => setEsc1Open(false)}
+                          onSuccess={() => { /* let the AD chain re-derive on next fetch */ }} />
+      )}
     </div>
   );
 }
