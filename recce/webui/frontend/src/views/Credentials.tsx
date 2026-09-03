@@ -166,7 +166,7 @@ export function Credentials({ nav }: { nav?: Nav }) {
           <span className="muted">what recce collected / captured — or <code>recce creds --run</code> to spray</span></div>
         <div className="tablewrap">
           <table className="loottable">
-            <thead><tr><th>Account</th><th>Secret</th><th>Kind</th><th>Source</th><th>From</th><th>Notes</th><th></th></tr></thead>
+            <thead><tr><th>Account</th><th>Secret</th><th>Kind</th><th>Source</th><th>From</th><th>Notes</th><th className="creds-act-col">Actions</th></tr></thead>
             <tbody>
               {creds.map((c, i) => (
                 <tr key={i}>
@@ -182,7 +182,7 @@ export function Credentials({ nav }: { nav?: Nav }) {
                     ? <span className="host-link" onClick={() => nav.openHost(c.origin_ip)} title="host detail">{c.origin_ip}</span>
                     : c.origin_ip}</td>
                   <td className="muted notes">{c.notes}</td>
-                  <td>
+                  <td className="creds-act-col">
                     <button className="cred-cmd-copy" onClick={() => copyCred(c)}
                             title={credOneLiner(c)}>📋 cmd</button>
                   </td>

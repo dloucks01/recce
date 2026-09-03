@@ -1070,3 +1070,12 @@
 @keyframes chain-step-flash { 0% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
   100% { background: transparent; } }
 .chain-step-flash { animation: chain-step-flash .9s ease-out; }
+
+/* Creds tab — the trailing "cmd" copy button was drifting far to the
+   right because the Notes column had no width cap and the actions
+   column had no header/width. Pin actions tight, cap notes, and
+   keep the button aligned right so it never looks cut off. */
+.loottable .creds-act-col { width: 1%; white-space: nowrap;
+  text-align: right; padding-left: 6px; padding-right: 12px; }
+.loottable td.notes { max-width: 240px; overflow: hidden;
+  text-overflow: ellipsis; }
