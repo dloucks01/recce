@@ -56,6 +56,24 @@ def test_attack_chain_empty_engagement(tmp_path: pathlib.Path) -> None:
     # The hero card should tell the tester to run recce enum first.
     assert "recce enum" in summary["next_action"], summary["next_action"]
 
+    # P7-C2: edges array is derived server-side from each step's
+    # depends_on. Contract check: every edge references two known step
+    # ids, the direction matches a real dependency, and the AD chain
+    # (which has explicit deps between at least anon_ldap_read →
+    # user_enum → unauth_roast) produces a non-empty list.
+    assert "edges" in data, "attack chain payload must carry edges (P7-C2)"
+    assert isinstance(data["edges"], list)
+    assert data["edges"], "AD chain has known deps — edges list should not be empty"
+    ids_set = set(ids)
+    for e in data["edges"]:
+        assert set(e.keys()) == {"from", "to"}, e
+        assert e["from"] in ids_set and e["to"] in ids_set, e
+        # `to`'s depends_on must actually include `from` — the derivation
+        # is not fabricated.
+        target_step = next(s for s in data["steps"] if s["id"] == e["to"])
+        assert e["from"] in target_step["depends_on"], (
+            f"edge {e['from']}->{e['to']} not in {target_step['depends_on']}")
+
 
 def test_attack_chain_anon_ldap_reachable(tmp_path: pathlib.Path) -> None:
     """A DC with anon LDAP read + a NULL-session finding → the first

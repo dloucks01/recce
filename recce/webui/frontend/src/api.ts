@@ -855,8 +855,15 @@ export type AttackChainStep = {
   // every evidence row is union-derived (e.g. known_users).
   contributing_hosts: string[];
 };
+// P7-C2: `edges` is derived server-side from each step's depends_on so
+// the ChainGraph SVG has a stable shape across every chain (AD/Cloud/
+// Web) without re-walking dependencies on the client. `from` and `to`
+// name step ids; edges whose target isn't in this chain are dropped
+// server-side so a malformed dep can't wedge the renderer.
+export type AttackChainEdge = { from: string; to: string };
 export type AttackChainResponse = {
   steps: AttackChainStep[];
+  edges: AttackChainEdge[];
   summary: {
     proven: number;
     pending: number;

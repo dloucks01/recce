@@ -10,11 +10,12 @@
 // This module exports both the AD-specific `AttackChain` component (default
 // entry for the "AD Chain" tab) and the reusable `ChainView` — the Cloud
 // and Web tabs consume `ChainView` directly with their own fetcher + title.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getAttackChainAd, AttackChainResponse, AttackChainStep,
   AttackChainStepStatus,
 } from "../api";
+import { ChainGraph } from "../components/ChainGraph";
 
 const STATUS_META: Record<AttackChainStepStatus, {
   icon: string; color: string; label: string; bg: string;
@@ -128,7 +129,9 @@ function StepCard({ step, n, onOpenHost, isLast }: StepCardProps) {
   const [open, setOpen] = useState(step.status !== "proven");
   const m = STATUS_META[step.status];
   return (
-    <div style={{ display: "flex", gap: 12, position: "relative" }}>
+    <div id={`chain-step-${step.id}`}
+         data-chain-step={step.id}
+         style={{ display: "flex", gap: 12, position: "relative" }}>
       {/* Vertical timeline line — drawn behind the marker; hidden on the last step. */}
       {!isLast && (
         <div aria-hidden="true" style={{
@@ -265,6 +268,8 @@ export function ChainView(p: ChainViewProps) {
   const [data, setData] = useState<AttackChainResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showGraph, setShowGraph] = useState(true);       // P7-C2
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -276,6 +281,15 @@ export function ChainView(p: ChainViewProps) {
   }, [p.fetcher]);
 
   const openHost = p.onOpenHost || ((_ip: string) => { /* no-op fallback */ });
+
+  const focusStep = (id: string) => {
+    // ChainGraph click → scroll the matching timeline card into view + flash.
+    const el = document.getElementById(`chain-step-${id}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("chain-step-flash");
+    window.setTimeout(() => el.classList.remove("chain-step-flash"), 900);
+  };
 
   if (loading) return <div className="loading">{p.loadingLabel}</div>;
   if (err) return <div className="err">{err}</div>;
@@ -330,8 +344,35 @@ export function ChainView(p: ChainViewProps) {
         </div>
       </section>
 
+      {/* P7-C2 — DAG map of the chain. Toggleable so an operator who
+          wants the linear-only view can hide it. Rendered only when
+          the payload carries edges (older backends won't) so this is
+          safe with a mixed frontend/backend. */}
+      {data.edges && data.edges.length > 0 && (
+        <section className="panel">
+          <div className="panel-h" style={{ cursor: "pointer",
+                  display: "flex", justifyContent: "space-between",
+                  alignItems: "center" }}
+               onClick={() => setShowGraph((v) => !v)}
+               role="button" tabIndex={0}
+               onKeyDown={(e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); setShowGraph((v) => !v); } }}>
+            <h3 style={{ margin: 0 }}>Chain map</h3>
+            <span className="muted" style={{ fontSize: 12 }}>
+              {showGraph ? "▾" : "▸"} click a node to jump to that step
+            </span>
+          </div>
+          {showGraph && (
+            <div style={{ padding: "0 12px 12px 12px", overflowX: "auto" }}>
+              <ChainGraph steps={steps} edges={data.edges}
+                          onSelect={focusStep} />
+            </div>
+          )}
+        </section>
+      )}
+
       {/* Timeline of steps. */}
-      <section className="panel" style={{ background: "transparent", padding: 0 }}>
+      <section ref={bodyRef} className="panel"
+               style={{ background: "transparent", padding: 0 }}>
         <div style={{ padding: "8px 0" }}>
           {steps.map((s, i) => (
             <StepCard key={s.id} step={s} n={i + 1}

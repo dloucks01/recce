@@ -1045,3 +1045,28 @@
   background: color-mix(in srgb, currentColor 25%, transparent); }
 .jobs-pill-bar-fill { display: block; height: 100%; background: currentColor;
   border-radius: inherit; transition: width .4s ease-out; }
+
+/* P7-C2: attack chain SVG DAG (ChainGraph) */
+.chain-graph-wrap { padding-top: 4px; }
+.chain-graph { display: block; max-width: 100%; height: auto;
+  min-width: 320px; }
+.chain-edge { fill: none; stroke: var(--muted); stroke-width: 1.5;
+  opacity: 0.55; transition: opacity .2s ease-out, stroke-width .2s ease-out; }
+.chain-graph:hover .chain-edge { opacity: 0.85; }
+.chain-node { cursor: pointer; }
+.chain-node circle { transition: transform .15s ease-out, filter .15s ease-out;
+  transform-origin: center; transform-box: fill-box; }
+.chain-node:hover circle { transform: scale(1.15);
+  filter: drop-shadow(0 2px 4px color-mix(in srgb, currentColor 30%, transparent)); }
+.chain-node:focus { outline: none; }
+.chain-node:focus circle { stroke: var(--accent); stroke-width: 3; }
+.chain-node-label { pointer-events: none; user-select: none; }
+.chain-graph-legend { display: flex; gap: 12px; flex-wrap: wrap;
+  padding: 6px 0 2px; font-size: 11px; }
+.chain-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.chain-legend-dot { display: inline-block; width: 9px; height: 9px;
+  border-radius: 50%; border: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
+/* Flash the target step card when a chain-graph node is clicked. */
+@keyframes chain-step-flash { 0% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  100% { background: transparent; } }
+.chain-step-flash { animation: chain-step-flash .9s ease-out; }

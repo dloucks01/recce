@@ -74,8 +74,21 @@ def _assemble_chain(raw_steps: list) -> dict:
                 next_action = s["next_step"]
                 break
 
+    # P7-C2: edges derived from each step's depends_on. Kept as a top-level
+    # `edges` array so the ChainGraph component consumes one payload shape
+    # regardless of which chain (AD / Cloud / Web) it's rendering, without
+    # re-implementing the dependency walk in the frontend. `from` and `to`
+    # are the step ids; unknown targets (a depends_on that names a step
+    # not in this chain) are dropped so a malformed dep can't wedge the
+    # renderer.
+    valid_ids = set(step_ids)
+    edges = [{"from": dep, "to": s["id"]}
+             for s in steps_out for dep in s["depends_on"]
+             if dep in valid_ids]
+
     return {
         "steps": steps_out,
+        "edges": edges,
         "summary": {
             "proven": proven_n,
             "pending": pending_n,
