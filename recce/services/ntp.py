@@ -516,15 +516,30 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     out[-1]["ids"] = ids
 
             if pr.get("peer_list") and not pr.get("monlist"):
+                # P0-1: T2 promotion — include the actual peer IPs the
+                # server named in its REQ_PEER_LIST reply so the finding
+                # carries the server-side content, not just "there was a
+                # peer list." Each IP is a candidate next-hop target
+                # (upstream DCs / appliances hidden from a raw port sweep).
+                peer_ips = pr.get("peers") or []
+                peer_line = (f" Named peers: {', '.join(peer_ips[:12])}"
+                             + (f" (+{len(peer_ips)-12} more)"
+                                if len(peer_ips) > 12 else "") + "."
+                             ) if peer_ips else ""
                 out.append(_finding(
                     "low",
                     "NTP peer list readable (internal time topology)", tgt,
                     "A mode-7 REQ_PEER_LIST returned this server's peers, exposing "
                     "upstream/peer time sources. On an internal that names further "
-                    "infrastructure — often a DC or an appliance not otherwise visible.",
+                    "infrastructure — often a DC or an appliance not otherwise visible."
+                    + peer_line,
                     "ntpq -p <ip>",
                     "`restrict default noquery` in ntp.conf; disable mode 7 (`disable monitor`).",
-                    ["CWE-200"], kind="ntp_peers"))
+                    ["CWE-200"], kind="ntp_peers",
+                    exploit_note=(
+                        "ntpq -p <ip>; for each peer IP: nmap -Pn -sS -p- "
+                        "<peer>  # DCs / appliances almost always come up."),
+                    depth_tier="t2"))
 
             # Clock skew — reported for the engagement, not just the report.
             skew = pr.get("skew")
@@ -541,7 +556,21 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "sudo ntpdate -u <ip>   # or: faketime / sudo chronyd -q 'server <ip> iburst'",
                     "Correct time sync on the host. For the tester: match the DC's clock "
                     "before Kerberos operations.",
-                    ["CWE-361"], kind="ntp_skew"))
+                    ["CWE-361"], kind="ntp_skew",
+                    exploit_note=(
+                        "sudo ntpdate -u <ip>; then re-run kerbrute / "
+                        "GetNPUsers.py — KRB_AP_ERR_SKEW should now be "
+                        "gone.  Long-term: wrap Kerberos tools in faketime "
+                        "so the estate clock delta stays isolated to that "
+                        "shell."),
+                    # P0-1: T2 promotion — the finding carries the ACTUAL
+                    # skew delta computed against the target's NTP reply
+                    # (server's transmit timestamp vs our monotonic).
+                    # That's live server-side content, not an inference.
+                    # (Auto-adjust of the scanner's own clock — the audit's
+                    # T3 path — is a behavior change deferred as a P2
+                    # follow-up.)
+                    depth_tier="t2"))
     return out
 
 

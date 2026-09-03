@@ -600,5 +600,88 @@ class PutGetT2PromotionTest(unittest.TestCase):
         self.assertFalse([f for f in fs if f["kind"] == "s7_put_get_enabled"])
 
 
+class FirmwareBandVerificationTest(unittest.TestCase):
+    """P0-1: SZL 0x0011 fw_version band comparison lifts s7_firmware_cve
+    from T1 (MLFB family only) to T2 when the target's firmware sits
+    inside a well-documented vulnerable range (currently CVE-2020-15782,
+    S7-1200 <V4.5)."""
+
+    def test_fw_lt_parses_vmajor_minor(self):
+        self.assertTrue(s7._fw_lt("V4.4", (4, 5)))
+        self.assertFalse(s7._fw_lt("V4.5", (4, 5)))
+        self.assertFalse(s7._fw_lt("V5.0", (4, 5)))
+        self.assertTrue(s7._fw_lt("V3", (4, 5)))                 # V3.0 < V4.5
+        self.assertIsNone(s7._fw_lt("", (4, 5)))
+        self.assertIsNone(s7._fw_lt("unknown", (4, 5)))
+        self.assertIsNone(s7._fw_lt("V", (4, 5)))                # bare 'V'
+
+    def test_s7_1200_v4_4_verified(self):
+        """S7-1200 order code + FW below the patched V4.5 → verified=True."""
+        matches = s7._cve_fingerprint("6ES7 212-1AE40-0XB0", "V4.4")
+        cve = next((m for m in matches if m["cve"] == "CVE-2020-15782"), None)
+        self.assertIsNotNone(cve)
+        self.assertTrue(cve["verified"])
+        self.assertEqual(cve["fw_cutoff"], "V4.5")
+        self.assertEqual(cve["fw_version"], "V4.4")
+        # note should carry the SZL-reported version so the operator sees why
+        self.assertIn("V4.4", cve["note"])
+
+    def test_s7_1200_v4_5_not_verified(self):
+        """FW at or above the patched V4.5 → verified=False (fw_lt returns False)."""
+        matches = s7._cve_fingerprint("6ES7 212-1AE40-0XB0", "V4.5")
+        cve = next((m for m in matches if m["cve"] == "CVE-2020-15782"), None)
+        self.assertIsNotNone(cve)
+        self.assertFalse(cve["verified"])
+
+    def test_s7_1200_no_fw_reported_stays_unverified(self):
+        """No parseable FW → verified=False so recce doesn't fabricate a
+        version-band claim on a target that never reported."""
+        matches = s7._cve_fingerprint("6ES7 212-1AE40-0XB0", "")
+        cve = next((m for m in matches if m["cve"] == "CVE-2020-15782"), None)
+        self.assertIsNotNone(cve)
+        self.assertFalse(cve["verified"])
+
+    def test_s7_300_stays_unverified(self):
+        """S7-300 CVEs (2015-2177 / 2016-9159) have no crisp cutoff in
+        Siemens ProductCERT; recce leaves them at MLFB family match only."""
+        matches = s7._cve_fingerprint("6ES7 315-2AH14-0AB0", "V3.2")
+        for m in matches:
+            self.assertFalse(m["verified"],
+                f"S7-300 CVE {m['cve']} shouldn't be marked verified — "
+                f"we don't ship the per-model cutoff table")
+
+    def test_finding_tier_reflects_verified_flag(self):
+        """The s7_firmware_cve finding lifts to depth_tier='t2' when the
+        underlying CVE match carries verified=True, stays 't1' when not."""
+        from recce.core.models import Host, Port
+        # Verified case: S7-1200 with FW below cutoff
+        pr_verified = {
+            "cotp_reachable": True, "s7_reachable": True,
+            "order_code": "6ES7 212-1AE40-0XB0", "fw_version": "V4.4",
+            "hw_version": "0001",
+            "cve_matches": s7._cve_fingerprint("6ES7 212-1AE40-0XB0", "V4.4"),
+        }
+        h = Host(ip="10.0.0.9", ports=[Port(portid=102, service="iso-tsap")])
+        fs = s7.findings([h], {("10.0.0.9", 102): pr_verified})
+        cve_findings = [f for f in fs if f["kind"] == "s7_firmware_cve"]
+        v_finding = next((f for f in cve_findings
+                          if "CVE-2020-15782" in f["title"]), None)
+        self.assertIsNotNone(v_finding)
+        self.assertEqual(v_finding["depth_tier"], "t2",
+            f"expected t2 for verified fw-band match, got {v_finding}")
+        self.assertIn("verified", v_finding["title"].lower())
+
+        # Unverified case: unknown firmware
+        pr_unverified = {**pr_verified, "fw_version": "",
+                         "cve_matches": s7._cve_fingerprint("6ES7 212-1AE40-0XB0", "")}
+        fs = s7.findings([h], {("10.0.0.9", 102): pr_unverified})
+        cve_findings = [f for f in fs if f["kind"] == "s7_firmware_cve"]
+        u_finding = next((f for f in cve_findings
+                          if "CVE-2020-15782" in f["title"]), None)
+        self.assertIsNotNone(u_finding)
+        self.assertEqual(u_finding["depth_tier"], "t1")
+        self.assertNotIn("verified", u_finding["title"].lower())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -520,32 +520,75 @@ def _deobfuscate_s7_password(blob: bytes) -> str:
 
 # --- CVE fingerprint -------------------------------------------------------
 
+def _fw_lt(fw_version: str, cutoff: tuple[int, int]) -> bool | None:
+    """Compare an S7 fw_version string ("V4.4", "V4.5") against a
+    (major, minor) cutoff. Returns True when fw < cutoff, False when
+    fw >= cutoff, None when the version couldn't be parsed. Only
+    (major, minor) is compared — Siemens patch tuples are Vmaj.min.
+    """
+    if not fw_version or not fw_version.startswith("V"):
+        return None
+    try:
+        parts = fw_version[1:].split(".")
+        maj = int(parts[0])
+        minor = int(parts[1]) if len(parts) > 1 else 0
+    except (ValueError, IndexError):
+        return None
+    return (maj, minor) < cutoff
+
+
 def _cve_fingerprint(order_code: str, fw_version: str) -> list[dict]:
     """Order-code and firmware-band matches against Siemens advisories the
     protocol response can positively distinguish. Never guesses beyond
-    fingerprints the wire actually exposes."""
+    fingerprints the wire actually exposes.
+
+    Each match carries a `verified` boolean:
+      * True  — SZL 0x0011 firmware version was in the CVE's known
+                vulnerable band (T2 evidence — real version check).
+      * False — firmware couldn't be parsed OR the CVE has no
+                well-documented cutoff; MLFB family match only (T1).
+    """
     out: list[dict] = []
     mlfb = (order_code or "").upper()
     # S7-300 / S7-400 — legacy families with SZL 0x0132 password readout
     # (CVE-2016-9159) and unauthenticated STOP/START (CVE-2015-2177). Both
-    # apply broadly to firmware < the mitigation release.
+    # apply broadly to firmware < the mitigation release; Siemens never
+    # published a single crisp cutoff (per-model patch releases scatter
+    # across the SSA-800477 lineage), so kept unverified.
     if mlfb.startswith("6ES7 3") or mlfb.startswith("6ES73"):
         out.append({"cve": "CVE-2015-2177", "family": "S7-300",
-                    "note": "Unauthenticated CPU STOP via S7COMM fn 0x29"})
+                    "note": "Unauthenticated CPU STOP via S7COMM fn 0x29",
+                    "verified": False, "fw_version": fw_version})
         out.append({"cve": "CVE-2016-9159", "family": "S7-300",
-                    "note": "SZL 0x0132 password readout (offline-crackable)"})
+                    "note": "SZL 0x0132 password readout (offline-crackable)",
+                    "verified": False, "fw_version": fw_version})
     if mlfb.startswith("6ES7 4") or mlfb.startswith("6ES74"):
         out.append({"cve": "CVE-2015-2177", "family": "S7-400",
-                    "note": "Unauthenticated CPU STOP via S7COMM fn 0x29"})
+                    "note": "Unauthenticated CPU STOP via S7COMM fn 0x29",
+                    "verified": False, "fw_version": fw_version})
     # S7-1200 — CVE-2020-15782 (memory read/write via crafted TCP request)
-    # applies to firmware < V4.5.0 on 1200 CPUs.
+    # applies to firmware < V4.5.0 on 1200 CPUs. Siemens SSA-434534 is
+    # explicit: "Update to V4.5.0 or later." → verified when we know FW
+    # and it falls below the cutoff.
     if mlfb.startswith("6ES7 2") or mlfb.startswith("6ES72"):
+        v = _fw_lt(fw_version, (4, 5))
         out.append({"cve": "CVE-2020-15782", "family": "S7-1200",
-                    "note": "Memory read/write bypass in FW <V4.5"})
+                    "note": ("Memory read/write bypass in FW <V4.5 — "
+                             f"SZL 0x0011 reports FW {fw_version} "
+                             f"(< V4.5 mitigation)"
+                             if v is True else
+                             "Memory read/write bypass in FW <V4.5"),
+                    "verified": v is True,
+                    "fw_version": fw_version,
+                    "fw_cutoff": "V4.5"})
     # S7-1500 — CVE-2022-38465 (hard-coded global cryptographic key).
+    # Siemens SSA-568427 mitigation is per-family firmware; kept unverified
+    # (a specific cutoff would need per-model lookup that recce doesn't
+    # ship a table for).
     if mlfb.startswith("6ES7 5") or mlfb.startswith("6ES75"):
         out.append({"cve": "CVE-2022-38465", "family": "S7-1500",
-                    "note": "Hard-coded global key (Siemens SSA-568427)"})
+                    "note": "Hard-coded global key (Siemens SSA-568427)",
+                    "verified": False, "fw_version": fw_version})
     return out
 
 
@@ -899,13 +942,42 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     depth_tier="t1"))
 
             for m in pr.get("cve_matches") or []:
+                # P0-1: T2 promotion — when the CVE has a well-defined
+                # firmware cutoff (currently CVE-2020-15782: FW <V4.5)
+                # AND SZL 0x0011 returned a fw_version we could parse,
+                # `verified=True` means the target's own fw_version fell
+                # in the vulnerable band. That's real server-side content
+                # (not an MLFB family guess) and lifts the finding to T2.
+                verified = bool(m.get("verified"))
+                fw_seen = m.get("fw_version") or ""
+                cutoff = m.get("fw_cutoff", "")
+                if verified:
+                    detail = (
+                        f"Order code prefix identifies {m['family']}. "
+                        f"{m['note']}. VERIFIED against SZL 0x0011: the "
+                        f"CPU reports firmware {fw_seen} which is below "
+                        f"the {cutoff} mitigation release — this "
+                        f"instance is in the vulnerable band."
+                    )
+                else:
+                    detail = (
+                        f"Order code prefix identifies {m['family']}. "
+                        f"{m['note']}. "
+                        + (f"SZL 0x0011 reports firmware {fw_seen} but "
+                           "recce has no version-band data for this CVE. "
+                           if fw_seen else
+                           "SZL 0x0011 did not return a parseable "
+                           "firmware version. ")
+                        + "Confirm firmware version against the advisory "
+                          "before treating as exploitable — MLFB alone "
+                          "establishes family, not patch level."
+                    )
                 out.append(_finding(
                     "high",
-                    f"S7 firmware matches Siemens advisory ({m['cve']})", tgt,
-                    f"Order code prefix identifies {m['family']}. "
-                    f"{m['note']}. Confirm firmware version against the "
-                    f"advisory before treating as exploitable — MLFB alone "
-                    f"establishes family, not patch level.",
+                    f"S7 firmware matches Siemens advisory ({m['cve']})"
+                    + (" — firmware verified in vulnerable band"
+                       if verified else ""),
+                    tgt, detail,
                     f"# check firmware against Siemens ProductCERT "
                     f"{m['cve']}",
                     f"Apply the Siemens firmware release addressing "
@@ -916,7 +988,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "for CVE-2016-9159 confirm password readout worked; "
                         "for CVE-2020-15782 use TIA Portal / snap7-plus PoC "
                         "(private) against S7-1200 <V4.5."),
-                    depth_tier="t1"))
+                    depth_tier="t2" if verified else "t1"))
     return out
 
 

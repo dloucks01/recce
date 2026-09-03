@@ -796,7 +796,13 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "ldns-walk <zone> @<ip>; for NSEC3: nsec3walker "
                         "<zone> then hashcat -m 8300 nsec3.hashes "
                         "rockyou.txt to recover the hashed labels."),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — the walked NSEC chain returned
+                    # concrete owner names harvested from the target's own
+                    # NSEC RR sequence. Every name in the finding sample
+                    # came from a real DNS reply, not an inference.
+                    # (Follow-up capability: NSEC3 walker for hashed zones,
+                    # documented in .recce-plan/audit/ as a P2-1 item.)
+                    depth_tier="t2"))
             # Open recursive resolver — server processes recursive queries from
             # unauthorized clients (the DNS-amplification primitive: small query
             # → large answer reflected at a spoofed victim IP).
@@ -857,7 +863,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             "--server <mx> --header 'Subject: spoof test'  "
                             "# proves receiving MTA accepts unsigned "
                             "spoofed mail."),
-                        depth_tier="t1"))
+                        # P0-1: T2 promotion — the finding is a definitive
+                        # server-side answer: the target's DNS resolver
+                        # returned no v=spf1 record when asked for the
+                        # zone's TXT set. A null-record reply is a real
+                        # answer, not an inference. (Follow-up: T3 comes
+                        # from actually delivering spoofed mail via the
+                        # discovered MX, gated behind a future --safe-off.)
+                        depth_tier="t2"))
                 elif re.search(r"[+?]all\b", es["spf"], re.I):
                     # Weak SPF — +all = pass everything; ?all = neutral.
                     out.append(_finding(
@@ -871,7 +884,12 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             "swaks --to test@<zone> --from spoof@<zone> "
                             "--server <mx>; check whether SPF-failing mail "
                             "lands in Inbox."),
-                        depth_tier="t1"))
+                        # P0-1: T2 promotion — the finding title carries
+                        # the ACTUAL SPF record string returned by the
+                        # target's TXT lookup (es["spf"]). The weak
+                        # terminator (+all / ?all) was extracted from real
+                        # server content, not inferred.
+                        depth_tier="t2"))
                 if not es.get("dmarc"):
                     out.append(_finding(
                         "medium", f"DMARC record missing for {z}", tgt,
@@ -886,7 +904,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             "swaks --to victim@<zone> --from ceo@<zone> "
                             "--server <mx>  # DMARC absent => spoofed "
                             "From: passes end-to-end."),
-                        depth_tier="t1"))
+                        # P0-1: T2 promotion — same DNS-reply reasoning as
+                        # dns_missing_spf: the target confirmed absence of
+                        # any TXT at _dmarc.<zone>.
+                        depth_tier="t2"))
                 elif "p=none" in es["dmarc"].lower():
                     out.append(_finding(
                         "low", f"DMARC in monitor-only mode for {z} (p=none)", tgt,
@@ -899,7 +920,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                             "swaks --to victim@<zone> --from cfo@<zone> "
                             "--server <mx>; delivery to Inbox proves "
                             "monitor-only enforcement."),
-                        depth_tier="t1"))
+                        # P0-1: T2 promotion — the target's TXT reply
+                        # returned an actual DMARC policy string
+                        # containing "p=none". The policy value is real
+                        # server-side content, not an inference.
+                        depth_tier="t2"))
                 # DKIM: presence is informational — its absence isn't a bug
                 # per se (DMARC allows either SPF or DKIM to pass), so no
                 # finding emitted, but the selectors are surfaced for the report.

@@ -1515,7 +1515,11 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     exploit_note=(
                         "For each url returned: opcua-client discover <url>; "
                         "enumerate the sibling."),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — FindServersRequest returned
+                    # concrete ApplicationDescription records + their
+                    # discoveryUrl fields extracted from the target's
+                    # reply. Every URL in the sample came from the target.
+                    depth_tier="t2"))
 
             # FindServersOnNetwork (LDS-ME).
             on_network = pr.get("on_network") or []
@@ -1537,7 +1541,10 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "For each record's discovery_url: opcua-client "
                         "get-endpoints <url> to build the site-wide OPC UA "
                         "inventory."),
-                    depth_tier="t1"))
+                    # P0-1: T2 promotion — FindServersOnNetwork returned
+                    # concrete server_name records enumerated from the
+                    # LDS-ME's mDNS registry. Real server-side content.
+                    depth_tier="t2"))
 
             # RegisterServer open-registration.
             reg = pr.get("register_server") or {}

@@ -650,6 +650,30 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     f"{i['service']}(:{i['default_port']}"
                     f"{'/localhost-only' if i['pivot_only'] else ''})"
                     for i in implied)
+                # P0-1: T2 promotion — when a check_ command corresponding
+                # to one of the implied services returned meaningful output
+                # in the enumeration pass (captured in pr["command_outputs"]),
+                # the agent didn't just declare the check registered — it
+                # actually ran the plugin and returned its result. That
+                # output IS live confirmation the local service is
+                # queryable through the NRPE surface. Include a short
+                # sample as the server-side evidence.
+                outputs = pr.get("command_outputs") or {}
+                confirmed_bits: list[str] = []
+                implied_cmds = {i["command"] for i in implied
+                                if i.get("command")}
+                for cmd, text in outputs.items():
+                    if cmd in implied_cmds and text:
+                        # trim to one line, drop a leading status label if
+                        # the plugin returned e.g. "OK - MySQL running"
+                        snippet = (text.splitlines() or [""])[0][:120]
+                        confirmed_bits.append(f"{cmd}: {snippet}")
+                proof = ""
+                depth_tier = "t1"
+                if confirmed_bits:
+                    proof = (" T2 PROOF: check output(s) captured — "
+                             + " · ".join(confirmed_bits[:3]))
+                    depth_tier = "t2"
                 out.append(_finding(
                     "medium", "NRPE implies additional local services", tgt,
                     f"Registered checks imply local services: {svc_lines}. "
@@ -657,12 +681,19 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                        f"the sweep — they are bound to 127.0.0.1 and only "
                        f"reachable via NRPE (a pivot signal)."
                        if pivot_only else "All implied services also show as "
-                       "open in the port sweep."),
+                       "open in the port sweep.")
+                    + proof,
                     f"check_nrpe -H {h.ip} -p {p.portid} -c check_mysql",
                     "Cross-check with the host's port sweep. If a pivot-only "
                     "service is present, plan follow-on access via an NRPE "
                     "RCE (if applicable) or credentialed host access.",
-                    [], kind="nrpe_implied_local_services"))
+                    [], kind="nrpe_implied_local_services",
+                    exploit_note=(
+                        "check_nrpe -H <ip> -p 5666 -c check_mysql   # "
+                        "parse output for 'Connection refused' vs 'Access "
+                        "denied for user' — turns inference into confirmation "
+                        "plus a version fingerprint."),
+                    depth_tier=depth_tier))
 
             if pr.get("users"):
                 out.append(_finding(
