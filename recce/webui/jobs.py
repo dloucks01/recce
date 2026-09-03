@@ -9,10 +9,12 @@ API reads (WAL makes the concurrent read/write safe).
 from __future__ import annotations
 
 import itertools
+import re
 import subprocess
 import sys
 import threading
 import time
+from typing import Any, Callable
 
 
 def recce_argv(*args: str) -> list[str]:
@@ -33,11 +35,61 @@ class Job:
         self.started = time.time()
         self.ended: float | None = None
         self._proc: subprocess.Popen | None = None
+        # P7-C5: throttled scan progress parsed from stdout. `done` is the
+        # per-host completion counter emitted by recce enum's throttled
+        # refresh; `total` is the authoritative-target count masscan logs
+        # when it hands off to enum. Neither always known — the frontend
+        # renders a bar when total is present, else a "N done" chip.
+        self.progress: dict | None = None
+        # P7-C1: structured return value for callable-based jobs (spray,
+        # act/run). Subprocess jobs leave this None; callers read
+        # `job.result` once status is `done` / `failed`. The web API
+        # exposes it on GET /api/jobs/{jid}.
+        self.result: Any = None
 
 
 _MAX_JOBS = 60          # cap the in-memory registry; oldest FINISHED jobs are evicted
 _MAX_RUNNING = 8        # admission cap: never let more than N scans spawn subprocesses at once
 _MAX_LINES = 10_000     # cap per-job stdout buffer; oldest lines dropped when exceeded
+
+
+# P7-C5 progress parsers — regex + a (done_group, total_group, phase) picker.
+# Applied in order; every match updates job.progress in place (partial updates
+# are fine — an early match may set total without done, a later one adds done).
+# Kept intentionally narrow so a garbled log line doesn't produce a wrong bar.
+_PROGRESS_RES: list[tuple[re.Pattern, Callable[[re.Match, dict], None]]] = [
+    # `[+] masscan found N host(s) with open ports; enumerating all M
+    # authoritative target(s).` — total = M, phase = "enum"
+    (re.compile(r"masscan found \d+ host\(s\) with open ports; "
+                r"enumerating all (\d+) authoritative target\(s\)"),
+     lambda m, p: p.update(total=int(m.group(1)), phase="enum")),
+    # `[+] masscan found N host(s) with open ports.` — total = N (weaker
+    # signal: recce may then add authoritative targets, but this is a
+    # reasonable initial upper bound if the authoritative line never runs).
+    # setdefault-style: only take this value if we haven't already learned
+    # a better one from the authoritative-target line.
+    (re.compile(r"masscan found (\d+) host\(s\) with open ports\."),
+     lambda m, p: (p.__setitem__("total", int(m.group(1)))
+                   if p.get("total") is None else None,
+                   p.__setitem__("phase", "enum"))),
+    # `    ~ report refreshed (X host(s) so far).` — done = X
+    (re.compile(r"~ report refreshed \((\d+) host\(s\) so far\)"),
+     lambda m, p: p.update(done=int(m.group(1)))),
+]
+
+
+def _apply_progress(line: str, job: "Job") -> None:
+    """Update job.progress from one stdout line. No-op when nothing matches."""
+    for rx, apply in _PROGRESS_RES:
+        m = rx.search(line)
+        if m is None:
+            continue
+        if job.progress is None:
+            job.progress = {"done": 0, "total": None, "phase": None}
+        try:
+            apply(m, job.progress)
+        except (ValueError, TypeError):
+            pass                                # bad capture — silently ignore
 
 
 class TooManyJobs(Exception):
@@ -87,9 +139,11 @@ class JobManager:
             job._proc = proc
             assert proc.stdout is not None
             for line in proc.stdout:
-                job.lines.append(line.rstrip("\n"))
+                stripped = line.rstrip("\n")
+                job.lines.append(stripped)
                 if len(job.lines) > _MAX_LINES:
                     job.lines = job.lines[-_MAX_LINES:]
+                _apply_progress(stripped, job)
                 if time.time() - job.started > self._JOB_TIMEOUT:
                     proc.terminate()
                     job.lines.append(f"[job timeout] killed after {self._JOB_TIMEOUT}s")
@@ -119,6 +173,53 @@ class JobManager:
             except Exception:
                 import logging
                 logging.getLogger("recce.webui").debug("on_done callback failed for job %s", job.id, exc_info=True)
+
+    def start_callable(self, label: str, fn: Callable[..., Any],
+                       *args, on_done=None, **kwargs) -> Job:
+        """P7-C1: run a Python callable in a background daemon thread as a
+        Job. Its return value is captured on `job.result` when it finishes;
+        exceptions land on job.result as `{"error": <str>}` with
+        status=failed. Cancellation isn't supported for callable jobs —
+        they're meant for short (seconds to a few minutes) in-process
+        actions like credential spray and act/run. Longer work should
+        stay on the subprocess path where `cancel` can SIGTERM the
+        child."""
+        with self._lock:
+            running = sum(1 for j in self._jobs.values() if j.status == "running")
+            if running >= _MAX_RUNNING:
+                raise TooManyJobs(f"{running} jobs already running (max {_MAX_RUNNING}); "
+                                  "wait for one to finish")
+            jid = str(next(self._counter))
+            # cmd is the display label the sidebar renders. Using a
+            # single-token argv keeps `" ".join` output equal to the label.
+            job = Job(jid, [label])
+            self._jobs[jid] = job
+            self._prune()
+        threading.Thread(target=self._run_callable,
+                         args=(job, fn, args, kwargs, on_done),
+                         daemon=True).start()
+        return job
+
+    def _run_callable(self, job: Job, fn: Callable[..., Any],
+                      args: tuple, kwargs: dict, on_done) -> None:
+        try:
+            job.result = fn(*args, **kwargs)
+            if job.status != "cancelled":
+                job.status = "done"
+            job.returncode = 0
+        except Exception as e:
+            job.result = {"error": str(e)}
+            job.status = "failed"
+            job.returncode = -1
+            job.lines.append(f"[job error] {e}")
+        job.ended = time.time()
+        if on_done is not None:
+            try:
+                on_done(job)
+            except Exception:
+                import logging
+                logging.getLogger("recce.webui").debug(
+                    "on_done callback failed for callable job %s", job.id, exc_info=True)
 
     def cancel(self, jid: str) -> bool:
         job = self._jobs.get(jid)

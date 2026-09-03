@@ -597,8 +597,26 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
 
     @app.get("/api/jobs")
     def list_jobs():
+        # P7-C5: expose `progress` (parsed from stdout by JobManager). Callable
+        # jobs never populate it and stay {progress: null}, which the frontend
+        # renders as a bare "N lines" chip with no bar.
         return [{"id": j.id, "cmd": j.cmd, "status": j.status, "lines": len(j.lines),
-                 "started": j.started} for j in jobs.list()]
+                 "started": j.started, "progress": j.progress}
+                for j in jobs.list()]
+
+    @app.get("/api/jobs/{jid}")
+    def get_job(jid: str):
+        """P7-C1: single-job endpoint with the callable-job `result` payload.
+        The async spray + act/run endpoints return a job id; polling here
+        gives the caller the full structured result (same shape as the sync
+        endpoints return inline) once status flips out of running."""
+        job = jobs.get(jid)
+        if job is None:
+            raise HTTPException(404, "no such job")
+        return {"id": job.id, "cmd": job.cmd, "status": job.status,
+                "started": job.started, "ended": job.ended,
+                "returncode": job.returncode, "lines": len(job.lines),
+                "progress": job.progress, "result": job.result}
 
     @app.get("/api/jobs/{jid}/events")
     async def job_events(jid: str):
@@ -608,10 +626,17 @@ def register_scan_routes(app: FastAPI, ctx) -> None:
 
         async def gen():
             i = 0
+            last_progress = None
             while True:
                 while i < len(job.lines):
                     yield f"data: {json.dumps({'line': job.lines[i]})}\n\n"
                     i += 1
+                # P7-C5: emit a `progress` event whenever the parsed
+                # {done, total, phase} dict changes so the frontend can
+                # move the bar without waiting for the next stdout line.
+                if job.progress != last_progress:
+                    last_progress = dict(job.progress) if job.progress else None
+                    yield f"data: {json.dumps({'progress': last_progress})}\n\n"
                 if job.status != "running":
                     yield f"data: {json.dumps({'done': True, 'status': job.status})}\n\n"
                     return

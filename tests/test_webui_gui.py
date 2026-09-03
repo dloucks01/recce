@@ -291,6 +291,59 @@ class ApiShape(unittest.TestCase):
         finally:
             __import__("shutil").rmtree(empty, ignore_errors=True)
 
+    def test_act_run_async_returns_job_id_and_polls_to_result(self):
+        """P7-C1: /api/act/run/async spawns a callable Job, returns a job
+        handle immediately, and the same {looted, creds, spray_files, ...}
+        payload lands on /api/jobs/{jid}.result once status flips to done."""
+        import time
+        empty = tempfile.mkdtemp()
+        from recce.core.store import Store
+        Store(_open_paths(empty)["db"]).close()
+        try:
+            with _client(empty) as c:
+                launch = c.post("/api/act/run/async")
+                self.assertEqual(launch.status_code, 200)
+                handle = launch.json()
+                self.assertIn("id", handle)
+                self.assertEqual(handle["status"], "running")
+                jid = handle["id"]
+                # Poll — the empty-engagement path resolves in milliseconds.
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    row = c.get(f"/api/jobs/{jid}").json()
+                    if row["status"] != "running":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(row["status"], "done",
+                    f"async act/run stayed running: {row!r}")
+                self.assertIsNotNone(row["result"])
+                self.assertIn("looted", row["result"])
+                self.assertIn("summary", row["result"])
+        finally:
+            __import__("shutil").rmtree(empty, ignore_errors=True)
+
+    def test_spray_async_rejects_empty_targets(self):
+        """P7-C1: same 400-on-empty guard as the sync /api/spray. The
+        async variant reuses the same parse rules, so it must reject the
+        same shapes."""
+        with _client(self.eng) as c:
+            for body in ({}, {"targets": ""}, {"targets": []}):
+                r = c.post("/api/spray/async", json=body)
+                self.assertEqual(r.status_code, 400,
+                    f"expected 400 for empty-target body {body!r}, got {r.status_code}")
+                self.assertIn("targets required", r.json()["detail"])
+
+    def test_jobs_endpoint_carries_progress_field(self):
+        """P7-C5: /api/jobs rows include a `progress` key (null for
+        callable / short jobs; a {done, total, phase} dict once the
+        stdout-line parser has matched). A missing key would break the
+        frontend job cards."""
+        with _client(self.eng) as c:
+            rows = c.get("/api/jobs").json()
+            for row in rows:
+                self.assertIn("progress", row,
+                    f"job row missing 'progress' key: {row!r}")
+
 
 @unittest.skipUnless(_BUILT, "frontend not built (recce/webui/static absent)")
 class ShippedSpa(unittest.TestCase):

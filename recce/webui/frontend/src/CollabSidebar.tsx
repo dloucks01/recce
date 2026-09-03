@@ -35,6 +35,11 @@ interface Job {
   cmd: string;
   tester: string;
   started: number;
+  // P7-C5: throttled progress parsed from stdout. Null for short jobs
+  // (spray/act/run callable jobs, quick scans that never emitted the
+  // authoritative-target announcement). When present, `total` may
+  // still be null — render as "N done" chip without a bar.
+  progress?: { done: number; total: number | null; phase: string | null } | null;
 }
 
 // Backend emits activity as {ts, tester, kind, text} — kind is the discriminator,
@@ -145,6 +150,31 @@ export function CollabSidebar({ hosts, nav }: { hosts: Host[]; nav?: Nav }) {
                     {j.cmd.split(" ").slice(0, 3).join(" ")}
                   </div>
                   <div className="job-time">{timeAgo(j.started)}</div>
+                  {j.progress && (
+                    <div className="job-progress"
+                         title={j.progress.total != null
+                           ? `${j.progress.done} of ${j.progress.total} host(s) (${j.progress.phase || "…"})`
+                           : `${j.progress.done} host(s) done · total unknown`}>
+                      {j.progress.total != null ? (
+                        <>
+                          <div className="job-progress-bar">
+                            <div className="job-progress-fill"
+                                 style={{ width: `${Math.min(100,
+                                   Math.max(2, (j.progress.done / Math.max(1, j.progress.total)) * 100))}%` }} />
+                          </div>
+                          <div className="job-progress-label">
+                            {j.progress.done}/{j.progress.total}
+                            {j.progress.phase && <span className="muted"> · {j.progress.phase}</span>}
+                          </div>
+                        </>
+                      ) : (
+                        <div className="job-progress-label">
+                          {j.progress.done} done
+                          {j.progress.phase && <span className="muted"> · {j.progress.phase}</span>}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <button className="job-cancel"
                           title="cancel this running job"
                           onClick={async () => {

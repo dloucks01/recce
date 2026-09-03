@@ -324,6 +324,59 @@ export async function postSpray(targets: string, safe: boolean): Promise<SprayRe
   return r.json();
 }
 
+// --- P7-C1 async job handles (spray + act/run) -------------------------------
+// Non-blocking variants. Launch returns immediately with a job id; poll
+// /api/jobs/{id} until status flips out of "running" and the same result
+// shape the sync variant returns inline appears on `row.result`.
+export type JobHandle = { id: string; cmd: string; status: "running" | "done" | "failed" | "cancelled" };
+export type JobRow<R = unknown> = {
+  id: string; cmd: string;
+  status: "running" | "done" | "failed" | "cancelled";
+  started: number; ended: number | null;
+  returncode: number | null;
+  lines: number;
+  progress: { done: number; total: number | null; phase: string | null } | null;
+  result: R | null;
+};
+export async function postActRunAsync(): Promise<JobHandle> {
+  const r = await fetch("/api/act/run/async", { method: "POST", headers: jsonHeaders() });
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
+export async function postSprayAsync(targets: string, safe: boolean): Promise<JobHandle> {
+  const r = await fetch("/api/spray/async", {
+    method: "POST", headers: jsonHeaders(),
+    body: JSON.stringify({ targets: targets ? targets.split(/[\s,]+/).filter(Boolean) : [], safe }),
+  });
+  if (!r.ok) {
+    let msg = `${r.status}`;
+    try { const j = await r.json(); if (j?.detail) msg = j.detail; } catch { /* keep status */ }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+export async function getJob<R = unknown>(jid: string): Promise<JobRow<R>> {
+  const r = await fetch(`/api/jobs/${encodeURIComponent(jid)}`);
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
+/** Poll /api/jobs/{jid} until status leaves "running". Rejects on cancel
+ *  after `timeoutMs`; resolves with the final row (containing result). */
+export async function waitForJob<R = unknown>(jid: string,
+    { intervalMs = 500, timeoutMs = 15 * 60_000 }: { intervalMs?: number; timeoutMs?: number } = {}
+  ): Promise<JobRow<R>> {
+  const deadline = Date.now() + timeoutMs;
+  // Small initial delay so a very fast job (act/run on an empty engagement)
+  // finishes before the first poll — one round-trip instead of two.
+  await new Promise((r) => setTimeout(r, Math.min(intervalMs, 50)));
+  while (Date.now() < deadline) {
+    const row = await getJob<R>(jid);
+    if (row.status !== "running") return row;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`job ${jid} did not finish within ${Math.round(timeoutMs / 1000)}s`);
+}
+
 // weighted risk score for sorting hosts most-dangerous-first
 export function hostScore(f: Record<string, number>): number {
   return (f.critical || 0) * 1000 + (f.high || 0) * 100 + (f.medium || 0) * 10 + (f.low || 0);

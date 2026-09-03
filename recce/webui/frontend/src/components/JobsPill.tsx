@@ -6,6 +6,8 @@ type Job = {
   cmd: string;
   tester: string;
   started: number;
+  // P7-C5 addition — see CollabSidebar for the full contract.
+  progress?: { done: number; total: number | null; phase: string | null } | null;
 };
 
 /**
@@ -42,8 +44,24 @@ export function JobsPill() {
   if (running.length === 0) return null;
 
   const title = running
-    .map((j) => `${j.tester || "system"} · ${j.cmd.slice(0, 80)}`)
+    .map((j) => {
+      const bar = j.progress
+        ? (j.progress.total != null
+            ? ` · ${j.progress.done}/${j.progress.total}`
+            : ` · ${j.progress.done} done`)
+        : "";
+      return `${j.tester || "system"} · ${j.cmd.slice(0, 80)}${bar}`;
+    })
     .join("\n");
+
+  // P7-C5: aggregate progress across the running jobs — the widest bar wins
+  // so the header pill visibly moves even when multiple scans are up. When
+  // no job has a total, we omit the bar and just show the count.
+  const totalKnown = running.filter((j) => j.progress?.total != null);
+  const aggPct = totalKnown.length
+    ? Math.max(...totalKnown.map((j) => Math.min(100,
+        (j.progress!.done / Math.max(1, j.progress!.total!)) * 100)))
+    : null;
 
   const onClick = () => {
     // Prefer scrolling the drawer into view (P7-B2 rendered it as a
@@ -73,6 +91,12 @@ export function JobsPill() {
       <span className="jobs-pill-label">
         {running.length === 1 ? "scan running" : "scans running"}
       </span>
+      {aggPct != null && (
+        <span className="jobs-pill-bar">
+          <span className="jobs-pill-bar-fill"
+                style={{ width: `${Math.max(4, aggPct)}%` }} />
+        </span>
+      )}
     </button>
   );
 }

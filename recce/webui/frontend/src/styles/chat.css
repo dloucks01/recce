@@ -1027,3 +1027,21 @@
   border: 1px solid color-mix(in srgb, var(--crit) 30%, transparent);
   border-radius: 6px; display: flex; align-items: center; flex-wrap: wrap;
   gap: 4px; }
+
+/* P7-C5: per-job progress bar in the CollabSidebar's Scanning-now cards */
+.job-progress { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.job-progress-bar { position: relative; height: 4px; border-radius: 2px;
+  background: color-mix(in srgb, var(--muted) 25%, transparent);
+  overflow: hidden; }
+.job-progress-fill { position: absolute; top: 0; left: 0; height: 100%;
+  background: var(--accent); border-radius: inherit;
+  transition: width .4s ease-out; }
+.job-progress-label { font-size: 10px; color: var(--muted);
+  display: flex; align-items: baseline; gap: 4px; }
+
+/* P7-C5: aggregate mini bar embedded in the header JobsPill */
+.jobs-pill-bar { display: inline-block; height: 4px; width: 42px;
+  border-radius: 2px; overflow: hidden;
+  background: color-mix(in srgb, currentColor 25%, transparent); }
+.jobs-pill-bar-fill { display: block; height: 100%; background: currentColor;
+  border-radius: inherit; transition: width .4s ease-out; }
