@@ -357,7 +357,7 @@ findings by "Cloud + container" so the readers exist.
 - Data sources: web crawl findings, KEV list already annotated on
   Vuln.kev, exploit_note fields for OOB callback commands.
 
-### P1-7 — ADCS ESC1 auto-request (T3 gated) ✅ (2026-09-03, `<pending>`)
+### P1-7 — ADCS ESC1 auto-request (T3 gated) ✅ (2026-09-03, `74829b3`)
 Shipped as `recce/ad/adcs_exploit.py` (subprocess wrapper around
 `certipy req`) + `recce/webui/routes/adcs_esc1.py` (WebGUI endpoint
 with strict gating). Instead of the audit's `--exploit` CLI flag
