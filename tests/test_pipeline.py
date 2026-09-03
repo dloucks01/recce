@@ -1350,8 +1350,7 @@ class HostUpCertaintyTest(unittest.TestCase):
         self.assertNotIn("10.0.0.6", ips)         # unconfirmed phantom hidden
 
     def test_checklist_carries_legend_above_header_and_round_trips(self):
-        from recce.report.excel import (build_workbook, read_workbook_tracking,
-                                         CHECKLIST_TITLE)
+        from recce.report.excel import build_workbook, read_workbook_tracking
         h = Host(ip="10.0.0.5", subnet="10.0.0.0/24", state="up", enumerated=True,
                  ports=[Port(portid=445, service="smb", state="open", vuln_scanned=True)])
         with tempfile.TemporaryDirectory() as d:
@@ -4249,9 +4248,12 @@ class RsyncTest(unittest.TestCase):
     def test_findings_and_prove(self):
         from recce.services import rsync as R
         from recce.vuln import proofs
-        analysis = R.analyze([Host(ip="127.0.0.1",
-                                   ports=[Port(portid=self.port, state="open",
-                                               service="rsync")])], active=True)
+        # analyze() is called for its side effects (parses the probe result
+        # into R's own module cache); the return value isn't consumed here
+        # because the assertions below re-derive from list_modules directly.
+        R.analyze([Host(ip="127.0.0.1",
+                        ports=[Port(portid=self.port, state="open",
+                                    service="rsync")])], active=True)
         # is_rsync gates on port 873; drive findings directly off the probe instead.
         pr = {("10.0.8.8", 873): R.list_modules("127.0.0.1", self.port, 3.0)}
         for m in pr[("10.0.8.8", 873)]["modules"]:
@@ -4369,7 +4371,6 @@ class NfsTest(unittest.TestCase):
     def test_recv_record_bounds_hostile_fragments(self):
         # Regression (audit): a never-last fragment stream must terminate, not hang.
         from recce.services import nfs as N
-        import io
         class _FakeSock:
             def __init__(self):
                 self.n = 0

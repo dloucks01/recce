@@ -146,7 +146,6 @@ class ApiShape(unittest.TestCase):
 
     def test_chat_endpoints_text_and_image(self):
         """Team chat: post text + a pasted image (stored on disk, served back), history."""
-        import base64
         PNG = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhf"
                "DwAChwGA60e6kgAAAABJRU5ErkJggg==")
         with _client(self.eng) as c:

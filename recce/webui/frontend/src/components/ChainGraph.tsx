@@ -173,6 +173,16 @@ export function ChainGraph(
                className="chain-node"
                transform={`translate(${n.x}, ${n.y})`}
                onClick={() => onSelect?.(n.id)}
+               onKeyDown={(ev) => {
+                 // Nodes are role=button + tabIndex=0, so the focus ring
+                 // lands on them naturally. Wire Enter + Space to fire
+                 // the same handler as click — otherwise a keyboard user
+                 // can tab TO a step but never activate it.
+                 if (ev.key === "Enter" || ev.key === " ") {
+                   ev.preventDefault();
+                   onSelect?.(n.id);
+                 }
+               }}
                tabIndex={0}
                role="button"
                aria-label={`${n.title} — ${meta.label}`}>

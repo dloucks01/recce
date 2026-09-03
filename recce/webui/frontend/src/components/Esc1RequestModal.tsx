@@ -45,6 +45,16 @@ export function Esc1RequestModal(
   const [avail, setAvail] = useState<AdcsEsc1Available | null>(null);
   const [availErr, setAvailErr] = useState<string | null>(null);
 
+  // Escape closes the modal — standard pattern, users expect it. The
+  // .modal-backdrop onClick already handles click-outside; Esc covers
+  // the keyboard case. Listener bound at document level so it fires
+  // regardless of which element has focus.
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const [template, setTemplate] = useState(templateHint);
   const [ca, setCa] = useState(caHint);
   const [dcIp, setDcIp] = useState(dcIpHint);
@@ -169,8 +179,11 @@ export function Esc1RequestModal(
               </label>
               <label>
                 <span>Template</span>
+                {/* autofocus the first user-editable input so a keyboard
+                    user can start typing straight after the modal opens */}
                 <input value={template} onChange={(e) => setTemplate(e.target.value)}
-                       placeholder="e.g. VulnerableUserAuth" disabled={busy} />
+                       placeholder="e.g. VulnerableUserAuth" disabled={busy}
+                       autoFocus />
               </label>
               <label>
                 <span>CA name</span>
