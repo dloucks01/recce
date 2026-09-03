@@ -115,17 +115,17 @@ def test_remove_finding_leaves_host_with_no_vulns(store):
 
 
 def test_remove_finding_by_tracking_row_key(store):
-    """The WebGUI + report + tracking-sheet all address findings by
-    ``tracking.vuln_row_key(v)`` (the ``"vuln:{ip}:{port}:{script}:{title[:60]}"``
-    row-key format). Historically remove_finding matched only against the
-    bare ``v.key`` and every /api/delete/finding round-trip 404'd — the
-    frontend can only send the row-key form. Guard both shapes."""
+    """P7-B5: `Vuln.key` and `tracking.vuln_row_key(v)` now return the
+    SAME canonical "vuln:{ip}:{port}:{script}:{title[:60]}" string —
+    the two shapes were unified so `remove_finding` has one thing to
+    match instead of a fallback branch. This test locks the identity
+    in and confirms deletion by the shared shape still lands."""
     from recce.core.tracking import vuln_row_key
     v = _vuln("10.0.0.1", 22, "ssh-weak", "Weak SSH key")
     store.upsert_host(_host("10.0.0.1", vulns=[v]))
     row_key = vuln_row_key(v)
-    assert row_key.startswith("vuln:"), "sanity: tracking row key carries the prefix"
-    assert row_key != v.key, "sanity: bare v.key does NOT carry the prefix"
+    assert row_key.startswith("vuln:"), "sanity: canonical key carries the prefix"
+    assert row_key == v.key, "P7-B5: Vuln.key must match vuln_row_key exactly"
     assert store.remove_finding("10.0.0.1", row_key) is True
     h = store.get_host("10.0.0.1")
     assert h is not None

@@ -444,20 +444,11 @@ class Store:
     # --- scope (every subnet in the engagement, so none is missed) --------------
 
     def remove_finding(self, ip: str, vuln_key: str) -> bool:
-        """Remove a single finding from a host by its vuln key. Loads the host,
-        filters out the matching vuln, and saves back without merge.
-
-        Accepts either canonical key shape:
-          * `tracking.vuln_row_key(v)` — the "vuln:{ip}:{port}:{script}:{title[:60]}"
-            format the WebGUI + report + tracking-sheet write out (the row key
-            testers actually see);
-          * bare `v.key` — the internal "{ip}:{port}:{script}:{title[:60]}"
-            format that models.Vuln.key returns.
-        Historically only the second was matched, so every /api/delete/finding
-        call from the WebGUI 404'd — the frontend sends the tracking row key.
+        """Remove a single finding from a host by its canonical `Vuln.key`
+        (the "vuln:{ip}:{port}:{script}:{title[:60]}" shape the WebGUI +
+        report + tracking-sheet all write out — P7-B5 unified this with
+        the model's `.key` property, so there's now one shape to match).
         """
-        # Local import to avoid a core->core.tracking cycle at module load.
-        from .tracking import vuln_row_key
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             host = self.get_host(ip)
@@ -465,8 +456,7 @@ class Store:
                 self.conn.rollback()
                 return False
             before = len(host.vulns)
-            host.vulns = [v for v in host.vulns
-                          if v.key != vuln_key and vuln_row_key(v) != vuln_key]
+            host.vulns = [v for v in host.vulns if v.key != vuln_key]
             if len(host.vulns) == before:
                 self.conn.rollback()
                 return False

@@ -91,13 +91,10 @@ def test_delete_finding(client):
     findings = data["items"]
     assert len(findings) > 0
     f = findings[-1]
-    # The API's "key" is vuln_row_key (prefixed "vuln:"), but remove_finding
-    # compares against Vuln.key (no prefix). Strip the prefix.
-    vuln_key = f["key"]
-    if vuln_key.startswith("vuln:"):
-        vuln_key = vuln_key[len("vuln:"):]
+    # P7-B5: the API's "key" IS the canonical Vuln.key (both now the
+    # same "vuln:..." string). Send it verbatim — no prefix-strip.
     r = client.post("/api/delete/finding", json={
-        "ip": f["ip"], "key": vuln_key,
+        "ip": f["ip"], "key": f["key"],
     }, headers={"X-Tester": "pytest"})
     assert r.status_code == 200
     assert r.json()["ok"] is True
@@ -377,9 +374,14 @@ def test_scan_context_reports_qualifying_hosts_per_command(client):
     body = r.json()
     assert body["hosts"] > 0
     cmds = body["commands"]
-    # Every registered service module is represented, plus web/api.
+    # Every registered service module WITH a `*_targets()` predicate is
+    # represented, plus the web-wide catch-alls. `cloud_metadata` is
+    # excluded because its scan piggybacks on any HTTP host (a live
+    # SSRF finding, not a target-list function) so the module
+    # intentionally has no `*_targets()`; `api` is web-wide.
     from recce.cli._service_helpers import _MODULE_PATH
-    assert set(cmds) >= (set(_MODULE_PATH) | {"web", "api"}) - {"api"}
+    excluded = {"api", "cloud_metadata"}
+    assert set(cmds) >= (set(_MODULE_PATH) | {"web", "api"}) - excluded
     for entry in cmds.values():
         assert isinstance(entry["count"], int)
         assert len(entry["sample"]) <= 8

@@ -172,19 +172,16 @@ def vuln_key(ip: str, port: Any, script_id: str) -> str:
 
 
 def vuln_row_key(v: Any) -> str:
-    """The single canonical key for a Vulnerabilities-sheet row, used by BOTH the
-    sheet writer and coverage counting so a triaged finding is actually counted.
-    (The two sites used different keys - script_id vs script_id+title - so the
-    Triaged tick was invisible to compute_coverage.) Keys live in one place.
+    """The single canonical key for a Vulnerabilities-sheet row.
 
-    The title slice must match models.Vuln.key's (60 chars): the store dedups
-    vulns on title[:60], so a coarser key here would collapse two store-distinct
-    findings into one Vulnerabilities row and undercount coverage. Mirror its
-    protocol handling too (appended only for non-tcp) so a udp finding kept
-    distinct by the store gets its own row rather than collapsing onto a tcp one."""
-    base = vuln_key(v.ip, v.port, f"{v.script_id}:{(v.title or '')[:60]}")
-    proto = (getattr(v, "protocol", "") or "tcp").lower()
-    return base if proto == "tcp" else f"{base}:{proto}"
+    P7-B5: `models.Vuln.key` now returns the same "vuln:..." string as this
+    function, so the two shapes have been unified. This is a thin alias
+    kept only so existing callers (excel writer, coverage counter, retest
+    diff, prove_dispatch, WebUI keying) don't have to be touched — each
+    reads the key via this helper regardless of whether it has a Vuln
+    dataclass or a lookalike duck-type. New code should prefer
+    `v.key` directly."""
+    return v.key
 
 
 def exploit_key(ip: str, port: Any, edb_id: str) -> str:

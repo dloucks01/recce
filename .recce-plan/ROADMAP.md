@@ -216,7 +216,7 @@ implemented. Written to `.recce-plan/audit/p0_2_missing_capabilities.md`
 with a prioritized cherry-pick order (top: `http-method-trace`,
 `web-security-headers`, `api-openapi-spec-exposed`).
 
-### P0-3 — Fix the bmc Vagrant canary (UDP)
+### P0-3 — Fix the bmc Vagrant canary (UDP) ✅ (already shipped in `tests/conftest.py`; roadmap now marked)
 **Effort:** XS (10 lines)
 **Blocks:** Phase 10 Vagrant-lane tests.
 **Why:** IPMI 623/udp can't be probed by TCP connect. Currently every
@@ -232,7 +232,7 @@ with a prioritized cherry-pick order (top: `http-method-trace`,
 4. Add a small unit test in `tests/test_env_gate_markers.py` that
    asserts an unreachable UDP probe returns False without exception.
 
-### P0-4 — Rename or consolidate the old Exploitation tab
+### P0-4 — Rename or consolidate the old Exploitation tab ✅ (resolved by the IA restructure — `exploit` → `attack/surface` via `LEGACY_TO_NEW`; `plan/actions` is now the old Exploitation view)
 **Effort:** XS (grep + rename)
 **Blocks:** Nothing.
 **Why:** `exploit` (old attack-plan panel) and `surface` (new
@@ -246,7 +246,7 @@ Exploit Surface) confuse in the tab bar.
 
 User picks A or B; whichever, ~40 lines of changes across 3-5 files.
 
-### P0-5 — ExploitSurfaceCallout empty-flash on fresh load
+### P0-5 — ExploitSurfaceCallout empty-flash on fresh load ✅ (`loaded` state guard already in `ExploitSurface.tsx`)
 **Effort:** XS
 **Blocks:** Nothing.
 **Why:** The callout renders empty for ~500ms while the API round-trip
@@ -533,7 +533,22 @@ current one highlighted. Switch reloads the SPA with `?eng=<slug>`.
 Backend gains `/api/engagements` (list) and `/api/engagement/switch`
 (POST) endpoints.
 
-#### P7-B5 — Canonicalise `Vuln.key` shape
+#### P7-B5 — Canonicalise `Vuln.key` shape ✅ (2026-09-03, `<pending>`)
+Unified `Vuln.key` and `tracking.vuln_row_key(v)` — both now return the
+same `"vuln:{ip}:{port}:{script}:{title[:60]}"` string (plus `":<proto>"`
+for non-tcp). `tracking.vuln_row_key` becomes a thin alias
+(`return v.key`) so its 13+ callers stay unchanged. `Store.remove_finding`
+dropped its dual-shape fallback branch — one canonical match to check.
+`test_webui_manage::test_delete_finding` and
+`tests/test_store_delete::test_remove_finding_by_tracking_row_key`
+updated to reflect the unified shape.
+
+Bonus: fixed an unrelated stale test expectation in
+`test_scan_context_reports_qualifying_hosts_per_command` — the P7-A3
+addition of `cloud_metadata` to `_MODULE_PATH` made the previous
+`>= (_MODULE_PATH | {web,api}) - {api}` assertion fail because
+`cloud_metadata` module has no `*_targets()` predicate by design
+(it piggybacks on any HTTP host). Test now excludes it explicitly.
 Two shapes in use today:
   * `models.Vuln.key` (bare `"{ip}:{port}:{script}:{title[:60]}"`)
   * `tracking.vuln_row_key(v)` (`"vuln:…"` prefix)

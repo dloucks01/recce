@@ -144,12 +144,19 @@ class Vuln:
 
     @property
     def key(self) -> str:
+        # P7-B5: canonical Vulnerabilities-row key — the SAME shape
+        # `tracking.vuln_row_key(v)` returns and the shape every WebUI
+        # / report / tracking-sheet endpoint hands out. The `vuln:`
+        # namespace prefix prevents string collisions with other row
+        # kinds (svc:, exploit:, acct:) when keys are mingled in a
+        # single collab notes/dismiss map.
+        #
         # Include the title so multiple findings on one port (e.g. several
         # version-db matches) don't collide and get deduped away. Append the
         # protocol only when it isn't the default tcp, so a udp finding can't
         # collapse onto a distinct tcp finding on the same port/script/title
         # while existing tcp keys stay stable (same pattern as tracking.acct_key).
-        base = f"{self.ip}:{self.port}:{self.script_id}:{self.title[:60]}"
+        base = f"vuln:{self.ip}:{self.port or 0}:{self.script_id}:{self.title[:60]}"
         proto = (self.protocol or "tcp").lower()
         return base if proto == "tcp" else f"{base}:{proto}"
 
