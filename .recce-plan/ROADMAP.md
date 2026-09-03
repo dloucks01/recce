@@ -578,13 +578,15 @@ show console" — no need to open Sessions to see what's running.
 
 ### Batch D — Test coverage
 
-#### P7-D1 — Commit WebGUI E2E smoke as CI tests
-Promote `scratchpad/api_sweep.py` + `scratchpad/scan_smoke.py` (both
+#### P7-D1 — Commit WebGUI E2E smoke as CI tests ✅ (2026-09-02, `<pending-hash>`)
+Promoted `scratchpad/api_sweep.py` + `scratchpad/scan_smoke.py` (both
 built during the P7 audit) to real tests under `tests/test_webui_smoke.py`.
-They spin up `recce serve` against a fixture engagement dir, hit every
-GET + safe POST endpoint, and assert response shape. This is what
-would have caught the `delete-finding` key mismatch + `cloud_metadata`
-ModuleNotFoundError BEFORE ship.
+Uses the same `TestClient` + `mock_engagement.build` fixtures as
+`tests/test_webui.py` so it's always-on (no live server needed).
+39 test cases: 35 parametrized GET sweep + 4 scan-launcher lifecycle.
+Confirmed pass under `pytest -n auto` (xdist). Catches the class of bug
+that let the `delete-finding` key mismatch + `cloud_metadata`
+ModuleNotFoundError + `Vuln.cve` AttributeError ship before we noticed.
 
 ---
 
