@@ -417,22 +417,28 @@ scheduled hashcat runbook + watcher that auto-updates the
 
 ## P2
 
-### P2-1 — Deferred capabilities from Phase 5a audit (~370 medium/low)
+### P2-1 — Deferred capabilities from Phase 5a audit (~370 medium/low) ⏸ (intentionally deferred)
 Each of the 34 existing services had capability gaps identified in
 Phase 5a; only critical-tier landed in Phase 5b. The medium/low pool
 is in the same audit files' `missing_capabilities` arrays where
 `value in ("medium","low")`.
 
 **Effort:** XL (multiple sessions, similar fan-out pattern to 5b).
-**Recommendation:** deprioritize unless a specific engagement calls
-for depth in a specific protocol.
+**Status:** deferred. Speculative capability adds without a specific
+engagement calling for the protocol depth waste weekly-limit tokens
+on breadth over usefulness. The 30-item cherry-pick list produced
+by P0-2 (`.recce-plan/audit/p0_2_missing_capabilities.md`) is the
+starting point for a cherry-pick pass — prioritise the http /
+web / api entries where the CVE reach is highest, one probe at a
+time as engagement demand surfaces.
 
-### P2-2 — Deferred capabilities from Tier 1/2/3 impl agents
+### P2-2 — Deferred capabilities from Tier 1/2/3 impl agents ⏸ (intentionally deferred)
 Each Tier 1/2/3 service module returned `capabilities_deferred`.
 Notable ones:
 - SSH: `pubkey_hassig_false_probe` (needs post-NEWKEYS transport
-  crypto — non-trivial), `hostkey_reuse_correlation` (needs the new
-  known_hostkeys reader — already exists now! could ship).
+  crypto — non-trivial), `hostkey_reuse_correlation` — **✅ SHIPPED**
+  (see `known_hostkeys.reused` + `ssh_hostkey_reused` finding at
+  `recce/services/ssh.py:1112`).
 - MySQL: sha256_password RSA-OAEP + X Protocol.
 - HTTP: Log4Shell OOB, request smuggling active PoC, HTTP/2 rapid
   reset, Spring4Shell.
@@ -441,38 +447,29 @@ Notable ones:
 - Every other new module has 5-15 deferred items in the same shape.
 
 **Effort:** XL. Each item is a distinct engineering choice.
-**Recommendation:** cherry-pick the 2-3 highest-KEV ones per module
-in a "T2/T3 hardening" pass rather than tackle wholesale.
+**Status:** deferred. Same reasoning as P2-1 — cherry-pick per
+engagement, not fan-out.
 
-### P2-3 — BloodHound push
-Read is done; push (write BloodHound-compat JSON so the tester can
-overlay live scan data on their BloodHound instance) would close a
-loop.
+### P2-3 — BloodHound push ✅ (shipped; `recce/ad/bloodhound_push.py` + `cmd_bloodhound_push` CLI + `webui/routes/bloodhound_export.py` — writes BloodHound-compat JSON for overlay)
 
-### P2-4 — `--suggest-only` mode
-One CLI flag that says "don't scan, tell me what I should run given
-what recce already knows" — pulls entirely from shared surfaces +
-audit's tester_next_step. GUI-render-only.
+### P2-4 — `--suggest-only` mode ✅ (shipped as `recce suggest` CLI subcommand — "print the ranked next-moves digest (no scan)" — thin wrapper over the shared surfaces + audit `tester_next_step`)
 
-**Effort:** S if built as a thin CLI wrapper over
-`/api/scan/suggestions` + `/api/exploit-surface`.
+### P2-5 — `recce prove` uplift ✅ (shipped; `cli/_act.py::cmd_prove` reads depth_tier, auto-promotes t0/t1 → t2 when a proof CONFIRMS the finding, populates `Vuln.output` with the proof-verdict evidence lines, and reports the count via `Promoted N finding(s) to depth_tier='t2'`)
 
-### P2-5 — `recce prove` uplift
-Wire it to consume `depth_tier` — only try to prove T1s that could
-become T2s (audit knows which). It'd auto-promote findings as the
-tester runs it.
+### P2-6 — Shared-surface consumers noted but not built ✅ (all 5 shipped)
+- `known_apop_challenges` (POP3 producer + hashloot consumer) —
+  module at `recce/creds/known_apop_challenges.py`
+- `known_ntlm_endpoints` (POP3/IMAP producers) —
+  `recce/core/known_ntlm_endpoints.py`
+- `known_uploaded_shells` (WebDAV canary tracking) —
+  `recce/creds/known_uploaded_shells.py`
+- `firmware_versions` (S7 + ENIP + BACnet + DNP3 unification via
+  `known_ot_assets` projection) — `recce/core/firmware_versions.py`,
+  docstring names every producer
+- `known_bacnet_networks` (topology) —
+  `recce/core/known_bacnet_networks.py`
 
-### P2-6 — Shared-surface consumers noted but not built
-- `known_apop_challenges` (POP3 → hashloot categories exist but no
-  producer wire)
-- `known_ntlm_endpoints` (POP3/IMAP → relay_targets extension)
-- `known_uploaded_shells` (WebDAV canary tracking)
-- `firmware_versions` (S7 + BACnet + DNP3 unification)
-- `known_bacnet_networks` (topology)
-
-Each is a small reader + 1-2 producer wires.
-
-### P2-7 — Skip services from Phase 9 plan
+### P2-7 — Skip services from Phase 9 plan ⏸ (documented decision, not work)
 - Real vSphere / vCenter (no viable local repro)
 - Real Siemens S7-1200 CPU (snap7-server covers 80%)
 - Real BGP peer AS (BIRD covers wire, not propagation)
@@ -481,6 +478,8 @@ Each is a small reader + 1-2 producer wires.
 These stay documented in `test_env/vagrant/README.md`. Building
 integration-only fallback via `RECCE_INT_*` env-var-URL config for
 real hardware in specific engagements is a P2 item.
+**Status:** decision-only, no code work — kept here so future
+sessions know the choice was deliberate.
 
 ---
 
