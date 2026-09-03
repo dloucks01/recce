@@ -25,6 +25,49 @@ recce ad loot.zip -u alice -p 'Passw0rd!' -d corp.local --dc-ip 10.0.10.10 \
      --roast --asrep --dcsync --screenshots -o eng
 ```
 
+## ADCS ESC1 auto-request (web workbench)
+
+Once `recce ad certipy.json …` has imported an ESC1-vulnerable template AND
+the credential store has an AD principal that can enroll on it, the web
+workbench's **AD attack chain** gets a 🎯 **Attempt ESC1 request** button
+on the `adcs_esc` step. Clicking it opens a form (principal picker from
+store, template / CA / DC IP / target UPN inputs), asks for an explicit
+"Run certipy req (intrusive)" confirm, and shells out to `certipy req`.
+
+On success the returned PFX lands under `<eng>/session-loot/adcs/` **and**
+a new `Credential(kind="cert")` folds into the store — the AD chain's
+`da_path` step naturally advances on the next fetch.
+
+Three protections apply at the endpoint (`POST /api/adcs/esc1/attempt`):
+
+1. **Exact-string confirm sentinel** — body must carry the exact string
+   `"yes-run-certipy"`, not a boolean. A JS-side `confirm: true` replay
+   is refused. The sentinel is discoverable via
+   `GET /api/adcs/esc1/available`.
+2. **Store-lookup credentials** — the endpoint does NOT accept a password
+   in the request body. The WebGUI names the AD principal; recce looks
+   the credential up in its own store.
+3. **Clean-fail on missing certipy** — returns 200 + `{ok:false,
+   error:"certipy not installed — install with pip install certipy-ad"}`
+   rather than a 500, so the UI renders the install hint inline.
+
+Requires **certipy** (`pip install certipy-ad`) on the recce host. See
+[webui.md](webui.md#adcs-esc1-auto-request-ad-chain) for the full flow.
+
+## Auto-crack loop
+
+Recce ships a **crack watcher** (`recce/creds/crack_watcher.py`) that
+polls hashcat's default potfiles in the background — every time you crack
+a Kerberos or NTLM hash recce holds, the plaintext folds back into the
+credential store as `Credential(kind="password", source="cracked")`.
+That lands the cred in the spray plan and advances the AD chain's
+`cred_acquired` step naturally.
+
+The header **Autocrack pill** in the web workbench (see
+[webui.md](webui.md#header)) shows the watcher's queue and recent
+promotions. No CLI required — the watcher runs as a background task
+inside `recce serve`.
+
 ## Credentialed enumeration (`credenum`)
 
 Authenticated checks nmap can't do — tool-gated, degrades cleanly when absent:

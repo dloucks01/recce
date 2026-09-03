@@ -130,6 +130,24 @@ python -m recce couchdb -o eng         # or one engine
 python -m recce influxdb -o eng
 ```
 
+## OT / ICS (`s7`, `bacnet`, `dnp3`, `enip`, `iec104`, `opcua`, `modbus`)
+
+Native stdlib deep modules for OT protocols — hand-rolled wire clients, no external ICS libraries needed, airgapped:
+
+- **`s7`** (102/tcp, Siemens ISO-on-TCP) — COTP + S7COMM SetupCommunication + SZL identity read (order code, hardware version, firmware). **CVE fingerprint with firmware-band verification** — CVE-2020-15782 (S7-1200 memory R/W) promotes to T2 only when SZL 0x0011 reports firmware below the V4.5 mitigation cutoff. S7-300/400/1500 CVEs stay at T1 (MLFB family match only).
+- **`bacnet`** (47808/udp) — Who-Is / I-Am + Device Object read; enumerates analog values, file objects, firmware revision. Feeds `firmware_versions` shared surface + `known_bacnet_networks` topology.
+- **`dnp3`** (20000/tcp) — REQUEST_LINK_STATUS + FC1 Class 0 read; leaks device attribute group (vendor, model, firmware).
+- **`enip`** (44818/tcp, Rockwell EtherNet/IP) — List Identity / Services / RegisterSession + follow-on class reads (TCP/IP 0xF5, EthernetLink 0xF6, Identity 0x01). Detects unauth CIP sessions + I/O traffic exposure on UDP/2222.
+- **`iec104`** (2404/tcp) — APCI STARTDT + General Interrogation; confirms outstation + reads status objects.
+- **`opcua`** (4840/tcp) — GetEndpoints + FindServers + FindServersOnNetwork; enumerates SecurityPolicy=None endpoints + LDS-ME server inventory. Anonymous browse when SecurityMode=None.
+- **`modbus`** (502/tcp) — Function-code enumeration + slave-id sweep + coil/register read.
+
+```bash
+python -m recce s7 -o eng        # port 102 targets only
+python -m recce bacnet -o eng    # UDP 47808 — needs `enum -U` first
+python -m recce opcua -o eng
+```
+
 ## Web & web-app (`recce web` / `recce api`)
 
 `recce web` deep-enumerates every HTTP/S endpoint (stdlib, no external tools); `recce api` focuses the API angle. Both feed Vulnerabilities + prove engine. All read-only unless noted:

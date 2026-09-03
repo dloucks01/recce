@@ -24,11 +24,16 @@ Run `recce -h` for the full list, `recce <command> -h` for one command's options
 | `exploitplan` | Ready-to-run msf `.rc` + tool commands for confirmed findings | `--lhost`, `--lport`, `--run` |
 | `poc [CVEs]` | Per-CVE PoC dossier + harness skeleton from offline intel | `--confirmed`, `--with-exploits` |
 | `attackpath` | Chain confirmed findings into a staged attack path | — |
+| `act` | Ranked action plan; `--run` executes the safe / reversible half | `--host IP`, `--only ARCHETYPE`, `--top N`, `--run` |
+| `prove` | Verdict engine — promotes findings to CONFIRMED on real proof + fills evidence | `--run` |
+| `suggest` | Print the ranked next-moves digest (no scan) — cross-service chain rules + T3-capable findings | — |
+| `verify` | Refresh KEV / EPSS / vulndb snapshots from disk | — |
+| `bloodhound-push` | Write BloodHound-compat JSON for overlay onto an existing BloodHound instance | — |
 | `creds` | Captured credentials + spray plan | `--add`, `--plan` |
-| `serve` | Web workbench (browser UI, multi-tester) | `--host`, `--port` |
+| `serve` | Web workbench (browser UI, multi-tester) — see [webui.md](webui.md) | `--host`, `--port` |
 | `report` | Rebuild workbook/reports from datastore | — |
 | `status` | Print coverage + suggested next command | — |
 
-Each protocol also has its own deep-enum command: `smb`, `ftp`, `mssql`, `mysql`, `postgres`, `mongodb`, `redis`, `elasticsearch`, `memcached`, `couchdb`, `influxdb`, `cassandra`, `oracle`, `db2`, `snmp`, `ldap`, `nfs`, `rsync`, `kerberos`, `docker`, `k8s`, `web`, `api`, `dns`, `smtp`. See [services.md](services.md).
+Each protocol also has its own deep-enum command: `smb`, `ftp`, `mssql`, `mysql`, `postgres`, `mongodb`, `redis`, `elasticsearch`, `memcached`, `couchdb`, `influxdb`, `cassandra`, `oracle`, `db2`, `snmp`, `ldap`, `nfs`, `rsync`, `kerberos`, `docker`, `k8s`, `web`, `api`, `dns`, `smtp`, plus OT/ICS: `s7`, `bacnet`, `dnp3`, `enip`, `iec104`, `opcua`, `modbus`. See [services.md](services.md).
 
 **Environment:** `RECCE_DEBUG=1` (full tracebacks), `RECCE_BROWSER=/path` (screenshot browser). **Exit codes:** `0` ok, `1` error, `2` bad args, `130` interrupted.

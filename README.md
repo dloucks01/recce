@@ -1,19 +1,21 @@
 # recce
 
-Pentest enumeration, vulnerability triage, and reporting — designed for airgapped engagements.
+Pentest enumeration, vulnerability triage, exploitation, and reporting — designed for airgapped engagements.
 
-`recce` orchestrates nmap across hosts and subnets, normalizes everything into a resumable SQLite datastore, and produces a tracking-ready Excel workbook, HTML report, network diagrams, and per-finding DOCX write-ups.
+`recce` scans networks, normalises everything into a resumable SQLite datastore, feeds a shared browser workbench, and produces a tracking-ready Excel workbook, HTML report, network diagrams, and per-finding DOCX write-ups. Stdlib-only at runtime — no pip install required.
 
-## Capabilities
+## What it does
 
-- **Scan & enumerate** — TCP/UDP sweeps, service/version/OS detection, deep NSE across many subnets
-- **Vulnerability identification** — offline version-to-CVE/CWE engine, HTTP/TLS probes, web content discovery, CISA KEV + EPSS prioritization
-- **Deep service modules** — native per-service scanners (databases, web, SMB, FTP, Docker, Kubernetes, SNMP, LDAP, and more) with credentialed follow-through, data exfiltration proof, and RCE validation
-- **Active Directory** — DC identification, NTLM relay targets, LDAP enumeration, BloodHound + Certipy import with shortest-path-to-DA mapping
-- **Exploit plans & attack paths** — Metasploit `.rc` files, tool commands, and a prioritized kill-chain grounded in confirmed findings
-- **Shell sessions** — built-in reverse-shell listener with browser terminals, PTY upgrade, persistence tracking, and team-shared session management
-- **Web workbench** — `recce serve` hosts the engagement as a shared browser UI with live scan control, findings triage, credential spray, and team coordination
-- **Reporting** — Excel workbook with persistent review tracking, HTML, Markdown, CSV, network maps, DOCX write-ups
+- **Discover & enumerate** — TCP/UDP sweeps, service/version/OS detection, deep NSE across many subnets
+- **Prove vulnerabilities** — offline version-to-CVE engine + live probes with server-side evidence + CISA KEV & EPSS prioritisation, then a **verdict engine** (`recce prove`) that promotes findings to `confirmed` on real proof
+- **Deep service modules** — native per-service scanners for databases, web, SMB, FTP, Docker, Kubernetes, SNMP, LDAP, and OT/ICS (S7, BACnet, DNP3, ENIP, IEC 104, OPC UA)
+- **Active Directory** — DC identification, LDAP enum, BloodHound + Certipy import with shortest-path-to-DA, live Kerberoasting, **ADCS ESC1 auto-request** (strictly gated)
+- **Attack chains** — AD, Cloud, and Web narratives rendered as a step-by-step chain from proven evidence, with a DAG view + click-to-jump navigation
+- **Cross-service intelligence** — 18 chain-correlation rules surface next moves like "LDAP anon-read + AS-REP roastable → run kerbrute → GetNPUsers → hashcat"; T3-capable findings auto-surface with their next-step command
+- **Shell sessions** — built-in reverse-shell listener, browser terminals, PTY upgrade, SOCKS pivots, port-forwards, persistence tracking, team-shared session driver
+- **Auto-crack loop** — hashcat potfiles polled continuously; cracks fold back into the credential store as sprayable password credentials
+- **Web workbench** — `recce serve` hosts the whole engagement as a shared browser UI with live scan control, findings triage, credential spray, attack-chain navigation, and team coordination
+- **Reporting** — Excel with persistent review tracking, HTML, Markdown, CSV, network maps, DOCX write-ups, and a fieldkit round-trip for the past-the-trigger half
 
 ## Install
 
@@ -23,7 +25,7 @@ Pentest enumeration, vulnerability triage, and reporting — designed for airgap
 ./bin/recce doctor       # check the box
 ```
 
-Only `nmap` is required. Optional tools (`masscan`, `searchsploit`, `netexec`, `impacket`, `ldapsearch`, `ssh`/`sshpass`, `firefox`/`chromium`) are used when present, with clean degradation when absent. `recce doctor` reports what's available.
+Only `nmap` is required. Optional tools (`masscan`, `searchsploit`, `netexec`, `impacket`, `ldapsearch`, `ssh`/`sshpass`, `certipy`, `hashcat`, `firefox`/`chromium`) are used when present, with clean degradation when absent. `recce doctor` reports what's available.
 
 ### Airgap transfer
 
@@ -40,20 +42,21 @@ The bundle freezes the Python runtime, dependencies, nmap, masscan, and ldapsear
 sudo ./bin/recce enum 10.0.10.0/24 -o eng    # discover hosts/ports/services
 sudo ./bin/recce vulns -o eng                 # vuln-scan open ports
 ./bin/recce sweep -o eng                      # deep pass — every applicable module
-./bin/recce status -o eng                     # what's left
+./bin/recce serve -o eng --port 8443          # open the web workbench
 ```
 
-Open `eng/enumeration.xlsx` and work the Checklist tab. Full walkthrough in [QUICKSTART.md](QUICKSTART.md).
+Open `eng/enumeration.xlsx` or point a browser at `http://<box>:8443`. Full walkthrough in [QUICKSTART.md](QUICKSTART.md).
 
 ## Documentation
 
 | Doc | What it covers |
 | --- | --- |
 | [QUICKSTART.md](QUICKSTART.md) | Zero to a filled-in workbook in five commands |
-| [CHEATSHEET.html](CHEATSHEET.html) | Printable one-page field reference |
-| [docs/](docs/README.md) | Full reference: commands, phases, services, design |
-| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Symptom, cause, fix — per phase |
-| [INTEGRATION.md](INTEGRATION.md) | Fieldkit round-trip (recce ranks, fieldkit proves past the trigger, findings fold back) |
+| [docs/reference/webui.md](docs/reference/webui.md) | Web workbench: tabs, attack chains, sessions, ESC1 |
+| [docs/](docs/README.md) | Full reference: commands, phases, services, AD, packaging |
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Symptom → cause → fix, per phase |
+| [INTEGRATION.md](INTEGRATION.md) | Fieldkit round-trip (recce ranks, fieldkit proves past the trigger) |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
 
 ## Layout
 
@@ -61,26 +64,26 @@ Open `eng/enumeration.xlsx` and work the Checklist tab. Full walkthrough in [QUI
 bin/recce               launcher
 recce/
   cli/                  command dispatch + per-phase modules
-  core/                 models, datastore, scanner engine, targets
+  core/                 models, datastore, scanner engine, targets, shared surfaces
   vuln/                 offline CVE/CWE engine, KEV/EPSS, verify
-  services/             per-service scanners (db/, web/, smb, ftp, ldap, ...)
-  ad/                   Active Directory (BloodHound, Kerberos, LDAP/NTLM)
-  act/                  exploit plan + attack-path synthesis
-  sessions/             reverse-shell listener, session manager
+  services/             per-service scanners (db/, web/, smb, ftp, ldap, s7, opcua, ...)
+  ad/                   Active Directory (BloodHound, Kerberos, LDAP/NTLM, ADCS ESC1)
+  act/                  ranked action plan + attack-path synthesis + verdict engine
+  sessions/             reverse-shell listener, session manager, tunnels, port-forwards
   intake/               parsers for external tool output
   report/               Excel, HTML, Markdown, CSV, DOCX, network maps
-  creds/                credential store, spray engine
-  webui/                web workbench (FastAPI + React)
+  creds/                credential store, spray engine, crack watcher
+  webui/                web workbench (FastAPI + React) — routes/ per concern
   data/                 bundled wordlists
   local/                on-target enum scripts (recce-enum.sh/.ps1)
 tools/                  build scripts (airgap bundle, wordlists, intel refresh)
-docs/                   reference + design notes
+docs/                   user reference
 tests/                  test suite            (repo only)
 test_env/               docker lab            (repo only)
+.recce-plan/            internal planning + design ADRs (repo only)
 ```
 
-`repo only` = development artifacts. They stay here, where CI runs them, and
-are left out of the airgap burn package built by `make_package.sh`.
+`repo only` = development artifacts. They stay here, where CI runs them, and are left out of the airgap burn package built by `make_package.sh`.
 
 ---
 

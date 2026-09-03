@@ -16,6 +16,15 @@
 
 The writer is **pure stdlib** (`.docx` = zip of XML) -- no python-docx needed, runs airgapped.
 
+## Generating reports from the browser
+
+`recce serve` (see [webui.md](webui.md)) has a **Report** tab that
+regenerates the same deliverables on demand — HTML, Excel, or DOCX
+write-ups — from whatever the current findings state is. Only findings
+whose status is **in-report** (set on the Findings tab) land in the
+deliverable, so a triaged engagement can produce the client report
+without touching a terminal.
+
 ## fieldkit integration (`fieldkit-export` / `fieldkit-import`)
 
 Round-trips with [**fieldkit**](https://github.com/dloucks01/fieldkit) -- recce ranks and hands off a prioritized work-queue; fieldkit executes past the trigger and proves compromise; proven findings flow back:

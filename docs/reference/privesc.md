@@ -33,3 +33,12 @@ For each confirmed finding, writes ready-to-run artifacts into `eng/exploit-plan
 Gated to confirmed findings, safe by default. Everything is within rules of engagement.
 
 **AV/EDR awareness.** When you `ingest` a `recce-enum.ps1` run, recce records the host's defensive posture (Defender, EDR agents, Sysmon, LSASS RunAsPPL, AppLocker, Credential Guard) and shows it on the Exploitation sheet. recce flags what's watching — it does not evade AV/EDR.
+
+## ADCS ESC1 auto-request
+
+For AD engagements with a vulnerable ADCS ESC1 template, recce can
+actually invoke `certipy req` to request a certificate authenticating
+as an arbitrary UPN. Strictly gated (exact-string confirm sentinel +
+store-lookup credentials + clean-fail on missing certipy). Documented
+in [active-directory.md](active-directory.md#adcs-esc1-auto-request-web-workbench)
++ [webui.md](webui.md#adcs-esc1-auto-request-ad-chain).
