@@ -1,0 +1,281 @@
+"""SessionManager — the one owner of listeners and sessions, and the single `adopt()`
+boundary every shell funnels through.
+
+`adopt(transport)` is the C2-ready seam: reverse-catch produces a transport and calls it;
+bind-connect, relay-in, and (later) implants will produce a transport and call the very
+same method. Match logic (token → stale-host → new) lives here once, so resilience and
+re-adoption are uniform across every acquisition mode.
+"""
+from __future__ import annotations
+
+import asyncio
+
+from .listener import Listener
+from .session import Session
+from .transport import Transport
+
+
+class SessionManager:
+    """Registry of listeners + sessions. Single-threaded on the serving asyncio loop."""
+
+    def __init__(self, store=None) -> None:
+        self.sessions: dict[str, Session] = {}
+        self.listeners: dict[str, Listener] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
+        # engagement hooks: callables(session) run on adoption (host link, activity, …).
+        # Kept as callbacks so this module stays free of webui/store imports.
+        self.hooks: list = []
+        self.on_change = None                       # callback(session, status) for live updates
+        self.store = store                          # optional SessionStore for durability
+        self._pending: dict[str, bytearray] = {}    # per-session transcript, batched
+        self._flush_task = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        if self.store is not None and self._flush_task is None:
+            self._flush_task = loop.create_task(self._flush_loop())
+
+    def load_persisted(self) -> None:
+        """Reload past sessions from the store as stale — call once before serving."""
+        if self.store is None:
+            return
+        for meta, transcript in self.store.load_sessions():
+            if meta["id"] not in self.sessions:
+                self.sessions[meta["id"]] = Session.restore(meta, transcript)
+
+    # --- transcript persistence (batched so we don't hit sqlite per chunk) -------
+    async def _flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            self._flush_all()
+
+    def _flush_all(self) -> None:
+        if self.store is None:
+            return
+        for sid, buf in list(self._pending.items()):
+            if buf:
+                self.store.append(sid, bytes(buf))
+                buf.clear()
+
+    def flush_pending(self, session_id: str) -> None:
+        """Flush one session's un-persisted transcript bytes to disk right now."""
+        if self.store is None:
+            return
+        buf = self._pending.get(session_id)
+        if buf:
+            self.store.append(session_id, bytes(buf))
+            buf.clear()
+
+    def _record(self, session_id: str, data: bytes) -> None:
+        buf = self._pending.setdefault(session_id, bytearray())
+        buf.extend(data)
+        if len(buf) >= 8192:                        # flush a big burst promptly
+            self.store.append(session_id, bytes(buf))
+            buf.clear()
+
+    def _save(self, sess: Session) -> None:
+        if self.store is not None:
+            self.store.save_session(sess)
+
+    # --- listeners ---------------------------------------------------------------
+    async def start_listener(self, port: int, host: str = "0.0.0.0",
+                             tls: bool = False, ssl_ctx=None) -> Listener:
+        lst = Listener(host, port, tls=tls)
+        await lst.start(self, ssl_ctx=ssl_ctx)
+        self.listeners[lst.id] = lst
+        return lst
+
+    async def stop_listener(self, listener_id: str) -> bool:
+        lst = self.listeners.pop(listener_id, None)
+        if not lst:
+            return False
+        await lst.stop()
+        return True
+
+    # --- adoption: the single boundary ------------------------------------------
+    async def adopt(self, transport: Transport, listener_id: str = "",
+                    token: str | None = None, initial: bytes = b"",
+                    pty: bool = False) -> Session:
+        """Bind a freshly-arrived connection to a Session — new, or an existing stale one
+        it should resume. Every acquisition mode ends here. A stager presents a `token`
+        (reliable NAT-safe re-adoption) and `pty=True`; a raw reverse shell has neither and
+        its first bytes arrive as `initial`."""
+        ip, port = transport.peer
+        sess = self._match(ip, token)
+        new = sess is None
+        if sess is None:
+            sess = Session(host_ip=ip, host_port=port)
+            if token:
+                sess.token = token          # the stager's embedded token IS the session's,
+            # Ensure the auto-generated name is unique across live+stale sessions.
+            # Session.__init__ picks from an empty exclusion set (it can't see the
+            # registry), so a rare collision gets resolved here at adoption time.
+            from .session import _generate_name
+            names = {s.name for s in self.sessions.values() if s.id != sess.id}
+            if sess.name in names:
+                sess.name = _generate_name(names)
+            self.sessions[sess.id] = sess   # so every reconnect rebinds to this same session
+        if pty:
+            sess.pty = True
+        sess.bind(transport)
+        if initial:                          # raw shell's first output / stager leftover
+            sess.feed(initial)
+            if self.store is not None:
+                self._record(sess.id, initial)
+        self._save(sess)                     # persist metadata (status → live)
+        self._changed(sess)                  # push a live update (catch / reconnect)
+        # pump target → session output in the background
+        asyncio.ensure_future(self._pump(sess, transport))
+        if new:                              # host-link + "shell caught" only once, not per reconnect
+            for hook in list(self.hooks):
+                try:
+                    hook(sess)
+                except Exception:  # noqa: BLE001 — a hook must never kill adoption
+                    pass
+        return sess
+
+    async def adopt_oob(self, reader, writer, token: str | None) -> None:
+        """Adopt an incoming OOB control-channel connection (see
+        recce/sessions/oob.py). Matches the parent session by token; if
+        no session is found (unknown / expired token) the connection is
+        dropped so a stale agent doesn't linger."""
+        from .oob import OobChannel
+        if not token:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        sess = None
+        for s in self.sessions.values():
+            if s.token == token:
+                sess = s
+                break
+        if sess is None:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        # Close any pre-existing OOB channel first (a re-launched agent
+        # after a shell reconnect wants a fresh binding).
+        existing = getattr(sess, "oob_channel", None)
+        if existing is not None:
+            try:
+                await existing.close()
+            except Exception:  # noqa: BLE001
+                pass
+        peer = writer.get_extra_info("peername")
+        chan = OobChannel(reader, writer, peer_addr=peer)
+        sess.oob_channel = chan
+
+    def _match(self, ip: str, token: str | None) -> Session | None:
+        """A tokened stager matches its exact session (NAT-safe) or starts fresh — it never
+        grabs an unrelated host's stale session. A raw shell (no token) resumes a stale
+        session from the same host."""
+        if token:
+            for s in self.sessions.values():
+                if s.token == token:
+                    return s
+            return None                           # unknown token → a new agent, not host-fallback
+        for s in self.sessions.values():          # raw shell: resume a dropped shell from this host
+            if s.host_ip == ip and s.status == "stale":
+                return s
+        return None
+
+    async def _pump(self, sess: Session, transport: Transport) -> None:
+        """Read the target until EOF, feeding output into the session. On close → stale."""
+        try:
+            while True:
+                data = await transport.read()
+                if not data:                      # EOF: the shell dropped
+                    break
+                sess.feed(data)
+                if self.store is not None:
+                    self._record(sess.id, data)   # persist output (batched)
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            if sess._transport is transport:      # only unbind if still the live one
+                sess.unbind()
+                if self.store is not None:
+                    self._flush_all()             # flush remaining transcript
+                    self._save(sess)              # persist status → stale
+                self._changed(sess)               # push a live update (dropped → stale)
+
+    def _changed(self, sess: Session) -> None:
+        if self.on_change is not None:
+            try:
+                self.on_change(sess)
+            except Exception:  # noqa: BLE001 — a listener must never break the session loop
+                import logging
+                logging.getLogger("recce.sessions").debug("on_change callback failed", exc_info=True)
+
+    # --- beacon registration (async-C2 P1) ---------------------------------------
+    async def register_beacon(self, host_ip: str, psk: str, *,
+                              transport: str = "http", sleep_s: float = 30.0,
+                              jitter_pct: float = 20.0, notes: str = "") -> Session:
+        """Bring a beacon-mode session into being. Same Session / same registry
+        as a caught shell — the ONLY difference is the transport underneath is
+        a BeaconTransport (queue-backed) rather than a live socket. Persist
+        the beacon row alongside the shell_sessions row so a `recce serve`
+        restart reloads both. `psk` is the raw pre-shared key; the caller has
+        already surfaced it to the operator once."""
+        from .transport import BeaconTransport
+        sess = Session(host_ip=host_ip, host_port=0, kind="beacon")
+        # Uniqueness across live+stale, same as adopt() does.
+        from .session import _generate_name
+        names = {s.name for s in self.sessions.values() if s.id != sess.id}
+        if sess.name in names:
+            sess.name = _generate_name(names)
+        self.sessions[sess.id] = sess
+        bt = BeaconTransport(host_ip)
+        sess.bind(bt)
+        if self.store is not None:
+            self._save(sess)                       # shell_sessions row
+            self.store.add_beacon(sess.id, psk, transport=transport,
+                                  sleep_s=sleep_s, jitter_pct=jitter_pct,
+                                  notes=notes)
+        self._changed(sess)
+        # Beacon read loop: same shape as _pump — every inbound result
+        # feeds the session's scrollback + transcript. Reads block on the
+        # transport's queue; close() unblocks with b"" and the loop exits.
+        asyncio.ensure_future(self._pump(sess, bt))
+        for hook in list(self.hooks):
+            try:
+                hook(sess)
+            except Exception:  # noqa: BLE001
+                pass
+        return sess
+
+    # --- access ------------------------------------------------------------------
+    def get(self, session_id: str) -> Session | None:
+        return self.sessions.get(session_id)
+
+    def list(self) -> list[Session]:
+        return sorted(self.sessions.values(), key=lambda s: s.created, reverse=True)
+
+    async def close_session(self, session_id: str) -> bool:
+        """Explicitly terminate a session — closes the transport if live, marks the
+        session dead, and drops it from the registry. Idempotent: unknown / already-
+        closed ids return False. `_pump` will notice the transport close and unbind
+        naturally, but we set status here so the operator sees `dead` at once."""
+        sess = self.sessions.pop(session_id, None)
+        if sess is None:
+            return False
+        sess.status = "dead"
+        transport = sess._transport
+        sess._transport = None
+        if transport is not None:
+            try:
+                await transport.close()
+            except (ConnectionError, OSError):
+                pass
+        if self.store is not None:
+            self.flush_pending(session_id)
+            self._save(sess)
+        sess._broadcast({"t": "status", "status": "dead"})
+        self._changed(sess)
+        return True

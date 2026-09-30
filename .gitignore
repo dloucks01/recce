@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Engagement output (never commit scan data / client artifacts)
+engagement/
+demo_engagement/
+test_engagement/
+*.sqlite
+*.xlsx
+raw/
+
+# Build artifacts
+build/
+dist/
+releases/
+dump.rdb
+*.rdb
+
+# web frontend dev artifacts
+recce/webui/frontend/node_modules/
+
+# IDE / editor config
+.vscode/
+.idea/
+*.swp
+.pytest_cache/
+
+# Offline CVE data pack — a large (~80-120 MB) OPTIONAL artifact built by
+# tools/build_cve_db.py and distributed separately (not in the main wheel);
+# recce discovers it at runtime when present. Never committed.
+recce/data/cve.sqlite
+

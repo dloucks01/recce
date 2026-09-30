@@ -1,0 +1,1065 @@
+"""Active Directory enumeration and analysis.
+
+Two tiers:
+
+1. Credential-free analysis of data nmap already collected (roles, SMB signing /
+   NTLM-relay targets, domain facts, password policy from NSE). Always runs.
+2. Optional credentialed LDAP enumeration via ldap3 (users, SPNs/kerberoastable,
+   AS-REP-roastable, computers, privileged groups, delegation, trusts, password
+   policy). Runs only when the operator supplies credentials.
+
+Nothing here scans on import; callers drive it explicitly.
+"""
+
+from __future__ import annotations
+
+import base64
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+
+from ..core.models import Account, Domain, Host
+
+# --- User-Account-Control flags -------------------------------------------------
+UAC = {
+    "ACCOUNTDISABLE": 0x0002,
+    "LOCKOUT": 0x0010,
+    "PASSWD_NOTREQD": 0x0020,
+    "NORMAL_ACCOUNT": 0x0200,
+    "DONT_EXPIRE_PASSWORD": 0x10000,
+    "TRUSTED_FOR_DELEGATION": 0x80000,          # unconstrained delegation
+    "TRUSTED_TO_AUTH_FOR_DELEGATION": 0x1000000,  # constrained delegation
+    "DONT_REQ_PREAUTH": 0x400000,               # AS-REP roastable
+}
+
+_FUNC_LEVEL = {
+    "0": "2000", "1": "2003 interim", "2": "2003", "3": "2008",
+    "4": "2008 R2", "5": "2012", "6": "2012 R2", "7": "2016",
+}
+
+# Well-known highly privileged groups worth flagging.
+PRIVILEGED_GROUPS = {
+    "domain admins", "enterprise admins", "schema admins", "administrators",
+    "account operators", "backup operators", "server operators", "print operators",
+    "dnsadmins", "group policy creator owners", "cert publishers",
+    "enterprise key admins", "key admins",
+}
+
+
+# --- tier 1: credential-free analysis of collected NSE data ---------------------
+
+def _script_map(host: Host) -> dict[str, str]:
+    """All NSE script outputs on the host keyed by script id (port + host scope)."""
+    out: dict[str, str] = {}
+    for s in host.host_scripts:
+        out[s.id] = s.output
+    for p in host.ports:
+        for s in p.scripts:
+            # Port-scoped scripts take precedence if the same id appears twice.
+            out[s.id] = s.output
+    return out
+
+
+def identify_roles(host: Host) -> None:
+    """Tag AD-relevant roles based on open ports and NSE output (in place)."""
+    open_ports = {p.portid for p in host.open_ports}
+    roles = set(host.roles)
+
+    is_dc = 88 in open_ports and (389 in open_ports or 636 in open_ports)
+    if not is_dc:
+        # Fall back to NSE hints (ldap rootdse / smb-os-discovery 'Domain controller').
+        for p in host.ports:
+            for s in p.scripts:
+                # `namingContexts` is a standard RootDSE attribute on EVERY LDAP
+                # server (OpenLDAP, AD LDS/ADAM), so it tagged any 389/636 host as a
+                # Domain Controller. Require an AD-DC-specific RootDSE marker instead.
+                low = s.output.lower()
+                if s.id.startswith("ldap") and (
+                        "domaincontrollerfunctionality" in low
+                        or "dsservicename" in low
+                        or "1.2.840.113556.1.4.800" in low):   # LDAP_CAP_ACTIVE_DIRECTORY_OID
+                    is_dc = True
+    if is_dc:
+        roles.add("Domain Controller")
+    if 3268 in open_ports or 3269 in open_ports:
+        roles.add("Global Catalog")
+    if 53 in open_ports and is_dc:
+        roles.add("DNS")
+    if {389, 636, 3268} & open_ports and not is_dc:
+        roles.add("LDAP server")
+    if 445 in open_ports or 139 in open_ports:
+        roles.add("SMB server")
+    if 1433 in open_ports:
+        roles.add("MSSQL")
+    if 5985 in open_ports or 5986 in open_ports:
+        roles.add("WinRM")
+    if 3389 in open_ports:
+        roles.add("RDP")
+    host.roles = sorted(roles)
+
+
+def parse_signing_and_ntlm(host: Host) -> None:
+    """Derive SMB signing posture and NTLM/domain facts from NSE output (in place)."""
+    smap = _script_map(host)
+
+    # SMB signing -> NTLM relay candidacy.
+    signing = "unknown"
+    for sid in ("smb2-security-mode", "smb-security-mode"):
+        text = smap.get(sid, "").lower()
+        if not text:
+            continue
+        if "not required" in text or "signing disabled" in text or \
+           re.search(r"message_signing:\s*disabled", text):
+            signing = "not required"
+            break
+        if "required" in text or "enabled and required" in text:
+            signing = "required"
+    host.smb_signing = signing
+
+    # NTLM info (domain / fqdn / os build) from rdp-ntlm-info / smb-os-discovery.
+    ntlm = dict(host.ntlm)
+    for sid in ("rdp-ntlm-info", "smb-os-discovery", "smb2-time"):
+        text = smap.get(sid, "")
+        for key, pat in (
+            ("dns_domain", r"(?:DNS_Domain_Name|Domain name|Domain):\s*(\S+)"),
+            ("dns_computer", r"(?:DNS_Computer_Name|FQDN):\s*(\S+)"),
+            ("netbios_domain", r"(?:NetBIOS_Domain_Name|NetBIOS domain):\s*(\S+)"),
+            ("os_build", r"(?:Product_Version|OS):\s*(.+)"),
+        ):
+            m = re.search(pat, text)
+            if m and key not in ntlm:
+                ntlm[key] = m.group(1).strip()
+    host.ntlm = ntlm
+
+
+def parse_password_policy(host: Host) -> dict:
+    """Extract a password policy dict from smb-enum-domains NSE output, if present."""
+    smap = _script_map(host)
+    text = smap.get("smb-enum-domains", "")
+    if not text:
+        return {}
+    policy: dict = {}
+    m = re.search(r"min(?:imum)? password length:\s*(\d+)", text, re.I)
+    if m:
+        policy["min_length"] = int(m.group(1))
+    m = re.search(r"max(?:imum)? password age:\s*([^\n;]+)", text, re.I)
+    if m:
+        policy["max_age"] = m.group(1).strip()
+    m = re.search(r"password history(?:\s*length)?:\s*(\d+)", text, re.I)
+    if m:
+        policy["history"] = int(m.group(1))
+    if re.search(r"lockout.*disabled", text, re.I):
+        policy["lockout_threshold"] = 0
+    else:
+        m = re.search(r"lockout threshold:\s*(\d+)", text, re.I)
+        if m:
+            policy["lockout_threshold"] = int(m.group(1))
+    return policy
+
+
+def analyze_hosts(hosts: list[Host]) -> None:
+    """Run all credential-free AD tagging across a host set (in place)."""
+    for h in hosts:
+        identify_roles(h)
+        parse_signing_and_ntlm(h)
+
+
+# --- derived target lists (used by the reports) ---------------------------------
+
+def domain_controllers(hosts: list[Host]) -> list[Host]:
+    return [h for h in hosts if "Domain Controller" in h.roles]
+
+
+def relay_targets(hosts: list[Host]) -> list[Host]:
+    """Hosts where SMB signing is not required -> NTLM relay candidates."""
+    return [h for h in hosts
+            if h.smb_signing == "not required"
+            and any(p.portid in (139, 445) for p in h.open_ports)]
+
+
+def smbv1_hosts(hosts: list[Host]) -> list[Host]:
+    out = []
+    for h in hosts:
+        smap = _script_map(h)
+        if "smb-vuln-ms17-010" in smap or "smbv1" in smap.get("smb-protocols", "").lower():
+            out.append(h)
+    return out
+
+
+def kerberoastable(hosts: list[Host]) -> list[Account]:
+    """Accounts carrying an SPN (excluding krbtgt) -> Kerberoasting targets.
+
+    A DISABLED account is excluded: the KDC will not issue a TGS for it
+    (KDC_ERR_CLIENT_REVOKED), so surfacing it is a false target. `enabled` is only
+    dropped when explicitly "no" (fail-open: an unknown state stays a target, so a
+    real roastable account is never hidden by missing UAC data). Matches the
+    BloodHound path, which already requires enabled.
+    """
+    out = []
+    for h in hosts:
+        for a in h.accounts:
+            if (a.attrs.get("spn") and a.name.lower() != "krbtgt"
+                    and a.attrs.get("enabled") != "no"):
+                out.append(a)
+    return out
+
+
+def asrep_roastable(hosts: list[Host]) -> list[Account]:
+    # Same rule as kerberoastable: a disabled DONT_REQ_PREAUTH account can't be roasted.
+    return [a for h in hosts for a in h.accounts
+            if a.attrs.get("asrep_roastable") == "yes" and a.attrs.get("enabled") != "no"]
+
+
+def delegation_accounts(hosts: list[Host]) -> list[Account]:
+    return [a for h in hosts for a in h.accounts if a.attrs.get("delegation")]
+
+
+def quick_wins(hosts: list[Host]) -> list[dict]:
+    """Single source of truth for AD 'quick win' rows (report + coverage tracking).
+
+    Each row: {category, target, detail, why, key}.
+    """
+    rows: list[dict] = []
+
+    def add(cat: str, target: str, detail: str, why: str) -> None:
+        rows.append({"category": cat, "target": target, "detail": detail,
+                     "why": why, "key": f"qw:{cat}:{target}"})
+
+    for h in domain_controllers(hosts):
+        add("Domain Controller", f"{h.ip} {h.hostname}".strip(),
+            ", ".join(h.roles), "Primary AD target; hosts NTDS, Kerberos, LDAP.")
+    for h in relay_targets(hosts):
+        add("NTLM relay target", f"{h.ip} {h.hostname}".strip(),
+            "SMB signing not required",
+            "Relay coerced/captured NTLM auth to this host (ntlmrelayx).")
+    for h in smbv1_hosts(hosts):
+        add("SMBv1 / MS17-010", f"{h.ip} {h.hostname}".strip(),
+            "SMBv1 enabled or ms17-010 flagged", "Potential unauthenticated RCE.")
+    for a in kerberoastable(hosts):
+        add("Kerberoastable", f"{a.domain}\\{a.name}".strip("\\"),
+            a.attrs.get("spn", ""),
+            "Request TGS and crack service-account password offline.")
+    for a in asrep_roastable(hosts):
+        add("AS-REP roastable", f"{a.domain}\\{a.name}".strip("\\"),
+            "DONT_REQ_PREAUTH set",
+            "Request AS-REP without preauth and crack offline (no creds needed).")
+    for a in delegation_accounts(hosts):
+        add("Delegation", f"{a.domain}\\{a.name}".strip("\\"),
+            a.attrs.get("delegation", ""),
+            "Abuse (un)constrained delegation for privesc / impersonation.")
+    for a in privileged_accounts(hosts):
+        add("Privileged account", f"{a.domain}\\{a.name}".strip("\\"),
+            a.attrs.get("memberof", "") or "adminCount=1",
+            "High-value credential; prioritise for compromise / protection.")
+    # LAPS / gMSA / PSO / trust findings — collected from the Domain objects
+    # attached to each DC host during LDAP enum.
+    seen_domain_keys: set[str] = set()
+    for h in hosts:
+        for dom in getattr(h, "domains", None) or []:
+            key = getattr(dom, "name", "") or getattr(dom, "netbios", "")
+            if key in seen_domain_keys:
+                continue
+            seen_domain_keys.add(key)
+            for entry in getattr(dom, "laps_readable", None) or []:
+                add("LAPS password readable",
+                    entry.get("host", "?"),
+                    f"attr={entry.get('attr')} dns={entry.get('dns') or '-'}",
+                    "Current LDAP bind reads the LAPS local-admin password on "
+                    "this computer — instant local admin.")
+            for entry in getattr(dom, "gmsa", None) or []:
+                tag = " (password readable)" if entry.get("password_readable") else ""
+                add(f"gMSA account{tag}",
+                    f"{key}\\{entry.get('name','?')}",
+                    "spns=" + (", ".join(entry.get("spns") or []) or "none"),
+                    "Group Managed Service Account. If msDS-ManagedPassword is "
+                    "readable, decrypt client-side for a full TGT.")
+            for pso in getattr(dom, "password_policies", None) or []:
+                add("Fine-grained password policy (PSO)",
+                    pso.get("name", "?"),
+                    f"min_len={pso.get('min_length')} complexity="
+                    f"{pso.get('complexity')} lockout={pso.get('lockout')} "
+                    f"applies_to={', '.join(pso.get('applies_to') or []) or '-'}",
+                    "PSOs relax password policy for specific groups. Groups "
+                    "with weak PSO settings are priority spray targets.")
+            for victim in getattr(dom, "rbcd_victims", None) or []:
+                sids = victim.get("trusted_from") or []
+                add("RBCD victim (msDS-AllowedToActOnBehalf...)",
+                    f"{key}\\{victim.get('name','?')} ({victim.get('kind','?')})",
+                    "trusted from: " + (", ".join(sids[:3]) if sids
+                                        else f"SDDL blob {victim.get('attr_len',0)}B"),
+                    "This object trusts another principal to impersonate ANY user "
+                    "against it via S4U2Proxy. If you control the trusted-from "
+                    "principal (or can add a computer account and get RBCD "
+                    "written), S4U2Self -> S4U2Proxy yields a TGS as arbitrary "
+                    "user - domain admin included. Full compromise of this host.")
+            # Synthesis: chain-reachable findings that cross services.
+            # These are engagement-level rows, not per-object — quick_wins is
+            # the right place because it is what the report + coverage tabs
+            # pull from and the operator is looking for "what can I chain
+            # RIGHT NOW", not the raw per-host list.
+            for row in _chain_reachable_rows(hosts, dom, key):
+                rows.append(row)
+            for trust in getattr(dom, "trusts", None) or []:
+                add("Trust relationship",
+                    f"{key} → {trust.get('name', '?')}",
+                    f"direction={trust.get('direction','?')} "
+                    f"type={trust.get('type','?')}",
+                    "Cross-domain trust. Bidirectional or outbound trusts let "
+                    "the trusted domain authenticate to this one — lateral "
+                    "movement route across forests.")
+    return rows
+
+
+def _chain_reachable_rows(hosts: list[Host], dom: "Domain", dom_key: str) -> list[dict]:
+    """Engagement-level "the chain is reachable" synthesis rows.
+
+    Two chains recce can currently prove-reachable end-to-end from the data it
+    already holds:
+
+      Coerce -> ADCS ESC8. If ANY host in the engagement exposes an MSRPC
+      coercion interface (PetitPotam / PrinterBug / DFSCoerce — kind
+      msrpc_coercion) AND ANY host carries an ADCS ESC8 vuln (Web/NDES
+      Enrollment reachable), a coerced NTLM authentication from a DC$ can be
+      relayed to the CA's HTTP endpoint and a domain-controller certificate
+      issued. Domain-wide compromise.
+
+      RBCD -> S4U2Proxy. An object with msDS-AllowedToActOnBehalfOfOther
+      Identity populated already trusts SOME principal to impersonate any
+      user against it. When ms-DS-MachineAccountQuota > 0 (any authenticated
+      user can add a computer account) that trust becomes attacker-controlled;
+      even without MAQ, an already-known kerberoastable account with RC4
+      etypes is a candidate. Both mean full compromise of the RBCD victim.
+
+    Emitted as quick_wins rows so they land in the report + coverage tabs the
+    tester actually reads. The evidence lives on the individual host findings;
+    these rows only claim the CHAIN is reachable.
+    """
+    out: list[dict] = []
+
+    def _has_vuln_kind(host: Host, kind_substrs: tuple[str, ...]) -> bool:
+        for v in getattr(host, "vulns", None) or []:
+            probe = f"{v.script_id or ''} {v.title or ''}".lower()
+            if any(s in probe for s in kind_substrs):
+                return True
+        return False
+
+    # Match against BOTH script_id and title, because the finding's `kind`
+    # (msrpc_coercion) is only on the raw finding dict — Vuln.script_id ends
+    # up as "msrpc:<title[:40]>" (see svccommon.findings_to_vulns), so the
+    # discovery signal in the stored vuln is the title wording.
+    coerce_hosts = [h for h in hosts
+                    if _has_vuln_kind(h, ("msrpc_coercion",
+                                          "authentication-coercion",
+                                          "petitpotam", "printerbug", "dfscoerce"))]
+    esc8_hosts = [h for h in hosts
+                  if _has_vuln_kind(h, ("adcs-esc8", "adcs esc8", "web/ndes"))]
+    if coerce_hosts and esc8_hosts:
+        c_labels = ", ".join(h.ip for h in coerce_hosts[:4])
+        e_labels = ", ".join(h.ip for h in esc8_hosts[:4])
+        out.append({
+            "category": "CHAIN reachable: Coerce -> ADCS ESC8",
+            "target": f"coerce({c_labels}) -> relay -> ESC8({e_labels})",
+            "detail": (f"{len(coerce_hosts)} coercion source(s) + {len(esc8_hosts)} "
+                       "ESC8-capable CA endpoint(s) present in the same engagement. "
+                       "The relay+enroll chain does NOT require a credential."),
+            "why": ("Coerce a DC$ authentication with PetitPotam / PrinterBug / "
+                    "DFSCoerce, relay it via ntlmrelayx to the CA's Web Enrollment "
+                    "endpoint, request a DomainController template certificate as "
+                    "the DC, then use Certipy auth to lift the machine's TGT / "
+                    "hash — domain-wide compromise. `certipy relay -target <ca> "
+                    "-template DomainController &` and coerce the DC in a "
+                    "separate window."),
+            "key": f"qw:chain-coerce-esc8:{dom_key}",
+        })
+
+    # RBCD S4U2Proxy reachability. Attacker-controlled principal comes from
+    # either ms-DS-MachineAccountQuota > 0 (add computer, own the SPN) or an
+    # already-owned kerberoastable account we could crack.
+    victims = getattr(dom, "rbcd_victims", None) or []
+    if victims:
+        maq = 0
+        try:
+            maq = int(getattr(dom, "machine_account_quota", 0) or 0)
+        except (TypeError, ValueError):
+            maq = 0
+        roastable = kerberoastable(hosts)
+        # `dc_ips` isn't guaranteed present in every path; fall back to hostname.
+        if maq > 0 or roastable:
+            v_labels = ", ".join(v.get("name", "?") for v in victims[:4])
+            source = ("machine-account quota > 0 (any authenticated user can add "
+                      "a computer)" if maq > 0
+                      else f"{len(roastable)} kerberoastable account(s) already listed")
+            out.append({
+                "category": "CHAIN reachable: RBCD -> S4U2Proxy",
+                "target": f"{dom_key}: {len(victims)} victim(s) ({v_labels})",
+                "detail": (f"RBCD is already configured on {len(victims)} object(s) "
+                           f"in {dom_key}. Attacker-controllable principal source: "
+                           f"{source}."),
+                "why": ("Populate/replace msDS-AllowedToActOnBehalf... on the "
+                        "victim with an SD naming a principal you control, then "
+                        "S4U2Self -> S4U2Proxy to obtain a service ticket for "
+                        "the victim AS Administrator. impacket-getST + "
+                        "impacket-secretsdump against the victim."),
+                "key": f"qw:chain-rbcd-s4u:{dom_key}",
+            })
+    return out
+
+
+def privileged_accounts(hosts: list[Host]) -> list[Account]:
+    out = []
+    for h in hosts:
+        for a in h.accounts:
+            if a.attrs.get("admincount") == "1":
+                out.append(a)
+                continue
+            # Exact per-group membership: `memberof` is a "; "-joined list of group
+            # CNs. A loose substring test flagged members of "Helpdesk Administrators"
+            # / "SQL Administrators" / "DHCP Administrators" as tier-0 privileged
+            # because those contain "administrators".
+            groups = {g.strip().lower() for g in (a.attrs.get("memberof") or "").split(";")}
+            if groups & {"domain admins", "enterprise admins", "administrators"}:
+                out.append(a)
+    return out
+
+
+# --- domain assembly ------------------------------------------------------------
+
+def derive_domains(hosts: list[Host]) -> list[Domain]:
+    """Assemble Domain records from credential-free NSE data."""
+    by_name: dict[str, Domain] = {}
+
+    def get(name: str) -> Domain:
+        key = name.lower()
+        if key not in by_name:
+            by_name[key] = Domain(name=name, sources=["nse"])
+        return by_name[key]
+
+    for h in hosts:
+        dns_domain = h.ntlm.get("dns_domain", "")
+        for a in h.accounts:
+            if a.kind == "domain" and (a.domain or dns_domain):
+                dns_domain = a.domain or dns_domain
+        if not dns_domain:
+            continue
+        dom = get(dns_domain)
+        nb = h.ntlm.get("netbios_domain", "")
+        if nb and not dom.netbios:
+            dom.netbios = nb
+        if "Domain Controller" in h.roles and h.ip not in dom.dc_ips:
+            dom.dc_ips.append(h.ip)
+        pol = parse_password_policy(h)
+        if pol and not dom.password_policy:
+            dom.password_policy = pol
+    return list(by_name.values())
+
+
+def merge_domain(old: Domain, new: Domain) -> Domain:
+    old.netbios = old.netbios or new.netbios
+    old.forest = old.forest or new.forest
+    old.functional_level = old.functional_level or new.functional_level
+    old.naming_context = old.naming_context or new.naming_context
+    old.machine_account_quota = old.machine_account_quota or new.machine_account_quota
+    old.anonymous_bind = old.anonymous_bind or new.anonymous_bind
+    old.dc_ips = sorted(set(old.dc_ips) | set(new.dc_ips))
+    if new.password_policy:
+        old.password_policy = {**old.password_policy, **new.password_policy}
+    seen = {(t.get("name"), t.get("direction")) for t in old.trusts}
+    for t in new.trusts:
+        if (t.get("name"), t.get("direction")) not in seen:
+            old.trusts.append(t)
+    old.sources = sorted(set(old.sources) | set(new.sources))
+    return old
+
+
+# --- tier 2: credentialed LDAP enumeration (optional, via ldap3) -----------------
+
+def _ldap3_present() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("ldap3") is not None
+
+
+def ldap_available() -> bool:
+    """True if we can enumerate LDAP - either the ldap3 package or, on an
+    airgapped Kali box, the ldapsearch binary (ldap-utils)."""
+    return _ldap3_present() or shutil.which("ldapsearch") is not None
+
+
+def _have(tool: str) -> bool:
+    return shutil.which(tool) is not None
+
+
+def _uac_flags(value: int) -> list[str]:
+    return [name for name, bit in UAC.items() if value & bit]
+
+
+def _func_level(val: str) -> str:
+    return _FUNC_LEVEL.get(str(val), str(val))
+
+
+# --- RBCD helpers -------------------------------------------------------------
+# The wire attribute msDS-AllowedToActOnBehalfOfOtherIdentity is a Windows
+# Security Descriptor in the standard SDDL/relative-security-descriptor binary
+# format. Parsing every ACE requires a full SD walker that is not worth writing
+# by hand for what is essentially "is this attribute populated on an object that
+# should not have it". The presence-alone signal is what turns into a finding;
+# any additional SID extraction is best-effort and never blocks the check.
+
+# S-1-5-21-<domain>-<rid>: the shape every domain-local SID takes on the wire.
+# A fixed-length S-1-5-XX-XX-XX-XX-XX with 4 subauths and a trailing RID.
+def _sids_in_sd(blob: bytes) -> list[str]:
+    """Best-effort scan for S-1-5-21-... SIDs inside a SD binary blob.
+
+    Windows SIDs on the wire are: rev(1) + subauth_count(1) + authority(6) +
+    subauths(4*count). Scan for that shape rather than walking every ACE, so a
+    malformed SD does not crash the enumeration - the finding value is the
+    presence of RBCD, not the exact principal list.
+    """
+    out: list[str] = []
+    if not isinstance(blob, (bytes, bytearray)) or len(blob) < 12:
+        return out
+    b = bytes(blob)
+    for i in range(len(b) - 12):
+        if b[i] != 0x01:                        # SID revision
+            continue
+        n = b[i + 1]
+        if not (1 <= n <= 15):
+            continue
+        end = i + 8 + 4 * n
+        if end > len(b):
+            continue
+        try:
+            authority = int.from_bytes(b[i + 2:i + 8], "big")
+        except ValueError:
+            continue
+        if authority != 5:                      # NT_AUTHORITY
+            continue
+        parts = [str(int.from_bytes(b[i + 8 + 4 * j:i + 12 + 4 * j], "little"))
+                 for j in range(n)]
+        sid = f"S-1-{authority}-" + "-".join(parts)
+        # Domain-object SIDs (S-1-5-21-*), well-known ones (S-1-5-32-*), or
+        # a computer/user SID all look identical here; keep any that name a
+        # principal that could plausibly be the delegated-from party.
+        if sid not in out and (parts[0] in ("21", "32") or len(parts) >= 4):
+            out.append(sid)
+    return out
+
+
+def _apply_rbcd(dom: Domain, dc_ip: str, entries, kind: str) -> None:
+    """Extract RBCD victims from a search-result set.
+
+    `entries` is the ldap3 conn.entries list; each entry may carry a populated
+    msDS-AllowedToActOnBehalfOfOtherIdentity attribute. We record every one:
+    the attribute existing at all is the finding.
+    """
+    for e in entries:
+        if "msDS-AllowedToActOnBehalfOfOtherIdentity" not in e:
+            continue
+        blob = e["msDS-AllowedToActOnBehalfOfOtherIdentity"].value
+        if not blob:
+            continue
+        raw = bytes(blob) if not isinstance(blob, (bytes, bytearray)) else blob
+        name = str(e.sAMAccountName.value or "?").rstrip("$") \
+            if "sAMAccountName" in e else "?"
+        dom.rbcd_victims.append({
+            "name": name, "kind": kind,
+            "trusted_from": _sids_in_sd(raw),
+            "attr_len": len(raw),
+        })
+
+
+def ldap_enumerate(
+    dc_ip: str,
+    domain: str = "",
+    username: str = "",
+    password: str = "",
+    use_ssl: bool = False,
+    anonymous: bool = False,
+) -> tuple[Domain, list[Account]]:
+    """Enumerate a domain over LDAP. Returns (Domain, accounts).
+
+    Uses the ldap3 package when installed; otherwise falls back to the Kali
+    `ldapsearch` binary (airgapped-friendly). Raises RuntimeError if neither is
+    available or the bind fails.
+    """
+    if not _ldap3_present():
+        if _have("ldapsearch"):
+            return _enum_ldapsearch(dc_ip, domain, username, password, use_ssl, anonymous)
+        raise RuntimeError("LDAP enumeration needs the ldap3 package or the "
+                           "ldapsearch binary (apt install ldap-utils).")
+    return _enum_ldap3(dc_ip, domain, username, password, use_ssl, anonymous)
+
+
+def _enum_ldap3(
+    dc_ip: str,
+    domain: str = "",
+    username: str = "",
+    password: str = "",
+    use_ssl: bool = False,
+    anonymous: bool = False,
+) -> tuple[Domain, list[Account]]:
+    try:
+        from ldap3 import ALL, Connection, NTLM, SUBTREE, Server
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError(
+            "credentialed LDAP needs the ldapsearch binary (apt install ldap-utils) "
+            "for airgapped use, or the ldap3 Python module") from e
+
+    port = 636 if use_ssl else 389
+    server = Server(dc_ip, port=port, use_ssl=use_ssl, get_info=ALL)
+    if anonymous:
+        conn = Connection(server, auto_bind=True)
+    else:
+        user = f"{domain}\\{username}" if domain else username
+        conn = Connection(server, user=user, password=password,
+                          authentication=NTLM, auto_bind=True)
+
+    dom = Domain(name=domain, sources=["ldap"], dc_ips=[dc_ip])
+    dom.anonymous_bind = anonymous
+
+    # rootDSE + naming context.
+    base_dn = ""
+    try:
+        info = server.info
+        if info and info.other:
+            ncs = info.other.get("defaultNamingContext") or info.naming_contexts
+            base_dn = ncs[0] if isinstance(ncs, (list, tuple)) else str(ncs)
+            fl = info.other.get("domainFunctionality", [""])
+            dom.functional_level = _func_level(fl[0] if isinstance(fl, list) else fl)
+            ffl = info.other.get("forestFunctionality", [""])
+            dom.forest = _func_level(ffl[0] if isinstance(ffl, list) else ffl)
+        dom.naming_context = base_dn
+    except Exception as e:
+        dom.enum_errors.append(str(e))
+    if not base_dn and domain:
+        base_dn = ",".join(f"DC={p}" for p in domain.split("."))
+        dom.naming_context = base_dn
+    if not base_dn:
+        conn.unbind()
+        raise RuntimeError("Could not determine LDAP base DN; supply --domain.")
+
+    accounts: list[Account] = []
+
+    # Domain object -> password policy + machine account quota.
+    try:
+        conn.search(base_dn, "(objectClass=domain)", search_scope="BASE",
+                    attributes=["minPwdLength", "lockoutThreshold", "maxPwdAge",
+                                "minPwdAge", "pwdHistoryLength",
+                                "ms-DS-MachineAccountQuota"])
+        if conn.entries:
+            e = conn.entries[0]
+            pol = {}
+            if "minPwdLength" in e:
+                pol["min_length"] = int(e.minPwdLength.value or 0)
+            if "lockoutThreshold" in e:
+                pol["lockout_threshold"] = int(e.lockoutThreshold.value or 0)
+            if "pwdHistoryLength" in e:
+                pol["history"] = int(e.pwdHistoryLength.value or 0)
+            if "maxPwdAge" in e and e.maxPwdAge.value:
+                pol["max_age"] = str(e.maxPwdAge.value)
+            dom.password_policy = pol
+            maq = e["ms-DS-MachineAccountQuota"].value if "ms-DS-MachineAccountQuota" in e else None
+            if maq is not None:
+                dom.machine_account_quota = str(maq)
+    except Exception as e:
+        dom.enum_errors.append(str(e))
+
+    # Users.
+    try:
+        conn.search(base_dn,
+                    "(&(objectCategory=person)(objectClass=user))",
+                    search_scope=SUBTREE,
+                    attributes=["sAMAccountName", "userAccountControl",
+                                "servicePrincipalName", "adminCount", "memberOf",
+                                "description", "pwdLastSet",
+                                # RBCD victim marker: any principal whose SD is
+                                # written into a target's msDS-AllowedToAct*
+                                # attribute is trusted to impersonate ANY user
+                                # against that target via S4U2Proxy - the
+                                # standard "attacker adds computer + writes
+                                # RBCD -> full compromise of the target" chain.
+                                "msDS-AllowedToActOnBehalfOfOtherIdentity"],
+                    paged_size=500)
+        accounts += _accounts_from_entries(conn, dc_ip, domain, kind="user")
+        # RBCD victims are usually computers, but a user account with the
+        # attribute is still a valid S4U2Proxy target (a service account whose
+        # delegation was configured through an RBCD write).
+        try:
+            _apply_rbcd(dom, dc_ip, conn.entries, kind="user")
+        except Exception as e:                # noqa: BLE001
+            dom.enum_errors.append(f"rbcd_user: {e}")
+    except Exception as e:
+        dom.enum_errors.append(str(e))
+
+    # Computers (delegation + OS + LAPS password readability).
+    try:
+        conn.search(base_dn, "(objectClass=computer)", search_scope=SUBTREE,
+                    attributes=["sAMAccountName", "dNSHostName", "operatingSystem",
+                                "operatingSystemVersion", "userAccountControl",
+                                # LAPS: legacy attr (ms-Mcs-AdmPwd) + new attr
+                                # (msLAPS-Password, Windows LAPS from Server 2019+).
+                                "ms-Mcs-AdmPwd", "msLAPS-Password",
+                                "msLAPS-EncryptedPassword",
+                                # RBCD victim marker on computers (this is where
+                                # RBCD attacks usually LAND - a machine account
+                                # whose msDS-AllowedToActOnBehalf... has been
+                                # written to trust an attacker-controlled
+                                # principal is an S4U2Proxy target).
+                                "msDS-AllowedToActOnBehalfOfOtherIdentity"],
+                    paged_size=500)
+        accounts += _accounts_from_entries(conn, dc_ip, domain, kind="computer")
+        # RBCD victims: any object with a populated msDS-AllowedToAct... blob
+        # already trusts SOMEONE to impersonate against it. The presence itself
+        # is the discovery signal; parsing the SDDL to name the delegated-from
+        # principal is a second pass.
+        try:
+            _apply_rbcd(dom, dc_ip, conn.entries, kind="computer")
+        except Exception as e:                # noqa: BLE001 — never break enum
+            dom.enum_errors.append(f"rbcd_computer: {e}")
+        # LAPS-readable tally: any computer where the CURRENT bind can read
+        # ms-Mcs-AdmPwd or msLAPS-Password is a bug (that attribute should be
+        # readable only to specific privileged groups). One readable = the
+        # tester has a local-admin password for that computer.
+        laps_readable: list[dict] = []
+        for e in conn.entries:
+            legacy = e["ms-Mcs-AdmPwd"].value if "ms-Mcs-AdmPwd" in e else None
+            newer = e["msLAPS-Password"].value if "msLAPS-Password" in e else None
+            if legacy or newer:
+                laps_readable.append({
+                    "host": str(e.sAMAccountName.value or "?").rstrip("$"),
+                    "dns": str(e.dNSHostName.value or "") if "dNSHostName" in e else "",
+                    "attr": "ms-Mcs-AdmPwd" if legacy else "msLAPS-Password",
+                })
+        if laps_readable:
+            dom.laps_readable = laps_readable
+    except Exception as e:
+        dom.enum_errors.append(str(e))
+
+    # gMSA (Group Managed Service Accounts) — msDS-GroupManagedServiceAccount.
+    # A tester who reads msDS-ManagedPassword can compute the gMSA plaintext
+    # password (the blob decrypts client-side). Flag every gMSA we CAN read.
+    try:
+        conn.search(base_dn,
+                    "(objectClass=msDS-GroupManagedServiceAccount)",
+                    search_scope=SUBTREE,
+                    attributes=["sAMAccountName", "servicePrincipalName",
+                                "msDS-ManagedPassword",
+                                "msDS-GroupMSAMembership"],
+                    paged_size=200)
+        gmsa_accts: list[dict] = []
+        for e in conn.entries:
+            name = str(e.sAMAccountName.value or "?").rstrip("$")
+            has_pw = "msDS-ManagedPassword" in e and e["msDS-ManagedPassword"].value
+            spns = list(e.servicePrincipalName.values or []) if "servicePrincipalName" in e else []
+            gmsa_accts.append({
+                "name": name,
+                "password_readable": bool(has_pw),
+                "spns": spns[:5],
+            })
+        if gmsa_accts:
+            dom.gmsa = gmsa_accts
+    except Exception as e:
+        dom.enum_errors.append(str(e))
+
+    # Fine-grained password policies (PSOs) — often relaxed for specific
+    # service-account groups (msDS-PasswordSettings). Weaker policies on a
+    # named group = spray priority target.
+    try:
+        conn.search(base_dn,
+                    "(objectClass=msDS-PasswordSettings)",
+                    search_scope=SUBTREE,
+                    attributes=["cn", "msDS-MinimumPasswordLength",
+                                "msDS-PasswordComplexityEnabled",
+                                "msDS-LockoutThreshold",
+                                "msDS-PSOAppliesTo"])
+        psos: list[dict] = []
+        for e in conn.entries:
+            psos.append({
+                "name": str(e.cn.value or "?"),
+                "min_length": str(e["msDS-MinimumPasswordLength"].value or "?")
+                               if "msDS-MinimumPasswordLength" in e else "?",
+                "complexity": str(e["msDS-PasswordComplexityEnabled"].value or "?")
+                              if "msDS-PasswordComplexityEnabled" in e else "?",
+                "lockout": str(e["msDS-LockoutThreshold"].value or "?")
+                           if "msDS-LockoutThreshold" in e else "?",
+                "applies_to": [_cn(a) for a in (e["msDS-PSOAppliesTo"].values or [])]
+                              if "msDS-PSOAppliesTo" in e else [],
+            })
+        if psos:
+            dom.password_policies = psos
+    except Exception as e:
+        dom.enum_errors.append(str(e))
+
+    # Privileged groups + members.
+    try:
+        conn.search(base_dn, "(objectClass=group)", search_scope=SUBTREE,
+                    attributes=["sAMAccountName", "member", "adminCount", "description"],
+                    paged_size=500)
+        for e in conn.entries:
+            name = str(e.sAMAccountName.value or "")
+            if name.lower() in PRIVILEGED_GROUPS or (
+                    "adminCount" in e and str(e.adminCount.value) == "1"):
+                members = e.member.values if "member" in e else []
+                accounts.append(Account(
+                    ip=dc_ip, source="ldap", kind="group", name=name, domain=domain,
+                    detail=f"{len(members)} member(s)",
+                    attrs={"members": "; ".join(_cn(m) for m in members),
+                           "admincount": "1"}))
+    except Exception as e:
+        dom.enum_errors.append(str(e))
+
+    # Trusts.
+    try:
+        conn.search(base_dn, "(objectClass=trustedDomain)", search_scope=SUBTREE,
+                    attributes=["trustPartner", "trustDirection", "trustType"])
+        _dir = {"1": "inbound", "2": "outbound", "3": "bidirectional"}
+        for e in conn.entries:
+            dom.trusts.append({
+                "name": str(e.trustPartner.value or ""),
+                "direction": _dir.get(str(e.trustDirection.value), str(e.trustDirection.value)),
+                "type": str(e.trustType.value or ""),
+            })
+    except Exception as e:
+        dom.enum_errors.append(str(e))
+
+    conn.unbind()
+    return dom, accounts
+
+
+def _cn(dn: str) -> str:
+    m = re.match(r"CN=([^,]+)", dn or "")
+    return m.group(1) if m else (dn or "")
+
+
+def _accounts_from_entries(conn, dc_ip, domain, kind):
+    """Convert ldap3 search results into Account objects with useful attrs."""
+    out: list[Account] = []
+    for e in conn.entries:
+        name = str(e.sAMAccountName.value or "") if "sAMAccountName" in e else ""
+        if not name:
+            continue
+        attrs: dict = {}
+        uac = 0
+        if "userAccountControl" in e and e.userAccountControl.value is not None:
+            uac = int(e.userAccountControl.value)
+            flags = _uac_flags(uac)
+            attrs["enabled"] = "no" if "ACCOUNTDISABLE" in flags else "yes"
+            if "DONT_REQ_PREAUTH" in flags:
+                attrs["asrep_roastable"] = "yes"
+            if "TRUSTED_FOR_DELEGATION" in flags:
+                attrs["delegation"] = "unconstrained"
+            elif "TRUSTED_TO_AUTH_FOR_DELEGATION" in flags:
+                attrs["delegation"] = "constrained"
+            if "PASSWD_NOTREQD" in flags:
+                attrs["passwd_notreqd"] = "yes"
+        if "servicePrincipalName" in e and e.servicePrincipalName.value:
+            spn = e.servicePrincipalName.value
+            attrs["spn"] = "; ".join(spn) if isinstance(spn, list) else str(spn)
+        if "adminCount" in e and str(e.adminCount.value) == "1":
+            attrs["admincount"] = "1"
+        if "memberOf" in e and e.memberOf.value:
+            mo = e.memberOf.value
+            attrs["memberof"] = "; ".join(_cn(m) for m in
+                                          (mo if isinstance(mo, list) else [mo]))
+        if "description" in e and e.description.value:
+            attrs["description"] = str(e.description.value)
+        if "operatingSystem" in e and e.operatingSystem.value:
+            attrs["os"] = str(e.operatingSystem.value)
+        if "dNSHostName" in e and e.dNSHostName.value:
+            attrs["fqdn"] = str(e.dNSHostName.value)
+        out.append(Account(ip=dc_ip, source="ldap", kind=kind, name=name,
+                           domain=domain, attrs=attrs))
+    return out
+
+
+# --- ldapsearch (airgapped) path ------------------------------------------------
+
+def _parse_ldif(text: str) -> list[dict]:
+    """Parse ldapsearch LDIF output into a list of {attr: [values]} entries.
+
+    Assumes `-o ldif-wrap=no` (no line folding). Handles base64 (attr:: b64).
+    """
+    entries: list[dict] = []
+    cur: dict | None = None
+    for line in text.splitlines():
+        if not line.strip():
+            if cur:
+                entries.append(cur)
+                cur = None
+            continue
+        if line.startswith("#") or ":" not in line:
+            continue
+        if line.lower().startswith("dn:"):
+            if cur:
+                entries.append(cur)
+            cur = {}
+        if cur is None:
+            cur = {}
+        attr, _, val = line.partition(":")
+        attr = attr.strip()
+        if val.startswith(":"):  # base64-encoded value
+            try:
+                val = base64.b64decode(val[1:].strip()).decode("utf-8", "replace")
+            except Exception:
+                val = val[1:].strip()
+        else:
+            val = val.strip()
+        cur.setdefault(attr, []).append(val)
+    if cur:
+        entries.append(cur)
+    return entries
+
+
+def _run_ldapsearch(dc_ip, base, filt, attrs, scope, username, password, domain, ssl):
+    proto = "ldaps" if ssl else "ldap"
+    cmd = ["ldapsearch", "-x", "-o", "ldif-wrap=no", "-LLL",
+           "-H", f"{proto}://{dc_ip}", "-s", scope, "-b", base]
+    pwfile = None
+    if username:
+        bind = f"{username}@{domain}" if domain else username
+        cmd += ["-D", bind]
+        if password:
+            # Pass the password via a 0600 file (-y) instead of -w <pw>, which would
+            # expose it on the world-readable process argv. mkstemp is owner-only;
+            # -y reads the whole file, so write the password with no trailing newline.
+            fd, pwfile = tempfile.mkstemp(prefix="recce-ldap-pw-")
+            try:
+                os.write(fd, password.encode())
+            finally:
+                os.close(fd)
+            cmd += ["-y", pwfile]
+        else:
+            cmd += ["-w", ""]
+    cmd.append(filt)
+    cmd += attrs
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              errors="replace", timeout=180)
+    except (subprocess.TimeoutExpired, OSError, ValueError) as e:
+        raise RuntimeError(f"ldapsearch failed: {e}")
+    finally:
+        if pwfile:
+            try:
+                os.unlink(pwfile)
+            except OSError:
+                pass
+    if proc.returncode not in (0, 4):  # 4 = size-limit exceeded (partial results)
+        err = (proc.stderr or "").strip().splitlines()
+        raise RuntimeError(err[-1] if err else f"ldapsearch exit {proc.returncode}")
+    return _parse_ldif(proc.stdout)
+
+
+def _first(entry: dict, key: str, default: str = "") -> str:
+    vals = entry.get(key) or entry.get(key.lower())
+    return vals[0] if vals else default
+
+
+def _acc_from_ldif(entry: dict, dc_ip: str, domain: str, kind: str) -> Account | None:
+    name = _first(entry, "sAMAccountName")
+    if not name:
+        return None
+    attrs: dict = {}
+    uac_s = _first(entry, "userAccountControl")
+    if uac_s.isdigit():
+        flags = _uac_flags(int(uac_s))
+        attrs["enabled"] = "no" if "ACCOUNTDISABLE" in flags else "yes"
+        if "DONT_REQ_PREAUTH" in flags:
+            attrs["asrep_roastable"] = "yes"
+        if "TRUSTED_FOR_DELEGATION" in flags:
+            attrs["delegation"] = "unconstrained"
+        elif "TRUSTED_TO_AUTH_FOR_DELEGATION" in flags:
+            attrs["delegation"] = "constrained"
+    spns = entry.get("servicePrincipalName")
+    if spns:
+        attrs["spn"] = "; ".join(spns)
+    if _first(entry, "adminCount") == "1":
+        attrs["admincount"] = "1"
+    memberof = entry.get("memberOf")
+    if memberof:
+        attrs["memberof"] = "; ".join(_cn(m) for m in memberof)
+    desc = _first(entry, "description")
+    if desc:
+        attrs["description"] = desc
+    os_ = _first(entry, "operatingSystem")
+    if os_:
+        attrs["os"] = os_
+    return Account(ip=dc_ip, source="ldap", kind=kind, name=name, domain=domain, attrs=attrs)
+
+
+def _enum_ldapsearch(dc_ip, domain, username, password, use_ssl, anonymous):
+    user = "" if anonymous else username
+    base = ",".join(f"DC={p}" for p in domain.split(".")) if domain else ""
+
+    dom = Domain(name=domain, sources=["ldapsearch"], dc_ips=[dc_ip],
+                 anonymous_bind=anonymous)
+
+    # rootDSE for base DN + functional levels (anonymous bind is fine here).
+    try:
+        root = _run_ldapsearch(dc_ip, "", "(objectclass=*)",
+                               ["defaultNamingContext", "domainFunctionality",
+                                "forestFunctionality"], "base", "", "", "", use_ssl)
+        if root:
+            base = _first(root[0], "defaultNamingContext") or base
+            dom.naming_context = base
+            dom.functional_level = _func_level(_first(root[0], "domainFunctionality"))
+            dom.forest = _func_level(_first(root[0], "forestFunctionality"))
+    except RuntimeError:
+        pass
+    if not base:
+        raise RuntimeError("Could not determine LDAP base DN; supply --domain.")
+
+    accounts: list[Account] = []
+
+    def q(filt, attrs, kind=None):
+        try:
+            entries = _run_ldapsearch(dc_ip, base, filt, attrs, "sub", user,
+                                      password, domain, use_ssl)
+        except RuntimeError:
+            return []
+        if kind:
+            return [a for e in entries if (a := _acc_from_ldif(e, dc_ip, domain, kind))]
+        return entries
+
+    accounts += q("(&(objectCategory=person)(objectClass=user))",
+                  ["sAMAccountName", "userAccountControl", "servicePrincipalName",
+                   "adminCount", "memberOf", "description"], kind="user")
+    accounts += q("(objectClass=computer)",
+                  ["sAMAccountName", "dNSHostName", "operatingSystem",
+                   "userAccountControl"], kind="computer")
+
+    for e in q("(objectClass=group)", ["sAMAccountName", "member", "adminCount"]):
+        gname = _first(e, "sAMAccountName")
+        if gname.lower() in PRIVILEGED_GROUPS or _first(e, "adminCount") == "1":
+            members = e.get("member", [])
+            accounts.append(Account(ip=dc_ip, source="ldap", kind="group", name=gname,
+                                    domain=domain, detail=f"{len(members)} member(s)",
+                                    attrs={"members": "; ".join(_cn(m) for m in members),
+                                           "admincount": "1"}))
+
+    _dir = {"1": "inbound", "2": "outbound", "3": "bidirectional"}
+    for e in q("(objectClass=trustedDomain)",
+               ["trustPartner", "trustDirection", "trustType"]):
+        dom.trusts.append({"name": _first(e, "trustPartner"),
+                           "direction": _dir.get(_first(e, "trustDirection"),
+                                                 _first(e, "trustDirection")),
+                           "type": _first(e, "trustType")})
+
+    # Domain object -> password policy + machine account quota.
+    for e in q("(objectClass=domain)", ["minPwdLength", "lockoutThreshold",
+                                        "pwdHistoryLength", "maxPwdAge",
+                                        "ms-DS-MachineAccountQuota"]):
+        pol = {}
+        if _first(e, "minPwdLength").isdigit():
+            pol["min_length"] = int(_first(e, "minPwdLength"))
+        if _first(e, "lockoutThreshold").isdigit():
+            pol["lockout_threshold"] = int(_first(e, "lockoutThreshold"))
+        if _first(e, "pwdHistoryLength").isdigit():
+            pol["history"] = int(_first(e, "pwdHistoryLength"))
+        dom.password_policy = pol
+        maq = _first(e, "ms-DS-MachineAccountQuota")
+        if maq:
+            dom.machine_account_quota = maq
+        break
+
+    return dom, accounts

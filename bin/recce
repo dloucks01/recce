@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Convenience wrapper so you can run `./bin/recce ...` (or symlink it onto your
+# PATH) from anywhere, with or without sudo. It puts the project folder on
+# PYTHONPATH so the `recce` package is found even under `sudo` (which resets the
+# environment).
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec env PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 -m recce "$@"

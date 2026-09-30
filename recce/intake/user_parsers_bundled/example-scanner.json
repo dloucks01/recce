@@ -1,0 +1,28 @@
+{
+  "name": "example-scanner",
+  "description": "Template for adding a custom-tool parser without touching Python. Copy this file to ~/.recce/parsers/ or <engagement>/parsers/ and adapt the regexes to your tool's output. Everything's line-anchored (re.M).",
+  "detect": {
+    "filename_glob": "*.example-scanner",
+    "content_re": "^example-scanner v",
+    "content_substr": "example-scanner"
+  },
+  "match": {
+    "target_re": "^Target:\\s+(?P<target>\\S+)",
+    "port_default": 0
+  },
+  "findings": [
+    {
+      "marker_re": "^\\[CRIT\\]\\s+(?P<title>.+?)(?:\\s+at\\s+(?P<port>\\d+))?\\s*(?:\\((?P<cve>CVE-\\d{4}-\\d+)\\))?$",
+      "severity": "critical",
+      "confidence": "confirmed"
+    },
+    {
+      "marker_re": "^\\[HIGH\\]\\s+(?P<title>.+)$",
+      "severity": "high"
+    },
+    {
+      "marker_re": "^\\[MED\\]\\s+(?P<title>.+)$",
+      "severity": "medium"
+    }
+  ]
+}

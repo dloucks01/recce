@@ -1,0 +1,11 @@
+# Force LF on checkout for everything, so a clone/copy that passes through a
+# Windows host never corrupts the bash wrapper or Python sources with CRLF
+# (a CRLF shebang breaks `./bin/recce` with "bad interpreter"). recce runs on
+# Kali/Linux only.
+* text=auto eol=lf
+bin/recce   text eol=lf
+*.py        text eol=lf
+*.sh        text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.xml       text eol=lf

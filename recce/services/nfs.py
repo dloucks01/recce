@@ -1,0 +1,747 @@
+"""Deep NFS / mountd enumeration (stdlib only).
+
+Speaks ONC RPC (Sun RPC, RFC 1057) + the portmapper and mountd protocols directly
+with struct/XDR on a raw socket - no rpcinfo/showmount binary. Airgapped, stdlib
+only, read-only.
+
+  * **portmapper DUMP (TCP 111):** the RPC program directory - which services
+    (nfs / mountd / nlockmgr / ...) are registered and on which ports. Enumerable with
+    no credential.
+  * **MOUNTPROC_EXPORT (mountd):** the equivalent of `showmount -e` - every exported
+    directory and the host list it is shared to. An export shared to `*` / everyone
+    (or with no host restriction) is mountable by any host on the network: read (and
+    frequently, via a matching UID or no_root_squash, write) every file under it.
+
+recce only issues the read-only EXPORT/DUMP calls - it never mounts a filesystem or
+touches a file. Positive findings fold into the severity totals, the Vulnerabilities
+sheet, the write-ups, a dedicated **NFS** tab, and the prove engine.
+"""
+from __future__ import annotations
+
+import shlex
+import socket
+import struct
+
+from ..core import proxy
+from ..core.models import Host, Port
+from .svccommon import finding_builder, recvn as _recvn
+
+_PORTS = (2049, 111)
+_DEFAULT_PORT = 2049
+_TIMEOUT = 6.0
+
+_PMAP_PROG, _PMAP_VERS = 100000, 2
+_MOUNT_PROG = 100005
+_NFS_PROG = 100003
+_NFS_VERS = 3
+_NFS_TCP_PORT = 2049                 # NFS well-known port (fallback if no pmap)
+_IPPROTO_TCP = 6
+_MAX_LIST = 4096                     # cap linked-list walks (hostile server guard)
+_MAX_RECORD = 8 * 1024 * 1024        # cap total RPC record size (memory guard)
+_MAX_FRAGMENTS = 64                  # cap record-marking fragments (loop guard)
+_MAX_MNT_ATTEMPTS = 4                # cap MOUNTPROC_MNT probes per host (budget guard)
+_MAX_AUTH_FLAVORS = 16               # cap auth_flavor list in MNT reply
+
+# NFSv3 file type codes (RFC 1813 sec 2.5).
+_NF3_NAMES = {1: "REG", 2: "DIR", 3: "BLK", 4: "CHR", 5: "LNK", 6: "SOCK", 7: "FIFO"}
+
+
+def is_nfs(port: Port) -> bool:
+    if port.portid in _PORTS:
+        return True
+    blob = f"{port.service} {port.product}".lower()
+    return any(k in blob for k in ("nfs", "rpcbind", "portmap", "mountd"))
+
+
+# --- ONC RPC over TCP (record marking) ------------------------------------------
+
+def _pack_call(xid: int, prog: int, vers: int, proc: int, args: bytes = b"") -> bytes:
+    """An RPC CALL message body (AUTH_NULL cred + verf), without record marking."""
+    return struct.pack(
+        ">IIIIIIIIII",
+        xid, 0,            # mtype = CALL
+        2,                 # rpcvers
+        prog, vers, proc,
+        0, 0,              # cred: AUTH_NULL, length 0
+        0, 0,              # verf: AUTH_NULL, length 0
+    ) + args
+
+
+def _rpc(sock: socket.socket, xid: int, prog: int, vers: int, proc: int,
+         args: bytes, timeout: float) -> bytes | None:
+    """Send one RPC call over TCP (with record marking) and return the result bytes
+    (everything after a SUCCESS accept), or None on any RPC/transport error."""
+    body = _pack_call(xid, prog, vers, proc, args)
+    # Record marking: last-fragment bit (0x80000000) | length.
+    sock.settimeout(timeout)
+    try:
+        sock.sendall(struct.pack(">I", 0x80000000 | len(body)) + body)
+    except OSError:
+        return None
+    reply = _recv_record(sock, timeout)
+    if reply is None:
+        return None
+    return _parse_reply(reply, xid)
+
+
+def _recv_record(sock: socket.socket, timeout: float) -> bytes | None:
+    """Read a complete RPC record (one or more record-marking fragments). Bounded on
+    both the total accumulated size and the fragment count so a hostile peer can't
+    exhaust memory or loop forever by never setting the last-fragment bit."""
+    sock.settimeout(timeout)
+    out = b""
+    for _ in range(_MAX_FRAGMENTS):
+        hdr = _recvn(sock, 4, timeout)
+        if hdr is None or len(hdr) < 4:
+            return None
+        marker = struct.unpack(">I", hdr)[0]
+        last = bool(marker & 0x80000000)
+        length = marker & 0x7FFFFFFF
+        if length > _MAX_RECORD or len(out) + length > _MAX_RECORD:
+            return None
+        frag = _recvn(sock, length, timeout)
+        if frag is None or len(frag) < length:
+            return None
+        out += frag
+        if last:
+            return out
+    return None                                        # too many fragments -> give up
+
+
+
+
+def _parse_reply(data: bytes, want_xid: int):
+    """Validate an RPC REPLY header and return the result payload, or None."""
+    try:
+        xid, mtype, reply_stat = struct.unpack_from(">III", data, 0)
+    except struct.error:
+        return None
+    if xid != want_xid or mtype != 1 or reply_stat != 0:   # REPLY + MSG_ACCEPTED
+        return None
+    i = 12
+    # verifier: flavor(4) + length(4) + body(length, padded)
+    try:
+        _flavor, vlen = struct.unpack_from(">II", data, i)
+    except struct.error:
+        return None
+    i += 8 + _xdr_pad(vlen)
+    try:
+        accept_stat = struct.unpack_from(">I", data, i)[0]
+    except struct.error:
+        return None
+    i += 4
+    if accept_stat != 0:                                   # SUCCESS
+        return None
+    return data[i:]
+
+
+# --- XDR readers (bounds-checked) ------------------------------------------------
+
+def _xdr_pad(n: int) -> int:
+    return (n + 3) & ~3
+
+
+class _Cur:
+    """A tiny bounds-checked XDR cursor over a byte buffer."""
+    __slots__ = ("b", "i")
+
+    def __init__(self, b: bytes):
+        self.b, self.i = b, 0
+
+    def u32(self) -> int:
+        if self.i + 4 > len(self.b):
+            raise ValueError("XDR: short uint32")
+        v = struct.unpack_from(">I", self.b, self.i)[0]
+        self.i += 4
+        return v
+
+    def opaque(self) -> bytes:
+        n = self.u32()
+        if n > len(self.b) - self.i:
+            raise ValueError("XDR: opaque length out of range")
+        v = self.b[self.i:self.i + n]
+        self.i += _xdr_pad(n)
+        return v
+
+    def string(self) -> str:
+        return self.opaque().decode("utf-8", "replace")
+
+
+# --- portmapper + mountd ---------------------------------------------------------
+
+def portmap_dump(ip: str, timeout: float = _TIMEOUT, pmport: int = 111) -> list[dict]:
+    """PMAPPROC_DUMP: the registered RPC programs. Returns [{prog,vers,prot,port}]."""
+    try:
+        sock = socket.create_connection((ip, pmport), timeout=timeout)
+    except OSError:
+        return []
+    try:
+        res = _rpc(sock, 0x1001, _PMAP_PROG, _PMAP_VERS, 4, b"", timeout)
+        if res is None:
+            return []
+        cur = _Cur(res)
+        out = []
+        try:
+            while len(out) < _MAX_LIST:
+                if cur.u32() == 0:                         # value-follows == FALSE
+                    break
+                prog, vers, prot, port = cur.u32(), cur.u32(), cur.u32(), cur.u32()
+                out.append({"prog": prog, "vers": vers, "prot": prot, "port": port})
+        except (ValueError, struct.error):
+            pass                                           # keep what parsed cleanly
+        return out
+    except (ValueError, struct.error):
+        return []
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def getport(ip: str, prog: int, vers: int, prot: int = _IPPROTO_TCP,
+            timeout: float = _TIMEOUT, pmport: int = 111) -> int:
+    """PMAPPROC_GETPORT for (prog, vers, prot). Returns the port, or 0."""
+    try:
+        sock = socket.create_connection((ip, pmport), timeout=timeout)
+    except OSError:
+        return 0
+    try:
+        args = struct.pack(">IIII", prog, vers, prot, 0)
+        res = _rpc(sock, 0x1002, _PMAP_PROG, _PMAP_VERS, 3, args, timeout)
+        if res is None or len(res) < 4:
+            return 0
+        return struct.unpack_from(">I", res, 0)[0]
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def mount_export(ip: str, port: int, vers: int = 3,
+                 timeout: float = _TIMEOUT) -> list[dict]:
+    """MOUNTPROC_EXPORT (proc 5): the export list. Returns
+    [{dir, groups:[hostspec, ...]}] - groups empty means shared to everyone."""
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+    except OSError:
+        return []
+    try:
+        res = _rpc(sock, 0x1003, _MOUNT_PROG, vers, 5, b"", timeout)
+        if res is None:
+            return []
+        cur = _Cur(res)
+        exports = []
+        try:
+            while len(exports) < _MAX_LIST:
+                if cur.u32() == 0:                         # no more exports
+                    break
+                dirp = cur.string()
+                groups = []
+                while len(groups) < _MAX_LIST:
+                    if cur.u32() == 0:                     # no more groups
+                        break
+                    groups.append(cur.string())
+                exports.append({"dir": dirp, "groups": groups})
+        except (ValueError, struct.error):
+            pass                                           # keep exports parsed so far
+        return exports
+    except (ValueError, struct.error):
+        return []
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def mount_dump(ip: str, port: int, vers: int = 3,
+               timeout: float = _TIMEOUT) -> list[dict]:
+    """MOUNTPROC_DUMP (proc 2, RFC 1813 sec 5.2.2) - `showmount -a`. Returns the
+    currently-mounted (hostname, dir) pairs the server tracks. Returns [] on any
+    RPC / XDR error. Feeds cross-service known_hosts + relay_targets."""
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+    except OSError:
+        return []
+    try:
+        res = _rpc(sock, 0x1004, _MOUNT_PROG, vers, 2, b"", timeout)
+        if res is None:
+            return []
+        cur = _Cur(res)
+        out = []
+        try:
+            while len(out) < _MAX_LIST:
+                if cur.u32() == 0:                         # value-follows == FALSE
+                    break
+                host = cur.string()
+                dirp = cur.string()
+                out.append({"hostname": host, "dir": dirp})
+        except (ValueError, struct.error):
+            pass                                           # keep entries parsed so far
+        return out
+    except (ValueError, struct.error):
+        return []
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def mount_mnt(ip: str, port: int, path: str, vers: int = 3,
+              timeout: float = _TIMEOUT) -> dict | None:
+    """MOUNTPROC_MNT (proc 1, RFC 1813 sec 5.2.1). Attempt to obtain a filehandle
+    for `path`. Returns {status, fh, auth_flavors} where status==0 (MNT3_OK)
+    means the server accepted the mount and handed back a root filehandle - the
+    primitive that separates 'showmount says *' from 'I hold /'. Returns None on
+    RPC / transport error; a non-zero status is a legitimate server response
+    (permission denied, no such export, etc)."""
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+    except OSError:
+        return None
+    try:
+        pbytes = path.encode("utf-8", "replace")
+        # dirpath = length-prefixed opaque, padded to a 4-byte boundary.
+        args = struct.pack(">I", len(pbytes)) + pbytes + b"\x00" * ((-len(pbytes)) & 3)
+        res = _rpc(sock, 0x1005, _MOUNT_PROG, vers, 1, args, timeout)
+        if res is None:
+            return None
+        cur = _Cur(res)
+        try:
+            status = cur.u32()
+        except (ValueError, struct.error):
+            return None
+        if status != 0:
+            return {"status": status, "fh": b"", "auth_flavors": []}
+        try:
+            if vers >= 3:
+                # NFSv3: nfs_fh3 = opaque data<NFS3_FHSIZE> (length-prefixed).
+                fh = cur.opaque()
+                n = cur.u32()
+                flavors = []
+                for _ in range(min(n, _MAX_AUTH_FLAVORS)):
+                    flavors.append(cur.u32())
+            else:
+                # NFSv1/2 mountd: fixed 32-byte fhandle, no auth flavors list.
+                if cur.i + 32 > len(cur.b):
+                    return {"status": status, "fh": b"", "auth_flavors": []}
+                fh = cur.b[cur.i:cur.i + 32]
+                cur.i += 32
+                flavors = []
+        except (ValueError, struct.error):
+            return {"status": status, "fh": b"", "auth_flavors": []}
+        return {"status": status, "fh": fh, "auth_flavors": flavors}
+    except (ValueError, struct.error):
+        return None
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def nfs3_getattr(ip: str, port: int, fh: bytes,
+                 timeout: float = _TIMEOUT) -> dict | None:
+    """NFSv3 NFSPROC3_GETATTR (proc 1 on NFS 100003 v3, RFC 1813 sec 3.3.1). A
+    single controlled read of a filehandle's attributes - the smallest NFS op
+    that proves the export is not merely 'listed to *' but that recce can
+    actually speak NFS through it and pull a real server-side answer. Returns
+    {status, fattr:{type,mode,nlink,uid,gid,size,used,fileid,mtime}} on
+    NFS3_OK; {status, fattr:{}} on any nfsstat3 != 0; None on transport/RPC
+    error. Read-only, one round trip, bounded timeout - no writes, no state."""
+    if not fh:
+        return None
+    scaled = proxy.scaled(timeout)
+    try:
+        sock = socket.create_connection((ip, port), timeout=scaled)
+    except OSError:
+        return None
+    try:
+        args = struct.pack(">I", len(fh)) + fh + b"\x00" * ((-len(fh)) & 3)
+        res = _rpc(sock, 0x1006, _NFS_PROG, _NFS_VERS, 1, args, scaled)
+        if res is None or len(res) < 4:
+            return None
+        cur = _Cur(res)
+        try:
+            status = cur.u32()
+        except (ValueError, struct.error):
+            return None
+        if status != 0:                                        # NFS3ERR_*
+            return {"status": status, "fattr": {}}
+        try:
+            ftype = cur.u32()
+            mode = cur.u32()
+            nlink = cur.u32()
+            uid = cur.u32()
+            gid = cur.u32()
+            size_hi, size_lo = cur.u32(), cur.u32()
+            size = (size_hi << 32) | size_lo
+            used_hi, used_lo = cur.u32(), cur.u32()
+            used = (used_hi << 32) | used_lo
+            cur.u32(); cur.u32()                               # rdev major/minor
+            cur.u32(); cur.u32()                               # fsid
+            fid_hi, fid_lo = cur.u32(), cur.u32()
+            fileid = (fid_hi << 32) | fid_lo
+            cur.u32(); cur.u32()                               # atime (skip)
+            mtime_s = cur.u32(); cur.u32()                     # mtime seconds + nsec
+            # ctime deliberately not parsed - we don't need it.
+        except (ValueError, struct.error):
+            return {"status": status, "fattr": {}}
+        return {"status": status, "fattr": {
+            "type": ftype, "type_name": _NF3_NAMES.get(ftype, str(ftype)),
+            "mode": mode, "nlink": nlink, "uid": uid, "gid": gid,
+            "size": size, "used": used, "fileid": fileid, "mtime": mtime_s,
+        }}
+    except (ValueError, struct.error):
+        return None
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def probe(ip: str, timeout: float = _TIMEOUT, pmport: int = 111,
+          mount_probe: bool = True) -> dict:
+    """Read-only NFS/mountd fingerprint via portmapper + mountd EXPORT. Returns
+    {reachable, programs, nfs, mountd_port, exports, mount_clients, mounts,
+    error}. `pmport` is the portmapper port (111 in the wild; overridable for
+    testing). `mount_probe` gates the MOUNTPROC_MNT filehandle-capture probe -
+    when True (default) recce attempts MNT for up to `_MAX_MNT_ATTEMPTS`
+    exports to prove mountability."""
+    out: dict = {"reachable": False, "programs": [], "exports": [],
+                 "mount_clients": [], "mounts": [], "world_getattr": None}
+    progs = portmap_dump(ip, timeout, pmport)
+    if progs:
+        out["reachable"] = True
+        out["programs"] = progs
+        out["nfs"] = any(p["prog"] == _NFS_PROG for p in progs)
+        # mountd's registered TCP port (prefer a v3 registration).
+        mport = 0
+        for p in progs:
+            if p["prog"] == _MOUNT_PROG and p["prot"] == _IPPROTO_TCP and p["port"]:
+                mport = p["port"]
+                if p["vers"] == 3:
+                    break
+        if not mport:
+            mport = getport(ip, _MOUNT_PROG, 3, _IPPROTO_TCP, timeout, pmport) or \
+                getport(ip, _MOUNT_PROG, 1, _IPPROTO_TCP, timeout, pmport)
+        out["mountd_port"] = mport
+        if mport:
+            exp = mount_export(ip, mport, 3, timeout) or \
+                mount_export(ip, mport, 1, timeout)
+            out["exports"] = exp
+            # G6 passive: currently-mounted client list (showmount -a). Try v3
+            # then v1; empty on well-restricted servers, an info-leak elsewhere.
+            clients = mount_dump(ip, mport, 3, timeout) or \
+                mount_dump(ip, mport, 1, timeout)
+            out["mount_clients"] = clients
+            # G1 active (gated): MOUNTPROC_MNT for up to N exports - captures the
+            # root filehandle and proves mountability from recce's own IP.
+            if mount_probe and exp:
+                mounts = []
+                for e in exp[:_MAX_MNT_ATTEMPTS]:
+                    r = mount_mnt(ip, mport, e["dir"], 3, timeout) or \
+                        mount_mnt(ip, mport, e["dir"], 1, timeout)
+                    if r is None:
+                        continue
+                    mounts.append({"dir": e["dir"], "status": r["status"],
+                                   "fh_len": len(r["fh"]),
+                                   "fh": r["fh"],
+                                   "auth_flavors": r["auth_flavors"]})
+                out["mounts"] = mounts
+                # T2 nfs_world promotion: one controlled NFSv3 GETATTR on the
+                # first world-mountable export whose MNT succeeded. Real
+                # server-side attribute bytes prove the export is speakable, not
+                # just enumerable. Single call, read-only, bounded timeout.
+                nfsport = 0
+                for p in progs:
+                    if (p["prog"] == _NFS_PROG and p["prot"] == _IPPROTO_TCP
+                            and p["port"] and p["vers"] == 3):
+                        nfsport = p["port"]
+                        break
+                nfsport = nfsport or _NFS_TCP_PORT
+                world_dirs = {e["dir"] for e in exp
+                              if _is_world(e.get("groups") or [])}
+                for m in mounts:
+                    if m["status"] != 0 or not m.get("fh"):
+                        continue
+                    if m["dir"] not in world_dirs:
+                        continue
+                    ga = nfs3_getattr(ip, nfsport, m["fh"], timeout)
+                    if ga is not None:
+                        out["world_getattr"] = {"dir": m["dir"],
+                                                "nfs_port": nfsport,
+                                                "status": ga["status"],
+                                                "fattr": ga["fattr"]}
+                    break                                       # one shot only
+    return out
+
+
+def nfs_targets(hosts: list[Host]) -> list[dict]:
+    """One target per host that exposes NFS/portmapper (deduped - the RPC work is
+    per-host, driven off portmapper 111)."""
+    seen, out = set(), []
+    for h in hosts:
+        if h.ip in seen:
+            continue
+        ports = {p.portid for p in h.open_ports}
+        if any(is_nfs(p) for p in h.open_ports):
+            seen.add(h.ip)
+            port = 111 if 111 in ports else _DEFAULT_PORT
+            out.append({"ip": h.ip, "hostname": h.hostname, "port": port})
+    return out
+
+
+# --- narratives + findings ------------------------------------------------------
+
+_EVERYONE = ("*", "(everyone)", "everyone", "0.0.0.0/0", "::/0")
+
+
+def _is_world(groups: list[str]) -> bool:
+    """True if an export is shared to any host (no restriction / a bare wildcard).
+    A scoped wildcard like '*.corp.example.com' is a domain restriction, NOT
+    everyone, so it is not treated as world-mountable."""
+    if not groups:
+        return True
+    return any(g.strip().lower() in _EVERYONE for g in groups)
+
+
+_NARRATIVE = {
+    "nfs_world": (
+        "The NFS export is shared to every host on the network (no client "
+        "restriction / a wildcard). Any machine can mount it and read every file; if "
+        "the server maps UIDs permissively or exports with no_root_squash, a mounted "
+        "attacker also writes as any user or root - a direct path to file tampering, "
+        "credential theft (SSH keys, /etc/shadow on a root-squash-off export) and code "
+        "execution via a planted SUID binary or cron/authorized_keys. Restrict every "
+        "export to specific hosts/subnets, enable root_squash, and export read-only "
+        "where possible."),
+    "nfs_export": (
+        "The NFS server lists its exports (showmount -e) to anyone with no credential. "
+        "Even restricted exports leak the server's directory layout and the client "
+        "ACLs, mapping out what to target next. Firewall the portmapper (111) and "
+        "mountd, and restrict who may query the export list."),
+    "nfs_rpc": (
+        "The portmapper (rpcbind, 111) answers a DUMP with the full list of registered "
+        "RPC services and ports to anyone. It is reconnaissance-friendly and has a "
+        "history of reflection/amplification abuse - firewall it to trusted hosts."),
+    "nfs_mnt_open": (
+        "mountd answered MOUNTPROC_MNT with MNT3_OK and handed recce a root "
+        "filehandle for the export. That proves the export is mountable from "
+        "this host, not merely 'listed to *' - the next NFSv3 GETATTR/READDIR "
+        "on that handle reads the tree, and where root_squash is off, writing "
+        "as UID 0 turns file access into code execution (SUID binary, cron, "
+        "or an ~/.ssh/authorized_keys drop). Restrict the export's client ACL, "
+        "enable root_squash, and mount read-only where possible."),
+    "nfs_mount_clients": (
+        "mountd's MOUNTPROC_DUMP (the `showmount -a` list) discloses the "
+        "hostnames/IPs of every client currently mounting an export. That is a "
+        "ready-made neighbour map: each entry is a machine trusted enough by "
+        "policy to hold this export, and a candidate for lateral movement or "
+        "AUTH_SYS UID spoofing. Firewall mountd and disable rmtab exposure "
+        "where the server supports it."),
+}
+
+
+TESTING_NARRATIVE = [
+    ("1. RPC directory (stdlib ONC RPC)",
+     "recce speaks Sun RPC directly - no rpcinfo/showmount. It calls the portmapper "
+     "DUMP on 111 to read which RPC services (nfs / mountd / ...) are registered."),
+    ("2. Export list (showmount -e)",
+     "It resolves mountd's port and calls MOUNTPROC_EXPORT to read every exported "
+     "directory and the host list it is shared to - read-only, no mount."),
+    ("3. Exposure classification",
+     "An export shared to * / everyone (or with no host restriction) is mountable by "
+     "any host (critical/high - read, and often write via no_root_squash). A "
+     "restricted-but-enumerable export list is a lower-severity information leak."),
+    ("4. Runbook",
+     "The exact follow-on commands (showmount -e, mount -o vers=3, the no_root_squash "
+     "SUID/UID-switch escalation) are staged per host."),
+]
+
+
+_finding = finding_builder("nfs", _NARRATIVE)
+
+
+def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
+    probes = probes or {}
+    out: list[dict] = []
+    for h in hosts:
+        pr = probes.get(h.ip) or {}
+        if not pr:
+            continue
+        tgt = f"{h.ip}:2049"
+        exports = pr.get("exports") or []
+        world = [e for e in exports if _is_world(e.get("groups") or [])]
+        if world:
+            dirs = ", ".join(e["dir"] for e in world[:12])
+            # T2 promotion: an NFSv3 GETATTR that returned NFS3_OK proves the
+            # world export is not merely 'listed to *' but actually speakable
+            # via NFS from an unprivileged client - real server-side attribute
+            # bytes came back over the wire.
+            ga = pr.get("world_getattr") or {}
+            ga_ok = bool(ga and ga.get("status") == 0 and ga.get("fattr"))
+            depth = "t2" if ga_ok else "t1"
+            detail = (
+                f"{len(world)} export(s) are shared with no host restriction / a "
+                f"wildcard: {dirs}. Any machine on the network can mount and read "
+                "them (and write, if root-squash is off).")
+            if ga_ok:
+                fa = ga["fattr"]
+                detail += (
+                    f" T2 proof: NFSv3 GETATTR against {h.ip}:{ga['nfs_port']} "
+                    f"for {ga['dir']} returned NFS3_OK - "
+                    f"type={fa.get('type_name')}, mode=0{fa.get('mode', 0):o}, "
+                    f"uid={fa.get('uid')}, gid={fa.get('gid')}, "
+                    f"size={fa.get('size')}, mtime={fa.get('mtime')}, "
+                    f"fileid={fa.get('fileid')}. NFS is speaking to us "
+                    "unauthenticated; the export is live, not just listed.")
+            elif ga and ga.get("status") not in (None, 0):
+                detail += (
+                    f" NFSv3 GETATTR reached the NFS server on port "
+                    f"{ga['nfs_port']} for {ga['dir']} but returned "
+                    f"nfsstat3={ga['status']} (attributes suppressed).")
+            out.append(_finding(
+                "high", "NFS export shared to any host (world-mountable)", tgt,
+                detail,
+                "showmount / mount",
+                # shlex.quote the server-supplied export path (attacker-controlled).
+                f"showmount -e {h.ip} ; mkdir /mnt/x ; mount -o vers=3 {h.ip}:"
+                f"{shlex.quote(world[0]['dir'])} /mnt/x   # then read/plant files (within ROE)",
+                "Restrict every export to specific hosts/subnets, enable root_squash, "
+                "and export read-only where possible.",
+                ["CWE-284", "CWE-732"], kind="nfs_world",
+                exploit_note=(
+                    "mkdir -p /mnt/nfs && mount -t nfs -o vers=3,nolock "
+                    f"{h.ip}:/<export> /mnt/nfs && ls -laR /mnt/nfs | head -200; "
+                    "look for id_rsa, .aws/credentials, /etc/shadow. If "
+                    "no_root_squash: cp /bin/bash /mnt/nfs/.bash && chmod +s "
+                    "/mnt/nfs/.bash for SUID escalation."),
+                depth_tier=depth))
+        if exports:
+            dirs = ", ".join(e["dir"] for e in exports[:12])
+            out.append(_finding(
+                "medium", "NFS exports enumerable without authentication", tgt,
+                f"mountd listed {len(exports)} export(s) with no credential: {dirs}."
+                " The export list leaks the server's layout + client ACLs.",
+                "showmount",
+                f"showmount -e {h.ip}",
+                "Firewall the portmapper (111) + mountd and restrict who may query "
+                "the export list.",
+                ["CWE-200"], kind="nfs_export"))
+        elif pr.get("programs"):
+            svcs = ", ".join(sorted({str(p["prog"]) for p in pr["programs"]})[:12])
+            out.append(_finding(
+                "low", "RPC services enumerable via portmapper (rpcbind)", tgt,
+                f"rpcbind (111) listed {len(pr['programs'])} registered RPC "
+                f"program/version entr(ies) with no credential (programs: {svcs}).",
+                "rpcinfo",
+                f"rpcinfo -p {h.ip}",
+                "Firewall rpcbind (111) to trusted hosts.",
+                ["CWE-200"], kind="nfs_rpc"))
+        # G1 nfs_mnt_open: MOUNTPROC_MNT succeeded - the server accepted the mount
+        # from recce's own IP and returned a root filehandle.
+        opened = [m for m in (pr.get("mounts") or []) if m.get("status") == 0]
+        if opened:
+            dirs = ", ".join(m["dir"] for m in opened[:8])
+            out.append(_finding(
+                "high",
+                "NFS mountd granted a filehandle (mount succeeded from recce)",
+                tgt,
+                f"MOUNTPROC_MNT returned MNT3_OK for {len(opened)} export(s): "
+                f"{dirs}. mountd handed back a root filehandle - the export is "
+                "mountable from this host's IP, not just 'listed to *'.",
+                "mount",
+                f"mkdir /mnt/x ; mount -o vers=3 {h.ip}:"
+                f"{shlex.quote(opened[0]['dir'])} /mnt/x ; ls -la /mnt/x",
+                "Restrict the export's client ACL, enable root_squash, and "
+                "export read-only where possible.",
+                ["CWE-284", "CWE-732"], kind="nfs_mnt_open",
+                exploit_note=(
+                    f"mount -o vers=3,nolock,soft {h.ip}:/<export> /mnt/x; "
+                    "find /mnt/x -maxdepth 3 -name id_rsa -o -name "
+                    "authorized_keys -o -name shadow 2>/dev/null; stat "
+                    "/mnt/x/etc  # if uid 0 = root_squash off"),
+                depth_tier="t2"))
+        # G6 nfs_mount_clients: showmount -a client list disclosure.
+        clients = pr.get("mount_clients") or []
+        if clients:
+            sample = ", ".join(
+                f"{c['hostname']}:{c['dir']}" for c in clients[:8])
+            out.append(_finding(
+                "medium",
+                "NFS mountd disclosed the client mount list (showmount -a)",
+                tgt,
+                f"MOUNTPROC_DUMP returned {len(clients)} (client, export) "
+                f"entr(ies) with no credential: {sample}. Reveals which hosts "
+                "already trust this server - direct lateral-movement targets.",
+                "showmount",
+                f"showmount -a {h.ip}",
+                "Firewall mountd and, where the server supports it, disable "
+                "rmtab exposure.",
+                ["CWE-200"], kind="nfs_mount_clients"))
+    return out
+
+
+# --- runbook + proof + analyze --------------------------------------------------
+
+def runbook(ip: str) -> list[dict]:
+    steps = [
+        ("recon", "rpcinfo", f"rpcinfo -p {ip}",
+         "List registered RPC services + ports."),
+        ("enumerate", "showmount", f"showmount -e {ip}",
+         "List every NFS export and its client ACL (confirms exposure)."),
+        ("loot", "mount", f"mkdir /mnt/nfs ; mount -o vers=3 {ip}:<export> /mnt/nfs ; "
+         "ls -la /mnt/nfs",
+         "Mount an open export and read its files."),
+        ("escalate", "no_root_squash", "on a no_root_squash export: copy a SUID-root "
+         "shell in, or drop an SSH key / cron as the mapped UID -> code execution "
+         "(only within scope).",
+         "Turn a writable export into code execution."),
+    ]
+    return [{"phase": ph, "tool": t, "command": c, "why": w}
+            for ph, t, c, w in steps]
+
+
+def proof_html(command, output, banner: str = "") -> str:
+    from ..services.db import mssql
+    return mssql.proof_html(command, output, prompt="$ ", banner=banner)
+
+
+def findings_to_vulns(fs: list[dict]) -> dict:
+    from .svccommon import findings_to_vulns as _f2v
+    return _f2v(fs, "nfs", _DEFAULT_PORT)
+
+
+def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
+            budget: float | None = None, progress=None) -> dict:
+    """Full NFS analysis. Returns {targets, findings, runbooks, probes, stats}.
+    `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
+    from . import svcprobe
+    targets = nfs_targets(hosts)
+    probes: dict = {}
+    state: dict = {}
+    if active:
+        for t, pr in svcprobe.iter_probe(targets, lambda t: probe(t["ip"]),
+                                         budget=budget, progress=progress, state=state):
+            if pr and pr.get("reachable"):
+                probes[t["ip"]] = pr
+                t["exports"] = len(pr.get("exports") or [])
+                t["world"] = sum(1 for e in pr.get("exports") or []
+                                 if _is_world(e.get("groups") or []))
+                t["programs"] = len(pr.get("programs") or [])
+                t["mount_clients"] = len(pr.get("mount_clients") or [])
+                t["mounts_ok"] = sum(1 for m in pr.get("mounts") or []
+                                     if m.get("status") == 0)
+    fs = findings(hosts, probes)
+    runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
+                 "credfree": runbook(t["ip"]), "credentialed": []}
+                for t in targets]
+    return {"targets": targets, "findings": fs, "runbooks": runbooks,
+            "probes": probes,
+            "stats": {"targets": len(targets), "findings": len(fs),
+                      "stopped": state.get("stopped")}}

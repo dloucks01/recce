@@ -1,0 +1,175 @@
+# Windows / Active Directory built-in + high-value account names.
+# Feeds AS-REP roast (Kerberos --userlist) and any user-enumeration
+# probe that accepts a --wordlist. Convention: distinguished by the
+# specific service accounts service-account patterns tend to appear
+# with different suffixes so an "svc_" prefix bucket is included below.
+Administrator
+Administrador
+administrator
+admin
+Admin
+root
+Guest
+guest
+DefaultAccount
+krbtgt
+KRBTGT
+Domain Admin
+Domain Admins
+Enterprise Admin
+Enterprise Admins
+Schema Admins
+Backup Operators
+Server Operators
+Print Operators
+Account Operators
+DnsAdmins
+DHCP Administrators
+IIS_IUSRS
+Users
+Domain Users
+Domain Computers
+Domain Controllers
+Read-Only Domain Controllers
+Cert Publishers
+Cloneable Domain Controllers
+Denied RODC Password Replication Group
+Group Policy Creator Owners
+Protected Users
+RODC
+IUSR
+ASPNET
+NETWORK SERVICE
+LOCAL SERVICE
+SYSTEM
+Anonymous
+ANONYMOUS LOGON
+WEB
+WEB1
+WEBAPP
+FILESERVER
+FILE
+BACKUP
+FTPUSER
+PRINT
+SPOOLER
+sqlservice
+sqlservice1
+mssql
+mssqlservice
+sql_service
+sql_svc
+sql
+sql_admin
+saUser
+sa
+sa_user
+db_user
+db_admin
+db_svc
+db_readwrite
+db_reader
+db_writer
+db_owner
+backupadmin
+adBackup
+exchange
+Exchange Trusted Subsystem
+exchsvc
+exch_service
+sccm
+sccm_admin
+sccm_svc
+sccm_client
+vmware
+vcenter
+vcenter_svc
+vsphere_svc
+horizon
+horizon_svc
+citrix
+citrix_svc
+xd_admin
+xen_admin
+adsvc
+sync_svc
+scan_svc
+scanner
+scan_service
+printsvc
+print_service
+Print_Operator
+rds_svc
+rdsuser
+rds_admin
+adfs
+adfs_svc
+adfssrv
+azuread
+aadsync
+ADSync
+MSOL_
+tableau
+tableau_svc
+salesforce
+sfsync
+sf_svc
+solarwinds
+splunk
+splunkforwarder
+zabbix
+nagios
+prtg
+oracle
+db2
+sap
+saphostagent
+saphostctrl
+saptrans
+sapinst
+sap_svc
+sap_admin
+websphere_svc
+weblogic_svc
+tomcat_svc
+apache_svc
+nginx_svc
+jenkins_svc
+gitlab_svc
+git_svc
+github_svc
+docker_svc
+kube_svc
+k8s_svc
+puppet_svc
+chef_svc
+ansible_svc
+elk_svc
+esxi_svc
+scheduler
+schedulesvc
+schedadmin
+taskadmin
+task_svc
+scan_svc
+scan_user
+labuser
+lab_admin
+demo
+test
+testuser
+guest_svc
+guest_user
+guest_account
+audit_svc
+audit_admin
+audituser
+auditor
+compliance
+compliance_svc
+help
+helpdesk
+helpdesk_svc
+support
+support_svc
+supportuser

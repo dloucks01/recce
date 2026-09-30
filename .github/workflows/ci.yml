@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# A newer push to the same branch/PR cancels the older, still-running run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# This repo ships runtime-only — the test suite and docker lab live in the
+# development tree, not here. CI validates the runtime code itself: the frontend
+# bundle is in sync, Python lints clean, and the shell scripts are warning-free.
+
+jobs:
+  frontend-build:
+    name: frontend build (static assets in sync)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The React app is pre-built and committed to recce/webui/static/ so end
+    # users don't need Node. If a src/ change lands without rebuilding, this
+    # job fails — no more stale bundles served from the ASGI mount.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: recce/webui/frontend/package-lock.json
+      - name: Install frontend deps
+        working-directory: recce/webui/frontend
+        run: npm ci
+      - name: Typecheck
+        # `vite build` uses esbuild, which STRIPS types without checking them -
+        # tsconfig's strict/noUnusedLocals/noUnusedParameters were never enforced
+        # and type errors shipped silently into the committed bundle. Runs before
+        # the build so a type error fails fast.
+        working-directory: recce/webui/frontend
+        run: npm run typecheck
+      - name: Build
+        working-directory: recce/webui/frontend
+        run: npm run build
+      - name: Verify committed static/ matches the build
+        run: |
+          if ! git diff --exit-code -- recce/webui/static/; then
+            echo "::error::recce/webui/static/ is stale — run 'npm run build' in recce/webui/frontend/ and commit the result."
+            exit 1
+          fi
+
+  lint:
+    name: ruff (pyflakes rules)
+    runs-on: ubuntu-latest
+    # BLOCKING. Ruff runs the same F rule set pyflakes did, but honours the
+    # suppressions configured in pyproject.toml - pyflakes has none, so the job
+    # could only ever be informational. Config + rationale live in [tool.ruff].
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # Pinned: this gate is blocking, so a ruff release that adds an F rule
+      # must not fail an unrelated push. Bump deliberately.
+      - run: pip install ruff==0.16.5
+      - run: ruff check recce
+
+  shellcheck:
+    name: shellcheck (warning+)
+    runs-on: ubuntu-latest
+    # BLOCKING at warning severity. shellcheck found a real bug in recce-enum.sh:
+    # `1.9.1*` is a glob, so both sudo CVE checks matched 1.9.10-1.9.19 and
+    # reported PATCHED releases as vulnerable (fixed in 6ccaf19). That class -
+    # SC2221/SC2222, unreachable case patterns - is warning level, so this gate
+    # would have caught it.
+    #
+    # warning+ only. The ~32 note-level findings are all intentional idioms
+    # (literal \n inside guidance text the operator copies, ls-vs-find style,
+    # deliberate word splitting) and gating on them would mean suppressions
+    # without value. Source resolution is configured in .shellcheckrc.
+    steps:
+      - uses: actions/checkout@v7
+      # Pinned for the same reason as ruff: a blocking gate must not start
+      # failing because the runner image shipped a newer shellcheck.
+      - name: Install shellcheck 0.11.0
+        run: |
+          curl -fsSL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz \
+            | tar -xJ
+          sudo install -m755 shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
+          shellcheck --version
+      - name: Lint every shell script
+        run: |
+          find . \( -name '*.sh' -o -path './bin/recce' \) \
+               -not -path './.git/*' -not -path '*/node_modules/*' -print0 \
+            | xargs -0 shellcheck -f gcc -S warning

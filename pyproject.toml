@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recce"
+description = "Multi-subnet enumeration, vulnerability triage & reporting for pentest engagements (stdlib-only, airgapped-friendly)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["pentest", "nmap", "enumeration", "reporting", "security"]
+dynamic = ["version"]
+# Runtime is deliberately stdlib-only (airgapped Kali boxes): no install-time
+# dependencies. The tools it shells out to (nmap, netexec, impacket, ...) are
+# gated at runtime, not Python packages.
+dependencies = []
+
+[project.optional-dependencies]
+# Baked into the airgap bundle (tools/build_bundle.sh installs `.[bundle]`). recce
+# still runs without these - it falls back to its hand-rolled clients / CLI tools -
+# but bundled they replace the fragile shell-outs with maintained libraries.
+bundle = ["impacket", "ldap3", "openpyxl", "fastapi", "uvicorn"]
+
+[project.scripts]
+recce = "recce.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "recce.__version__" }
+
+# Auto-discover every subpackage so a `pip install` never quietly ships a
+# broken tree again. The previous "packages = ['recce','recce.webui']" list
+# was missing 11 real subpackages (recce.cli, recce.act, recce.ad, recce.core,
+# recce.intake, recce.report, recce.report.formats, recce.services,
+# recce.services.db, recce.services.web, recce.sessions, recce.vuln,
+# recce.webui.routes, recce.webui.services) — the shell installed cleanly but
+# then ImportError'd on the very first subcommand dispatch.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["recce*"]
+exclude = ["tests*", "tools*", "test_env*", "docs*"]
+
+[tool.setuptools.package-data]
+# Ship the on-target enum scripts, the Kali-side per-service enumeration suite,
+# and the pre-built webui bundle. Recursive globs (**/*) so a new file under
+# scripts/ or webui/static/ doesn't need a pyproject edit to reach the wheel.
+recce = [
+    "local/**/*",
+    "scripts/**/*",
+    "creds/**/*",
+    "data/wordlists/*.txt",   # curated bundled wordlists (paths/creds/users)
+    "webui/static/**/*",
+    "*.json",              # KEV/EPSS snapshots (refresh_intel drops these)
+    # NOTE: the offline CVE database (~80-120 MB) is deliberately NOT bundled
+    # here — it ships as a SEPARATE optional data pack (tools/build_cve_db.py)
+    # that recce discovers at runtime (recce/vuln/cvedb.py). Keeps this wheel lean.
+]
+
+# --- lint ---------------------------------------------------------------------
+# Ruff runs the pyflakes (F) rule set. It replaced a bare `pyflakes` call because
+# pyflakes has no suppression mechanism at all - it ignores `# noqa` - so the
+# job could never be made blocking while the architectural findings below exist.
+[tool.ruff]
+target-version = "py39"        # matches requires-python
+
+[tool.ruff.lint]
+select = ["F"]                 # pyflakes-equivalent only; not an style reformat
+# F403/F405 = "star import used" / "may be undefined, from star imports".
+# The cli and services/web packages are built on `from .helpers import *` and
+# `from .http import *` on purpose (the wildcard is what lets the private _*
+# helpers resolve across the split modules), so these fire ~592 times by design.
+#
+# KNOW WHAT THIS COSTS. Pyflakes cannot report F821 (undefined name) in a module
+# that contains `import *` - it downgrades every unresolved name to F405, which
+# the line below ignores. So in the 20 star-importing modules this gate does NOT
+# catch undefined names. `sweep --vulns` calling an unimported cmd_vulns was
+# caught only because _phases.py happens not to star-import; the same bug in
+# cli/_services.py or services/web/checks.py would pass clean.
+#
+# Live proof that the blind spot is not theoretical: services/web/loot.py uses
+# Port and Vuln, which are in neither http.py's nor crawl.py's __all__. Eight
+# functions there fail typing.get_type_hints() today. Nothing crashes only
+# because `from __future__ import annotations` keeps them lazy strings - the
+# first runtime use of Port in that module is an invisible NameError.
+#
+# The real fix is to convert the wildcards to explicit imports (every module
+# already curates __all__, so it is mechanical) and then un-ignore F405.
+ignore = ["F403", "F405"]
+
+[tool.ruff.lint.per-file-ignores]
+# These two package __init__ files are NAMESPACE SURFACES: production code and
+# tests reach imports through the package rather than the origin module (e.g.
+# `from ...cli import ip_matcher`, `cli.np.parse_nmap_xml = ...`). The imports
+# read as unused and are load-bearing. See the comment at the top of each.
+"recce/cli/__init__.py" = ["F401"]
+"recce/services/web/__init__.py" = ["F401"]

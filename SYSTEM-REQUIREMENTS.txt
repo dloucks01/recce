@@ -1,0 +1,16 @@
+# recce — stdlib-only Python (3.9+), no pip install needed.
+#
+# System tools (all standard on Kali). Only nmap is required; everything
+# else is optional and degrades cleanly. Run `recce doctor` to check.
+#
+#   nmap           (required) — scanning, service/version/OS, NSE vuln + AD
+#   masscan        (optional) — fast network-wide port sweep
+#   searchsploit   (optional) — offline exploit mapping
+#   netexec / nxc  (optional) — credentialed SMB/AD enum (credenum)
+#   impacket       (optional) — Kerberoast / AS-REP / secretsdump (credenum)
+#   ldapsearch     (optional) — credentialed AD LDAP enum
+#   ssh + sshpass  (optional) — credentialed Linux local checks (credenum)
+#   chromium       (optional) — web screenshots (or set RECCE_BROWSER)
+#
+# Self-contained bundle: tools/build_bundle.sh freezes Python + all deps +
+# nmap/masscan/ldapsearch into one ~45MB folder. See docs/reference/packaging.md.

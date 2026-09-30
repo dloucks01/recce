@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>recce — Field Cheat-Sheet</title>
+<style>
+:root{--tl:#0f766e;--tl2:#115e59;--ink:#1a2422;--mut:#5f6f6e;--line:#e3e8e7;--bg:#f7faf9;
+  --code:#0b3b37;--codebg:#eef3f2;--warn:#9C7A00;--crit:#C00000}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  color:var(--ink);background:var(--bg)}
+a{color:var(--tl);text-decoration:none}
+a:hover{text-decoration:underline}
+header{background:linear-gradient(135deg,var(--tl),var(--tl2));color:#fff;padding:22px 0 18px}
+.wrap{max-width:1180px;margin:0 auto;padding:0 22px 56px}
+header .wrap{padding-bottom:0}
+h1{margin:0;font-size:23px;letter-spacing:.2px}
+.sub{opacity:.92;margin-top:3px;font-size:13px}
+.sub .k{background:rgba(255,255,255,.18);border-radius:5px;padding:1px 7px;margin-left:4px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+h2{font-size:13px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.6px;color:var(--tl2);
+  display:flex;align-items:center;gap:8px}
+h2 .num{background:var(--tl);color:#fff;width:20px;height:20px;border-radius:50%;
+  display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex:0 0 auto}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:20px}
+.card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:15px 16px 4px;
+  break-inside:avoid}
+.card.span{grid-column:1 / -1}
+code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code{background:var(--codebg);color:var(--code);border-radius:5px;padding:1px 6px;font-size:12.5px}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:10px}
+th{text-align:left;padding:5px 8px;font-size:11px;text-transform:uppercase;letter-spacing:.4px;
+  color:var(--mut);border-bottom:1px solid var(--line)}
+td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:none}
+td.cmd{white-space:nowrap}
+td.cmd code{white-space:nowrap}
+.flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin:2px 0 12px}
+.flow .st{background:var(--codebg);border:1px solid var(--line);border-radius:8px;
+  padding:8px 12px;text-align:center;flex:1 1 0;min-width:120px}
+.flow .st b{display:block;color:var(--tl2);font-size:13px}
+.flow .st span{color:var(--mut);font-size:11px}
+.flow .ar{display:flex;align-items:center;color:var(--tl);font-weight:700;padding:0 6px;font-size:16px}
+.note{border-radius:8px;padding:9px 12px;margin:4px 0 12px;font-size:12.5px;border:1px solid var(--line)}
+.note b{text-transform:uppercase;letter-spacing:.4px;font-size:11px}
+.note.tip{background:#eef7f5;border-left:4px solid var(--tl)}
+.note.tip b{color:var(--tl2)}
+.note.warn{background:#fbf6e3;border-left:4px solid var(--warn)}
+.note.warn b{color:var(--warn)}
+.note.crit{background:#fbe9e9;border-left:4px solid var(--crit)}
+.note.crit b{color:var(--crit)}
+ul.tight{margin:4px 0 12px;padding-left:18px}
+ul.tight li{margin:3px 0;font-size:12.5px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;margin:2px 0 10px}
+.legend span b{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  background:var(--codebg);border-radius:4px;padding:0 5px;margin-right:4px}
+footer{color:var(--mut);font-size:11.5px;margin-top:26px;text-align:center}
+.printbtn{position:fixed;right:16px;bottom:16px;background:var(--tl);color:#fff;border:none;
+  border-radius:22px;padding:10px 18px;font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+@media (max-width:820px){.grid{grid-template-columns:1fr}}
+@media print{
+  body{background:#fff;font-size:11.5px}
+  header{background:var(--tl2)!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .card,.note,.flow .st,code{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .printbtn{display:none}
+  .wrap{max-width:none;padding:0 10px 8px}
+  .grid{gap:10px}
+  h2{margin-top:2px}
+  @page{margin:12mm}
+}
+@media (prefers-color-scheme:dark){
+  :root{--ink:#e6edec;--mut:#9fb0ae;--line:#294541;--bg:#0c1615;--code:#a9e5dc;--codebg:#14211f}
+  .card,table th{background:#101d1b}
+  .card{border-color:var(--line)}
+  .flow .st,code{background:#14211f}
+  .note.tip{background:#10201d}.note.warn{background:#241f10}.note.crit{background:#25110f}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>recce — Field Cheat-Sheet</h1>
+    <div class="sub">Keep <span class="k">-o eng</span> the same across every command.</div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- WORKFLOW -->
+  <div class="card span" style="margin-top:20px">
+    <h2><span class="num">0</span>Engagement flow</h2>
+    <div class="flow">
+      <div class="st"><b>enum / scan</b><span>hosts &amp; ports</span></div>
+      <div class="ar">&#9654;</div>
+      <div class="st"><b>vulns</b><span>NSE + CVE</span></div>
+      <div class="ar">&#9654;</div>
+      <div class="st"><b>services</b><span>per-port enum</span></div>
+      <div class="ar">&#9654;</div>
+      <div class="st"><b>ingest / creds</b><span>fold in loot</span></div>
+      <div class="ar">&#9654;</div>
+      <div class="st"><b>report</b><span>deliverables</span></div>
+    </div>
+    <div class="note tip"><b>First run</b> &nbsp;<code>./bin/recce doctor</code> — checks pipeline + optional tools. Only <code>nmap</code> is required.</div>
+  </div>
+
+  <div class="grid">
+
+    <!-- CORE COMMANDS -->
+    <div class="card span">
+      <h2><span class="num">1</span>Core commands</h2>
+      <table>
+        <tr><th>Phase</th><th>Command</th><th>Does</th></tr>
+        <tr><td>Enumerate</td><td class="cmd"><code>sudo ./bin/recce enum &lt;targets&gt; -o eng</code></td><td>hosts/ports/services</td></tr>
+        <tr><td>Import</td><td class="cmd"><code>./bin/recce import scan.xml -o eng</code></td><td>build sheet from existing nmap XML</td></tr>
+        <tr><td>Vuln-scan</td><td class="cmd"><code>sudo ./bin/recce vulns -o eng</code></td><td>NSE + CVE/CWE + TLS/HTTP probes</td></tr>
+        <tr><td>Sweep (unauth)</td><td class="cmd"><code>./bin/recce sweep -o eng</code></td><td>all cred-free deep modules</td></tr>
+        <tr><td>Sweep (auth)</td><td class="cmd"><code>./bin/recce credsweep -u U -p P -d dom -o eng</code></td><td>all authed deep modules</td></tr>
+        <tr><td>Per-service</td><td class="cmd"><code>./bin/recce services -o eng</code></td><td>exact enum cmd per open port</td></tr>
+        <tr><td>Databases</td><td class="cmd"><code>sudo ./bin/recce db -o eng</code></td><td>database-service enum</td></tr>
+        <tr><td>Priv-esc</td><td class="cmd"><code>./bin/recce privesc -o eng</code></td><td>per-host escalation playbook</td></tr>
+        <tr><td>Cred enum</td><td class="cmd"><code>./bin/recce credenum -u U -p P -d dom -o eng</code></td><td>authed SMB/AD/SSH enum</td></tr>
+        <tr><td>Ingest loot</td><td class="cmd"><code>./bin/recce ingest loot.txt -o eng</code></td><td>fold <code>recce-enum.sh/.ps1</code> output</td></tr>
+        <tr><td>Deploy</td><td class="cmd"><code>./bin/recce deploy -u U -p P -o eng</code></td><td>local-enum on every credentialed host; <code>--dry-run</code> to preview</td></tr>
+        <tr><td>Exploit plan</td><td class="cmd"><code>./bin/recce exploitplan -o eng --lhost &lt;ip&gt;</code></td><td>msf <code>.rc</code> + tool commands</td></tr>
+        <tr><td>Attack path</td><td class="cmd"><code>./bin/recce attackpath -o eng</code></td><td>chains findings to compromise</td></tr>
+        <tr><td>Credentials</td><td class="cmd"><code>./bin/recce creds --add 'dom\u:p' -o eng</code></td><td>stack creds; <code>--plan</code> = spray plan</td></tr>
+        <tr><td>Write-ups</td><td class="cmd"><code>./bin/recce writeups -o eng</code></td><td>Word doc per finding</td></tr>
+        <tr><td>Report</td><td class="cmd"><code>./bin/recce report -o eng</code></td><td>rebuild HTML/MD from Excel edits</td></tr>
+        <tr><td>Access</td><td class="cmd"><code>./bin/recce access -o eng</code></td><td>footholds per host; <code>--host IP --note '...'</code></td></tr>
+        <tr><td>Status</td><td class="cmd"><code>./bin/recce status -o eng</code></td><td>what's left + next command</td></tr>
+      </table>
+      <div class="note tip"><b>Tip</b> &nbsp;<code>./bin/recce</code> = <code>python3 -m recce</code>. Use <code>sudo</code> for SYN/OS detection.</div>
+    </div>
+
+    <!-- TARGETING -->
+    <div class="card">
+      <h2><span class="num">2</span>Targeting</h2>
+      <table>
+        <tr><th>Scan...</th><th>Syntax</th></tr>
+        <tr><td>one host</td><td><code>10.0.10.5</code></td></tr>
+        <tr><td>several</td><td><code>10.0.10.5 10.0.10.9</code></td></tr>
+        <tr><td>range</td><td><code>10.0.10.10-40</code></td></tr>
+        <tr><td>subnet</td><td><code>10.0.10.0/24</code></td></tr>
+        <tr><td>file</td><td><code>@scope.txt</code></td></tr>
+      </table>
+      <div class="note warn"><b>Zero ports?</b> &nbsp;Add <code>-Pn</code> (auto-fallback when discovery gets no responses).</div>
+    </div>
+
+    <!-- SPEED / FILTERS -->
+    <div class="card">
+      <h2><span class="num">3</span>Speed &amp; filters</h2>
+      <ul class="tight">
+        <li><code>--fast</code> — top-signal checks only</li>
+        <li><code>--aggressive</code> — brute / nikto / dir-bust</li>
+        <li><code>--only http smb</code> — restrict to named services</li>
+        <li><code>--unscanned</code> — only ports not yet scanned</li>
+        <li><code>--workers N</code> / <code>--profile quick</code> / <code>--host-timeout</code></li>
+        <li><code>--resume</code> — pick up interrupted run</li>
+        <li><code>--no-probes</code> / <code>--no-searchsploit</code></li>
+      </ul>
+      <div class="note tip"><b>Debug</b> &nbsp;<code>RECCE_DEBUG=1</code> for full tracebacks.</div>
+    </div>
+
+    <!-- POST-EXPLOIT -->
+    <div class="card span">
+      <h2><span class="num">4</span>Got a foothold?</h2>
+      <table>
+        <tr><th>On target</th><th>Back on Kali</th></tr>
+        <tr>
+          <td class="cmd"><code>./recce-enum.sh -o loot.txt</code></td>
+          <td class="cmd"><code>./bin/recce ingest loot.txt -o eng</code></td>
+        </tr>
+        <tr>
+          <td class="cmd"><code>powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt</code></td>
+          <td class="cmd"><code>./bin/recce exploitplan -o eng --lhost &lt;ip&gt;</code></td>
+        </tr>
+      </table>
+      <div class="note crit"><b>Read-only</b> &nbsp;On-target sweeps only read; they never change the box.</div>
+    </div>
+
+    <!-- WORKBOOK -->
+    <div class="card">
+      <h2><span class="num">5</span>The workbook</h2>
+      <ul class="tight">
+        <li><b>Start Here</b> — tab guide. <b>Runbook</b> — per-phase commands.</li>
+        <li><b>Checklist</b> — one row per IP, grouped by subnet.</li>
+        <li><b>Services / Vulns / Priv-esc / Exploitation / Attack Path / Credentials</b></li>
+        <li><b>Overview</b> — subnet completion status.</li>
+      </ul>
+      <div class="legend">
+        <span><b>&#9744;</b>to&nbsp;do</span>
+        <span><b>&#9680;</b>in&nbsp;progress</span>
+        <span><b>&#9745;</b>done</span>
+        <span><b>&#8212;</b>n/a</span>
+      </div>
+      <div class="note tip"><b>Safe re-scan</b> &nbsp;Re-scanning never wipes manual marks.
+        Edit in Excel, save + close, then <code>./bin/recce report -o eng</code>.</div>
+    </div>
+
+    <!-- DELIVERABLES -->
+    <div class="card">
+      <h2><span class="num">6</span>Deliverables (<code>eng/</code>)</h2>
+      <table>
+        <tr><th>File</th><th>What</th></tr>
+        <tr><td class="cmd"><code>enumeration.xlsx</code></td><td>tracking workbook</td></tr>
+        <tr><td class="cmd"><code>report.html</code></td><td>client-ready page</td></tr>
+        <tr><td class="cmd"><code>enumeration.md</code></td><td>markdown notes</td></tr>
+        <tr><td class="cmd"><code>services.csv</code></td><td>flat pivot data</td></tr>
+        <tr><td class="cmd"><code>writeups/*.docx</code></td><td>per-finding Word docs</td></tr>
+        <tr><td class="cmd"><code>exploit-plan/*</code></td><td>msf <code>.rc</code> + per-host plans</td></tr>
+        <tr><td class="cmd"><code>creds/*.txt</code></td><td>users / passwords / hashes</td></tr>
+      </table>
+    </div>
+
+    <!-- TROUBLESHOOTING -->
+    <div class="card span">
+      <h2><span class="num">7</span>Troubleshooting</h2>
+      <table>
+        <tr><th>Symptom</th><th>Fix</th><th>Symptom</th><th>Fix</th></tr>
+        <tr>
+          <td><code>nmap not found</code></td><td>install nmap</td>
+          <td>too slow</td><td><code>--fast</code>, <code>--workers N</code>, <code>--profile quick</code></td>
+        </tr>
+        <tr>
+          <td>weak scan / "not root"</td><td><code>sudo</code></td>
+          <td>crashed / interrupted</td><td><code>--resume</code></td>
+        </tr>
+        <tr>
+          <td>zero ports</td><td><code>-Pn</code>; <code>--reliable</code> if rate-limited</td>
+          <td>"No open ports match"</td><td>run <code>enum</code> first</td>
+        </tr>
+        <tr>
+          <td>no findings</td><td><code>--version-all</code> then <code>vulns --aggressive</code></td>
+          <td>workbook won't update</td><td>close it in Excel first</td>
+        </tr>
+        <tr>
+          <td><code>credenum: No tools</code></td><td>install netexec + impacket</td>
+          <td><code>FAIL</code> / <code>ERR</code></td><td><code>FAIL</code>=bad creds; <code>ERR</code>=unreachable</td>
+        </tr>
+      </table>
+      <div class="note tip"><b>Idempotent</b> &nbsp;Every phase is safe to re-run (no duplicate rows).
+        See <b>README.md</b>, <b>TROUBLESHOOTING.md</b>, <b>QUICKSTART.md</b>.</div>
+    </div>
+
+  </div>
+
+  <footer>recce — stdlib-only pentest enumeration, triage &amp; reporting.</footer>
+</div>
+
+<button class="printbtn" onclick="window.print()">&#9112; Print</button>
+</body>
+</html>

