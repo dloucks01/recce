@@ -603,7 +603,8 @@ def _ldap_shot(args, ip, command, output):
 
 
 def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
-                      no_targets: str, fmt, extra=None, udp: bool = False) -> int:
+                      no_targets: str, fmt, extra=None, udp: bool = False,
+                      default_ports: tuple = ()) -> int:
     """Shared driver for the single-service deep-enum commands (snmp/mongodb/redis/
     elasticsearch/rsync/nfs). They differ only in the module they call, the hint shown
     when no endpoints are present, and how each target line is formatted - everything
@@ -650,6 +651,40 @@ def _run_service_scan(args, *, module: str, source: str, label: str, noun: str,
     analysis = mod.analyze(hosts, active=active, creds=db_creds,
                            **extra_kw, **_probe_kwargs(args, source))
     tgts = analysis["targets"]
+    if not tgts and active and default_ports and (
+            getattr(args, "targets", None) or getattr(args, "host", None)):
+        # The operator explicitly named target(s) but the datastore has no
+        # matching port for them — usually because enum never scanned this
+        # service's (often non-standard / high) port. Rather than dead-end with
+        # "run enum first", probe the named target(s) DIRECTLY on the module's
+        # default port(s): seed them as assumed-open and re-analyze. A closed
+        # port just yields no finding (the live probe fails cleanly), so this
+        # never invents a false positive — it just honors `recce <svc> <ip>`.
+        from ..core.models import Host, Port
+        from ..core.targets import load_targets
+        seeded = {h.ip: h for h in hosts}
+        try:
+            explicit_ips, _hn, _sn = load_targets(
+                (getattr(args, "targets", None) or [])
+                + (getattr(args, "host", None) or []))
+        except Exception:  # noqa: BLE001 — fall back to already-selected hosts
+            explicit_ips = [h.ip for h in hosts]
+        for ip in (explicit_ips or list(seeded))[:256]:
+            h = seeded.get(ip) or Host(ip=ip, state="up")
+            seeded[ip] = h
+            have = {p.portid for p in h.ports}
+            for pid in default_ports:
+                if pid not in have:
+                    h.ports.append(Port(portid=pid, state="open",
+                                        protocol=("udp" if udp else "tcp"),
+                                        service=source))
+        probe_hosts = list(seeded.values())
+        _pl = "/".join(str(p) for p in default_ports)
+        print(f"[i] no {label} endpoint in the datastore for the named target(s) "
+              f"— probing {_pl}/{'udp' if udp else 'tcp'} directly.")
+        analysis = mod.analyze(probe_hosts, active=active, creds=db_creds,
+                               **extra_kw, **_probe_kwargs(args, source))
+        tgts = analysis["targets"]
     if not tgts:
         print(no_targets)
         store.close()

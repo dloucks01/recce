@@ -1527,6 +1527,12 @@ def crlf_injection_probe(ip: str, port: int, use_tls: bool,
 def _mk(host_ip: str, port: Port, sid: str, sev: str, title: str,
         cwes: list[str], output: str, remediation: str,
         exploit_note: str = "", depth_tier: str = "") -> Vuln:
+    # Substitute the real host:port for the `IP:PORT` command placeholder so the
+    # paste-ready exploit command names this endpoint, not a literal the operator
+    # has to hand-edit. `<ip>`-style placeholders are left alone on purpose.
+    _endpoint = f"{host_ip}:{port.portid}"
+    exploit_note = exploit_note.replace("IP:PORT", _endpoint) if exploit_note else exploit_note
+    output = output.replace("IP:PORT", _endpoint) if output else output
     return Vuln(
         ip=host_ip, port=port.portid, protocol=port.protocol,
         script_id=sid, state="finding", title=title, output=output,

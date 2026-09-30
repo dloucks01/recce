@@ -704,6 +704,14 @@ def register_findings_routes(app: FastAPI, ctx) -> None:
                 tier = (getattr(v, "depth_tier", "") or "").strip()
                 if not note and not tier:
                     continue
+                # Defensive IP:PORT substitution: the service-module builders
+                # already do this at Vuln creation, but findings stored by a
+                # prior recce version may still hold the literal placeholder.
+                # We know the real endpoint here, so render the paste-ready
+                # command against it instead of shipping a template the tester
+                # has to hand-edit.
+                if note and "IP:PORT" in note:
+                    note = note.replace("IP:PORT", f"{h.ip}:{v.port or 0}")
                 items.append({
                     "key": tracking.vuln_row_key(v),
                     "ip": h.ip,

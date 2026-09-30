@@ -82,7 +82,7 @@ def register_manage_routes(app: FastAPI, ctx) -> None:
             findings_n = len(h.vulns or [])
             findings_sample = [
                 {"title": (v.title or "")[:80], "severity": v.severity or "",
-                 "cve": (v.ids[0] if getattr(v, "ids", None) else "")}
+                 "cve": v.primary_cve()}
                 for v in (h.vulns or [])[:6]
             ]
             open_ports = [p.portid for p in h.open_ports]

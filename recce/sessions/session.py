@@ -126,6 +126,13 @@ class Session:
         # existing session names is enforced by SessionManager at adoption time.
         self.name: str = _generate_name(set())
         self.label: str = ""                   # user-editable name ("initial foothold", etc.)
+        # Ergonomics (batch 2). `notes` records the operator's per-session context
+        # ("cracked svc_sql via kerberoast → nxc") for the writeup; `pinned` floats
+        # the session to the top of the list; `listener_id` traces a caught shell
+        # back to the listener that received it. All three persist across restarts.
+        self.notes: str = ""
+        self.pinned: bool = False
+        self.listener_id: str = ""
         self.driver: str | None = None         # tester id currently allowed to type
         self.attached: set[str] = set()        # presence — who's watching
         self.last_seen = time.time()           # last byte from the target (liveness)
@@ -158,6 +165,9 @@ class Session:
         s.created = meta.get("opened") or s.created
         s.pty = bool(meta.get("pty"))
         s.label = meta.get("label", "")
+        s.notes = meta.get("notes", "")
+        s.pinned = bool(meta.get("pinned"))
+        s.listener_id = meta.get("listener_id", "")
         # Restore the memorable name if one was persisted; else keep whatever the
         # constructor generated (sessions from before this feature landed).
         if meta.get("name"):
@@ -447,4 +457,5 @@ class Session:
                 "host_ip": self.host_ip, "host_port": self.host_port,
                 "kind": self.kind, "status": self.status, "pty": self.pty,
                 "label": self.label, "driver": self.driver, "attached": sorted(self.attached),
-                "created": self.created, "last_seen": self.last_seen, "bytes": self._blen}
+                "created": self.created, "last_seen": self.last_seen, "bytes": self._blen,
+                "notes": self.notes, "pinned": self.pinned, "listener_id": self.listener_id}

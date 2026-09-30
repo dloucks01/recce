@@ -954,7 +954,7 @@ class Store:
         completed can differ by minutes. bytes is the full captured length even
         when output is truncated, so the UI shows "12 KB, showing preview"."""
         row = (str(int(time.time())), operator or "", session_id or "", host_ip or "",
-               kind or "", (command or "")[:2000], (output or "")[:4000],
+               kind or "", (command or "")[:8000], (output or "")[:4000],
                status or "", attack or "",
                task_id or "", result_at or "", int(bytes) if bytes else 0)
         with self._write_txn():

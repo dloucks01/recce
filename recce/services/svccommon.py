@@ -79,11 +79,19 @@ def findings_to_vulns(fs: list[dict], source: str, default_port: int,
         parts = f["target"].split(":")
         ip = parts[0]
         port = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else default_port
-        out_text = f.get("detail", "")
+        # Substitute the concrete host:port for the `IP:PORT` command placeholder
+        # so paste-ready commands (in output + exploit_note) name the real target
+        # instead of a literal the operator must hand-edit. `<ip>` / `<host>` style
+        # placeholders are intentionally left alone (they mark operator-supplied
+        # values like a relay victim or attacker IP).
+        _endpoint = f"{ip}:{port}"
+        def _sub(s: str) -> str:
+            return s.replace("IP:PORT", _endpoint) if s else s
+        out_text = _sub(f.get("detail", ""))
         if f.get("narrative"):
-            out_text += f"\n\nWhat this enables:\n{f['narrative']}"
+            out_text += f"\n\nWhat this enables:\n{_sub(f['narrative'])}"
         if f.get("command"):
-            out_text += f"\n\nProve / next step:\n{f['command']}"
+            out_text += f"\n\nProve / next step:\n{_sub(f['command'])}"
         # Most deep-service findings are live protocol actions (confidence="confirmed"),
         # but a module can mark a heuristic/observed one honestly by putting its own
         # "confidence" on the finding dict. Only a genuinely confirmed finding carries a
@@ -105,7 +113,7 @@ def findings_to_vulns(fs: list[dict], source: str, default_port: int,
             cwes=list(f.get("cwes") or ["CWE-284"]),
             output=out_text.strip(), remediation=f.get("remediation", ""),
             evidence=evidence,
-            exploit_note=f.get("exploit_note", ""),
+            exploit_note=_sub(f.get("exploit_note", "")),
             depth_tier=f.get("depth_tier", "")))
     return by_ip
 

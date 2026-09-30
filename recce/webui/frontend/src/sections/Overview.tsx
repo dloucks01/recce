@@ -42,32 +42,36 @@ export function Overview({ data, nav }: SectionProps) {
         </div>
       )}
 
-      {/* Baked-intel freshness. Signals which upstream KEV catalog + EPSS
-          model produced the KEV/EPSS chips above; a stale bake silently
-          under-prioritises new CVEs, so keep it visible. Warns amber when
-          the KEV_AS_OF is 'unknown' (never refreshed since build). */}
-      {ov.intel_asof && (
+      {/* Baked-intel status. The summary leads with the entry counts actually
+          baked in, so a present-but-unstamped snapshot reads as healthy. Amber
+          warning fires ONLY when the intel is genuinely absent (0 entries) —
+          not merely unstamped, which is a provenance detail, not a gap. */}
+      {ov.intel_asof && (() => {
+        const present = ov.intel_asof.present ?? (ov.intel_asof.kev_count ?? 0) > 0;
+        const stamped = ov.intel_asof.stamped ?? (ov.intel_asof.kev_as_of !== "unknown");
+        return (
         <div className="muted" style={{
           fontSize: 12, marginTop: -4,
-          color: ov.intel_asof.kev_as_of === "unknown" ? "var(--warn, #b45309)" : undefined,
+          color: !present ? "var(--warn, #b45309)" : undefined,
         }}
              title={
-               `KEV: ${ov.intel_asof.kev_catalog_version
-                 ? `v${ov.intel_asof.kev_catalog_version}`
-                 : "unknown"}` +
+               `KEV: ${ov.intel_asof.kev_count ?? "?"} CVEs` +
+               (ov.intel_asof.kev_catalog_version ? ` · v${ov.intel_asof.kev_catalog_version}` : "") +
                (ov.intel_asof.kev_released ? ` (released ${ov.intel_asof.kev_released})` : "") +
-               ` · baked ${ov.intel_asof.kev_as_of || "unknown"}\n` +
-               `EPSS: ${ov.intel_asof.epss_model || "unknown"}` +
+               ` · baked ${ov.intel_asof.kev_as_of || "unstamped"}\n` +
+               `EPSS: ${ov.intel_asof.epss_count ?? "?"} scores` +
+               (ov.intel_asof.epss_model ? ` · ${ov.intel_asof.epss_model}` : "") +
                (ov.intel_asof.epss_score_date ? ` (scored ${ov.intel_asof.epss_score_date})` : "") +
-               ` · baked ${ov.intel_asof.epss_as_of || "unknown"}`
+               ` · baked ${ov.intel_asof.epss_as_of || "unstamped"}`
              }>
-          {ov.intel_asof.kev_as_of === "unknown" && <span>⚠ </span>}
+          {!present && <span>⚠ </span>}
           Offline intel: {ov.intel_asof.summary}
-          {ov.intel_asof.kev_as_of === "unknown" && (
-            <span> — run <span className="mono">python3 tools/refresh_intel.py</span> to stamp</span>
+          {present && !stamped && (
+            <span> — <span className="mono">tools/refresh_intel.py</span> stamps the snapshot date</span>
           )}
         </div>
-      )}
+        );
+      })()}
 
       <div className="grid" style={{ gridTemplateColumns: "minmax(0,1.5fr) minmax(0,1fr)", gap: 12 }}>
         <Panel title="★ Next moves" sub="highest-impact actions you can take now"

@@ -72,6 +72,10 @@ export type IntelAsOf = {
   epss_as_of?: string;
   epss_model?: string;                // "v2024.02.29" for EPSS v4
   epss_score_date?: string;
+  kev_count?: number;                 // KEV CVEs actually baked in
+  epss_count?: number;                // EPSS scores actually baked in
+  stamped?: boolean;                  // snapshot date written by refresh_intel
+  present?: boolean;                  // any intel baked in at all
 };
 export type Overview = {
   name: string; hosts_up: number; hosts_total: number;
@@ -610,6 +614,10 @@ export interface SessionInfo {
   driver: string | null; attached: string[]; created: number; bytes: number;
   socks_port?: number; portfwd_count?: number; portfwd_preview?: string[];
   oob_active?: boolean;
+  // batch-2 ergonomics
+  notes?: string;          // free-form operator context for the writeup
+  pinned?: boolean;        // pinned sessions float to the top of the list
+  listener_id?: string;    // id of the listener that caught this shell (empty for beacons / imports)
 }
 export interface QuickAction { key: string; label: string; cmd: string; }
 export async function getQuickActions(): Promise<QuickAction[]> {
@@ -713,7 +721,10 @@ export async function stopListener(id: string): Promise<void> {
   await fetch(`/api/listeners/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function patchSession(sessionId: string, patch: { label?: string }): Promise<SessionInfo> {
+export async function patchSession(
+  sessionId: string,
+  patch: { label?: string; notes?: string; pinned?: boolean },
+): Promise<SessionInfo> {
   const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
     method: "PATCH", headers: jsonHeaders(), body: JSON.stringify(patch),
   });
@@ -733,7 +744,10 @@ export async function lootCred(sessionId: string, c: { username: string; secret:
 }
 export async function getTranscript(sessionId: string): Promise<string> {
   const r = await getJSON<{ data: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`);
-  return atob(r.data);
+  // Defensive: `data` should always be valid base64 from the server, but if a
+  // partial write / stray byte slips in, don't let an uncaught DOMException
+  // crash the terminal render.
+  try { return atob(r.data || ""); } catch { return ""; }
 }
 
 export async function upgradeSession(sessionId: string):
@@ -762,6 +776,82 @@ export async function getStager(tls: boolean): Promise<string> {
 // --- session file transfer + on-target enum -----------------------------------
 export async function runEnum(sessionId: string): Promise<{ id: string; bytes: number }> {
   const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/enum`, { method: "POST", headers: jsonHeaders() });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+// Queue-or-run a task through the beacon-aware /task endpoint. Interactive
+// shells run synchronously and the response carries `output_b64` (the raw
+// output). Beacons return `status:"queued"` + a task_id — the actual output
+// arrives asynchronously when the beacon checks in and posts back through
+// /beacon/result. The Run menu uses this so free-form commands work uniformly
+// on both session kinds (before this, /quickrun 409'd on beacons because it
+// required a live shell socket).
+export interface RunTaskResult {
+  id: string; host_ip: string; task_id: string;
+  status?: "queued" | "done" | "error";
+  output_b64?: string; captured_ms?: number;
+  output?: string;                          // decoded convenience field, filled in below
+  queued?: boolean;                         // true when the beacon path was taken
+}
+export async function runOrQueueTask(sessionId: string, command: string,
+                                     timeoutSec: number = 30): Promise<RunTaskResult> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/task`, {
+    method: "POST", headers: jsonHeaders(),
+    body: JSON.stringify({ command, timeout: timeoutSec }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  const j: RunTaskResult = await r.json();
+  j.queued = j.status === "queued";
+  // Decode output_b64 → output for interactive-shell responses so callers
+  // don't each have to base64-decode themselves.
+  if (!j.queued && j.output_b64) {
+    try { j.output = atob(j.output_b64); } catch { j.output = ""; }
+  } else if (!j.output_b64) {
+    // Older interactive-mode responses may set `output` directly; leave alone.
+    j.output = j.output || "";
+  }
+  return j;
+}
+
+// Beacon self-test: server-side round-trip proving queue → deliver → result
+// → save works end-to-end without needing an external client. Returns per-stage
+// timings + the saved artifact id on success, or {ok:false, reason} on failure.
+export interface BeaconSelftestResult {
+  ok: boolean; beacon_id?: string; task_id?: string; artifact_id?: string;
+  stages?: { queue_ms?: number; deliver_ms?: number; result_ms?: number;
+             tasks_delivered?: number; saved_path?: string; saved_bytes?: number };
+  reason?: string;
+}
+export async function selftestBeacon(bid: string): Promise<BeaconSelftestResult> {
+  const r = await fetch(`/api/beacons/${encodeURIComponent(bid)}/selftest`, {
+    method: "POST", headers: jsonHeaders(),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+
+// Promote a beacon to an interactive shell session by queuing the upgrade
+// command. The stager connects back to an active listener on next check-in.
+export async function promoteBeacon(bid: string, lhost?: string):
+  Promise<{ ok: boolean; task_id: string; callback: string; token: string; message: string }> {
+  const r = await fetch(`/api/beacons/${encodeURIComponent(bid)}/promote`, {
+    method: "POST", headers: jsonHeaders(),
+    body: JSON.stringify(lhost ? { lhost } : {}),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  return r.json();
+}
+
+// Unified file-pull → session-loot. Works on both interactive shells (returns
+// the saved file synchronously) and beacons (queues a `base64 <path>` task
+// tagged loot-pull; /beacon/result auto-decodes + saves when the beacon posts
+// its next result). Caller distinguishes by inspecting the response shape.
+export interface LootPullSaved { ok: true; saved: string; size: number; artifact_id?: string; sha256?: string; finding_id?: string | null; }
+export interface LootPullQueued { status: "queued"; task_id: string; path: string; host_ip: string; message: string; }
+export async function pullLoot(sessionId: string, path: string): Promise<LootPullSaved | LootPullQueued> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/loot-pull`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify({ path }),
+  });
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
   return r.json();
 }
@@ -1261,12 +1351,11 @@ export const getArtifacts = (opts: { host?: string; session?: string; task?: str
 // instead of a live socket; the operator dispatches tasks the same way,
 // but they sit in 'queued' until the beacon client polls /beacon/checkin.
 export type Beacon = {
-  id: string; transport: string; registered: number; last_checkin: number;
+  id: string; host_ip: string; transport: string; registered: number; last_checkin: number;
   sleep_s: number; jitter_pct: number; notes: string;
   // psk is ONLY present on the register response — never on GETs.
 };
 export type BeaconRegisterResponse = Beacon & {
-  host_ip: string;
   psk: string;                     // shown ONCE; operator must copy it now
 };
 export const listBeacons = () =>

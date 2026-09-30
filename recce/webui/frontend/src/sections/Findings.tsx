@@ -121,7 +121,12 @@ export function Findings({ data, nav }: SectionProps) {
     const dismissedGroups = group(dead).sort(groupSort);
     const counts = {
       issues: gs.length,
-      findings: live.length,
+      // "findings" counts confirmed/observed findings only — the same non-lead
+      // basis as the severity chips and the report ("N issues / N findings"),
+      // so the three surfaces never disagree. Unconfirmed leads are surfaced
+      // separately as "candidates".
+      findings: live.filter((x) => !isLead(x)).length,
+      leads: live.filter((x) => isLead(x)).length,
       kev: act.filter((g) => g.kev).length,
       verify: verify.reduce((a, g) => a + g.members.length, 0),
       dismissed: dead.length,
@@ -187,7 +192,8 @@ export function Findings({ data, nav }: SectionProps) {
 
       {/* At-a-glance triage summary */}
       <div className="row wrap" style={{ gap: 14, margin: "0 2px 12px", fontSize: 12 }}>
-        <span><b>{counts.issues}</b> issue{counts.issues === 1 ? "" : "s"} <span className="muted">· {counts.findings} findings</span></span>
+        <span><b>{counts.issues}</b> issue{counts.issues === 1 ? "" : "s"} <span className="muted">· {counts.findings} finding{counts.findings === 1 ? "" : "s"}</span></span>
+        {counts.leads > 0 && <span className="muted">{counts.leads} candidate{counts.leads === 1 ? "" : "s"}</span>}
         {counts.kev > 0 && <span style={{ color: "var(--kev)" }}><b>{counts.kev}</b> KEV</span>}
         {counts.verify > 0 && <span className="muted">{counts.verify} to verify</span>}
         {counts.dismissed > 0 && <span className="faint">{counts.dismissed} dismissed</span>}

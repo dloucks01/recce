@@ -107,6 +107,12 @@ class SessionManager:
             sess = Session(host_ip=ip, host_port=port)
             if token:
                 sess.token = token          # the stager's embedded token IS the session's,
+            # Trace the shell back to the listener that caught it — enables
+            # "which listener produced which session" in the UI without racing
+            # a lookup at display time. Empty when the acquisition mode has no
+            # listener (e.g. bind-connect, imported session, beacon register).
+            if listener_id:
+                sess.listener_id = listener_id
             # Ensure the auto-generated name is unique across live+stale sessions.
             # Session.__init__ picks from an empty exclusion set (it can't see the
             # registry), so a rare collision gets resolved here at adoption time.
@@ -235,7 +241,8 @@ class SessionManager:
         sess.bind(bt)
         if self.store is not None:
             self._save(sess)                       # shell_sessions row
-            self.store.add_beacon(sess.id, psk, transport=transport,
+            self.store.add_beacon(sess.id, psk, host_ip=host_ip,
+                                  transport=transport,
                                   sleep_s=sleep_s, jitter_pct=jitter_pct,
                                   notes=notes)
         self._changed(sess)

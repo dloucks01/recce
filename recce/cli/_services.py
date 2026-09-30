@@ -891,7 +891,8 @@ def cmd_modbus(args: argparse.Namespace) -> int:
         no_targets="[!] No Modbus endpoints in the datastore (port 502). "
                    "Run `enum` against the OT segment first.",
         fmt=_fmt_simple(lambda t, a: (t.get('vendor','?') + ' ' +
-                                       t.get('product','?')).strip()))
+                                       t.get('product','?')).strip()),
+        default_ports=(502,))
 
 
 def cmd_rdp(args: argparse.Namespace) -> int:
@@ -1351,7 +1352,8 @@ def cmd_s7(args: argparse.Namespace) -> int:
         noun="S7 endpoint(s)",
         no_targets="[!] No S7 endpoints in the datastore (port 102). "
                    "Run `enum` against the OT segment first.",
-        fmt=_fmt_simple(lambda t, a: (t.get('module') or t.get('cpu') or '?')))
+        fmt=_fmt_simple(lambda t, a: (t.get('module') or t.get('cpu') or '?')),
+        default_ports=(102,))
 
 
 def cmd_bacnet(args: argparse.Namespace) -> int:
@@ -1362,7 +1364,7 @@ def cmd_bacnet(args: argparse.Namespace) -> int:
         no_targets="[!] No BACnet endpoints in the datastore (port 47808/udp). "
                    "Run `enum -U` (UDP) against the OT segment first.",
         fmt=_fmt_simple(lambda t, a: t.get('vendor') or '?'),
-        udp=True)
+        default_ports=(47808,), udp=True)
 
 
 def cmd_opcua(args: argparse.Namespace) -> int:
@@ -1372,7 +1374,8 @@ def cmd_opcua(args: argparse.Namespace) -> int:
         noun="OPC-UA endpoint(s)",
         no_targets="[!] No OPC-UA endpoints in the datastore (port 4840). "
                    "Run `enum` against the OT segment first.",
-        fmt=_fmt_simple(lambda t, a: ('anon' if t.get('anonymous') else 'auth-required')))
+        fmt=_fmt_simple(lambda t, a: ('anon' if t.get('anonymous') else 'auth-required')),
+        default_ports=(4840,))
 
 
 def cmd_dnp3(args: argparse.Namespace) -> int:
@@ -1382,7 +1385,8 @@ def cmd_dnp3(args: argparse.Namespace) -> int:
         noun="DNP3 endpoint(s)",
         no_targets="[!] No DNP3 endpoints in the datastore (port 20000). "
                    "Run `enum` against the OT segment first.",
-        fmt=_fmt_simple(lambda t, a: f"src={t.get('src','?')}"))
+        fmt=_fmt_simple(lambda t, a: f"src={t.get('src','?')}"),
+        default_ports=(20000,))
 
 
 def cmd_iec104(args: argparse.Namespace) -> int:
@@ -1392,7 +1396,8 @@ def cmd_iec104(args: argparse.Namespace) -> int:
         noun="IEC-104 endpoint(s)",
         no_targets="[!] No IEC-104 endpoints in the datastore (port 2404). "
                    "Run `enum` against the OT segment first.",
-        fmt=_fmt_simple(lambda t, a: f"CAA={t.get('caa','?')}"))
+        fmt=_fmt_simple(lambda t, a: f"CAA={t.get('caa','?')}"),
+        default_ports=(2404,))
 
 
 def cmd_enip(args: argparse.Namespace) -> int:
@@ -1403,7 +1408,8 @@ def cmd_enip(args: argparse.Namespace) -> int:
         no_targets="[!] No EtherNet/IP endpoints in the datastore (port 44818). "
                    "Run `enum` against the OT segment first.",
         fmt=_fmt_simple(lambda t, a: (t.get('vendor','?') + ' ' +
-                                       t.get('product','')).strip()))
+                                       t.get('product','')).strip()),
+        default_ports=(44818,))
 
 
 def cmd_coap(args: argparse.Namespace) -> int:
@@ -1414,4 +1420,4 @@ def cmd_coap(args: argparse.Namespace) -> int:
         no_targets="[!] No CoAP endpoints in the datastore (port 5683/udp). "
                    "Run `enum -U` (UDP) first.",
         fmt=_fmt_simple(lambda t, a: f"{t.get('resources',0)} resource(s)"),
-        udp=True)
+        default_ports=(5683,), udp=True)

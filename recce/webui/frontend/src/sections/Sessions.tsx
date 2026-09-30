@@ -5,13 +5,14 @@
 import { useEffect, useRef, useState } from "react";
 import {
   SessionInfo, ListenerInfo, QuickAction, getSessions, getListeners, startListener,
-  stopListener, getQuickActions, runQuickAction, runShellCmd, runEnum,
+  stopListener, getQuickActions, runQuickAction, runEnum,
   downloadFromShell, uploadToShell, startTunnel, stopTunnel, tunnelStatus,
   startPortFwd, upgradeSession, lootCred, persistSession, getTeardown, TeardownInventory,
   removePersistence, removeAllPersistence, clearTeardownUpload, closeSession,
   TdPersistence, TdUpload, TdListener, TdSession, TdTunnel, TdPortfwd,
   getSessionTasks, TaskRow,
   Beacon, BeaconRegisterResponse, listBeacons, registerBeacon, deleteBeacon, patchBeacon,
+  patchSession, pullLoot, selftestBeacon, runOrQueueTask, promoteBeacon,
 } from "../api";
 import { bytesToB64 } from "../util";
 import { SectionProps } from "../nav";
@@ -24,6 +25,7 @@ export function Sessions({ nav }: SectionProps) {
   const [listeners, setListeners] = useState<ListenerInfo[]>([]);
   const [selId, setSelId] = useState<string | null>(null);
   const [teardown, setTeardown] = useState<TeardownInventory | null>(null);
+  const [filter, setFilter] = useState("");     // batch-2: session list filter
 
   useEffect(() => {
     const poll = () => { getSessions().then(setSessions).catch(() => {}); getListeners().then(setListeners).catch(() => {}); };
@@ -32,8 +34,40 @@ export function Sessions({ nav }: SectionProps) {
   useEffect(() => { if (sessions.length && !sessions.find((s) => s.id === selId)) setSelId(sessions[0].id); }, [sessions, selId]);
 
   const sel = sessions.find((s) => s.id === selId) || null;
+  // Filter: match host_ip / label / name / id — case-insensitive. Empty filter passes everything.
+  const q = filter.trim().toLowerCase();
+  const matches = (s: SessionInfo) => !q ||
+    (s.host_ip || "").toLowerCase().includes(q) ||
+    (s.label || "").toLowerCase().includes(q) ||
+    (s.name || "").toLowerCase().includes(q) ||
+    s.id.toLowerCase().includes(q);
+  const visible = sessions.filter(matches);
+  // Group by host, but keep the group ordering deterministic — pinned hosts (any
+  // pinned session on that host) come first, then live > stale > dead, then IP.
   const byHost: Record<string, SessionInfo[]> = {};
-  for (const s of sessions) (byHost[s.host_ip] ||= []).push(s);
+  for (const s of visible) (byHost[s.host_ip] ||= []).push(s);
+  const hostRank = (h: string) => {
+    const ss = byHost[h];
+    const pinned = ss.some((s) => s.pinned) ? 0 : 1;
+    const status = ss.some((s) => s.status === "live") ? 0
+                 : ss.some((s) => s.status === "stale") ? 1 : 2;
+    return [pinned, status, h] as const;
+  };
+  const hostOrder = Object.keys(byHost).sort((a, b) => {
+    const [pa, sa, ia] = hostRank(a); const [pb, sb, ib] = hostRank(b);
+    return pa !== pb ? pa - pb : sa !== sb ? sa - sb : ia.localeCompare(ib);
+  });
+  // Within a host, pinned first, then by name for stability.
+  for (const h of hostOrder) byHost[h].sort((a, b) =>
+    Number(!!b.pinned) - Number(!!a.pinned) || (a.name || a.id).localeCompare(b.name || b.id));
+  // Listener id → "host:port" for the small "via :4444" chip on each session card.
+  const listenerAddr = new Map(listeners.map((l) => [l.id, `${l.port}`]));
+
+  const togglePin = (s: SessionInfo) => {
+    patchSession(s.id, { pinned: !s.pinned })
+      .then(() => getSessions().then(setSessions))
+      .catch((e) => toast.show(String(e)));
+  };
 
   async function newListener() {
     try { const l = await startListener(4444, false); toast.show(`listener up on :${l.port}`); getListeners().then(setListeners); }
@@ -62,19 +96,44 @@ export function Sessions({ nav }: SectionProps) {
         <BeaconsPanel />
 
         <div>
-          {Object.keys(byHost).length === 0 ? <div className="muted" style={{ fontSize: 12, padding: "8px 2px" }}>No shells yet.</div> :
-            Object.entries(byHost).map(([host, ss]) => (
+          {sessions.length > 3 && (
+            <input className="fin" style={{ margin: "6px 0", width: "100%", padding: "3px 6px", fontSize: 12 }}
+                   placeholder="filter: host, label, name, id…" value={filter}
+                   onChange={(e) => setFilter(e.target.value)} />
+          )}
+          {sessions.length === 0 ? <div className="muted" style={{ fontSize: 12, padding: "8px 2px" }}>No shells yet.</div>
+           : hostOrder.length === 0 ? <div className="muted" style={{ fontSize: 12, padding: "8px 2px" }}>No matches for "{filter}".</div>
+           : hostOrder.map((host) => (
               <div key={host}>
                 <div className="sess-grp-h">{host}</div>
-                {ss.map((s) => (
+                {byHost[host].map((s) => {
+                  // Prefer the operator's label over the auto-generated name — the label
+                  // is "why this session matters" (e.g. "initial foothold"), the name
+                  // is just a memorable id (STORMY_BEAR). Fall back to name, then hex.
+                  const shown = s.label || s.name || s.id.slice(0, 8);
+                  const secondary = s.label && s.name ? s.name : "";
+                  return (
                   <div key={s.id} className={"sess-item" + (s.id === selId ? " active" : "")} onClick={() => setSelId(s.id)}>
                     <span className={"sess-dot " + s.status} />
-                    <span className="sess-name">{s.name || s.id.slice(0, 8)}</span>
+                    {/* Pin star: click doesn't select the session — stopPropagation
+                        so the row's onClick doesn't fire. */}
+                    <button className="linkish" title={s.pinned ? "unpin" : "pin"}
+                            onClick={(e) => { e.stopPropagation(); togglePin(s); }}
+                            style={{ fontSize: 12, padding: 0, marginRight: 2,
+                                     color: s.pinned ? "var(--accent, #f59e0b)" : "var(--faint, #999)" }}>
+                      {s.pinned ? "★" : "☆"}
+                    </button>
+                    <span className="sess-name" title={secondary ? `${shown} · ${secondary}` : shown}>{shown}</span>
                     {s.kind === "beacon" && <span className="chip" title="async beacon (polls in via /beacon/checkin)" style={{ fontSize: 9 }}>BEACON</span>}
                     {s.pty && <span className="chip" style={{ fontSize: 9 }}>PTY</span>}
                     {s.socks_port ? <span className="chip" title="SOCKS proxy up" style={{ fontSize: 9 }}>SOCKS</span> : null}
+                    {s.listener_id && listenerAddr.has(s.listener_id) && (
+                      <span className="faint" title={`caught by listener ${s.listener_id}`}
+                            style={{ fontSize: 10, marginLeft: 4 }}>via :{listenerAddr.get(s.listener_id)}</span>
+                    )}
+                    {s.notes && <span title={s.notes} style={{ fontSize: 10, opacity: 0.6 }}>📝</span>}
                   </div>
-                ))}
+                );})}
               </div>
             ))}
         </div>
@@ -87,12 +146,23 @@ export function Sessions({ nav }: SectionProps) {
         ) : (
           <>
             <div className="sess-toolbar">
+              <InfoMenu session={sel} onChanged={() => getSessions().then(setSessions)} />
               <RunMenu session={sel} />
               <TransferMenu session={sel} />
               <PivotMenu session={sel} />
               <PersistMenu session={sel} onTeardown={() => getTeardown().then(setTeardown)} />
-              <button className="btn sm" title="upgrade to a robust reconnecting PTY"
-                      onClick={() => upgradeSession(sel.id).then((r) => toast.show(r.upgraded ? "PTY upgrade sent — reconnecting shell will land as a sibling" : (r.reason || "upgrade requested"))).catch((e) => toast.show(String(e)))}>⬆ Upgrade PTY</button>
+              {sel.kind === "beacon" ? (
+                <button className="btn sm"
+                        title="queue the upgrade stager — on next check-in the beacon will connect back as an interactive PTY shell"
+                        onClick={() => promoteBeacon(sel.id)
+                          .then((r) => toast.show(r.message || "promote queued"))
+                          .catch((e) => toast.show(String(e)))}>⬆ Promote → Shell</button>
+              ) : (
+                <button className="btn sm" disabled={sel.pty}
+                        title={sel.pty ? "this session is already running a PTY"
+                                      : "upgrade to a robust reconnecting PTY"}
+                        onClick={() => upgradeSession(sel.id).then((r) => toast.show(r.upgraded ? "PTY upgrade sent — reconnecting shell will land as a sibling" : (r.reason || "upgrade requested"))).catch((e) => toast.show(String(e)))}>⬆ Upgrade PTY</button>
+              )}
               <LootMenu session={sel} />
               <button className="btn sm right" onClick={() => getTeardown().then(setTeardown)}>Teardown</button>
             </div>
@@ -159,7 +229,16 @@ function TasksPanel({ session }: { session: SessionInfo }) {
             <div className="muted" style={{ fontSize: 12, padding: "8px 0" }}>
               No tasks yet. Use Run → Command, or fieldkit against this session, and rows will appear here.
             </div>
-          ) : rows.map((r) => (
+          ) : rows.map((r) => {
+            // Loot-pull tasks: the raw `base64 /etc/shadow` command is
+            // implementation detail — surface the intent ("📥 pull /etc/shadow")
+            // so the panel reads as loot activity, not shell activity.
+            const isLoot = r.kind === "loot-pull";
+            const lootPath = isLoot ? extractLootPath(r.command) : "";
+            const displayCmd = isLoot && lootPath
+              ? `📥 pull ${lootPath}${r.status === "error" && r.output ? ` — ${r.output}` : ""}`
+              : r.command;
+            return (
             <div key={r.task_id || (r.ts + r.command)}
                  className="row" style={{ gap: 8, padding: "3px 0", fontSize: 12, alignItems: "baseline",
                                           borderBottom: "1px solid color-mix(in srgb,var(--line) 40%,transparent)",
@@ -173,34 +252,160 @@ function TasksPanel({ session }: { session: SessionInfo }) {
                 {r.status}
               </span>
               <span className="mono" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {r.command}
+                {displayCmd}
               </span>
               {r.attack && <span className="faint" style={{ fontSize: 10 }} title={r.attack}>{r.attack.split(" ")[0]}</span>}
               {r.bytes > 0 && <span className="faint" style={{ fontSize: 10 }}>{r.bytes}B</span>}
               <span className="faint" style={{ fontSize: 10 }}>{r.operator}</span>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
       {selected && (
-        <div className="drawer-backdrop" onClick={() => setSelected(null)}>
-          <div onClick={(e) => e.stopPropagation()}
-               style={{ position: "fixed", inset: "10% 10%", background: "var(--bg)",
-                        border: "1px solid var(--line)", borderRadius: 6, padding: 14,
-                        display: "flex", flexDirection: "column", zIndex: 1000 }}>
-            <div className="row" style={{ gap: 8, alignItems: "baseline", marginBottom: 8 }}>
-              <span className="chip">{selected.status}</span>
-              <span className="mono" style={{ fontWeight: 600 }}>{selected.command}</span>
-              {selected.attack && <span className="chip">{selected.attack}</span>}
-              <button className="btn sm right" onClick={() => setSelected(null)}>Close</button>
-            </div>
-            <pre className="out-panel" style={{ flex: 1, overflow: "auto", margin: 0 }}>{selected.output || "(no output)"}</pre>
-            <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
-              {selected.bytes}B · {selected.operator} · {selected.result_at ? `finished ${new Date(Number(selected.result_at) * 1000).toLocaleTimeString()}` : "still queued"}
-            </div>
-          </div>
-        </div>
+        <TaskDetailDrawer task={selected} onClose={() => setSelected(null)} />
       )}
+    </div>
+  );
+}
+
+function extractLootPath(cmd: string): string {
+  let inner = cmd;
+  if (cmd.startsWith('sh -c "')) {
+    inner = cmd.slice('sh -c "'.length).replace(/"$/, "");
+  }
+  if (!inner.startsWith("base64 ")) return "";
+  const tail = inner.slice("base64 ".length);
+  const idx = tail.indexOf(" 2>/dev/null");
+  const pathPart = idx >= 0 ? tail.slice(0, idx) : tail;
+  return pathPart.trim().replace(/^'|'$/g, "");
+}
+
+// Fallback decoder for when the artifact fetch fails / hasn't landed yet.
+// Reads the base64 preview stored on the task row (capped at ~4 KiB, so
+// files larger than ~2.6 KB raw will fail to decode — we report that).
+function fromRowPreview(output: string): { loading: false; text: string; bytes: number;
+    binary: boolean; savedPath: string; error: string } {
+  if (!output) return { loading: false, text: "", bytes: 0, binary: false, savedPath: "", error: "" };
+  const cleaned = output.replace(/[\s\r\n]/g, "");
+  try {
+    const bin = atob(cleaned);
+    let binary = false;
+    for (let i = 0; i < bin.length; i++) {
+      const c = bin.charCodeAt(i);
+      if (c === 0 || (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) || c >= 0xf5) {
+        binary = true; break;
+      }
+    }
+    if (binary) return { loading: false, text: "", bytes: bin.length, binary: true, savedPath: "", error: "" };
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    return { loading: false, text, bytes: bin.length, binary: false, savedPath: "", error: "" };
+  } catch {
+    return { loading: false, text: "", bytes: 0, binary: false, savedPath: "",
+             error: "the row preview is truncated (files > ~2.6 KB); the artifact fetch is the reliable path" };
+  }
+}
+
+// TaskDetailDrawer — for loot-pull tasks the raw `output` is base64 text of
+// the pulled file, which is unreadable to a human. This drawer:
+//   • Prefers fetching the ACTUAL saved artifact via /api/loot/file — works
+//     for arbitrarily large files (the DB preview truncates at 4000 chars of
+//     base64, ~2.6 KB raw, so anything bigger fails to decode from the row).
+//   • Falls back to base64-decoding the truncated preview when no artifact
+//     row exists yet (task just completed, artifact index still catching up).
+//   • Offers a "Raw base64" toggle for anyone debugging the transport.
+function TaskDetailDrawer({ task, onClose }: { task: TaskRow; onClose: () => void }) {
+  const isLoot = task.kind === "loot-pull";
+  const [mode, setMode] = useState<"decoded" | "raw">(isLoot ? "decoded" : "raw");
+  const lootPath = isLoot ? extractLootPath(task.command) : "";
+
+  // Async: locate the artifact for this task and pull the real file bytes.
+  const [fileInfo, setFileInfo] = useState<{
+    loading: boolean; text: string; bytes: number; binary: boolean;
+    savedPath: string; error: string;
+  }>({ loading: isLoot, text: "", bytes: 0, binary: false, savedPath: "", error: "" });
+  useEffect(() => {
+    if (!isLoot) return;
+    let cancel = false;
+    (async () => {
+      try {
+        const arts = await fetch(`/api/artifacts?task=${encodeURIComponent(task.task_id)}&limit=5`)
+          .then((r) => r.ok ? r.json() : { artifacts: [] });
+        const art = (arts.artifacts || [])[0];
+        if (!art) {
+          // Fall back to the row preview (base64 decode with truncation guard).
+          if (cancel) return;
+          setFileInfo(fromRowPreview(task.output));
+          return;
+        }
+        const rel = art.path.split("/session-loot/").pop() || "";
+        const resp = await fetch(`/api/loot/file?rel=${encodeURIComponent(rel)}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const buf = new Uint8Array(await resp.arrayBuffer());
+        if (cancel) return;
+        // Same binary sniff as before — any NUL or unexpected control char
+        // outside \t\r\n means we can't safely render as text.
+        let binary = false;
+        for (let i = 0; i < buf.length; i++) {
+          const c = buf[i];
+          if (c === 0 || (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) || c >= 0xf5) {
+            binary = true; break;
+          }
+        }
+        const text = binary ? "" : new TextDecoder("utf-8", { fatal: false }).decode(buf);
+        setFileInfo({ loading: false, text, bytes: buf.length, binary,
+                      savedPath: rel, error: "" });
+      } catch (e) {
+        if (cancel) return;
+        setFileInfo({ ...fromRowPreview(task.output),
+                      error: `fetch failed (${String(e)}) — showing row preview if any` });
+      }
+    })();
+    return () => { cancel = true; };
+  }, [task.task_id, isLoot, task.output]);
+
+  const displayCmd = isLoot && lootPath ? `📥 pull ${lootPath}` : task.command;
+
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+           style={{ position: "fixed", inset: "10% 10%", background: "var(--bg)",
+                    border: "1px solid var(--line)", borderRadius: 6, padding: 14,
+                    display: "flex", flexDirection: "column", zIndex: 1000 }}>
+        <div className="row" style={{ gap: 8, alignItems: "baseline", marginBottom: 8 }}>
+          <span className="chip">{task.status}</span>
+          <span className="mono" style={{ fontWeight: 600 }}>{displayCmd}</span>
+          {task.attack && <span className="chip">{task.attack}</span>}
+          {isLoot && (
+            <span className="row" style={{ gap: 4, marginLeft: 8 }}>
+              <button className={"btn sm" + (mode === "decoded" ? " primary" : "")}
+                      onClick={() => setMode("decoded")}
+                      title="the file's actual contents (base64 decoded)">Decoded</button>
+              <button className={"btn sm" + (mode === "raw" ? " primary" : "")}
+                      onClick={() => setMode("raw")}
+                      title="the raw base64 as returned by the target — how it was transported over the shell channel">Raw base64</button>
+            </span>
+          )}
+          <button className="btn sm right" onClick={onClose}>Close</button>
+        </div>
+        <pre className="out-panel" style={{ flex: 1, overflow: "auto", margin: 0 }}>
+          {isLoot && mode === "decoded"
+            ? (task.status === "error"
+               ? `(failed: ${task.output || "unknown error"})`
+               : fileInfo.loading ? "(loading actual file from session-loot…)"
+               : fileInfo.text ? fileInfo.text
+               : fileInfo.binary ? `(binary file — ${fileInfo.bytes} bytes — saved to session-loot/${fileInfo.savedPath}, not rendered)`
+               : fileInfo.error ? `(${fileInfo.error})`
+               : "(no output)")
+            : (task.output || "(no output)")}
+        </pre>
+        <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+          {task.bytes}B · {task.operator} · {task.result_at ? `finished ${new Date(Number(task.result_at) * 1000).toLocaleTimeString()}` : "still queued"}
+          {isLoot && fileInfo.savedPath && <> · <a href={`/api/loot/file?rel=${encodeURIComponent(fileInfo.savedPath)}`} target="_blank" rel="noreferrer" className="linkish">download from session-loot/</a></>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -222,24 +427,116 @@ function Menu({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
+// InfoMenu — batch-2 ergonomics. Rename the session (label), add operator
+// notes (for the writeup), and toggle pinned. All persisted via PATCH so a
+// serve restart doesn't lose the tester's context. Kept as a compact menu so
+// it doesn't grow the toolbar's height.
+function InfoMenu({ session, onChanged }: { session: SessionInfo; onChanged: () => void }) {
+  const [label, setLabel] = useState(session.label || "");
+  const [notes, setNotes] = useState(session.notes || "");
+  // Re-seed the local editors when the selected session changes, or when the
+  // upstream row changes (e.g. someone else on the team edited the label).
+  useEffect(() => { setLabel(session.label || ""); setNotes(session.notes || ""); },
+            [session.id, session.label, session.notes]);
+  const save = (patch: { label?: string; notes?: string; pinned?: boolean }) => {
+    patchSession(session.id, patch)
+      .then(() => { toast.show("session updated"); onChanged(); })
+      .catch((e) => toast.show(String(e)));
+  };
+  const dirty = label !== (session.label || "") || notes !== (session.notes || "");
+  return (
+    <Menu label="Info">
+      <div className="field"><span className="fl">Label — a short, memorable name</span>
+        <input className="fin" placeholder="e.g. web01 initial foothold"
+               value={label} onChange={(e) => setLabel(e.target.value)}
+               maxLength={80} style={{ marginBottom: 6 }} />
+      </div>
+      <div className="field"><span className="fl">Notes — how you got in, what's interesting</span>
+        <textarea className="fin" rows={4} placeholder="folded into the report writeup"
+                  value={notes} onChange={(e) => setNotes(e.target.value)}
+                  maxLength={4096} style={{ marginBottom: 6, resize: "vertical" }} />
+      </div>
+      <div className="row" style={{ gap: 6, alignItems: "center" }}>
+        <button className="btn sm primary" disabled={!dirty}
+                onClick={() => save({ label: label.trim(), notes })}>Save</button>
+        <button className="btn sm" onClick={() => save({ pinned: !session.pinned })}
+                title={session.pinned ? "unpin from top of list" : "pin to top of list"}>
+          {session.pinned ? "★ Unpin" : "☆ Pin"}
+        </button>
+        <span className="faint" style={{ fontSize: 10, marginLeft: 6 }}>
+          {session.host_ip}
+          {session.listener_id && ` · via listener ${session.listener_id.slice(0, 6)}`}
+        </span>
+      </div>
+    </Menu>
+  );
+}
+
 function RunMenu({ session }: { session: SessionInfo }) {
   const [qa, setQa] = useState<QuickAction[]>([]);
   const [cmd, setCmd] = useState("");
   const [out, setOut] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => { getQuickActions().then(setQa).catch(() => {}); }, []);
-  const run = async (fn: () => Promise<{ output: string }>) => { setBusy(true); try { setOut((await fn()).output); } catch (e) { setOut(String(e)); } finally { setBusy(false); } };
+  const isBeacon = session.kind === "beacon";
+
+  // Route through /task instead of /quickrun so BOTH beacons and interactive
+  // shells work: interactive returns the output synchronously; beacon queues,
+  // and the check-in delivers + result-post backfills the row in the Tasks
+  // panel. Previously the free command input 409'd on beacons ("shell not
+  // connected") because /quickrun required a live socket.
+  const runAny = async (command: string) => {
+    if (!command.trim()) return;
+    setBusy(true);
+    try {
+      const r = await runOrQueueTask(session.id, command);
+      if (r.queued) {
+        setOut(`[queued] ${command}\ntask_id=${r.task_id.slice(0, 8)} · result will land in the Tasks panel when the beacon next checks in (see the sleep interval)`);
+      } else {
+        setOut(r.output || "(no output)");
+      }
+    } catch (e) {
+      setOut(`error: ${String(e)}`);
+    } finally { setBusy(false); }
+  };
+
   return (
     <Menu label="Run">
+      {isBeacon && (
+        <div className="faint" style={{ fontSize: 11, marginBottom: 6 }}>
+          ⏱ Beacon session — commands are <b>queued</b> and run on the next check-in.
+          Watch the Tasks panel below for the result.
+        </div>
+      )}
       <div className="row wrap" style={{ gap: 4, marginBottom: 8 }}>
-        {qa.map((a) => <button key={a.key} className="btn sm" disabled={busy} onClick={() => run(() => runQuickAction(session.id, a.key))} title={a.cmd}>{a.label}</button>)}
+        {qa.map((a) => (
+          // Quick-action chips: for interactive shells, /quick runs the
+          // curated command synchronously and returns output. For beacons,
+          // the same command has to go through the queue path, so we send
+          // it as a raw task instead of hitting /quick.
+          <button key={a.key} className="btn sm" disabled={busy} title={a.cmd}
+                  onClick={() => isBeacon
+                    ? runAny(a.cmd)
+                    : (async () => { setBusy(true); try { setOut((await runQuickAction(session.id, a.key)).output); } catch (e) { setOut(String(e)); } finally { setBusy(false); } })()}>
+            {a.label}
+          </button>
+        ))}
       </div>
       <div className="row" style={{ gap: 6, marginBottom: 8 }}>
-        <input className="fin" placeholder="run a command…" value={cmd} onChange={(e) => setCmd(e.target.value)}
-               onKeyDown={(e) => { if (e.key === "Enter" && cmd.trim()) run(() => runShellCmd(session.id, cmd)); }} />
-        <button className="btn sm" disabled={busy || !cmd.trim()} onClick={() => run(() => runShellCmd(session.id, cmd))}>Run</button>
+        <input className="fin" placeholder={isBeacon ? "queue a command… (runs on next check-in)" : "run a command…"}
+               value={cmd} onChange={(e) => setCmd(e.target.value)}
+               onKeyDown={(e) => { if (e.key === "Enter" && cmd.trim()) runAny(cmd); }} />
+        <button className="btn sm" disabled={busy || !cmd.trim()} onClick={() => runAny(cmd)}>
+          {isBeacon ? "Queue" : "Run"}
+        </button>
       </div>
-      <button className="btn sm" disabled={busy} onClick={() => { setBusy(true); runEnum(session.id).then((r) => { setOut(`enum queued (${r.bytes} bytes script)`); }).catch((e) => setOut(String(e))).finally(() => setBusy(false)); }}>Run on-target enum → ingest</button>
+      <button className="btn sm" disabled={busy || isBeacon}
+              title={isBeacon
+                ? "the enum script needs an interactive shell to stream output; not supported on beacons"
+                : "runs recce-enum.sh/.ps1 on the target and folds the output into Priv-Esc"}
+              onClick={() => { setBusy(true); runEnum(session.id).then((r) => { setOut(`enum queued (${r.bytes} bytes script)`); }).catch((e) => setOut(String(e))).finally(() => setBusy(false)); }}>
+        Run on-target enum → ingest
+      </button>
       {out && <pre className="out-panel" style={{ marginTop: 8 }}>{out}</pre>}
     </Menu>
   );
@@ -298,6 +595,16 @@ function PivotMenu({ session }: { session: SessionInfo }) {
 function PersistMenu({ session, onTeardown }: { session: SessionInfo; onTeardown: () => void }) {
   const [armed, setArmed] = useState(false);
   const install = () => {
+    // Belt-and-suspenders on an intrusive, on-target action: even after the
+    // in-menu "armed" step the operator gets a native confirm naming the host
+    // — the same pattern retire uses. Prevents a single stray click on an armed
+    // Persist menu from writing crontab on the wrong box.
+    if (!confirm(`Install a tracked cron beacon on ${session.host_ip}?\n\n`
+                 + `This is INTRUSIVE (writes a crontab entry on the target). `
+                 + `The install is tracked in Teardown so it can be removed cleanly.`)) {
+      setArmed(false);
+      return;
+    }
     persistSession(session.id)
       .then((r) => toast.show(r.ok ? "beacon installed (tracked in Teardown)" : (r.reason || "failed")))
       .catch((e) => toast.show(String(e)))
@@ -318,11 +625,68 @@ function PersistMenu({ session, onTeardown }: { session: SessionInfo; onTeardown
   );
 }
 
+// Quick-pick targets — common host-recon paths a tester grabs after landing
+// a shell. Kept short and OS-obvious so it's a visible shortcut, not a
+// checklist. Anything not here goes through the free-form path input.
+const LOOT_QUICKPICKS_LINUX: { label: string; path: string }[] = [
+  { label: "/etc/passwd", path: "/etc/passwd" },
+  { label: "/etc/shadow", path: "/etc/shadow" },
+  { label: "~/.ssh/id_rsa", path: "~/.ssh/id_rsa" },
+  { label: "~/.bash_history", path: "~/.bash_history" },
+  { label: "/root/.bash_history", path: "/root/.bash_history" },
+  { label: "/etc/hosts", path: "/etc/hosts" },
+];
+
 function LootMenu({ session }: { session: SessionInfo }) {
   const [u, setU] = useState(""); const [s, setS] = useState(""); const [k, setK] = useState("password");
+  const [path, setPath] = useState("");
+  const [pulling, setPulling] = useState(false);
+  const isBeacon = session.kind === "beacon";
+  const pull = (p: string) => {
+    const target = (p || path).trim();
+    if (!target) { toast.show("path required"); return; }
+    setPulling(true);
+    // pullLoot dispatches internally: interactive shell → runs now, returns
+    // {saved, size}; beacon → queues a `base64 <path>` loot-pull task, returns
+    // {status:queued, task_id}. The result handler at /beacon/result decodes
+    // + saves when the beacon posts back on its next check-in.
+    pullLoot(session.id, target)
+      .then((r) => {
+        if ("status" in r && r.status === "queued") {
+          toast.show(`queued for ${r.host_ip} — saves on next beacon check-in`);
+        } else if ("saved" in r) {
+          toast.show(`pulled ${r.size} bytes → ${r.saved}`);
+        }
+        setPath("");
+      })
+      .catch((e) => toast.show(`pull failed: ${String(e)}`))
+      .finally(() => setPulling(false));
+  };
   return (
     <Menu label="Loot">
-      <div className="field"><span className="fl">Record a captured credential</span>
+      {/* Pull-a-file: same backend as Transfer → Download for interactive
+          shells; on beacons it queues a loot-pull task and the /beacon/result
+          handler auto-decodes + saves when the beacon checks in next. */}
+      <div className="field"><span className="fl">
+        Grab a file → loot{isBeacon && <span className="faint" style={{ fontWeight: "normal" }}> · queued until next check-in</span>}
+      </span>
+        <div className="row" style={{ gap: 6, marginBottom: 6 }}>
+          <input className="fin" placeholder="e.g. /etc/shadow or C:\\Users\\Admin\\NTUSER.DAT"
+                 value={path} onChange={(e) => setPath(e.target.value)}
+                 style={{ flex: 1 }} />
+          <button className="btn sm primary" disabled={!path.trim() || pulling}
+                  onClick={() => pull(path)}>{pulling ? "…" : isBeacon ? "Queue" : "Pull"}</button>
+        </div>
+        <div className="row wrap" style={{ gap: 4 }}>
+          {LOOT_QUICKPICKS_LINUX.map((q) => (
+            <button key={q.path} className="btn sm" disabled={pulling} title={q.path}
+                    style={{ fontSize: 10, padding: "1px 6px" }}
+                    onClick={() => pull(q.path)}>{q.label}</button>
+          ))}
+        </div>
+      </div>
+      {/* Original credential-recording pane, unchanged. */}
+      <div className="field" style={{ marginTop: 10 }}><span className="fl">Record a captured credential</span>
         <input className="fin" placeholder="username" value={u} onChange={(e) => setU(e.target.value)} style={{ marginBottom: 6 }} />
         <input className="fin" placeholder="secret / hash" value={s} onChange={(e) => setS(e.target.value)} style={{ marginBottom: 6 }} />
         <div className="row" style={{ gap: 6 }}>
@@ -476,7 +840,7 @@ function BeaconsPanel() {
           </div>
         ) : beacons.map((b) => (
           <BeaconRow key={b.id} b={b} onReload={reload}
-                     onRetire={() => doRetire(b.id, b.id.slice(0, 8))} />
+                     onRetire={() => doRetire(b.id, b.host_ip || b.id.slice(0, 8))} />
         ))}
       </Panel>
       {showRegister && (
@@ -494,10 +858,52 @@ function BeaconRow({ b, onRetire, onReload }: { b: Beacon; onRetire: () => void;
   const [editing, setEditing] = useState(false);
   const [sleep, setSleep] = useState(String(b.sleep_s));
   const [jitter, setJitter] = useState(String(b.jitter_pct));
-  const stale = b.last_checkin > 0 && (Date.now() / 1000 - b.last_checkin) > b.sleep_s * 3;
-  const dot = b.last_checkin === 0 ? "stale" : (stale ? "stale" : "live");
-  const seen = b.last_checkin === 0 ? "never seen"
-    : `seen ${Math.max(0, Math.round(Date.now() / 1000 - b.last_checkin))}s ago`;
+  // `tick` advances every second so `seen 5s ago` counts up and the ⚡ flash
+  // fades on schedule without waiting for the 4s beacon-list poll to re-render.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const age = b.last_checkin > 0 ? (Date.now() / 1000 - b.last_checkin) : Infinity;
+  const stale = b.last_checkin > 0 && age > b.sleep_s * 3;
+  const neverSeen = b.last_checkin === 0;
+  const dot = neverSeen ? "stale" : (stale ? "stale" : "live");
+  const seen = neverSeen ? "never seen" : `seen ${Math.max(0, Math.round(age))}s ago`;
+  // ⚡ within 3s of a fresh check-in — long enough to notice, short enough not
+  // to lie about "just now" when the checkin was actually a minute ago.
+  const fresh = b.last_checkin > 0 && age < 3;
+  // Queued-tasks visibility: when a beacon is stale + tasks are backed up, an
+  // operator who queued a pull will wonder why nothing happened. Poll the task
+  // count for this beacon so we can show "N queued" and, when stale, a warning.
+  const [queued, setQueued] = useState<number>(0);
+  useEffect(() => {
+    let cancel = false;
+    const poll = () => {
+      fetch(`/api/sessions/${encodeURIComponent(b.id)}/tasks?status=queued&limit=100`)
+        .then((r) => r.ok ? r.json() : { tasks: [] })
+        .then((j) => { if (!cancel) setQueued((j.tasks || []).length); })
+        .catch(() => {});
+    };
+    poll();
+    const t = window.setInterval(poll, 4000);
+    return () => { cancel = true; window.clearInterval(t); };
+  }, [b.id]);
+  const [testing, setTesting] = useState(false);
+  const runSelftest = () => {
+    setTesting(true);
+    selftestBeacon(b.id).then((r) => {
+      if (r.ok) {
+        const st = r.stages || {};
+        toast.show(`self-test PASSED · queue ${st.queue_ms || 0}ms · deliver ${st.deliver_ms || 0}ms `
+                 + `· result ${st.result_ms || 0}ms · ${st.saved_bytes || 0}B saved`);
+      } else {
+        toast.show(`self-test FAILED: ${r.reason || "unknown"}`);
+      }
+      onReload();
+    }).catch((e) => toast.show(`self-test error: ${String(e)}`))
+      .finally(() => setTesting(false));
+  };
   const save = () => {
     const body: { sleep_s?: number; jitter_pct?: number } = {};
     const s = Number(sleep), j = Number(jitter);
@@ -509,21 +915,63 @@ function BeaconRow({ b, onRetire, onReload }: { b: Beacon; onRetire: () => void;
   };
   return (
     <div style={{ padding: "4px 0", borderBottom: "1px solid color-mix(in srgb,var(--line) 40%,transparent)" }}>
+      {/* Row 1 — the identity: dot + host + retire/edit right-aligned. Uncramped. */}
       <div className="row" style={{ gap: 6, alignItems: "center", fontSize: 12 }}>
         <span className={"sess-dot " + dot} />
-        <span className="mono" title={b.id}>{b.id.slice(0, 8)}</span>
-        <span className="faint">{b.transport}</span>
-        {!editing && (
-          <span className="faint" style={{ fontSize: 11 }}>
-            {b.sleep_s}s ±{b.jitter_pct}%
+        {b.host_ip
+          ? <span className="mono" title={`beacon ${b.id}`}>{b.host_ip}</span>
+          : <span className="mono faint" title={b.id}>{b.id.slice(0, 8)}</span>}
+        {/* Pulse indicator: a checkin within the last 3s gets a brief ⚡ so team
+            members watching the pane spot the tick they'd otherwise miss. */}
+        {fresh && <span title="just checked in" style={{ color: "var(--ok, #16a34a)", fontSize: 10 }}>⚡</span>}
+        {/* Queued-tasks chip: when tasks are backed up on a stale/never-seen
+            beacon, an operator will wonder why nothing's happening. Red on
+            stale = "tasks are waiting for a client that isn't polling"; muted
+            on live = "just queued, will drain on next check-in". */}
+        {queued > 0 && (
+          <span className="chip" style={{ fontSize: 9,
+                  color: (stale || neverSeen) ? "var(--err, #b91c1c)" : undefined,
+                  fontWeight: (stale || neverSeen) ? 600 : undefined }}
+                title={(stale || neverSeen)
+                  ? "tasks are queued but the beacon isn't polling — is your on-target client running?"
+                  : "tasks queued for next check-in"}>
+            {queued} queued
           </span>
         )}
-        <button className="linkish right" onClick={onRetire} title="retire — history kept">retire</button>
-        {!editing && (
-          <button className="linkish" style={{ marginRight: 6 }} onClick={() => setEditing(true)}>edit</button>
-        )}
+        <span className="right row" style={{ gap: 8 }}>
+          <button className="linkish" onClick={() => {
+            promoteBeacon(b.id)
+              .then((r) => { toast.show(r.message || "promote queued"); onReload(); })
+              .catch((e) => toast.show(String(e)));
+          }} title="queue upgrade stager — beacon connects back as interactive shell on next check-in">
+            promote
+          </button>
+          <button className="linkish" onClick={runSelftest} disabled={testing}
+                  title="round-trip the pipeline in-process (queue → deliver → result → save) — proves everything works without needing a real on-target client">
+            {testing ? "…" : "self-test"}
+          </button>
+          {!editing && <button className="linkish" onClick={() => setEditing(true)}>edit</button>}
+          <button className="linkish" onClick={onRetire} title="retire — history kept">retire</button>
+        </span>
       </div>
-      {editing ? (
+      {/* Row 2 — the metadata: transport, cadence, id, notes. Faint so it recedes. */}
+      {!editing && (
+        <div className="faint" style={{ fontSize: 10, marginLeft: 14, marginTop: 2 }}>
+          {b.transport} · {b.sleep_s}s ±{b.jitter_pct}%
+          {b.host_ip && <> · <span title={b.id}>{b.id.slice(0, 8)}</span></>}
+          {" · "}{seen}
+          {b.notes ? ` · ${b.notes}` : ""}
+        </div>
+      )}
+      {/* Loud hint when tasks are backing up and no client is polling. Doesn't
+          duplicate the chip's message — it explains what to do about it. */}
+      {queued > 0 && (stale || neverSeen) && !editing && (
+        <div style={{ fontSize: 10, marginLeft: 14, marginTop: 2,
+                      color: "var(--warn, #b45309)" }}>
+          ⚠ {queued} task(s) waiting — beacon hasn't polled. Run <span className="mono">self-test</span> to prove the server side, or start your on-target client.
+        </div>
+      )}
+      {editing && (
         <div className="row" style={{ gap: 4, marginTop: 4, fontSize: 11, alignItems: "center" }}>
           <span className="faint">sleep</span>
           <input className="fin" type="number" min={1} max={3600} value={sleep} onChange={(e) => setSleep(e.target.value)}
@@ -534,8 +982,6 @@ function BeaconRow({ b, onRetire, onReload }: { b: Beacon; onRetire: () => void;
           <button className="btn sm primary" onClick={save}>save</button>
           <button className="btn sm" onClick={() => { setSleep(String(b.sleep_s)); setJitter(String(b.jitter_pct)); setEditing(false); }}>cancel</button>
         </div>
-      ) : (
-        <div className="faint" style={{ fontSize: 10, marginLeft: 14 }}>{seen}{b.notes ? ` · ${b.notes}` : ""}</div>
       )}
     </div>
   );

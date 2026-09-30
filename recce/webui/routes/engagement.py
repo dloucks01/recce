@@ -121,9 +121,9 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
                     hint = _msf_for(text, host=h)
                     if hint is None:
                         return {"key": key, "hint": None, "ip": h.ip,
-                                "port": v.port, "cve": (v.ids[0] if v.ids else "")}
+                                "port": v.port, "cve": v.primary_cve()}
                     return {"key": key, "ip": h.ip, "port": v.port,
-                            "cve": (v.ids[0] if v.ids else ""),
+                            "cve": v.primary_cve(),
                             "hint": {"module": hint["module"],
                                      "payload": hint["payload"] or "",
                                      "note": hint["note"]}}
@@ -427,7 +427,7 @@ def register_engagement_routes(app: FastAPI, ctx) -> None:
                     kev_findings.append({
                         "key": tracking.vuln_row_key(v), "ip": h.ip, "port": v.port,
                         "title": v.title or v.script_id, "severity": v.severity or "info",
-                        "cve": (v.ids[0] if v.ids else ""),
+                        "cve": v.primary_cve(),
                         "epss": round((getattr(v, "epss", 0.0) or 0.0) * 100),
                     })
             if getattr(h, "enumerated", False):

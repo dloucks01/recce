@@ -54,7 +54,8 @@ def _index(hosts) -> dict[str, dict]:
                 "key": k, "ip": v.ip, "port": v.port,
                 "title": v.title or v.script_id or "finding",
                 "severity": v.severity or "info",
-                "cve": (v.ids[0] if v.ids else ""),
+                "cve": (v.primary_cve() if hasattr(v, "primary_cve")
+                        else (v.ids[0] if v.ids else "")),
                 "kev": bool(getattr(v, "kev", False)),
             }
     return out

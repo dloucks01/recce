@@ -112,9 +112,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # Offline intel freshness — stale KEV/EPSS silently under-prioritises new CVEs.
     try:
         from ..vuln import intel_asof
-        print(f"\nOffline intel (baked, airgap): {intel_asof.summary()}")
-        if intel_asof.KEV_AS_OF == "unknown":
-            print("  [!] freshness unknown — run `python3 tools/refresh_intel.py` at build time to stamp + update it.")
+        _intel = intel_asof.info()
+        print(f"\nOffline intel (baked, airgap): {_intel['summary']}")
+        if not _intel["present"]:
+            print("  [!] no baked KEV/EPSS intel — run `python3 tools/refresh_intel.py` to build it.")
+        elif not _intel["stamped"]:
+            print("  [i] snapshot present but undated — `python3 tools/refresh_intel.py` stamps the provenance date.")
     except Exception:  # noqa: BLE001 — never let the freshness line break doctor
         pass
 

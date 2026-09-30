@@ -38,6 +38,7 @@ CREATE INDEX IF NOT EXISTS ix_uploads_host ON uploads(host_ip);
 -- design doc §9 for the trust model this fits.
 CREATE TABLE IF NOT EXISTS beacon (
   id           TEXT PRIMARY KEY,     -- == shell_sessions.id
+  host_ip      TEXT DEFAULT '',      -- host the beacon runs on (shown in the beacon list)
   transport    TEXT DEFAULT 'http',  -- http | https (future: dns)
   registered   REAL DEFAULT 0,       -- unix ts of first registration
   last_checkin REAL DEFAULT 0,       -- unix ts of most recent check-in
@@ -79,6 +80,16 @@ class SessionStore:
             # Per-session command history so up-arrow after re-attach recalls what
             # was typed against THIS host, not this browser tab. Stored as JSON list.
             self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN history TEXT DEFAULT ''")
+        # Session ergonomics (batch 2): notes let the operator record "how I got in
+        # here" per-session (feeds the writeup); pinned floats important sessions to
+        # the top of the list; listener_id ties a caught shell back to the listener
+        # that received it (traceback surface).
+        if "notes" not in cols:
+            self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN notes TEXT DEFAULT ''")
+        if "pinned" not in cols:
+            self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN pinned INTEGER DEFAULT 0")
+        if "listener_id" not in cols:
+            self._conn.execute("ALTER TABLE shell_sessions ADD COLUMN listener_id TEXT DEFAULT ''")
         # Beacon-table psk column: an early P1-A build named the field
         # `psk_hash` and stored the raw key in it (a hash column can't verify
         # HMAC, so the name was wrong). Rename in place: add `psk`, copy over,
@@ -89,17 +100,23 @@ class SessionStore:
             self._conn.execute("ALTER TABLE beacon ADD COLUMN psk TEXT DEFAULT ''")
             if "psk_hash" in beacon_cols:
                 self._conn.execute("UPDATE beacon SET psk = psk_hash WHERE psk = ''")
+        if beacon_cols and "host_ip" not in beacon_cols:
+            self._conn.execute("ALTER TABLE beacon ADD COLUMN host_ip TEXT DEFAULT ''")
 
 
     def save_session(self, s) -> None:
         closed = None if s.status == "live" else time.time()
         self._conn.execute(
-            "INSERT INTO shell_sessions(id,host_ip,host_port,kind,status,token,opened,closed,pty,label,name) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+            "INSERT INTO shell_sessions(id,host_ip,host_port,kind,status,token,opened,closed,pty,label,name,"
+            "notes,pinned,listener_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET status=excluded.status, closed=excluded.closed, "
-            "pty=excluded.pty, label=excluded.label, name=excluded.name",
+            "pty=excluded.pty, label=excluded.label, name=excluded.name, "
+            "notes=excluded.notes, pinned=excluded.pinned, listener_id=excluded.listener_id",
             (s.id, s.host_ip, s.host_port, s.kind, s.status, s.token, s.created, closed,
-             1 if s.pty else 0, s.label, s.name))
+             1 if s.pty else 0, s.label, s.name,
+             getattr(s, "notes", "") or "", 1 if getattr(s, "pinned", False) else 0,
+             getattr(s, "listener_id", "") or ""))
         self._conn.commit()
 
     def save_history(self, session_id: str, entries: list[str]) -> None:
@@ -134,9 +151,16 @@ class SessionStore:
         self._conn.commit()
 
     def load_sessions(self) -> list[tuple[dict, bytes]]:
-        """Every persisted session with its concatenated transcript, oldest first."""
+        """Every persisted session with its concatenated transcript, oldest first.
+        Excludes sessions explicitly marked `dead` (retired beacon / operator-closed
+        shell) — without this filter a retired beacon comes back as an orphaned
+        stale session after every serve restart, still holding queued tasks that
+        can never be delivered because its transport is gone."""
         rows = self._conn.execute(
-            "SELECT id,host_ip,host_port,kind,status,token,opened,pty,label,name FROM shell_sessions "
+            "SELECT id,host_ip,host_port,kind,status,token,opened,pty,label,name,"
+            "notes,pinned,listener_id "
+            "FROM shell_sessions "
+            "WHERE status IS NULL OR status != 'dead' "
             "ORDER BY opened").fetchall()
         out: list[tuple[dict, bytes]] = []
         for r in rows:
@@ -147,7 +171,9 @@ class SessionStore:
             self._seq[r[0]] = (chunks[-1][0] + 1) if chunks else 0   # continue the seq
             out.append(({"id": r[0], "host_ip": r[1], "host_port": r[2], "kind": r[3],
                          "token": r[5], "opened": r[6], "pty": r[7],
-                         "label": r[8] or "", "name": r[9] or ""}, data))
+                         "label": r[8] or "", "name": r[9] or "",
+                         "notes": r[10] or "", "pinned": bool(r[11]),
+                         "listener_id": r[12] or ""}, data))
         return out
 
     def load_transcript(self, session_id: str, limit: int = 0) -> bytes:
@@ -230,34 +256,36 @@ class SessionStore:
     # is the raw pre-shared key used to HMAC-authenticate those polls; it
     # is shown to the operator ONCE at registration and stored here for
     # verification (HMAC needs the raw key; a hash column can't verify).
-    _BEACON_COLS = ("id", "transport", "registered", "last_checkin",
+    _BEACON_COLS = ("id", "host_ip", "transport", "registered", "last_checkin",
                     "sleep_s", "jitter_pct", "psk", "notes")
 
-    def add_beacon(self, bid: str, psk: str, *, transport: str = "http",
+    def add_beacon(self, bid: str, psk: str, *, host_ip: str = "",
+                   transport: str = "http",
                    sleep_s: float = 30.0, jitter_pct: float = 20.0,
                    notes: str = "", registered: float | None = None) -> None:
         """Register a beacon. `psk` is the raw pre-shared key — the caller
         (the operator's register-beacon route) has already surfaced it to
-        the UI once and won't show it again."""
+        the UI once and won't show it again. `host_ip` is the host the beacon
+        runs on, so the beacon list can name its target."""
         import time
         ts = time.time() if registered is None else float(registered)
         self._conn.execute(
-            "INSERT OR REPLACE INTO beacon(id,transport,registered,last_checkin,"
-            "sleep_s,jitter_pct,psk,notes) VALUES(?,?,?,?,?,?,?,?)",
-            (bid, transport or "http", ts, 0.0,
+            "INSERT OR REPLACE INTO beacon(id,host_ip,transport,registered,last_checkin,"
+            "sleep_s,jitter_pct,psk,notes) VALUES(?,?,?,?,?,?,?,?,?)",
+            (bid, host_ip or "", transport or "http", ts, 0.0,
              float(sleep_s), max(0.0, min(100.0, float(jitter_pct))),
              psk or "", (notes or "")[:500]))
         self._conn.commit()
 
     def get_beacon(self, bid: str) -> dict | None:
         r = self._conn.execute(
-            "SELECT id,transport,registered,last_checkin,sleep_s,jitter_pct,"
+            "SELECT id,host_ip,transport,registered,last_checkin,sleep_s,jitter_pct,"
             "psk,notes FROM beacon WHERE id=?", (bid,)).fetchone()
         return dict(zip(self._BEACON_COLS, r)) if r else None
 
     def list_beacons(self) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT id,transport,registered,last_checkin,sleep_s,jitter_pct,"
+            "SELECT id,host_ip,transport,registered,last_checkin,sleep_s,jitter_pct,"
             "psk,notes FROM beacon ORDER BY registered DESC").fetchall()
         return [dict(zip(self._BEACON_COLS, r)) for r in rows]
 
@@ -287,7 +315,18 @@ class SessionStore:
         return True
 
     def delete_beacon(self, bid: str) -> bool:
+        # Belt + suspenders: also mark the paired shell_sessions row `dead` so
+        # a subsequent serve restart never re-hydrates the retired beacon as a
+        # stale orphan. (The manager's close_session() usually did this via
+        # _save(sess) with status='dead', but a partial teardown or a manager
+        # not fully bound would leave a live-looking row behind — this makes
+        # retirement atomic at the store layer.)
+        import time
+        now = time.time()
         cur = self._conn.execute("DELETE FROM beacon WHERE id=?", (bid,))
+        self._conn.execute(
+            "UPDATE shell_sessions SET status='dead', closed=? "
+            "WHERE id=? AND (closed IS NULL OR closed=0)", (now, bid))
         self._conn.commit()
         return cur.rowcount > 0
 

@@ -160,6 +160,35 @@ class Vuln:
         proto = (self.protocol or "tcp").lower()
         return base if proto == "tcp" else f"{base}:{proto}"
 
+    def primary_cve(self) -> str:
+        """The single headline CVE to display for this finding.
+
+        `ids` is sorted (oldest first), so a naive `ids[0]` for a finding that
+        aggregates many CVEs (e.g. the `vulners` banner→CVE dump) picks the
+        OLDEST CVE, which then contradicts the title, which names the highest-CVSS
+        one. Precedence here keeps the displayed CVE consistent with the title and
+        the KEV badge:
+          1. the CVE named in the title, when it's one of this finding's ids
+          2. a CISA-KEV member (the most actionable one to lead with)
+          3. the first (sorted) id as a stable fallback
+        """
+        import re as _re
+        ids = [i.upper() for i in (self.ids or []) if i]
+        m = _re.search(r"CVE-\d{4}-\d{3,7}", self.title or "", _re.I)
+        title_cve = m.group(0).upper() if m else ""
+        if title_cve and (not ids or title_cve in ids):
+            return title_cve
+        if ids:
+            try:
+                from ..vuln.kev import is_kev
+                for c in ids:
+                    if is_kev(c):
+                        return c
+            except Exception:  # noqa: BLE001 — never let intel import break display
+                pass
+            return ids[0]
+        return title_cve
+
 
 @dataclass
 class Exploit:
